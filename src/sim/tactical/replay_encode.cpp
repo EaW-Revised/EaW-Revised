@@ -1,5 +1,7 @@
 #include "replay_internal.hpp"
 
+#include <optional>
+
 
 namespace eawr::sim::tactical {
 using namespace replay_detail;

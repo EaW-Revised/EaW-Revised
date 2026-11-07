@@ -1,6 +1,7 @@
 #include "scene_test_support.hpp"
 #include "eawr/assets/asset_names.hpp"
 #include <bit>
+#include <limits>
 #include <thread>
 
 namespace eawr::tests::scene_tests {
@@ -301,6 +302,290 @@ void model_cache_budget_contracts() {
     expect(replay.size() == 5 && replay.front().budget_bytes == (128ULL << 20U)
         && std::all_of(replay.begin(), replay.end(), [](const auto& item) { return item.decodes == 3; }),
         "budget replay counts one decode per distinct model when every budget holds the working set");
+
+    const std::array phase_mounts{eawr::vfs::MountSpec{"phases", tree.root, "data", {}}};
+    auto phase_mount = eawr::vfs::Vfs::mount(phase_mounts);
+    expect(static_cast<bool>(phase_mount), "campaign cache phase fixture mounts");
+    if (!phase_mount) return;
+    auto& phase_files = phase_mount.value();
+    eawr::scene::VfsAssetCache phased(phase_files);
+    auto pinned = phased.shared_model("data/art/models/a.alo");
+    auto transient = phased.shared_model("data/art/models/b.alo");
+    expect(pinned && transient, "campaign preparation decodes both fixture models");
+    if (!pinned || !transient) return;
+    const auto original_bones = transient.value()->bones.size();
+    const auto original_name = transient.value()->bones.front().name;
+    const auto original_capacity = eawr::assets::payload_capacity(*transient.value()).total_bytes();
+    std::weak_ptr<const eawr::assets::Model> dropped = transient.value();
+    transient.value().reset();
+    phased.begin_galactic_gameplay(0);
+    expect(dropped.expired() && pinned.value()->bones.front().name == "ROOT",
+        "GC boundary releases cache-only payload while preserving renderer-style shared pins");
+    auto phase_stats = phased.model_stats();
+    expect(phase_stats.gameplay_loads == 0 && phase_stats.battle_loads == 0,
+        "initial campaign preparation is not counted as gameplay or battle loading");
+    {
+        eawr::scene::VfsAssetCache::ModelLoadScope loading(phase_files);
+        {
+            eawr::scene::VfsAssetCache::ModelLoadScope nested_loading(phase_files);
+            auto reread = phased.shared_model("data/art/models/b.alo");
+            expect(reread && reread.value()->bones.size() == original_bones
+                && reread.value()->bones.front().name == original_name
+                && eawr::assets::payload_capacity(*reread.value()).total_bytes() == original_capacity,
+                "battle LOAD rereads the evicted model with its original payload");
+        }
+        phase_stats = phased.model_stats();
+        expect(phase_stats.battle_loads == 1 && phase_stats.battle_load_boundaries == 1
+            && phase_stats.gameplay_loads == 0 && phase_stats.cache_retained_bytes == size,
+            "nested loading scopes retain initial sharing and classify one real decode only");
+    }
+    expect(phased.model_stats().cache_budget_bytes == 0,
+        "nested battle loading restores the budget in effect at entry");
+    phased.set_model_cache_budget(0);
+    auto alias = phased.shared_model("DATA/ART/MODELS/A.ALO");
+    expect(alias && alias.value().get() == pinned.value().get() && phased.model_stats().gameplay_loads == 0,
+        "a retained renderer-style recipe supplies late arrivals without gameplay decode");
+    {
+        auto fallback = phased.shared_model("data/art/models/b.alo");
+        expect(static_cast<bool>(fallback) && phased.model_stats().gameplay_loads == 1
+            && phased.model_stats().first_gameplay_model == "data/art/models/b.alo",
+            "a true late-arrival cache miss is counted as gameplay work rather than hidden");
+        auto same_fallback = phased.shared_model("DATA/ART/MODELS/B.ALO");
+        expect(same_fallback && same_fallback.value().get() == fallback.value().get()
+            && phased.model_stats().gameplay_loads == 1, "aliases do not inflate the actual decode counter");
+    }
+    phased.begin_galactic_gameplay(std::numeric_limits<std::uint64_t>::max());
+    static_cast<void>(phased.shared_model("data/art/models/b.alo"));
+    expect(phased.model_stats().cache_retained_bytes == size,
+        "unbounded same-binary control keeps cache-only payload without disabling read counters");
+    {
+        eawr::scene::VfsAssetCache::ModelLoadScope loading(phase_files);
+        phased.set_model_cache_budget(eawr::scene::default_model_cache_budget_bytes);
+        expect(phased.model_stats().cache_budget_bytes == std::numeric_limits<std::uint64_t>::max(),
+            "tactical ready cannot trim during a galactic battle load");
+    }
+    expect(phased.model_stats().cache_budget_bytes == std::numeric_limits<std::uint64_t>::max()
+        && phased.model_stats().cache_retained_bytes == size,
+        "battle loading restores the unlimited control even after tactical ready sets a budget");
+    cache.begin_galactic_gameplay(0);
+    static_cast<void>(cache.shared_model("data/art/models/c.alo"));
+    const auto unrelated_before = cache.model_stats();
+    {
+        eawr::scene::VfsAssetCache::ModelLoadScope loading(phase_files);
+        static_cast<void>(cache.shared_model("data/art/models/c.alo"));
+    }
+    const auto unrelated_after = cache.model_stats();
+    expect(unrelated_after.gameplay_loads == unrelated_before.gameplay_loads + 1
+        && unrelated_after.battle_load_boundaries == 0 && unrelated_after.cache_budget_bytes == 0,
+        "another mount continues gameplay accounting during this mount's battle load");
+    phased.begin_galactic_preparation();
+    phase_stats = phased.model_stats();
+    expect(phase_stats.cache_budget_bytes == std::numeric_limits<std::uint64_t>::max()
+        && phase_stats.gameplay_loads == 0 && phase_stats.first_gameplay_model.empty()
+        && phase_stats.battle_loads == 0 && phase_stats.battle_load_boundaries == 0,
+        "a second campaign on retained menu content restores preparation sharing and fresh phase counters");
+
+    // End-of-preparation trim (--eawr-gc-prep-trim): the same budget call as the gameplay boundary,
+    // made while still preparing. It frees cache-only payload, flips no phase and counts nothing as gameplay.
+    static_cast<void>(phased.shared_model("data/art/models/c.alo"));
+    const auto untrimmed = phased.model_stats();
+    expect(untrimmed.cache_retained_bytes == size * 2,
+        "preparation keeps every decoded model in the unbounded cache");
+    phased.set_model_cache_budget(size);
+    auto trimmed = phased.model_stats();
+    expect(trimmed.cache_budget_bytes == size && trimmed.cache_retained_bytes == size
+        && trimmed.cache_evictions == untrimmed.cache_evictions + 1,
+        "a preparation-phase budget call trims the cache without a gameplay boundary");
+    expect(trimmed.gameplay_loads == 0 && trimmed.first_gameplay_model.empty() && trimmed.unique_loads == untrimmed.unique_loads,
+        "the preparation trim decodes nothing and counts no gameplay load");
+    static_cast<void>(phased.shared_model("data/art/models/b.alo"));
+    auto between = phased.model_stats();
+    expect(between.unique_loads == trimmed.unique_loads + 1 && between.gameplay_loads == 0
+        && between.first_gameplay_model.empty(),
+        "a decode between the trim and the boundary counts in unique_loads but not as gameplay work");
+    phased.begin_galactic_gameplay(size);
+    const auto boundary = phased.model_stats();
+    expect(boundary.cache_budget_bytes == size && boundary.cache_retained_bytes == between.cache_retained_bytes
+        && boundary.cache_evictions == between.cache_evictions && boundary.unique_loads == between.unique_loads
+        && boundary.gameplay_loads == 0 && boundary.first_gameplay_model.empty(),
+        "the gameplay boundary after a preparation trim is idempotent and keeps the zero-gameplay-decode gate");
+
+    // Tactical load bracket: begin_model_load bounds the cache from the first decode.
+    const auto fresh_mount = [&](const char* name) {
+        const std::array load_mounts{eawr::vfs::MountSpec{name, tree.root, "data", {}}};
+        return eawr::vfs::Vfs::mount(load_mounts);
+    };
+    const std::array<std::string_view, 3> model_paths{"data/art/models/a.alo", "data/art/models/b.alo",
+                                                      "data/art/models/c.alo"};
+    const auto content_digest = [](const std::string_view path, const eawr::assets::Model& model) {
+        std::uint64_t digest = 1469598103934665603ULL;
+        const auto mix = [&](const std::uint64_t value) { digest = (digest ^ value) * 1099511628211ULL; };
+        for (const char letter : path) mix(static_cast<unsigned char>(letter));
+        mix(model.bones.size());
+        mix(model.meshes.size());
+        for (const auto& bone : model.bones) {
+            for (const char letter : bone.name) mix(static_cast<unsigned char>(letter));
+            mix(static_cast<std::uint64_t>(static_cast<std::int64_t>(bone.parent)));
+        }
+        mix(eawr::assets::payload_capacity(model).total_bytes());
+        return digest;
+    };
+    {
+        auto bounded_mount = fresh_mount("bounded");
+        expect(static_cast<bool>(bounded_mount), "bounded load fixture mounts");
+        if (!bounded_mount) return;
+        eawr::scene::VfsAssetCache bounded(bounded_mount.value());
+        bounded.begin_model_load(size * 2);
+        bool within_bound = true;
+        for (unsigned round = 0; round < 3; ++round) {
+            for (const auto path : model_paths) {
+                auto result = bounded.shared_model(path);
+                expect(static_cast<bool>(result), "a bounded load still decodes every model");
+                within_bound &= bounded.model_stats().cache_retained_bytes <= size * 2 + size;
+            }
+        }
+        const auto bounded_stats = bounded.model_stats();
+        expect(within_bound && bounded_stats.cache_retained_bytes <= size * 2
+            && bounded_stats.cache_budget_bytes == size * 2,
+            "a budget set before the loads bounds retained bytes at every request");
+        expect(bounded_stats.cache_evictions > 0, "an input larger than the budget evicts during the load");
+    }
+    {
+        const std::array<std::uint64_t, 4> budgets{0, size - 1, eawr::scene::default_model_cache_budget_bytes,
+                                                   std::numeric_limits<std::uint64_t>::max()};
+        std::vector<std::vector<std::uint64_t>> digests;
+        std::vector<std::uint64_t> decodes;
+        for (const auto budget : budgets) {
+            auto mount = fresh_mount("digest");
+            expect(static_cast<bool>(mount), "digest fixture mounts");
+            if (!mount) return;
+            eawr::scene::VfsAssetCache digest_cache(mount.value());
+            digest_cache.begin_model_load(budget);
+            auto& sequence = digests.emplace_back();
+            for (unsigned round = 0; round < 2; ++round) {
+                for (const auto path : model_paths) {
+                    auto result = digest_cache.shared_model(path);
+                    if (!result) { expect(false, "digest fixture decodes"); return; }
+                    sequence.push_back(content_digest(path, *result.value()));
+                }
+            }
+            decodes.push_back(digest_cache.model_stats().unique_loads);
+        }
+        expect(std::all_of(digests.begin(), digests.end(), [&](const auto& item) { return item == digests.front(); }),
+            "decoded content is identical at budgets 0, undersized, 128 MiB and unlimited");
+        expect(decodes[0] == 6 && decodes[1] == 6 && decodes[2] == 3 && decodes[3] == 3,
+            "the budget changes when a model is decoded again, never what is decoded");
+    }
+    {
+        auto gc_mount = fresh_mount("gc-noop");
+        expect(static_cast<bool>(gc_mount), "GC no-op fixture mounts");
+        if (!gc_mount) return;
+        eawr::scene::VfsAssetCache gc(gc_mount.value());
+        gc.begin_galactic_gameplay(std::numeric_limits<std::uint64_t>::max());
+        {
+            eawr::scene::VfsAssetCache::ModelLoadScope battle(gc_mount.value());
+            gc.begin_model_load(0);
+            auto during = gc.shared_model(model_paths[0]);
+            gc.end_model_load(0);
+            const auto scope_stats = gc.model_stats();
+            expect(during && scope_stats.cache_budget_bytes == std::numeric_limits<std::uint64_t>::max()
+                && scope_stats.cache_retained_bytes == size && scope_stats.battle_loads == 1
+                && scope_stats.gameplay_loads == 0,
+                "a galactic battle load ignores the load bracket and keeps the cache unbounded");
+        }
+        const auto after_stats = gc.model_stats();
+        expect(after_stats.cache_budget_bytes == std::numeric_limits<std::uint64_t>::max()
+            && after_stats.cache_retained_bytes == size && after_stats.gameplay_loads == 0,
+            "closing the battle load restores the galactic budget and counts nothing as gameplay");
+        auto late = gc.shared_model(model_paths[1]);
+        expect(late && gc.model_stats().gameplay_loads == 1,
+            "galactic gameplay accounting is the unchanged one");
+    }
+    {
+        auto ready_mount = fresh_mount("post-ready");
+        expect(static_cast<bool>(ready_mount), "post-ready fixture mounts");
+        if (!ready_mount) return;
+        eawr::scene::VfsAssetCache ready(ready_mount.value());
+        ready.begin_model_load(std::numeric_limits<std::uint64_t>::max());
+        auto loaded_a = ready.shared_model(model_paths[0]);
+        expect(loaded_a && ready.model_stats().gameplay_loads == 0, "a decode before the final trim does not count");
+        ready.end_model_load(eawr::scene::default_model_cache_budget_bytes);
+        auto hit = ready.shared_model(model_paths[0]);
+        expect(hit && hit.value().get() == loaded_a.value().get() && ready.model_stats().gameplay_loads == 0,
+            "a cache hit after the final trim never counts");
+        auto loaded_b = ready.shared_model(model_paths[1]);
+        const auto ready_stats = ready.model_stats();
+        expect(loaded_b && ready_stats.gameplay_loads == 1 && ready_stats.first_gameplay_model == model_paths[1]
+            && ready_stats.battle_loads == 0, "a decode after the final trim counts as gameplay work in a skirmish");
+        auto again = ready.shared_model(model_paths[1]);
+        expect(again && ready.model_stats().gameplay_loads == 1, "a repeat request for that model is a hit");
+        ready.begin_model_load(eawr::scene::default_model_cache_budget_bytes);
+        auto reopened = ready.shared_model(model_paths[2]);
+        expect(reopened && ready.model_stats().gameplay_loads == 0 && ready.model_stats().first_gameplay_model.empty(),
+            "a new load on the same mount reopens the load phase with a fresh gameplay decode count");
+    }
+    // release_raw_pins: the compose drops its wrapper pins between placement decisions, in the load phase only.
+    {
+        auto pin_mount = fresh_mount("pins");
+        expect(static_cast<bool>(pin_mount), "pin release fixture mounts");
+        if (!pin_mount) return;
+        eawr::scene::VfsAssetCache pins(pin_mount.value());
+        pins.begin_model_load(0); // the strong cache retains nothing: only owners keep a model
+        std::weak_ptr<const eawr::assets::Model> watched;
+        {
+            auto shared = pins.shared_model(model_paths[0]);
+            expect(static_cast<bool>(shared), "the pinned fixture model decodes");
+            if (!shared) return;
+            watched = shared.value();
+        }
+        expect(watched.expired(), "without a pin or a strong entry a model is freed");
+        const auto* pin_pointer = pins.model(model_paths[0]);
+        {
+            auto again = pins.shared_model(model_paths[0]);
+            expect(static_cast<bool>(again), "the pinned model is shared");
+            if (!again) return;
+            watched = again.value();
+        }
+        expect(pin_pointer && !watched.expired(), "a raw pointer from model() pins the model");
+        const auto loads_before = pins.model_stats().unique_loads;
+        expect(pins.release_raw_pins(), "the release is allowed while the battle load is open");
+        expect(watched.expired(), "releasing the pin frees a model nothing else owns");
+        const auto release_stats = pins.model_stats();
+        expect(release_stats.raw_pin_releases == 1 && release_stats.raw_pins_released == 1
+                && release_stats.raw_pin_release_refused == 0,
+            "the release is counted");
+        expect(pins.model(model_paths[0]) != nullptr && pins.model_stats().unique_loads == loads_before + 1,
+            "a model requested again after its pin was released decodes again, and is pinned again");
+        expect(pins.release_raw_pins() && pins.model_stats().raw_pins_released == 2,
+            "an empty or repeated release is harmless and counts the pins it dropped");
+
+        pins.begin_model_load(std::numeric_limits<std::uint64_t>::max());
+        const auto* kept = pins.model(model_paths[1]);
+        const auto retained_before = pins.model_stats().unique_loads;
+        expect(pins.release_raw_pins(), "release inside an unbounded load");
+        expect(pins.model(model_paths[1]) == kept && pins.model_stats().unique_loads == retained_before,
+            "a model the strong cache retains is not decoded again after its pin is released");
+
+        pins.end_model_load(eawr::scene::default_model_cache_budget_bytes);
+        const auto* late = pins.model(model_paths[2]);
+        expect(!pins.release_raw_pins(), "after the final trim the release is refused");
+        expect(late && pins.model_stats().raw_pin_release_refused == 1 && pins.model_stats().raw_pins_released >= 2,
+            "a refusal is counted and drops nothing: gameplay never pays for it");
+    }
+    {
+        auto gc_mount = fresh_mount("pins-galactic");
+        expect(static_cast<bool>(gc_mount), "galactic pin fixture mounts");
+        if (!gc_mount) return;
+        eawr::scene::VfsAssetCache gc(gc_mount.value());
+        gc.begin_galactic_gameplay(size);
+        const auto* outside = gc.model(model_paths[0]);
+        expect(outside && !gc.release_raw_pins(), "galactic gameplay outside a battle load refuses the release");
+        {
+            eawr::scene::VfsAssetCache::ModelLoadScope scope(gc_mount.value());
+            expect(gc.release_raw_pins(), "a galactic battle load may release its compose pins");
+        }
+        expect(gc.model_stats().raw_pin_release_refused == 1, "only the gameplay call was refused");
+    }
 }
 
 void missing_material_effect_contracts() {

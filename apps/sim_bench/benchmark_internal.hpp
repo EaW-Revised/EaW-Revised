@@ -7,21 +7,15 @@
 #include "eawr/sim/tactical/session.hpp"
 #include "eawr/sim/tactical/visibility.hpp"
 
-#include <algorithm>
 #include <array>
 #include <atomic>
 #include <charconv>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
-#include <functional>
 #include <iomanip>
-#include <iostream>
-#include <map>
-#include <optional>
 #include <set>
 #include <span>
-#include <sstream>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -41,6 +35,8 @@ struct Options {
     std::uint64_t seed = 0x5eed;
     std::vector<std::size_t> workers;
     bool dispatch_cost = false;
+    bool fog = false;
+    bool hash = true;
 };
 constexpr tactical::PlayerId player_count = 4;
 

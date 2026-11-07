@@ -117,7 +117,8 @@ func _process(delta):
         extra = ["--eawr-galactic-hud-fixture", fixture]
         if focused:
             extra += ["--eawr-galactic-focus", "101", "--eawr-galactic-flight-ms", "750"]
-        return support.PlanetHudRuntime.capture(self, "synthetic", *extra)
+        engine_args = ("--render-thread", self.render_thread) if getattr(self, "render_thread", None) else ()
+        return support.PlanetHudRuntime.capture(self, "synthetic", *extra, engine_args=engine_args)
 
     def test_presence_count_contents_and_hero_masks(self):
         for fixture in ["fleet-presence", "fleet-count", "fleet-contents", "fleet-heroes"]:

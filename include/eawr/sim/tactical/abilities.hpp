@@ -26,7 +26,7 @@ namespace eawr::sim::tactical {
 enum class SpecialAbilityKind : std::uint8_t {
     none, combat_bonus, production_price, concentrate_fire, tractor_beam, energy_weapon,
     sensor_jamming, corrupt_systems, blast, stealth, find_weakness, maximum_firepower, laser_defense, leech_shields,
-    redirect_blaster, force_healing = 15, enable_radar = 16,
+    redirect_blaster, force_healing = 15, enable_radar = 16, super_laser = 17,
 };
 enum class SpecialActivationStyle : std::uint8_t {
     unspecified, space_automatic, ground_automatic, ground_activated, galactic_automatic, user_input,
@@ -70,6 +70,7 @@ struct SpecialAbilityProfile {
     std::uint32_t concentrate_stacking_category{};
     // WHE-57..60: nested ranges override ordinary targeting only when positive.
     math::Fixed beam_min_range{}, beam_max_range{}, damage_per_frame{};
+    std::uint32_t fire_delay_frames{}; // WSPL-03: SUPER_LASER, trunc(Fire_Delay x 30)
     std::uint64_t doubled_speed_categories{}; // nonhero Corvette exception, resolved from content
     std::string beam_owner_particle{}, beam_owner_bone{};
     // WST-12: the cloak fade's length in seconds and its end tint (bytes); presentation only.

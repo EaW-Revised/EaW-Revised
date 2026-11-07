@@ -107,11 +107,8 @@ void EawrGroundInput::_gui_input(const Ref<InputEvent>& input) {
     queue_redraw();
 }
 void EawrGroundInput::_notification(int what) {
-    if (what != NOTIFICATION_DRAW || !rectangle) return;
-    if (const auto rect = rectangle()) {
-        draw_rect(*rect, Color(1,1,1,0.2F));
-        draw_rect(*rect, Color(1,1,1,1), false, 3);
-    }
+    // GHUD-R47: selection is shown by the live unit brackets, without a box outline.
+    (void)what;
 }
 
 bool GalacticMode::State::open_object_sale(sim::EntityId object, Vector2 point) {
@@ -172,8 +169,13 @@ bool GalacticMode::State::build_ground_hud() {
             .pressed = texture(*this, *component, data::ui::Field::selected_texture_name),
             // A structure slot's icon is its structure's, set per publication (GHUD-S68); never the authored
             // unavailable-slot art, which retail shows only for pads of an inaccessible surface.
-            .portrait = HudButtonArt::Portrait{structure || name == "b_underground" ? Ref<Texture2D>{}
-                : texture(*this, *component, data::ui::Field::icon_texture_name), false, !structure}});
+            .disabled = {}, .portrait = HudButtonArt::Portrait{structure || name == "b_underground" ? Ref<Texture2D>{}
+                : texture(*this, *component, data::ui::Field::icon_texture_name), false, !structure},
+            // The pad's selected frame belongs above the company portrait, including during a box preview.
+            .overlays = name.starts_with("Pad_") ? std::optional{HudButtonArt::Overlays{
+                texture(*this, *component, data::ui::Field::mouse_over_texture_name),
+                texture(*this, *component, data::ui::Field::selected_texture_name), {},
+                !component->flag(data::ui::Field::selected_alpha), true}} : std::nullopt});
         ground_hud.buttons.emplace(name, button);
         if (name == "Slot_00") button->set_action([this] { static_cast<void>(request_ground_land(true)); });
         else button->set_action([] {});
@@ -196,6 +198,7 @@ bool GalacticMode::State::build_ground_hud() {
     input->drag_art->receiver({}, {}, {});
     input->drag_art->set_anchors_and_offsets_preset(Control::PRESET_FULL_RECT);
     input->hit = [this](Vector2 point) {
+        if (advanced_map_shell && advanced_map_shell->is_visible_in_tree()) return detail_hit(point);
         if (!fleet_organize->is_visible_in_tree() || dragged_fleet) return false;
         if (map_input.box_start) return true;
         for (const auto& [name, button] : ground_hud.buttons)
@@ -208,7 +211,10 @@ bool GalacticMode::State::build_ground_hud() {
         const auto a = *map_input.box_start, b = *map_input.box_end;
         return Rect2(std::min(a.x,b.x), std::min(a.y,b.y), std::abs(a.x-b.x), std::abs(a.y-b.y));
     };
-    input->event = [this](int kind, Vector2 point, bool control, bool twice) { ground_pointer(kind, point, control, twice); };
+    input->event = [this](int kind, Vector2 point, bool control, bool twice) {
+        if (advanced_map_shell && advanced_map_shell->is_visible_in_tree()) detail_pointer(kind, point);
+        else ground_pointer(kind, point, control, twice);
+    };
     input->right_event = [this](Vector2 point, bool pressed) {
         if (pressed) {
             ground_hud.sale_object = 0;
@@ -243,7 +249,7 @@ bool GalacticMode::State::build_ground_hud() {
         sale->set_name("g_ground_sell"); sale->set_z_index(static_cast<int>(component->integer(data::ui::Field::base_layer).value_or(0)));
         sale->setup_art({.normal = texture(*this, *component, data::ui::Field::icon_texture_name),
             .hover = texture(*this, *component, data::ui::Field::mouse_over_texture_name),
-            .disabled = texture(*this, *component, data::ui::Field::disabled_texture_name)});
+            .pressed = {}, .disabled = texture(*this, *component, data::ui::Field::disabled_texture_name), .portrait = {}, .overlays = {}});
         sale->set_sounds(*component, [this](const std::string& cue) { if (audio) audio->ui_sound(cue); });
         ground_hud.sale_label = memnew(Label); sale->add_child(ground_hud.sale_label);
         auto* label = ground_hud.sale_label; label->set_mouse_filter(Control::MOUSE_FILTER_IGNORE);
@@ -338,6 +344,7 @@ void GalacticMode::State::ground_pointer(int kind, Vector2 point, bool control, 
             static_cast<void>(map_input.begin_box({point.x,point.y}, found->second.allied, ground_hud.pressed != 0 || over_pad));
     } else if (kind == 1) {
         map_input.move_box({point.x,point.y});
+        if (!ground_hud.pressed_object && map_input.box_end) map_input.preview_box(ground_hud.widgets);
         if (ground_hud.pressed_object && map_input.box_end) fleet_drag_hover(point);
         // WGP-184: the held company has left its rest point (GUI_Drag_Fleet, once per press).
         if (ground_hud.pressed_object && map_input.box_end && !ground_hud.drag_sound) {
@@ -376,6 +383,7 @@ void GalacticMode::State::ground_pointer(int kind, Vector2 point, bool control, 
         ground_hud.drag_sound = false;
         if (ground_hud.double_release) { map_input.box_start.reset(); map_input.box_end.reset(); }
         else if (ground_launch_drop(point) || ground_pad_drop(point)) { map_input.box_start.reset(); map_input.box_end.reset(); }
+        else if (ground_hud.pressed_object && map_input.box_end) { map_input.box_start.reset(); map_input.box_end.reset(); }
         else if (map_input.release_box(ground_hud.widgets)) ++ground_hud.boxes;
         else if (ground_hud.pressed) {
             const auto id = ground_hud.pressed - 1;
@@ -455,7 +463,7 @@ bool GalacticMode::State::request_ground_land(bool submit, galactic_view::Object
         || !galactic_view::fleet_can_land(*published_snapshot, galaxy->local.player, id)) return false;
     if (!submit) return true;
     const auto planets = input_planets();
-    const auto command = map_input.command({galactic_view::DropKind::land, id, 0, selected_planet, {}}, planets);
+    const auto command = map_input.command({galactic_view::DropKind::land, id, 0, selected_planet, {}, {}, {}, {}}, planets);
     if (!command) return false;
     game->submit(platform::LiveGameOrder{sim::SeatId{galaxy->local.seat}, *command, {}});
     ++submitted_orders; ++ground_hud.land_orders;
@@ -546,7 +554,7 @@ bool GalacticMode::State::ground_launch_drop(Vector2 point) {
         units.push_back(widget->object);
     }
     const auto planets = input_planets();
-    const galactic_view::DropIntent intent{galactic_view::DropKind::launch, units.front(), target, selected_planet, std::move(path), slot, units};
+    const galactic_view::DropIntent intent{galactic_view::DropKind::launch, units.front(), target, selected_planet, std::move(path), slot, units, {}};
     const auto command = map_input.command(intent, planets);
     if (!command) return false;
     game->submit(platform::LiveGameOrder{sim::SeatId{galaxy->local.seat}, *command, {}});

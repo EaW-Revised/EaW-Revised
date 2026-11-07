@@ -21,6 +21,6 @@ target_include_directories(
     PUBLIC
         "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>"
 )
-target_link_libraries(eawr_platform_live_ai PUBLIC eawr::platform eawr::skirmish)
+target_link_libraries(eawr_platform_live_ai PUBLIC eawr::platform eawr::skirmish PRIVATE eawr::checkpoint)
 target_compile_features(eawr_platform_live_ai PUBLIC cxx_std_20)
 eawr_target_project_warnings(eawr_platform_live_ai)

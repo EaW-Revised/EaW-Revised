@@ -22,7 +22,6 @@
 
 #include <algorithm>
 #include <array>
-#include "diagnostic_timer.hpp"
 #include <cstdlib>
 #include <cstddef>
 #include <cstdint>
@@ -75,7 +74,7 @@ core::Result<void> session_detail::Tick::CommandHandlers::repair_hardpoint(const
         }
     }
     events.push_back(Event{command_tick, reason == RejectReason::none ? EventKind::order_accepted : EventKind::order_rejected,
-        issuer, command.key.sequence, command.units.front(), OrderKind::repair_hardpoint, reason, static_cast<std::uint8_t>(repair->hardpoint)});
+        issuer, command.key.sequence, command.units.front(), OrderKind::repair_hardpoint, reason, repair->hardpoint});
     return core::Result<void>::success();
 }
 

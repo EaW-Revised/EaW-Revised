@@ -1244,6 +1244,11 @@ void mode_selected_closure() {
         && level.land_goal_cycle_sleep == ai::real(15) && level.land_build_time_multiplier == ai::parse_real("0.5").value()
         && data.value().constants.land_region_size == ai::real(640),
         "#3780: land difficulty and constants are read beside the space ones");
+    expect(ai::mode_contrast_multiplier(level, BattleDomain::land) == ai::real(3)
+        && ai::mode_contrast_multiplier(level, BattleDomain::space) == ai::real(2)
+        && ai::mode_goal_cycle_sleep(level, BattleDomain::land) == ai::real(15)
+        && ai::mode_goal_cycle_sleep(level, BattleDomain::space) == level.space_goal_cycle_sleep,
+        "#3207 G1-a: sleep and contrast are picked by the session's battle domain, space unchanged");
     foc::AiSetup land_setup;
     land_setup.domain = BattleDomain::land;
     land_setup.players = {{1, "FIRST", false, true, "Lander"}};
@@ -1537,12 +1542,39 @@ void mod_ai_calls() {
             skipped_no_result = object.Set_Targeting_Priorities('Custom_Set') == nil
             continued = true
         end
+        function Selectable(object, other, dead)
+            selectable_type = object.Is_Selectable()
+            selectable_other = other.Is_Selectable()
+            selectable_dead_nil = dead.Is_Selectable() == nil
+        end
+        function AnimOk(object, dead)
+            anim_two = object.Play_Animation('Cinematic', false) == nil
+            anim_three = object.Play_Animation('Idle', true, 1.5) == nil
+            anim_dead = dead.Play_Animation('Idle', true) == nil
+            anim_done = true
+        end
+        function AnimBadCount(object) object.Play_Animation('Idle') end
+        function AnimBadName(object) object.Play_Animation(5, false) end
+        function AnimBadLoop(object) object.Play_Animation('Idle', 'yes') end
+        function AnimBadIndex(object) object.Play_Animation('Idle', false, 'x') end
         function SkippedMethods(tf, object)
             skipped_tf_priorities = tf.Set_Targeting_Priorities('Custom_Set') == nil
             skipped_tf_lock = tf.Lock_Current_Orders(true) == nil
             skipped_object_lock = object.Lock_Current_Orders(true) == nil
             methods_continued = true
         end
+        function InvulnOk(object, dead)
+            invuln_on = object.Make_Invulnerable(true) == nil
+            invuln_again = object.Make_Invulnerable(true) == nil
+            invuln_off = object.Make_Invulnerable(false) == nil
+            invuln_dead = dead.Make_Invulnerable(true) == nil
+            invuln_done = true
+        end
+        function InvulnNoArgs(object) object.Make_Invulnerable() end
+        function InvulnTwoArgs(object) object.Make_Invulnerable(true, true) end
+        function InvulnNumber(object) object.Make_Invulnerable(1) end
+        function InvulnString(object) object.Make_Invulnerable('true') end
+        function InvulnNil(object) object.Make_Invulnerable(nil) end
         function Query(tf, object)
             threat = tf.Get_Self_Threat_Sum()
             online = object.Are_Engines_Online()
@@ -1713,11 +1745,77 @@ void mod_ai_calls() {
         expect(value && value.value() && std::get<bool>(value.value()->data),
             "EX-59: counted unsupported setter returns no result and allows the caller to continue");
     }
+    // WSU-21: Is_Selectable answers the type's SELECTABLE behaviour; a dead object answers nothing.
+    world.host->setup.content.types.front().selectable = true;
+    invoke(1, "Selectable", {object_handle, auth::Value{auth::Handle{foc::handle_game_object, 15}},
+        auth::Value{auth::Handle{foc::handle_game_object, 9999}}});
+    for (const auto& [name, expected] : {std::pair{"selectable_type", true}, {"selectable_other", false}, {"selectable_dead_nil", true}}) {
+        const auto value = scripts.value().read_global(1, name);
+        expect(value && value.value() && std::get_if<bool>(&value.value()->data) && std::get<bool>(value.value()->data) == expected,
+            "WSU-21: Is_Selectable reports the SELECTABLE behaviour of the object's type and nothing for a dead object");
+    }
+    // TL-02: Play_Animation validates its arguments and is otherwise a silent presentation no-op.
+    invoke(1, "AnimOk", {object_handle, auth::Value{auth::Handle{foc::handle_game_object, 9999}}});
+    for (const auto* name : {"anim_two", "anim_three", "anim_dead", "anim_done"}) {
+        const auto value = scripts.value().read_global(1, name);
+        expect(value && value.value() && std::get_if<bool>(&value.value()->data) && std::get<bool>(value.value()->data),
+            "TL-02: valid Play_Animation calls answer nothing without a diagnostic and let the script continue");
+    }
+    std::uint64_t anim_instance = 100;
+    for (const char* bad : {"AnimBadCount", "AnimBadName", "AnimBadLoop", "AnimBadIndex"}) {
+        expect(scripts.value().create_instance(anim_instance, "CALLS.LUA").has_value(), "TL-02: each failing call has an instance");
+        auth::ScriptEvent event;
+        event.key = {scripts.value().completed_tick() + 1, foc::producer_foc_engine, anim_instance, sequence++};
+        event.target = anim_instance++; event.kind = auth::ScriptEvent::Kind::call; event.name = bad; event.arguments = {object_handle};
+        expect(scripts.value().submit_event(std::move(event)).has_value(), "TL-02: bad call queues");
+        const auto report = scripts.value().service(executor);
+        expect(report && report.value().diagnostics.size() == 1
+            && report.value().diagnostics.front().message.find("Play_Animation") != std::string::npos,
+            "TL-02: a wrong argument count or type is a script error naming Play_Animation");
+    }
     invoke(1, "SkippedMethods", {force(1), auth::Value{auth::Handle{foc::handle_game_object, 10}}}, 3);
     for (const auto* name : {"skipped_tf_priorities", "skipped_tf_lock", "skipped_object_lock", "methods_continued"}) {
         const auto value = scripts.value().read_global(1, name);
         expect(value && value.value() && std::get_if<bool>(&value.value()->data) && std::get<bool>(value.value()->data),
             "EX-59: TaskForce targeting and object/TaskForce locks diagnose each skip, return no result and continue");
+    }
+    // TL-03: Make_Invulnerable(bool) queues one replay command per valid call (a dead object queues none);
+    // every other argument shape is a script error naming the call and queues nothing.
+    {
+        expect(scripts.value().create_instance(200, "CALLS.LUA").has_value(), "TL-03: valid-call instance");
+        auth::ScriptEvent event;
+        event.key = {scripts.value().completed_tick() + 1, foc::producer_foc_engine, 200, sequence++};
+        event.target = 200; event.kind = auth::ScriptEvent::Kind::call; event.name = "InvulnOk";
+        event.arguments = {object_handle, auth::Value{auth::Handle{foc::handle_game_object, 9999}}};
+        expect(scripts.value().submit_event(std::move(event)).has_value(), "TL-03: valid call queues");
+        const auto report = scripts.value().service(executor);
+        expect(report && report.value().diagnostics.empty() && report.value().commands.size() == 3,
+            "TL-03: three valid calls on a live object queue three commands and the dead object queues none");
+        if (report && report.value().commands.size() == 3) {
+            const bool flags[] = {true, true, false};
+            for (std::size_t i = 0; i < 3; ++i) {
+                const auto& command = report.value().commands[i];
+                expect(command.verb == foc::verb_make_invulnerable && command.arguments.size() == 3
+                    && std::get_if<bool>(&command.arguments[2].data) && std::get<bool>(command.arguments[2].data) == flags[i],
+                    "TL-03: each command carries the issuer, the object and the requested flag");
+            }
+        }
+        const auto done = scripts.value().read_global(200, "invuln_done");
+        expect(done && done.value() && std::get_if<bool>(&done.value()->data) && std::get<bool>(done.value()->data),
+            "TL-03: valid calls answer nothing and let the script continue");
+        std::uint64_t bad_instance = 210;
+        for (const char* bad : {"InvulnNoArgs", "InvulnTwoArgs", "InvulnNumber", "InvulnString", "InvulnNil"}) {
+            expect(scripts.value().create_instance(bad_instance, "CALLS.LUA").has_value(), "TL-03: each failing call has an instance");
+            auth::ScriptEvent failing;
+            failing.key = {scripts.value().completed_tick() + 1, foc::producer_foc_engine, bad_instance, sequence++};
+            failing.target = bad_instance++; failing.kind = auth::ScriptEvent::Kind::call; failing.name = bad;
+            failing.arguments = {object_handle};
+            expect(scripts.value().submit_event(std::move(failing)).has_value(), "TL-03: bad call queues");
+            const auto bad_report = scripts.value().service(executor);
+            expect(bad_report && bad_report.value().diagnostics.size() == 1 && bad_report.value().commands.empty()
+                && bad_report.value().diagnostics.front().message.find("Make_Invulnerable") != std::string::npos,
+                "TL-03: a wrong argument count or type is a script error naming Make_Invulnerable and queues no command");
+        }
     }
 }
 

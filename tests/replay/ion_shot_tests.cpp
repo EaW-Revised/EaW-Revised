@@ -4,6 +4,7 @@
 // replay round trip; identical hashes at 1, 2, 4 and 8 workers.
 
 #include "../support/check.hpp"
+#include "eawr/sim/tactical/fighters.hpp"
 #include "tactical_ai_internal.hpp"
 #include "tactical_ai_world.hpp"
 #include "eawr/platform/sim_workers.hpp"

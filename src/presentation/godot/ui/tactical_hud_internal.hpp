@@ -14,6 +14,7 @@
 #include "eawr/data/ui/text_database.hpp"
 #include "eawr/presentation/ui/battle_messages.hpp"
 #include "eawr/presentation/ui/fonts.hpp"
+#include "eawr/presentation/ui/project_hud.hpp"
 #include "eawr/presentation/ui/theme.hpp"
 
 #include <godot_cpp/classes/canvas_item_material.hpp>
@@ -130,6 +131,13 @@ public:
     }
     // #459: what a press does (the time panel's buttons and the options button).
     void set_action(std::function<void()> action) { action_ = std::move(action); }
+    // #5857 (WST-75): the press a FORCE_CLICK_GUI reward makes. It takes the human press's path, minus the pointer: a
+    // toggle control changes its pressed state first, then the same action runs. A disabled or hidden control ignores it.
+    void activate() {
+        if (is_disabled() || !is_visible_in_tree()) return;
+        if (is_toggle_mode()) set_pressed_no_signal(!is_pressed());
+        _pressed();
+    }
     // #3075: the authored Click_SFX / Mouse_Over_SFX names and the owner's SFX sink.
     void set_sounds(std::string click, std::string mouse_over, std::function<void(const std::string&)> sound, std::string right_click = {}) {
         if (!sound_ && sound) connect("mouse_entered", callable_mp(this, &EawrHudButton::hover_sound));
@@ -274,6 +282,10 @@ public:
         if (special_overlay_ == nullptr) return "none";
         return is_disabled() ? "disabled" : order_selected_ || is_pressed() ? "selected" : is_hovered() ? "hover" : "none";
     }
+    // The state the button draws, for authored art too (overlay_name only knows the stock overlay layer).
+    [[nodiscard]] const char* visual_state() const {
+        return is_disabled() ? "disabled" : order_selected_ || is_pressed() ? "pressed" : is_hovered() ? "hover" : "normal";
+    }
     void set_flash_texture(const Ref<Texture2D>& texture) {
         flash_ = memnew(TextureRect);
         flash_->set_mouse_filter(MOUSE_FILTER_IGNORE);
@@ -287,6 +299,13 @@ public:
         flash_->hide();
         add_child(flash_);
     }
+    // An authored flash quad can differ from the retained icon's size (g_radar_blip: 16x16 over a 12x12 dot).
+    void set_flash_box(const Rect2& box) {
+        if (!flash_) return;
+        flash_->set_anchors_preset(PRESET_TOP_LEFT);
+        flash_->set_position(box.position); flash_->set_size(box.size);
+    }
+    [[nodiscard]] bool flash_shown() const { return flash_ != nullptr && flash_->is_visible(); }
     void set_flashing(const bool on) {
         if (flashing_ == on) return;
         flashing_ = on;
@@ -379,6 +398,9 @@ struct TacticalHud::State final {
     std::string shell_model;
     std::string atlas_path;
     model::HudShell shell;
+    model::ProjectHudDefinitions project_hud;
+    std::vector<model::HudComponent> project_hud_anchors;
+    bool gift_dock_warning{};
     std::optional<model::ReferencePoint> movie_bone;
     CommandBarMovie command_bar_movie;
     model::PlanetName planet;
@@ -436,6 +458,8 @@ struct TacticalHud::State final {
     std::function<void(sim::SeatId)> gift_handler;
     bool gift_open{};
     bool gift_enabled{};
+    bool gift_policy{};
+    model::ProjectHudLayoutWatch gift_layout;
     std::uint64_t gift_presses{}, gift_submissions{};
     EawrHudButton* beacon_button{};
     std::function<void()> beacon_handler;
@@ -481,6 +505,8 @@ struct TacticalHud::State final {
     model::StandaloneTextures standalone;
     std::map<std::string, Ref<Texture2D>, std::less<>> card_textures;
     std::map<std::string, std::pair<std::string, String>, std::less<>> card_types; // Icon_Name, display name
+    // This cache belongs to one HUD and is rebuilt with it for each battle.
+    std::map<std::string, std::map<std::uint32_t, std::string>, std::less<>> ability_icons;
     model::ResolvedFont card_face;
     std::map<std::string, model::UnitCardLooks, std::less<>> encyclopedia_types;
     const model::UnitCardLooks& encyclopedia_type(const std::string& type);

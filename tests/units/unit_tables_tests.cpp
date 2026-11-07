@@ -9,6 +9,7 @@
 #include "unit_tables_support.hpp"
 #include "unit_tables_synthetic_fixtures.hpp"
 #include "eawr/assets/map.hpp"
+#include "eawr/campaign/space_entry.hpp"
 #include "eawr/units/unit_tables.hpp"
 #include "eawr/core/sha256.hpp"
 #include "eawr/presentation/ui/selection.hpp"
@@ -34,6 +35,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -430,13 +432,33 @@ void independent_guard_profiles() {
     bad.footprint.collision_x = bad.footprint.collision_y = Fixed::from_raw(Fixed::scale);
     bad.footprint.custom_soft_radius = Fixed::from_raw(raw(eawr::sim::tactical::max_combat_distance + 1));
     loaded.tables->units = {bad, *good};
-    expect(!eawr::units::combat_table(*loaded.tables), "synthetic strict combat still rejects the invalid footprint");
+    eawr::core::LoadNoteBuffer load_notes;
+    const auto combat = eawr::units::combat_table(*loaded.tables, eawr::units::ContentErrors::strict,
+        nullptr, &load_notes);
+    expect(static_cast<bool>(combat), "synthetic strict combat accepts the normalized footprint");
+    if (combat) {
+        const auto& footprints = combat.value().footprints;
+        const auto footprint = std::find_if(footprints.begin(), footprints.end(), [&](const auto& value) {
+            return value.type_id == eawr::assets::object_type_crc(bad.id);
+        });
+        expect(footprint != footprints.end()
+            && footprint->radius == Fixed::from_raw(raw(eawr::sim::tactical::max_motion_coordinate)),
+            "synthetic strict combat clamps the footprint radius to the supported maximum");
+    }
+    eawr::core::LoadNoteCollector collector;
+    collector.merge(load_notes);
+    const auto captured = collector.snapshot();
+    expect(captured.size() == 1 && captured.front().code == "EAWR-LOAD-0157"
+        && captured.front().object == bad.id && captured.front().tag == "Custom_Soft_Footprint_Radius"
+        && captured.front().effective_value == std::to_string(eawr::sim::tactical::max_motion_coordinate),
+        "synthetic strict combat emits exactly one footprint clamp note with the effective radius");
     std::vector<std::string> defects, refusals;
     std::vector<eawr::core::Diagnostic> notes;
     const auto admitted = guard_combat_profiles(*loaded.tables, defects, refusals, notes);
-    expect(defects.size() == 1 && defects.front().find(bad.id) != std::string::npos && refusals.empty()
+    expect(defects.empty() && refusals.empty() && admitted.size() == 2
+        && std::find(admitted.begin(), admitted.end(), bad.id) != admitted.end()
         && std::find(admitted.begin(), admitted.end(), "Test_Frigate") != admitted.end(),
-        "installed guard reports a bad footprint and still admits the independent valid profile");
+        "installed guard admits both the normalized footprint and the independent valid profile");
     expect(guard_turret_refusal("combat table: invalid manual turret of weapon 16")
         && guard_turret_refusal("HPT-09: authored turret frame shear exceeds 1/256")
         && !guard_turret_refusal("Turret_Unit: combat table: invalid target footprint"),
@@ -454,6 +476,11 @@ void space_unit_guard_selection() {
         "<Variant_Of_Existing_Type>Guard_Missing_Base</Variant_Of_Existing_Type></SpaceUnit>"
         "<SpaceUnit Name=\"Guard_Second_Broken_Unit\">"
         "<Variant_Of_Existing_Type>Guard_Other_Missing_Base</Variant_Of_Existing_Type></SpaceUnit>"
+        "<Planet Name=\"Guard_Dangling_Planet\">"
+        "<Variant_Of_Existing_Type>Guard_Missing_Planet_Base</Variant_Of_Existing_Type></Planet>"
+        "<Planet Name=\"Guard_Planet_Base\"><Terrain>Temperate</Terrain></Planet>"
+        "<Planet Name=\"Guard_Intact_Planet\">"
+        "<Variant_Of_Existing_Type>Guard_Planet_Base</Variant_Of_Existing_Type></Planet>"
         "<SpaceProp Name=\"Guard_Model_Base\"><Space_Model_Name>guard.alo</Space_Model_Name></SpaceProp>"
         "<SpaceProp Name=\"Guard_Inherited_Model\">"
         "<Variant_Of_Existing_Type>Guard_Model_Base</Variant_Of_Existing_Type></SpaceProp>");
@@ -492,6 +519,155 @@ void space_unit_guard_selection() {
     const auto unrelated = catalog.resolve("Guard_Unrelated_Projectile", eawr::data::Category::game_object);
     expect(!unrelated && unrelated.error().code == "EAWR-XML-0008",
         "Remake guard selection does not repair an unrelated authored defect");
+
+    // CGS-22: the shared stock-name resolution skips exactly the absent-base case, once per name, however many sites ask
+    // (space-entry type table, planet locations, the unit-table name set), and a skipped name stays in one shared set.
+    {
+        eawr::campaign::StockNameSkips skips;
+        const auto first = eawr::campaign::resolve_stock_name(catalog, "Guard_Broken_Unit",
+            eawr::data::Category::game_object, "galactic type", skips);
+        const auto again = eawr::campaign::resolve_stock_name(catalog, "Guard_Broken_Unit",
+            eawr::data::Category::game_object, "stock type name", skips);
+        expect(first && !first.value() && again && !again.value() && skips.notes.size() == 1
+            && skips.contains("GUARD_BROKEN_UNIT") && skips.notes.front().code == "EAWR-XML-0008"
+            && skips.notes.front().action == eawr::core::LoadAction::skipped_object
+            && skips.notes.front().object == "Guard_Broken_Unit" && skips.notes.front().line.has_value() && *skips.notes.front().line != 0,
+            "CGS-22: a type site and a name-set site skip the same absent-base type with ONE load note carrying its source line");
+        const auto fine = eawr::campaign::resolve_stock_name(catalog, "Guard_Inherited_Model",
+            eawr::data::Category::game_object, "galactic type", skips);
+        expect(fine && fine.value() && !skips.contains("Guard_Inherited_Model") && skips.notes.size() == 1,
+            "CGS-22 negative control: a resolvable type is returned, not skipped");
+        const auto absent = eawr::campaign::resolve_stock_name(catalog, "Guard_Not_Defined_Anywhere",
+            eawr::data::Category::game_object, "planet", skips);
+        expect(!absent && !skips.contains("Guard_Not_Defined_Anywhere") && skips.notes.size() == 1,
+            "CGS-22 negative control: any other resolve failure still fails and is not recorded as skipped");
+        // F1: the AI selection content (prepare_ai_selection_content) and the auto-resolve/AI planet sites decide a planet
+        // with the same predicate on the same resolve; a dangling planet base is skipped, any other failure is not.
+        const auto planet_skipped = [&](const char* name) {
+            const auto resolved = catalog.resolve(name, eawr::data::Category::game_object);
+            return !resolved && eawr::campaign::stock_name_skippable(resolved.error());
+        };
+        expect(planet_skipped("Guard_Dangling_Planet"),
+            "CGS-22: a planet whose variant base is absent is skipped by the AI selection content path");
+        expect(!planet_skipped("Guard_Intact_Planet") && catalog.resolve("Guard_Intact_Planet", eawr::data::Category::game_object),
+            "CGS-22 negative control: a planet with a resolvable base is kept");
+        expect(!planet_skipped("Guard_Not_Defined_Anywhere") && !catalog.resolve("Guard_Not_Defined_Anywhere", eawr::data::Category::game_object),
+            "CGS-22 negative control: an undefined planet name is not skippable and still refuses");
+    }
+}
+
+// #4985: a teammate's mod shipyard through the real Remake chain. Two humans share a team; the shipyard of
+// the first (a SpaceBuildable, not a StarBase) must be selectable by the ally (WSU-16 community flag) and the
+// ally's purchase must pass the session's production query. The Remake base maps all declare capacity 1, so the
+// fixture uses a loose Remake map found by name; on its new-marker layout two allies share one faction (team 0)
+// and an enemy holds team 1 (validate_setup_slots).
+int remake_ally_shipyard(const std::filesystem::path& game, const std::filesystem::path& mod, const std::string& map_stem,
+                         const std::string& team_faction, const std::string& enemy_faction, const std::string& producer) {
+    const auto fail = [](const eawr::core::Diagnostic& diagnostic) {
+        std::cerr << eawr::core::format_diagnostic(diagnostic) << '\n';
+        return 1;
+    };
+    auto roots = eawr::vfs::mod_chain_roots(mod);
+    for (const auto& [name, root] : roots) {
+        if (!std::filesystem::is_directory(root)) {
+            std::cout << "SKIP: Remake chain layer is not installed: " << name << '\n';
+            return 77;
+        }
+    }
+    roots.emplace_back("expansion", game / "corruption" / "Data");
+    roots.emplace_back("base", game / "GameData" / "Data");
+    auto chain = eawr::vfs::resolve_manifest_chain(roots);
+    if (!chain) return fail(chain.error());
+    std::vector<eawr::vfs::MountSpec> specs;
+    for (auto& layer : chain.value()) specs.push_back(std::move(layer.mount));
+    auto filesystem = eawr::vfs::Vfs::mount(specs);
+    if (!filesystem) return fail(filesystem.error());
+    auto catalog = eawr::data::load_catalog_strict(filesystem.value(), eawr::data::Profile::remake);
+    if (!catalog) return fail(catalog.error());
+    auto map_records = filesystem.value().enumerate("data/art/maps/", ".ted");
+    if (!map_records) return fail(map_records.error());
+    const auto map_record = std::find_if(map_records.value().begin(), map_records.value().end(), [&](const auto& record) {
+        std::string path = record.canonical_path;
+        std::transform(path.begin(), path.end(), path.begin(), [](const unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        return path == "data/art/maps/" + map_stem + ".ted";
+    });
+    if (map_record == map_records.value().end()) {
+        std::cout << "SKIP: the Remake chain has no map " << map_stem << '\n';
+        return 77;
+    }
+    eawr::skirmish::FixtureOptions options;
+    options.map = map_record->canonical_path;
+    options.slots = std::vector<eawr::skirmish::LobbySlot>{
+        {1, team_faction, 0, true, {}, {}}, {2, team_faction, 0, true, {}, {}}, {3, enemy_faction, 1, true, {}, {}}};
+    auto fixture = eawr::skirmish::fixture_from_options(options, filesystem.value(), catalog.value().catalog);
+    if (!fixture) return fail(fixture.error());
+    eawr::scene::VfsAssetCache cache(filesystem.value());
+    eawr::units::LoadInput input;
+    input.catalog = &catalog.value().catalog;
+    input.filesystem = &filesystem.value();
+    input.model = cache.access().model;
+    input.space_map = fixture.value().map;
+    auto tables = eawr::units::load_unit_tables(input);
+    if (!tables) return fail(tables.error());
+    auto inputs = eawr::skirmish::read_start_inputs(fixture.value(), filesystem.value(),
+        catalog.value().catalog, tables.value());
+    if (!inputs) return fail(inputs.error());
+    const auto* shipyard = tables.value().find(producer);
+    expect(shipyard != nullptr, "the Remake producer type loads");
+    if (shipyard == nullptr) return 1;
+    expect(shipyard->kind != eawr::units::UnitKind::station && !shipyard->capture_point,
+        "#4985: the Remake shipyard is neither a StarBase station nor a capture point");
+    expect(shipyard->station_community_property,
+        "#4985: the Remake shipyard inherits Is_Community_Property, so its ally may select it");
+    auto start = eawr::skirmish::build_start(fixture.value(), inputs.value());
+    if (!start) return fail(start.error());
+    auto content = eawr::skirmish::session_content(tables.value(), eawr::skirmish::human_slots(fixture.value()));
+    if (!content) return fail(content.error());
+    auto economy = eawr::skirmish::economy_rules(start.value(), inputs.value(), tables.value());
+    if (!economy) return fail(economy.error());
+    const auto producer_type = eawr::skirmish::type_id(producer);
+    eawr::sim::tactical::FactionId builder_id{};
+    for (const auto& player : start.value().players) if (player.player.player_id == 1) builder_id = player.player.faction_id;
+    // Every other mod shipyard that authors a build menu (not a StarBase, a capture point, nor an under-construction
+    // placeholder such as UC_*_Shipyard, which has no menu) carries the same flag.
+    std::size_t shipyards = 0;
+    for (const auto& unit : tables.value().units) {
+        if (unit.id.size() < 9 || unit.id.compare(unit.id.size() - 9, 9, "_Shipyard") != 0) continue;
+        if (unit.kind == eawr::units::UnitKind::station || unit.capture_point) continue;
+        const auto unit_type = eawr::skirmish::type_id(unit.id);
+        const bool has_menu = std::any_of(start.value().players.begin(), start.value().players.end(), [&](const auto& player) {
+            return economy.value().menu(unit_type, player.player.faction_id) != nullptr;
+        });
+        if (!has_menu) continue;
+        ++shipyards;
+        expect(unit.station_community_property, "#4985: shipyard " + unit.id + " is selectable by an ally");
+    }
+    expect(shipyards >= 1, "the Remake chain authors at least one shipyard with a build menu");
+    const auto* menu = economy.value().menu(producer_type, builder_id);
+    expect(menu != nullptr, "the Remake shipyard authors a menu for its owner's faction");
+    if (menu == nullptr) return 1;
+    const auto offered = std::find_if(menu->options.begin(), menu->options.end(), [](const auto& option) {
+        return option.available && option.kind == eawr::sim::tactical::BuildKind::unit;
+    });
+    expect(offered != menu->options.end(), "the owner-faction menu offers an available unit");
+    if (offered == menu->options.end()) return 1;
+    auto setup = start.value().setup;
+    eawr::sim::EntityId entity = 1;
+    for (const auto& unit : setup.units) entity = std::max(entity, unit.entity_id + 1);
+    setup.units.push_back({entity, producer_type, 1, setup.units.empty() ? eawr::sim::math::Vec3{} : setup.units.front().position,
+        eawr::sim::math::identity_quat(), {}});
+    const auto& bound = content.value();
+    auto session = eawr::sim::tactical::TacticalSession::create(setup, bound.sensors, bound.durability, bound.motion,
+        std::nullopt, bound.combat, eawr::skirmish::victory_rules(start.value(), tables.value()), bound.abilities,
+        economy.value(), bound.map_box);
+    if (!session) return fail(session.error());
+    expect(session.value().build_option(1, entity, offered->type) != nullptr,
+        "the owner buys from its Remake shipyard");
+    expect(session.value().build_option(2, entity, offered->type) != nullptr,
+        "#4985: the allied buyer passes the production query at its teammate's Remake shipyard");
+    std::cout << "Remake ally shipyard: " << producer << " owner/buyer " << team_faction << " enemy " << enemy_faction
+              << " shipyards " << shipyards << " unit " << offered->type << " failures " << failures << '\n';
+    return failures == 0 ? 0 : 1;
 }
 
 } // namespace
@@ -625,6 +801,15 @@ int main(const int argc, char** argv) {
                   << loaded_count << " loaded, " << admitted.size()
                   << " combat profiles, " << failures << " failures\n";
         return failures == 0 ? 0 : 1;
+    }
+    if (argc == 2 && std::string_view(argv[1]) == "--remake-ally-shipyard") {
+        const auto game = eawr::testing::environment("EAWR_EAW_GAME_ROOT");
+        const auto mod = eawr::testing::environment("EAWR_REMAKE_MOD_ROOT");
+        if (!game || game->empty() || !mod || mod->empty()) {
+            std::cout << "SKIP: Remake chain not configured; set EAWR_EAW_GAME_ROOT and EAWR_REMAKE_MOD_ROOT\n";
+            return 77;
+        }
+        return remake_ally_shipyard(*game, *mod, "_mp_space_sco_geonosis", "Rebel", "Empire", "Rebel_Capital_Shipyard");
     }
     // A selected installed-mod battle, using the same faction dependency closure as the viewer.
     // Arguments supply all installed paths, the playable map and both faction names.
@@ -1054,6 +1239,7 @@ int main(const int argc, char** argv) {
         }
     }
     synthetic_tables();
+    community_structure_tables();
     for (const std::string value : {"", "Yes", "true", "1", "no", "0"}) {
         TempTree tree;
         auto xml = units_xml("3600", "Unit_Select_Test");

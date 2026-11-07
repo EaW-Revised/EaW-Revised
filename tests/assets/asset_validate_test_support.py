@@ -457,7 +457,7 @@ def check_environment_ledger(validator: Path, data: Path, old_ted: bytes) -> Non
     xml = data / "XML"
     xml.mkdir()
     (xml / "GameObjectFiles.xml").write_text(
-        "<Game_Object_Files><File>ledger_a.xml</File><File>ledger_b.xml</File></Game_Object_Files>",
+        "<Game_Object_Files><File>ledger_b.xml</File><File>ledger_a.xml</File></Game_Object_Files>",
         encoding="utf-8",
     )
     (xml / "ledger_a.xml").write_text(

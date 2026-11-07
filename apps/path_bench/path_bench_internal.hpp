@@ -18,24 +18,19 @@
 #include "eawr/skirmish/ai.hpp"
 #include "eawr/skirmish/start.hpp"
 #include "eawr/units/unit_tables.hpp"
-#include "eawr/vfs/vfs.hpp"
+#include "eawr/vfs/vfs_fwd.hpp"
 
-#include <algorithm>
 #include <charconv>
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
-#include <fstream>
-#include <functional>
 #include <iomanip>
-#include <iostream>
 #include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <set>
-#include <sstream>
 #include <string>
 #include <string_view>
 #include <utility>

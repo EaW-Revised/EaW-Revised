@@ -8,6 +8,8 @@
 #include <string_view>
 #include <unordered_map>
 
+#include "eawr/core/flat_id_map.hpp"
+
 namespace eawr::presentation::audio {
 
 // SND-42/64: consume eligibility before playback admission. A requested type
@@ -42,8 +44,9 @@ public:
     static constexpr double fade_epsilon = 0.0001;
     // One logical frame for one object; true when the sighting handlers run now.
     [[nodiscard]] bool tick(std::uint64_t entity, bool visible, double opacity) {
-        auto [it, inserted] = countdown_.try_emplace(entity, 0U);
-        std::uint32_t& left = it->second;
+        auto* slot = countdown_.find(entity);
+        const bool inserted = slot == nullptr;
+        std::uint32_t& left = inserted ? countdown_[entity] : slot->second; // a new object starts at 0
         if (!inserted && left > 0) --left;
         if (left != 0 && std::abs((visible ? 1.0 : 0.0) - opacity) < fade_epsilon) return false;
         left = period_frames;
@@ -52,11 +55,11 @@ public:
     // Drops objects the session no longer holds; call with the live count now and then.
     template<class Alive>
     void retain(const Alive& alive) {
-        std::erase_if(countdown_, [&](const auto& entry) { return !alive(entry.first); });
+        countdown_.erase_if([&](const std::uint64_t entity, const std::uint32_t&) { return !alive(entity); });
     }
     [[nodiscard]] std::size_t tracked() const noexcept { return countdown_.size(); }
 private:
-    std::unordered_map<std::uint64_t, std::uint32_t> countdown_;
+    core::FlatIdMap<std::uint32_t> countdown_;
 };
 
 // SND-44: FIFO, including duplicates; only the front is serviced. Storage is

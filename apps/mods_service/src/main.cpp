@@ -7,8 +7,10 @@
 #include "line_framer.hpp"
 #include "service.hpp"
 #include "loadcheck.hpp"
+#include "records.hpp"
 
 #include "eawr/core/build_identity.hpp"
+#include "eawr/core/build_label.hpp"
 
 #include <filesystem>
 #include <fstream>
@@ -129,10 +131,11 @@ private:
     std::ofstream file_;
 };
 
-int run(const std::vector<fs::path>& args) {
+int run(const std::vector<fs::path>& args, const fs::path& executable) {
     std::optional<fs::path> transcript_path;
     fs::path user_data;
     fs::path helper;
+    fs::path records_helper;
     for (std::size_t index = 0; index < args.size(); ++index) {
         if (args[index] == fs::path("--transcript") && index + 1 < args.size()) {
             transcript_path = args[++index];
@@ -140,6 +143,8 @@ int run(const std::vector<fs::path>& args) {
             user_data = fs::absolute(args[++index]);
         } else if (args[index] == fs::path("--loadcheck-helper") && index + 1 < args.size()) {
             helper = fs::absolute(args[++index]);
+        } else if (args[index] == fs::path("--records-helper") && index + 1 < args.size()) {
+            records_helper = fs::absolute(args[++index]);
         } else {
             log_line("usage: eawr_mods_service [--user-data <folder>] [--transcript <file>]");
             return 2;
@@ -164,10 +169,14 @@ int run(const std::vector<fs::path>& args) {
         if (!write_out(response)) pipe_failed = true;
     };
     eawr::mods_service::Service service(
-        {version, std::string(eawr::core::build_identity()), version}, [](std::string_view text) { log_line(text); });
+        {version, std::string(eawr::core::build_identity()), version, eawr::core::build_label(eawr::core::build_identity())},
+        [](std::string_view text) { log_line(text); });
     if (!user_data.empty()) service.model.user_data = user_data;
+    service.model.player_dir = fs::absolute(executable).parent_path();
     service.loadcheck().executable = helper;
     service.loadcheck().emit = send;
+    service.records().executable = records_helper;
+    service.records().emit = send;
     eawr::mods_service::LineFramer framer(eawr::mods_service::kLineLimit);
     std::vector<std::string> out;
 
@@ -197,6 +206,7 @@ int run(const std::vector<fs::path>& args) {
         if (!framer.feed(std::string_view(buffer.data(), got), handle)) break;
     }
     service.loadcheck().stop();
+    service.records().stop();
     if (pipe_failed) {
         log_line("stdout closed; exiting");
         return 1;
@@ -212,14 +222,18 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &count);
     std::vector<fs::path> args;
     for (int index = 1; argv != nullptr && index < count; ++index) args.emplace_back(argv[index]);
+    std::wstring executable_path(32768, L'\0');
+    const auto length = GetModuleFileNameW(nullptr, executable_path.data(), static_cast<DWORD>(executable_path.size()));
+    executable_path.resize(length);
+    const fs::path executable = executable_path;
     if (argv != nullptr) LocalFree(argv);
-    return run(args);
+    return run(args, executable);
 }
 #else
 int main(int argc, char** argv) {
     std::signal(SIGPIPE, SIG_IGN); // a closed stdout becomes a write error, then exit 1
     std::vector<fs::path> args;
     for (int index = 1; index < argc; ++index) args.emplace_back(argv[index]);
-    return run(args);
+    return run(args, fs::path(argv[0]));
 }
 #endif

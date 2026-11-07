@@ -245,6 +245,8 @@ ViewResult build_view(const GalaxySnapshotStub& snapshot, const SeatId local_sea
         }
         PlanetView item;
         item.ability = planet.ability;
+        item.weather = planet.weather;
+        item.info = planet.info;
         item.id = planet.id;
         item.name = planet.name;
         item.model = planet.model;
@@ -413,10 +415,14 @@ void zoom(OrbitCamera& camera, const float factor) {
 std::array<float, 3> render_point(const Vec3& source) noexcept { return {source.x, source.z, -source.y}; }
 
 float galactic_vertical_fov(const std::uint32_t width, const std::uint32_t height) noexcept {
-    // WGP-43: the perspective argument atan(.5) is the full horizontal angle.
+    // WGP-43: the perspective argument atan(.5) is the full horizontal angle at the reference 16:9 aspect.
+    // Owner decision (#5600): windows wider than 16:9 are Hor+, so the vertical angle stays that of 16:9 and the
+    // extra width shows more of the galaxy. Narrower windows keep the fixed horizontal angle of WGP-43.
+    constexpr float reference_aspect = 16.0F / 9.0F;
     const float horizontal = std::atan(0.5F);
     const float aspect = static_cast<float>(std::max(1U, width)) / static_cast<float>(std::max(1U, height));
-    return 2.0F * std::atan(std::tan(horizontal * 0.5F) / aspect) * 180.0F / std::numbers::pi_v<float>;
+    return 2.0F * std::atan(std::tan(horizontal * 0.5F) / std::min(aspect, reference_aspect)) * 180.0F /
+           std::numbers::pi_v<float>;
 }
 
 presentation::FixedCamera fixed_camera(const OrbitCamera& camera, const std::uint32_t width,
@@ -460,8 +466,11 @@ void PlanetCamera::position(const Vec3 point) {
 void PlanetCamera::pan(const GalaxyView& view, const float x, const float y, const bool forced_scroll) {
     if (forced_scroll || state_ != CameraState::overview || !std::isfinite(x) || !std::isfinite(y)) return;
     const Bounds box = pan_bounds(view);
-    scroll_.x = std::clamp(scroll_.x + x, box.min.x, box.max.x);
-    scroll_.y = std::clamp(scroll_.y - y, box.min.y, box.max.y);
+    // #5617: screen-relative pan at any yaw (the same rotation as the free orbit pan).
+    const float yaw = radians(yaw_offset_);
+    const float forward = -y;
+    scroll_.x = std::clamp(scroll_.x + x * std::cos(yaw) + forward * std::sin(yaw), box.min.x, box.max.x);
+    scroll_.y = std::clamp(scroll_.y - x * std::sin(yaw) + forward * std::cos(yaw), box.min.y, box.max.y);
     scroll_.z = constants_.scroll_plane;
 }
 
@@ -547,6 +556,35 @@ void PlanetCamera::service(const std::uint64_t wall_milliseconds) {
     }
 }
 
+bool PlanetCamera::tilt(const float fraction_y) {
+    if (state_ != CameraState::overview || !std::isfinite(fraction_y)) return false;
+    const float base = -constants_.initial_pitch;
+    tilt_offset_ = std::clamp(base + tilt_offset_ + fraction_y * 100.0F * constants_.tilt_degrees_per_unit,
+                              orbit_min_pitch, orbit_max_pitch) - base;
+    return true;
+}
+
+bool PlanetCamera::yaw(const float fraction_x) {
+    if (state_ != CameraState::overview || !std::isfinite(fraction_x)) return false;
+    yaw_offset_ = std::fmod(yaw_offset_ + fraction_x * 100.0F * constants_.tilt_degrees_per_unit, 360.0F);
+    return true;
+}
+
+bool PlanetCamera::zoom_overview(const float direction) {
+    if (state_ != CameraState::overview || !std::isfinite(direction)) return false;
+    const float limit = std::clamp(overview_zoom_max_distance / std::max(constants_.initial_pullback, 1.0F),
+                                   1.0F, overview_zoom_out_max_factor);
+    if (direction < 0.0F) {
+        overview_zoom_ = std::min(overview_zoom_ * overview_zoom_step, limit);
+        return true;
+    }
+    if (direction > 0.0F && overview_zoom_ > 1.0F) {
+        overview_zoom_ = overview_zoom_ / overview_zoom_step < 1.0F + 1e-3F ? 1.0F : overview_zoom_ / overview_zoom_step;
+        return true;
+    }
+    return false;
+}
+
 OrbitCamera PlanetCamera::pose() const {
     float blend = 0.0F;
     if (state_ == CameraState::focused) blend = 1.0F;
@@ -557,11 +595,12 @@ OrbitCamera PlanetCamera::pose() const {
     const Vec3 focus{target_.x + radius_ * constants_.focused_offset.x,
                      target_.y + radius_ * constants_.focused_offset.y,
                      target_.z + radius_ * constants_.focused_offset.z};
-    return {lerp(scroll_, focus, blend), 0.0F,
+    const float overview_pullback = constants_.initial_pullback * overview_zoom_;
+    return {lerp(scroll_, focus, blend), yaw_offset_ * (1.0F - blend),
             // WGP-41/WGUI-63: X(90 + authored pitch), translated along local +Z.
             // Orbit elevation is the negative authored pitch in the source XY plane.
-            -constants_.initial_pitch - (constants_.focused_pitch - constants_.initial_pitch) * blend,
-            constants_.initial_pullback + (radius_ * constants_.focused_pullback - constants_.initial_pullback) * blend};
+            -constants_.initial_pitch + tilt_offset_ * (1.0F - blend) - (constants_.focused_pitch - constants_.initial_pitch) * blend,
+            overview_pullback + (radius_ * constants_.focused_pullback - overview_pullback) * blend};
 }
 
 Vec3 source_light_direction(const Vec3 angles) noexcept {

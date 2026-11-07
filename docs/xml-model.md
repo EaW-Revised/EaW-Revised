@@ -169,13 +169,17 @@ physical-XML diagnostics above: `registry_invalid` (a registry root missing, unr
 malformed or the wrong root), `include_failed` (an admitted include that exists but cannot be
 read or parsed), `hardpoint_include_failed` (the hardpoint share of those) and
 `include_missing` (an include that is not found; omitted with a warning, R-10 and R-13).
-FoC fails the load on a bad registry root and on an admitted hardpoint include that cannot be
-read or parsed (C-06), so those two set `health.fatal`. `load_catalog` still returns the catalog
-and every diagnostic, because the scanners report on broken trees; `load_catalog_strict` returns
-the fatal diagnostic as the error. Production callers use the strict load, or print
-`describe_load_health` after a lenient one, so a failed registry or include never loads silently.
-A malformed game-object include is counted and printed but not fatal here (the issue scoped the
-failure to hardpoints).
+The FoC debug walk reports failures for a bad registry root and for an admitted hardpoint
+include that cannot be read or parsed (C-06). Our loader skips unparseable registry and include
+files, records their health counts, and emits a file-specific load note; neighboring files still
+load. An unreadable hardpoint include, missing or unreadable registry, or wrong registry root can
+still set `health.fatal`. `load_catalog_strict` returns that remaining fatal diagnostic as an
+error; callers can print `describe_load_health` for the counts on a completed load.
+
+When strict XML parsing fails, an initial processing instruction after an optional UTF-8 BOM and
+whitespace is omitted through its first closing angle bracket for a retry. A successful retry
+emits a load note with the authored header and preserves source offsets. This is a bounded
+compatibility rule based on the debug header walk; complete-document capture remains pending.
 
 ## Versioned scanner input receipt
 

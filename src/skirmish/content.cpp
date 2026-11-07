@@ -1,13 +1,22 @@
+#include "eawr/units/content_selection.hpp"
 #include "eawr/skirmish/start.hpp"
 #include "eawr/skirmish/roster_gate.hpp"
 
 #include "skirmish_internal.hpp"
 
 #include <algorithm>
+#include <limits>
+#include <map>
+#include <set>
 #include <string>
 #include <utility>
 
 namespace eawr::skirmish {
+
+namespace {
+void drop_skipped_launch_content(SessionContent& content, const units::UnitTables& tables,
+    std::vector<core::Diagnostic>& skipped, core::LoadNoteBuffer& notes);
+}
 
 core::Result<SessionContent> session_content(
     const units::UnitTables& tables, const std::span<const sim::tactical::PlayerId> humans,
@@ -15,6 +24,8 @@ core::Result<SessionContent> session_content(
     std::vector<core::Diagnostic>* const skipped) {
     using ContentResult = core::Result<SessionContent>;
     SessionContent content;
+    std::vector<core::Diagnostic> ignored_diagnostics;
+    auto* diagnostics = skipped ? skipped : &ignored_diagnostics;
     core::LoadNoteBuffer load_notes;
     content.sensors = sensor_table(tables, &load_notes);
     auto durability = units::durability_table(tables, skipped, &load_notes);
@@ -23,14 +34,15 @@ core::Result<SessionContent> session_content(
     auto motion = units::motion_table(tables, spawn_policy, skipped, &load_notes);
     if (!motion) return ContentResult::failure(motion.error());
     content.motion = std::move(motion).value();
-    auto combat = units::combat_table(tables, errors, skipped, &load_notes);
+    auto combat = units::combat_table(tables, errors, diagnostics, &load_notes);
     if (!combat) return ContentResult::failure(combat.error());
     content.combat = std::move(combat).value();
     auto abilities = units::ability_table(tables, humans,
         [](std::string_view unit, std::string_view ability) { return roster_ability_reason(unit, ability).empty(); },
-        true, errors, skipped, &load_notes);
+        true, errors, diagnostics, &load_notes);
     if (!abilities) return ContentResult::failure(abilities.error());
     content.abilities = std::move(abilities).value();
+    drop_skipped_launch_content(content, tables, *diagnostics, load_notes);
     core::LoadNoteCollector collected;
     collected.merge(load_notes);
     content.load_notes = collected.snapshot();
@@ -53,11 +65,166 @@ std::string skipped_name(const core::Diagnostic& diagnostic) {
     return end == std::string_view::npos ? std::string{} : std::string(rest.substr(0, end));
 }
 
-core::Diagnostic skip_refusal(const std::string& what, const std::string& type, const core::Diagnostic& why) {
+core::LoadNote placement_note(const std::string& what, const std::string& type, const core::Diagnostic& why) {
     core::Diagnostic diagnostic;
     diagnostic.code = std::string(diagnostic_codes::input);
     diagnostic.message = what + " places unit type '" + type + "', which this content skipped (#4589): " + why.message;
-    return diagnostic;
+    core::LoadNote note;
+    note.code = "EAWR-LOAD-0450";
+    note.object = what;
+    note.tag = "type";
+    note.authored_value = type;
+    note.action = core::LoadAction::skipped_placement;
+    note.effective_value = "omitted";
+    note.diagnostic_code = diagnostic.code;
+    note.message = diagnostic.message;
+    return note;
+}
+
+using Rejections = std::map<sim::tactical::TypeId, core::Diagnostic>;
+Rejections rejections(const std::span<const core::Diagnostic> skipped) {
+    Rejections result;
+    for (const auto& diagnostic : skipped) {
+        const auto name = skipped_name(diagnostic);
+        if (!name.empty()) result.try_emplace(type_id(name), diagnostic);
+    }
+    return result;
+}
+
+void expand_skipped_teams(const units::UnitTables& tables, std::vector<core::Diagnostic>& skipped) {
+    const units::ContentTypeSelection type_selection(tables);
+    auto rejected = rejections(skipped);
+    if (rejected.empty()) return;
+    // AG-11: a team whose craft was rejected must never be created, including later
+    // replenishment and reserve launches. Keep the original diagnostic as its reason.
+    for (const auto& unit : tables.units) {
+        if (!type_selection.keeps(unit)) continue;
+        const auto id = type_id(unit.id);
+        if (rejected.contains(id)) continue;
+        for (const auto& member : unit.members) {
+            const auto found = rejected.find(type_id(member.craft));
+            if (found == rejected.end()) continue;
+            auto diagnostic = found->second;
+            diagnostic.message = "skipped unit type '" + unit.id + "': " + found->second.message;
+            rejected.emplace(id, diagnostic);
+            skipped.push_back(std::move(diagnostic));
+            break;
+        }
+    }
+}
+
+void drop_skipped_launch_content(SessionContent& content, const units::UnitTables& tables,
+    std::vector<core::Diagnostic>& skipped, core::LoadNoteBuffer& notes) {
+    expand_skipped_teams(tables, skipped);
+    const auto rejected = rejections(skipped);
+    if (rejected.empty()) return;
+    for (const auto& [type, diagnostic] : rejected) {
+        (void)type;
+        auto note = placement_note(skipped_name(diagnostic), skipped_name(diagnostic), diagnostic);
+        note.code = "EAWR-LOAD-0451";
+        note.action = core::LoadAction::skipped_object;
+        note.diagnostic_code = diagnostic.code;
+        note.message = diagnostic.message;
+        notes.append(std::move(note));
+    }
+    const auto filter = [&](auto& spawner) {
+        std::erase_if(spawner.entries, [&](const auto& entry) {
+            const auto found = rejected.find(entry.squadron);
+            if (found == rejected.end()) return false;
+            auto note = placement_note("spawner type " + std::to_string(spawner.type_id),
+                skipped_name(found->second), found->second);
+            note.tag = "Starting_Spawned_Units_Tech_0";
+            // Multiple rejected entries on one spawner are distinct authored references.
+            note.object += " launch " + std::to_string(entry.squadron);
+            notes.append(std::move(note));
+            return true;
+        });
+    };
+    for (auto& spawner : content.motion.squadrons.spawners) filter(spawner);
+    for (auto& [key, spawner] : content.motion.squadrons.campaign_spawners) {
+        (void)key;
+        filter(spawner);
+    }
+}
+
+// Close removal over whole squadron placements so neither orphan craft nor empty
+// team containers survive. Preserve all remaining entity IDs and allocator boundaries.
+void drop_setup_entities(sim::tactical::TacticalSetup& setup, std::set<sim::EntityId>& removed,
+    const Rejections& rejected, std::vector<core::LoadNote>* const notes) {
+    // Healthy teammates leave this placement, but remain valid independent garrison templates.
+    auto placement_roots = removed;
+    sim::EntityId highest{};
+    const auto visit_id = [&](const sim::EntityId entity) { highest = std::max(highest, entity); };
+    const auto visit_carried = [&](auto&& self, const auto& object) -> void {
+        visit_id(object.entity_id);
+        for (const auto& member : object.members) self(self, member);
+    };
+    for (const auto& unit : setup.units) {
+        visit_id(unit.entity_id);
+        for (const auto& object : unit.contained) visit_carried(visit_carried, object);
+    }
+    for (const auto& team : setup.squadrons) {
+        visit_id(team.container);
+        for (const auto member : team.members) visit_id(member);
+        if (!removed.contains(team.container) && std::none_of(team.members.begin(), team.members.end(),
+                [&](const auto member) { return removed.contains(member); })) continue;
+        removed.insert(team.container);
+        placement_roots.insert(team.container);
+        removed.insert(team.members.begin(), team.members.end());
+    }
+    for (const auto& garrison : setup.free_garrisons) for (const auto entity : garrison.registered) visit_id(entity);
+    // A carried team is one placement. Removing its parent or any rejected member
+    // removes that whole carried placement, including nested identities.
+    const auto carried_reason = [&](auto&& self, const auto& object) -> const core::Diagnostic* {
+        const auto found = rejected.find(object.type_id);
+        if (found != rejected.end()) return &found->second;
+        for (const auto& member : object.members) if (const auto* why = self(self, member)) return why;
+        return nullptr;
+    };
+    const auto refers_removed = [&](auto&& self, const auto& object) -> bool {
+        if (removed.contains(object.entity_id) || removed.contains(object.parent)) return true;
+        return std::any_of(object.members.begin(), object.members.end(), [&](const auto& member) { return self(self, member); });
+    };
+    const auto mark_carried = [&](auto&& self, const auto& object) -> void {
+        removed.insert(object.entity_id);
+        for (const auto& member : object.members) self(self, member);
+    };
+    for (auto& unit : setup.units) {
+        std::erase_if(unit.contained, [&](const auto& object) {
+            const auto* why = carried_reason(carried_reason, object);
+            if (!why && !removed.contains(unit.entity_id) && !refers_removed(refers_removed, object)) return false;
+            if (notes && !removed.contains(unit.entity_id)) {
+                auto diagnostic = why ? *why : detail::error(diagnostic_codes::input, "contained placement refers to an omitted entity");
+                notes->push_back(placement_note("contained placement " + std::to_string(object.entity_id)
+                    + " of carrier " + std::to_string(unit.entity_id), why ? skipped_name(*why) : std::to_string(object.type_id), diagnostic));
+            }
+            mark_carried(mark_carried, object);
+            return true;
+        });
+    }
+    if (!removed.empty() && !setup.first_free_entity_id && highest < std::numeric_limits<sim::EntityId>::max())
+        setup.first_free_entity_id = highest + 1;
+    std::set<sim::tactical::TypeId> removed_types;
+    for (const auto& unit : setup.units) if (placement_roots.contains(unit.entity_id)) removed_types.insert(unit.type_id);
+    std::erase_if(setup.squadrons, [&](const auto& team) { return removed.contains(team.container); });
+    std::erase_if(setup.units, [&](const auto& unit) { return removed.contains(unit.entity_id); });
+    for (auto& garrison : setup.free_garrisons) {
+        std::erase_if(garrison.registered, [&](const auto entity) { return removed.contains(entity); });
+        std::erase_if(garrison.templates, [&](const auto type) {
+            const auto found = rejected.find(type);
+            if (found == rejected.end() && !removed_types.contains(type)) return false;
+            if (notes) {
+                const auto diagnostic = found != rejected.end() ? found->second
+                    : detail::error(diagnostic_codes::input, "free garrison template belongs to an omitted placement");
+                notes->push_back(placement_note("free garrison of player " + std::to_string(garrison.player)
+                    + " template " + std::to_string(type), found != rejected.end() ? skipped_name(found->second)
+                    : std::to_string(type), diagnostic));
+            }
+            return true;
+        });
+    }
+    // The empty binding is derived metadata; each authored template removal above has its own note.
+    std::erase_if(setup.free_garrisons, [](const auto& garrison) { return garrison.templates.empty(); });
 }
 
 } // namespace
@@ -76,7 +243,10 @@ std::vector<std::string> skipped_type_ids(const std::span<const core::Diagnostic
 std::vector<std::string> skipped_type_ids_of(const units::UnitTables& tables) {
     std::vector<core::Diagnostic> skipped;
     (void)units::combat_table(tables, units::ContentErrors::skip_object, &skipped);
-    (void)units::ability_table(tables, {}, nullptr, true, units::ContentErrors::skip_object, &skipped);
+    (void)units::ability_table(tables, {},
+        [](std::string_view unit, std::string_view ability) { return roster_ability_reason(unit, ability).empty(); },
+        true, units::ContentErrors::skip_object, &skipped);
+    expand_skipped_teams(tables, skipped);
     return skipped_type_ids(skipped);
 }
 
@@ -105,45 +275,92 @@ std::string content_load_summary(const std::span<const core::Diagnostic> diagnos
     return summary;
 }
 
-core::Result<void> refuse_skipped_starts(const SkirmishStart& start, const std::span<const core::Diagnostic> skipped) {
-    const auto why = [&](const std::string& type) -> const core::Diagnostic* {
-        for (const auto& diagnostic : skipped) {
-            if (detail::iequals(skipped_name(diagnostic), type)) return &diagnostic;
-        }
-        return nullptr;
-    };
-    const auto check = [&](const std::string& what, const std::string& type) -> std::optional<core::Diagnostic> {
-        if (type.empty()) return std::nullopt;
-        if (const auto* found = why(type)) return skip_refusal(what, type, *found);
-        return std::nullopt;
-    };
-    if (skipped.empty()) return core::Result<void>::success();
-    for (const auto& unit : start.units) {
-        const auto what = "starting unit " + std::to_string(unit.state.entity_id) + " (record " + std::to_string(unit.record) + ")";
-        if (auto refusal = check(what, unit.type)) return core::Result<void>::failure(std::move(*refusal));
-        if (auto refusal = check(what + "'s craft", unit.craft_type)) return core::Result<void>::failure(std::move(*refusal));
+void drop_skipped_setup(sim::tactical::TacticalSetup& setup,
+    const std::span<const core::Diagnostic> skipped, std::vector<core::LoadNote>* const notes) {
+    const auto previous_notes = notes ? notes->size() : 0;
+    const auto rejected = rejections(skipped);
+    if (rejected.empty()) return;
+    std::set<sim::EntityId> removed;
+    for (const auto& unit : setup.units) {
+        const auto found = rejected.find(unit.type_id);
+        if (found == rejected.end()) continue;
+        removed.insert(unit.entity_id);
+        if (notes) notes->push_back(placement_note("the recorded unit " + std::to_string(unit.entity_id),
+            skipped_name(found->second), found->second));
     }
-    for (const auto& launch : start.launches) {
-        if (auto refusal = check("the launch of spawner " + launch.spawner_type, launch.squadron)) {
-            return core::Result<void>::failure(std::move(*refusal));
-        }
-    }
-    return core::Result<void>::success();
+    drop_setup_entities(setup, removed, rejected, notes);
+    if (notes && setup.skirmish) for (auto index = previous_notes; index < notes->size(); ++index)
+        (*notes)[index].file = setup.skirmish->map;
 }
 
-core::Result<void> refuse_skipped_setup(const sim::tactical::TacticalSetup& setup, const std::span<const core::Diagnostic> skipped) {
-    if (skipped.empty()) return core::Result<void>::success();
-    for (const auto& diagnostic : skipped) {
-        const auto name = skipped_name(diagnostic);
-        if (name.empty()) continue;
-        const auto type = battle::type_id(name);
-        for (const auto& unit : setup.units) {
-            if (unit.type_id == type) {
-                return core::Result<void>::failure(skip_refusal("the recorded unit " + std::to_string(unit.entity_id), name, diagnostic));
-            }
+void drop_skipped_starts(SkirmishStart& start, const std::span<const core::Diagnostic> skipped,
+    std::vector<core::LoadNote>* const notes) {
+    const auto previous_notes = notes ? notes->size() : 0;
+    const auto rejected = rejections(skipped);
+    if (rejected.empty()) return;
+    std::set<sim::EntityId> removed;
+    for (const auto& unit : start.units) {
+        auto found = rejected.find(type_id(unit.type));
+        if (found == rejected.end() && !unit.craft_type.empty()) found = rejected.find(type_id(unit.craft_type));
+        if (found == rejected.end()) continue;
+        removed.insert(unit.state.entity_id);
+        if (notes) notes->push_back(placement_note("starting unit " + std::to_string(unit.state.entity_id)
+            + " (record " + std::to_string(unit.record) + ")", skipped_name(found->second), found->second));
+    }
+    drop_setup_entities(start.setup, removed, rejected, notes);
+    std::erase_if(start.units, [&](const auto& unit) { return removed.contains(unit.state.entity_id); });
+    std::map<sim::EntityId, const sim::tactical::UnitState*> retained_states;
+    for (const auto& state : start.setup.units) retained_states.emplace(state.entity_id, &state);
+    for (auto& unit : start.units) {
+        const auto retained = retained_states.find(unit.state.entity_id);
+        if (retained != retained_states.end()) unit.state.contained = retained->second->contained;
+    }
+    bool dropped_launch = false;
+    std::erase_if(start.launches, [&](const auto& launch) {
+        const auto found = rejected.find(type_id(launch.squadron));
+        if (found == rejected.end() && !removed.contains(launch.spawner)) return false;
+        if (notes) {
+            const auto diagnostic = found != rejected.end() ? found->second
+                : detail::error(diagnostic_codes::input, "launch spawner placement was omitted");
+            notes->push_back(placement_note("the launch of spawner " + launch.spawner_type
+                + " entity " + std::to_string(launch.spawner), launch.squadron, diagnostic));
+        }
+        dropped_launch = true;
+        return true;
+    });
+    std::erase_if(start.arrivals.rows, [&](const auto& demand) {
+        const auto found = rejected.find(type_id(demand.type));
+        if (found == rejected.end() && !removed.contains(demand.anchor)) return false;
+        if (notes) {
+            const auto diagnostic = found != rejected.end() ? found->second
+                : detail::error(diagnostic_codes::input, "arrival anchor placement was omitted");
+            notes->push_back(placement_note("arrival " + demand.type + " of anchor " + std::to_string(demand.anchor), demand.type, diagnostic));
+        }
+        return true;
+    });
+    if (notes) for (auto index = previous_notes; index < notes->size(); ++index) (*notes)[index].file = start.map;
+    if (removed.empty() && !dropped_launch) return;
+    core::LoadNoteBuffer power_notes;
+    for (auto& player : start.players) {
+        player.combat_power_tick_zero = {};
+        player.combat_power_launches = {};
+        for (const auto& unit : start.units) {
+            if (unit.state.owner != player.player.player_id || !unit.combat_power
+                || unit.role == battle::UnitRole::map_object) continue;
+            player.combat_power_tick_zero = units::add_power(player.combat_power_tick_zero, *unit.combat_power,
+                "player " + std::to_string(player.player.player_id), "starting combat power: ", diagnostic_codes::input, &power_notes);
+        }
+        for (const auto& launch : start.launches) {
+            if (launch.owner != player.player.player_id) continue;
+            player.combat_power_launches = units::add_power(player.combat_power_launches, launch.combat_power,
+                "player " + std::to_string(player.player.player_id), "launch combat power: ", diagnostic_codes::input, &power_notes);
         }
     }
-    return core::Result<void>::success();
+    if (notes) {
+        core::LoadNoteCollector collected;
+        collected.merge(power_notes);
+        for (auto note : collected.snapshot()) notes->push_back(std::move(note));
+    }
 }
 
 std::size_t drop_skipped_menu_options(sim::tactical::EconomyRules& rules, const std::span<const std::string> skipped,
@@ -237,23 +454,26 @@ core::Result<std::optional<sim::tactical::FogRules>> fog_rules(const StartInputs
     rules.cells_tall = cells(*height);
     rules.ramp_down_step = step.value();
     // V-22 / WHZ-09: fog initialization uses raw, unrotated obstacle circles.
-    if (inputs.tables != nullptr) for (const auto& placement : inputs.placements) {
-        if (!placement.position) continue;
-        const units::SpaceFootprint* footprint = nullptr;
-        for (const auto& type : inputs.tables->obstacles) if (type.id == placement.type) footprint = &type.footprint;
-        for (const auto& type : inputs.tables->units) if (type.id == placement.type) footprint = &type.footprint;
-        if (footprint == nullptr || !footprint->space_obstacle || !footprint->obstacle_radius
-            || !(footprint->hazard.nebula || footprint->hazard.asteroid_field
-                || footprint->hazard.impassable_asteroid || footprint->hazard.ion_storm)) continue;
-        const auto x = sim::math::add(placement.position->x, footprint->hazard.obstacle_offset.x);
-        const auto y = sim::math::add(placement.position->y, footprint->hazard.obstacle_offset.y);
-        if (!x || !y) {
-            core::Diagnostic diagnostic;
-            diagnostic.code = std::string(diagnostic_codes::input);
-            diagnostic.message = "dense fog obstacle offset exceeds the coordinate range";
-            return FogResult::failure(std::move(diagnostic));
+    if (inputs.tables != nullptr) {
+        const units::FootprintTypeSelection selection(*inputs.tables);
+        for (const auto& placement : inputs.placements) {
+            if (!placement.position) continue;
+            const units::SpaceFootprint* footprint = nullptr;
+            if (const auto* winner = selection.find(placement.type))
+                footprint = winner->unit ? &winner->unit->footprint : &winner->obstacle->footprint;
+            if (footprint == nullptr || !footprint->space_obstacle || !footprint->obstacle_radius
+                || !(footprint->hazard.nebula || footprint->hazard.asteroid_field
+                    || footprint->hazard.impassable_asteroid || footprint->hazard.ion_storm)) continue;
+            const auto x = sim::math::add(placement.position->x, footprint->hazard.obstacle_offset.x);
+            const auto y = sim::math::add(placement.position->y, footprint->hazard.obstacle_offset.y);
+            if (!x || !y) {
+                core::Diagnostic diagnostic;
+                diagnostic.code = std::string(diagnostic_codes::input);
+                diagnostic.message = "dense fog obstacle offset exceeds the coordinate range";
+                return FogResult::failure(std::move(diagnostic));
+            }
+            rules.dense_circles.push_back({{x.value(), y.value(), Fixed{}}, *footprint->obstacle_radius});
         }
-        rules.dense_circles.push_back({{x.value(), y.value(), Fixed{}}, *footprint->obstacle_radius});
     }
     if (auto valid = sim::tactical::validate_fog_rules(rules); !valid) return FogResult::failure(valid.error());
     return FogResult::success(rules);

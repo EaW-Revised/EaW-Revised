@@ -48,7 +48,7 @@ bool GalacticMode::State::build_weapon_action_hud() {
             std::string why;
             auto pixels = texture_image(texture.value(), why);
             if (pixels.is_null()) { failure = why; return false; }
-            setup.meshes.push_back({mesh.blend, ImageTexture::create_from_image(pixels), mesh.triangles});
+            setup.meshes.push_back({mesh.blend, ImageTexture::create_from_image(pixels), mesh.triangles, {}});
         }
         surface.panel->setup(std::move(setup), nullptr);
         surface.close_name = "hack_close";

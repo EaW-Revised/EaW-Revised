@@ -53,6 +53,23 @@ class CampaignEntryContracts(unittest.TestCase):
             self.assertIn("GalacticMode::from_command_line()", body)
             self.assertIn("start_galactic(std::move(campaign_options))", body)
 
+    def test_restore_keeps_an_independent_content_load(self):
+        host = (SRC / "viewer_host_ready.cpp").read_text(encoding="utf-8")
+        restore = host.split("front_options.saved_game_launcher =", 1)[1].split("\n        };", 1)[0]
+        self.assertNotIn("setup_content", restore, "restores must validate their fresh reconstruction inputs")
+        scene = (SRC / "galactic/galactic_scene.cpp").read_text(encoding="utf-8")
+        mount = scene.split("bool GalacticMode::State::mount()", 1)[1].split("\nbool ", 1)[0]
+        self.assertIn("!options.restore_save && !options.lan_start", mount)
+
+    def test_content_chain_mismatch_falls_through_to_fresh_mount(self):
+        scene = (SRC / "galactic/galactic_scene.cpp").read_text(encoding="utf-8")
+        mount = scene.split("bool GalacticMode::State::mount()", 1)[1].split("\nbool ", 1)[0]
+        reuse = mount.split("if (setup.matches_chain(", 1)[1]
+        self.assertLess(reuse.index("return true;"), reuse.index('trace.mark("gc.mount.content_chain_mismatch")'))
+        self.assertLess(reuse.index('trace.mark("gc.mount.content_chain_mismatch")'), reuse.index("vfs::Vfs::mount(specs)"))
+        self.assertNotIn("return", reuse.split('trace.mark("gc.mount.content_chain_mismatch")', 1)[1]
+                         .split("vfs::Vfs::mount(specs)", 1)[0])
+
     def test_lists_come_from_the_data(self):
         screen = (SRC / "campaign_setup_screen.cpp").read_text(encoding="utf-8")
         self.assertIn("load_galactic_data(", screen)
@@ -83,6 +100,64 @@ class CampaignEntryContracts(unittest.TestCase):
 
 @unittest.skipUnless(RUNTIME and GAME_ROOT, "requires the viewer GPU lane and installed game data")
 class CampaignFromMenuGpu(unittest.TestCase):
+    def test_named_campaign_starts_without_editing_technology(self):
+        with tempfile.TemporaryDirectory(prefix="front-end-named-campaign-") as temporary:
+            output = pathlib.Path(temporary)
+            report = output / "named.json"
+            campaign = "Sandbox_Rim_Worlds_Empire"
+            result, _ = front.run_front_end(output, "named", (
+                "--eawr-front-end-test-campaign", "campaign:" + campaign,
+                "--eawr-attract", "off", "--eawr-audio", "off",
+                "--eawr-galactic-paused", "yes", "--eawr-report", str(report),
+                "--eawr-save-dir", str(output / "saves")))
+            self.assertEqual(result.returncode, 0, result.stdout[-6000:])
+            started = STARTED.search(result.stdout)
+            self.assertIsNotNone(started, result.stdout[-6000:])
+            self.assertEqual(started.group(1), campaign)
+            self.assertNotIn("EAWR campaign technology options:", result.stdout)
+            self.assertNotIn("EAWR campaign unchanged technology edit:", result.stdout)
+            data = json.loads(report.read_text(encoding="utf-8"))
+            self.assertEqual(data["campaign"], campaign)
+            self.assertEqual(data["failure"], "")
+
+    def test_shared_and_fresh_setup_content_have_identical_campaign_states(self):
+        # Same executable, source data, authored campaign and seed. Exercise tick zero and
+        # a running AI campaign so a cached catalogue cannot silently change setup or live rules.
+        with tempfile.TemporaryDirectory(prefix="front-end-content-identity-") as temporary:
+            output = pathlib.Path(temporary)
+            for target in (0, 600):
+                reports = []
+                for fresh in (True, False):
+                    label = f"{'fresh' if fresh else 'shared'}-{target}"
+                    report = output / f"{label}.json"
+                    extra = ("--eawr-front-end-test-campaign", "start", "--eawr-attract", "off",
+                             "--eawr-audio", "off", "--eawr-report", str(report),
+                             "--eawr-save-dir", str(output / label / "saves"))
+                    if fresh:
+                        extra += ("--eawr-gc-fresh-content",)
+                    if target:
+                        extra += ("--eawr-galactic-all-ai", "yes", "--eawr-galactic-seed", "5198",
+                                  "--eawr-galactic-ticks", str(target))
+                    else:
+                        extra += ("--eawr-galactic-paused", "yes")
+                    result, _ = front.run_front_end(output, label, extra)
+                    self.assertEqual(result.returncode, 0, result.stdout[-6000:])
+                    data = json.loads(report.read_text(encoding="utf-8"))
+                    self.assertEqual(data["mode"], "galactic")
+                    self.assertEqual(data["failure"], "")
+                    self.assertEqual("gc.build_view.reused_catalog" in result.stdout, not fresh)
+                    self.assertRegex(data["live_session"]["snapshot_sha256"], r"^[0-9a-f]{64}$")
+                    if target:
+                        self.assertRegex(data["ai_proof"]["end_state_hash"], r"^[0-9a-f]{64}$")
+                    reports.append(data)
+                for field in ("campaign", "profile", "layers", "snapshot", "native_ai_players"):
+                    self.assertEqual(reports[0][field], reports[1][field], (target, field))
+                self.assertEqual(reports[0]["live_session"]["snapshot_sha256"],
+                                 reports[1]["live_session"]["snapshot_sha256"], target)
+                if target:
+                    self.assertEqual(reports[0]["ai_proof"]["end_state_hash"],
+                                     reports[1]["ai_proof"]["end_state_hash"], target)
+
     def test_custom_campaign_starts_the_galactic_mode(self):
         with tempfile.TemporaryDirectory(prefix="front-end-campaign-") as temporary:
             output = pathlib.Path(os.environ.get("EAWR_FRONT_END_EYECHECK", temporary)).resolve() / "campaign"

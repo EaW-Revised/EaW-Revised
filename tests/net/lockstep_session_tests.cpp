@@ -16,6 +16,7 @@
 #include <functional>
 #include <iostream>
 #include <memory>
+#include <limits>
 #include <optional>
 #include <span>
 #include <string>
@@ -43,6 +44,8 @@ public:
     std::vector<sim::SeatCommandKey> installed;
     std::vector<net::SeatInput> executed;
     bool recognize_departures{};
+    std::uint64_t checkpoint_at{};
+    bool checkpoint_requested() const override { return checkpoint_at != 0 && tick == checkpoint_at; }
     std::uint64_t completed_tick() const override { return tick; }
     std::string state_hash() const override { return eawr::core::sha256_hex(canonical_state()); }
     std::vector<std::uint8_t> canonical_state() const override {
@@ -80,6 +83,158 @@ public:
         return recognize_departures && input.bytes.size() == 1 && input.bytes.front() == 0;
     }
 };
+
+void checkpoint_barrier_contracts() {
+    for (const unsigned failure_mode : {0U, 1U, 2U}) {
+        FakeNetwork network(2);
+        std::array<OpaqueAdapter, 2> adapters;
+        std::array<unsigned, 2> commits{}, refusals{};
+        std::array<std::uint64_t, 2> captures{};
+        std::vector<std::unique_ptr<FakeTransport>> transports;
+        std::vector<net::LockstepSession> sessions;
+        const std::vector<net::PeerSeat> seats{{{1}, true}, {{2}, true}};
+        network.fault = [](auto from, auto, std::span<const std::uint8_t> bytes) {
+            FakeDelivery value;
+            if (from == 1 && bytes.front() == net::checkpoint_drain_kind) value.ordered_delay = 4;
+            return value;
+        };
+        for (unsigned peer = 0; peer < 2; ++peer) {
+            adapters[peer].checkpoint_at = 5;
+            net::SessionOptions options; options.final_tick_count = 25; options.completeness_timeout_ms = 500;
+            transports.push_back(std::make_unique<FakeTransport>(network, peer));
+            sessions.push_back(require(net::LockstepSession::create(adapters[peer], *transports.back(), seats, options)));
+            net::CheckpointCallbacks callbacks;
+            callbacks.capture = [&, peer](const auto& sequences) -> eawr::core::Result<net::CheckpointProof> {
+                captures[peer] = adapters[peer].tick;
+                expect(sequences.size() == 2, "save drain retains both producers' accepted sequence maxima");
+                if (failure_mode == 2 && peer == 1) {
+                    eawr::core::Diagnostic error; error.code = net::session_errors::simulation; error.message = "synthetic capture failure";
+                    return eawr::core::Result<net::CheckpointProof>::failure(error);
+                }
+                const auto digest = eawr::core::sha256(adapters[peer].canonical_state());
+                net::CheckpointProof proof{digest, digest, digest};
+                if (failure_mode == 1 && peer == 1) proof[0][0] ^= 1;
+                return eawr::core::Result<net::CheckpointProof>::success(proof);
+            };
+            callbacks.commit = [&, peer] { ++commits[peer]; return eawr::core::Result<void>::success(); };
+            callbacks.refused = [&, peer](auto) { ++refusals[peer]; };
+            sessions.back().enable_checkpoint_barrier(std::move(callbacks));
+            require(sessions.back().submit([peer](auto) { return eawr::core::Result<std::vector<std::uint8_t>>::success(
+                {static_cast<std::uint8_t>(peer + 1)}); }));
+        }
+        bool observed_hold{};
+        for (std::uint64_t round = 0; round < 400; ++round) {
+            network.round = round;
+            for (unsigned peer = 0; peer < 2; ++peer) {
+                require(sessions[peer].pump(round));
+                if (sessions[peer].checkpoint_pending()) {
+                    observed_hold = true;
+                    expect(!sessions[peer].submit([peer](auto) { return eawr::core::Result<std::vector<std::uint8_t>>::success(
+                        {static_cast<std::uint8_t>(peer + 1)}); }), "save barrier stops new admission while pumping transport");
+                }
+            }
+            if (adapters[0].tick == 25 && adapters[1].tick == 25) break;
+        }
+        expect(observed_hold && adapters[0].tick == 25 && adapters[1].tick == 25,
+            "capture agreement and capture refusal both release without freezing play");
+        expect(adapters[0].state_hash() == adapters[1].state_hash() && adapters[0].executed.size() == 2,
+            "save barrier retains every accepted command and peer state");
+        expect(captures[0] == captures[1] && captures[0] >= 5, "both peers capture one agreed completed barrier");
+        expect(commits[0] == (failure_mode == 0 ? 1U : 0U) && commits[1] == commits[0],
+            "history commits only after matching all-peer capture proofs");
+        expect(refusals[0] == (failure_mode == 0 ? 0U : 1U) && refusals[1] == refusals[0],
+            "capture mismatch or failure reports a failed save on every peer");
+    }
+}
+
+void checkpoint_release_contracts() {
+    // Delayed release, closed host before capture, dropped release, closed host
+    // after proofs, and ordinary release all use the same real session pump.
+    for (const unsigned mode : {0U, 1U, 2U, 3U, 4U}) {
+        FakeNetwork network(2);
+        std::array<OpaqueAdapter, 2> adapters;
+        std::array<unsigned, 2> commits{}, refusals{}, captures{};
+        std::array<std::uint64_t, 2> boundaries{};
+        std::vector<std::unique_ptr<FakeTransport>> transports;
+        std::vector<net::LockstepSession> sessions;
+        const std::vector<net::PeerSeat> seats{{{1}, true}, {{2}, true}};
+        network.fault = [mode](auto from, auto, std::span<const std::uint8_t> bytes) {
+            FakeDelivery delivery;
+            if (from == 0 && bytes.front() == net::checkpoint_release_kind && bytes.back() == 1) {
+                if (mode == 0 || mode == 3) delivery.ordered_delay = 1000;
+                if (mode == 2) delivery.drop = true;
+            }
+            return delivery;
+        };
+        for (unsigned peer = 0; peer < 2; ++peer) {
+            adapters[peer].checkpoint_at = 5;
+            net::SessionOptions options;
+            options.input_delay = 3; options.final_tick_count = 8; options.completeness_timeout_ms = 500;
+            transports.push_back(std::make_unique<FakeTransport>(network, peer));
+            sessions.push_back(require(net::LockstepSession::create(adapters[peer], *transports.back(), seats, options)));
+            net::CheckpointCallbacks callbacks;
+            callbacks.capture = [&, peer](const auto&) {
+                ++captures[peer];
+                const auto digest = eawr::core::sha256(adapters[peer].canonical_state());
+                return eawr::core::Result<net::CheckpointProof>::success({digest, digest, digest});
+            };
+            callbacks.commit = [&, peer] {
+                ++commits[peer]; boundaries[peer] = adapters[peer].tick;
+                return eawr::core::Result<void>::success();
+            };
+            callbacks.refused = [&, peer](auto) { ++refusals[peer]; };
+            sessions.back().enable_checkpoint_barrier(std::move(callbacks));
+        }
+        bool held_past_timeout{}, ended{};
+        std::uint64_t failed_tick{};
+        for (std::uint64_t round = 0; round < 1200; ++round) {
+            network.round = round;
+            if (mode != 1 && !commits[0]) require(sessions[0].pump(round));
+            // Pre-match loss must occur after the sealed trigger, before capture.
+            if (mode == 1) {
+                require(sessions[0].pump(round));
+                if (sessions[1].checkpoint_pending()) network.open[0] = false;
+            }
+            if (mode == 3 && commits[0]) network.open[0] = false;
+            const auto result = sessions[1].pump(round);
+            if (!result) {
+                ended = true; failed_tick = adapters[1].tick;
+                expect((mode == 1 || mode == 3) && result.error().code == net::session_errors::stalled
+                    && result.error().message.find("save barrier unresolved: host connection lost") != std::string::npos,
+                    "host stream loss ends the session through the normal named connection-loss route");
+                break;
+            }
+            if (round == 750) {
+                held_past_timeout = commits[0] == 1 && commits[1] == 0 && sessions[1].checkpoint_pending();
+                expect(refusals[0] == 0 && refusals[1] == 0, "delayed release cannot roll history back locally");
+            }
+            if (commits[1]) break;
+        }
+        if (mode == 2) {
+            expect(held_past_timeout && captures[0] == 1 && captures[1] == 1 && commits[0] == 1 && commits[1] == 0,
+                "dropped terminal release holds matching proofs without a local history decision");
+            network.round = 121'200;
+            const auto expired = sessions[1].pump(network.round);
+            ended = !expired; failed_tick = adapters[1].tick;
+            expect(!expired && expired.error().code == net::session_errors::stalled
+                && expired.error().message.find("save barrier unresolved: host connection lost") != std::string::npos,
+                "a dropped release ends participation after the bounded decision window");
+        }
+        if (mode == 1 || mode == 2 || mode == 3) {
+            expect(ended && sessions[1].failure().has_value() && sessions[1].connection_lost_peer() == 0U
+                && commits[1] == 0 && refusals[1] == 0,
+                "unresolved save fails the session without committing or refusing the barrier");
+            expect(!sessions[1].pump(121'201) && adapters[1].tick == failed_tick,
+                "session failure is terminal and never advances or rewinds simulation");
+            if (mode == 1) expect(captures[1] == 0, "pre-match host loss regression occurs before capture");
+        } else {
+            expect((mode != 0 || held_past_timeout) && commits[0] == 1 && commits[1] == 1,
+                "normal and delayed host releases commit on both peers");
+            expect(boundaries[0] == 8 && boundaries[1] == boundaries[0] && refusals[0] == 0 && refusals[1] == 0,
+                "successful release preserves the same history boundary");
+        }
+    }
+}
 
 void chained_departures() {
     FakeNetwork network(4);
@@ -785,10 +940,81 @@ void script_hash_only_on_exchange_ticks() {
 }
 using namespace lockstep_session_test;
 
+void restored_boundary_contract() {
+    using namespace lockstep_session_test;
+    for (const auto peers : {2U, 3U}) {
+        eawr::testing::FakeNetwork network(peers);
+        std::vector<OpaqueAdapter> adapters(peers);
+        std::vector<std::unique_ptr<eawr::testing::FakeTransport>> transports;
+        std::vector<std::unique_ptr<net::DesyncMonitor>> monitors;
+        std::vector<net::LockstepSession> sessions;
+        std::vector<net::PeerSeat> roster;
+        for (unsigned peer = 0; peer < peers; ++peer) roster.push_back({sim::SeatId{peer + 1}, true});
+        constexpr std::uint64_t boundary = 137;
+        for (unsigned peer = 0; peer < peers; ++peer) {
+            adapters[peer].tick = boundary;
+            transports.push_back(std::make_unique<eawr::testing::FakeTransport>(network, peer));
+            net::DesyncOptions hashing; hashing.initial_tick = boundary; hashing.exchange_every = 5;
+            monitors.push_back(std::make_unique<net::DesyncMonitor>(*transports.back(), hashing));
+            net::SessionOptions options; options.initial_tick = boundary; options.final_tick_count = boundary + 12;
+            for (unsigned seat = 1; seat <= peers; ++seat) options.producer_sequences[sim::SeatId{seat}] = 41 + seat;
+            sessions.push_back(require(net::LockstepSession::create(adapters[peer], *transports.back(), roster,
+                options, monitors.back().get())));
+            const auto key = require(sessions.back().submit([](auto stamp) {
+                return eawr::core::Result<std::vector<std::uint8_t>>::success({static_cast<std::uint8_t>(stamp.seat.value)});
+            }));
+            expect(key.tick == boundary + 3 && key.sequence == 43 + peer, "resume advances past inclusive saved producer maximum and preserves lead");
+            expect(key.sequence > options.producer_sequences.at(roster[peer].seat), "resumed input never reuses saved producer maximum");
+            expect(sessions.back().next_seal() == boundary, "resume starts sealing at completed N");
+        }
+        for (std::uint64_t round = 0; round < 300; ++round) {
+            network.round = round;
+            for (unsigned peer = 0; peer < peers; ++peer) require(sessions[peer].pump(round));
+        }
+        for (unsigned peer = 0; peer < peers; ++peer) {
+            expect(adapters[peer].tick == boundary + 12, "resume reaches absolute final horizon");
+            expect(adapters[peer].state_hash() == adapters[0].state_hash(), "resumed peers preserve identical state");
+            expect(monitors[peer]->setup_agreed() && monitors[peer]->agreed_end(), "initial restored hash and final barrier agree");
+        }
+    }
+}
+
+void restored_sequence_edges() {
+    using namespace lockstep_session_test;
+    for (const unsigned mode : {0U, 1U, 2U}) {
+        eawr::testing::FakeNetwork network(2);
+        eawr::testing::FakeTransport transport(network, 0);
+        OpaqueAdapter adapter; adapter.tick = 7;
+        net::SessionOptions options; options.initial_tick = 7; options.final_tick_count = 30;
+        if (mode == 1) options.producer_sequences[sim::SeatId{1}] = 0;
+        if (mode == 2) options.producer_sequences[sim::SeatId{1}] = std::numeric_limits<std::uint64_t>::max();
+        auto session = require(net::LockstepSession::create(adapter, transport, {{{1}, true}, {{2}, true}}, options));
+        const auto key = session.submit([](auto) {
+            return eawr::core::Result<std::vector<std::uint8_t>>::success({1});
+        });
+        if (mode == 2) expect(!key && key.error().code == net::session_errors::admission, "exhausted producer refuses without wrapping");
+        else expect(key && key.value().sequence == (mode == 1 ? 1U : 0U), "saved maximum zero differs from an absent producer");
+    }
+    eawr::testing::FakeNetwork network(2);
+    eawr::testing::FakeTransport host(network, 0), guest(network, 1);
+    OpaqueAdapter adapter; adapter.tick = 7;
+    net::SessionOptions options; options.initial_tick = 7; options.final_tick_count = 30;
+    options.producer_sequences[sim::SeatId{1}] = 0;
+    auto session = require(net::LockstepSession::create(adapter, guest, {{{1}, true}, {{2}, true}}, options));
+    const auto frame = require(net::encode_batch({0, 7, 7, {{{7, {1}, 0}, {1}}}}));
+    require(host.send(1, frame)); network.round = 1;
+    const auto accepted = session.pump(network.round);
+    expect(!accepted && accepted.error().code == net::session_errors::admission, "remote input cannot replay inclusive saved maximum zero");
+}
+
 int main() {
     try {
+        restored_sequence_edges();
+        restored_boundary_contract();
         script_hash_only_on_exchange_ticks();
         object_turn_only_command_log();
+        checkpoint_barrier_contracts();
+        checkpoint_release_contracts();
         chained_departures();
         target_timing_controls();
         final_tick_departure_ack();

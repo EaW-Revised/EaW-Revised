@@ -68,7 +68,8 @@ core::Result<SealedBatch> decode_batch(std::span<const std::uint8_t> frame) {
 core::Result<sim::SeatCommandKey> LockstepSession::submit(
     const EncodeIntent& encode, const std::optional<std::uint64_t> input_epoch) {
     if (failure_) return core::Result<sim::SeatCommandKey>::failure(*failure_);
-    if (departed_[self_] || agreement_ || held_ || resync_ || (options_.resync && monitor_ && monitor_->frozen())
+    if (checkpoint_ || recovery_rejoin_ || departed_[self_] || agreement_ || held_ || resync_
+        || (options_.resync && monitor_ && monitor_->frozen())
         || (options_.reconnect && options_.reconnect->rejoin_source))
         return refused<sim::SeatCommandKey>(session_errors::admission, "seat departed or agreement pending");
     const auto completed = adapter_->completed_tick();
@@ -101,6 +102,11 @@ core::Result<void> LockstepSession::seal() {
     if (options_.keep_admission_tick_open && options_.pending_input_epoch)
         if (const auto epoch = options_.pending_input_epoch(); epoch && *epoch <= completed)
             through = std::min(through, *epoch + options_.input_delay - 1U);
+    if (checkpoint_) {
+        const auto limit = checkpoint_->cutoff.value_or(*checkpoint_->drains[self_]);
+        if (limit == 0) return refused<void>(session_errors::options, "invalid save cutoff");
+        through = std::min(through, limit - 1);
+    }
     while (next_seal_ < options_.final_tick_count && next_seal_ <= through) {
         SealedBatch batch{self_, next_seal_, next_seal_, {}};
         if (auto found = pending_.find(next_seal_); found != pending_.end()) {
@@ -149,7 +155,35 @@ core::Result<void> LockstepSession::seal() {
     return core::Result<void>::success();
 }
 
+core::Result<void> LockstepSession::pump_galactic_recovery(bool obsolete_owner, bool published_owner) {
+    if (!galactic_recovery_handler_ || (!obsolete_owner && !published_owner && !failure_ && (!encode_departure_ || !departed_[self_])))
+        return core::Result<void>::success();
+    // Preserve the old active owner on a pre-commit refusal, and give the
+    // published owner a boundary at release. Both must retain gameplay frames.
+    const auto budget = obsolete_owner || published_owner ? std::size_t{1} : options_.max_frames_per_pump;
+    for (std::size_t count = 0; count < budget; ++count) {
+        auto frame = transport_->poll();
+        if (!frame) break;
+        if (frame->from < seats_.size() && frame->from != self_ && !frame->frame.empty()
+            && frame->frame.front() >= 90 && frame->frame.front() <= 98)
+            galactic_recovery_handler_(std::move(*frame));
+        else if (published_owner || (obsolete_owner && !failure_ && (!encode_departure_ || !departed_[self_]))) {
+            constexpr std::size_t byte_limit = 8 * max_batch_bytes;
+            const auto frame_limit = departure_frame_limit(input_horizon(), seats_.size() - 1);
+            if (frame->frame.size() > max_batch_bytes + 5 || frame->frame.size() > byte_limit - galactic_recovery_input_bytes_
+                || galactic_recovery_input_.size() >= frame_limit)
+                return refused<void>(session_errors::resource_limit, "retained recovery input exceeds its bound");
+            galactic_recovery_input_bytes_ += frame->frame.size();
+            galactic_recovery_input_.push_back(std::move(*frame));
+        }
+    }
+    return core::Result<void>::success();
+}
 core::Result<void> LockstepSession::receive(Received received) {
+    if (galactic_recovery_handler_ && !received.frame.empty() && received.frame.front() >= 90 && received.frame.front() <= 98) {
+        galactic_recovery_handler_(std::move(received));
+        return core::Result<void>::success();
+    }
     if (!received.frame.empty() && (received.frame.front() == timing_proposal_kind || received.frame.front() == timing_ready_kind)) {
         if (received.from >= seats_.size() || received.from == self_ || received.frame.size() != 17)
             return refused<void>(timing_errors::malformed, "timing frame has invalid sender or size");
@@ -159,6 +193,7 @@ core::Result<void> LockstepSession::receive(Received received) {
         || received.frame.size() > max_batch_bytes + 5)
         return refused<void>(session_errors::malformed, "frame has invalid transport sender or size");
     const auto kind = received.frame.front();
+    if (kind >= checkpoint_drain_kind && kind <= checkpoint_release_kind) return receive_checkpoint(received);
     if (kind >= mesh_report_kind && kind <= mesh_confirm_kind) {
         if (!mesh_) return refused<void>(mesh_errors::malformed, "pair-loss control without a room mesh");
         return mesh_->receive(received, std::chrono::milliseconds(last_now_.value_or(0)));
@@ -213,7 +248,7 @@ core::Result<void> LockstepSession::receive(Received received) {
     const auto digest = core::sha256(received.frame);
     const auto expected = received_through_[sender];
     if (batch.tick < expected) {
-        if (accepted_[sender].at(batch.tick) == digest) return core::Result<void>::success();
+        if (batch.tick >= initial_tick_ && accepted_[sender].at(batch.tick - initial_tick_) == digest) return core::Result<void>::success();
         return refused<void>(session_errors::conflicting_duplicate, "late batch contradicts accepted sealed input");
     }
     if (batch.tick != expected)
@@ -237,6 +272,215 @@ core::Result<void> LockstepSession::receive(Received received) {
     ready_[batch.tick].emplace(sender, std::move(decoded).value());
     ++received_through_[sender];
     return core::Result<void>::success();
+}
+
+
+core::Result<void> LockstepSession::broadcast_checkpoint(const Bytes& frame) {
+    for (PeerIndex peer = 0; peer < seats_.size(); ++peer) {
+        if (peer == self_ || !(checkpoint_ ? checkpoint_->voters[peer] : timing_voter(peer))) continue;
+        if (transport_->link(peer) == LinkState::closed) continue;
+        auto sent = transport_->send(peer, frame);
+        if (!sent && transport_->link(peer) != LinkState::closed) return sent;
+    }
+    return core::Result<void>::success();
+}
+core::Result<void> LockstepSession::abort_checkpoint(std::string message, bool broadcast) {
+    if (!checkpoint_) return core::Result<void>::success();
+    const auto epoch = checkpoint_->epoch;
+    if (broadcast && self_ != checkpoint_callbacks_->host) {
+        // A peer can request refusal, but cannot withdraw its proof or decide
+        // locally: the host may already have committed and sent its release.
+        if (!checkpoint_->refusal_requested) {
+            checkpoint_->refusal_requested = true;
+            Bytes frame{checkpoint_release_kind}; append(frame, epoch, 8); append(frame, 0, 1);
+            const auto host = checkpoint_callbacks_->host;
+            if (transport_->link(host) != LinkState::closed) {
+                auto sent = transport_->send(host, frame);
+                if (!sent && transport_->link(host) != LinkState::closed) return sent;
+            }
+        }
+        return core::Result<void>::success();
+    }
+    if (broadcast) {
+        Bytes frame{checkpoint_release_kind}; append(frame, epoch, 8); append(frame, 0, 1);
+        if (auto sent = broadcast_checkpoint(frame); !sent) return sent;
+    }
+    completed_checkpoint_ = epoch; checkpoint_.reset(); early_checkpoint_.clear();
+    if (checkpoint_callbacks_->refused)
+        checkpoint_callbacks_->refused(diagnostic(session_errors::admission, "Save failed: " + message));
+    return core::Result<void>::success();
+}
+core::Result<void> LockstepSession::begin_checkpoint() {
+    if (!checkpoint_callbacks_ || !checkpoint_callbacks_->capture || !checkpoint_callbacks_->commit
+        || checkpoint_callbacks_->host >= seats_.size())
+        return refused<void>(session_errors::options, "save barrier callbacks are incomplete");
+    const auto epoch = adapter_->completed_tick();
+    if (!epoch) return refused<void>(session_errors::admission, "save barrier requires a completed trigger tick");
+    const auto drain = std::max({epoch, next_seal_, pending_.empty() ? epoch : pending_.rbegin()->first + 1});
+    CheckpointBarrier barrier;
+    barrier.epoch = epoch; barrier.since_ms = last_now_.value_or(0); barrier.drains.resize(seats_.size());
+    barrier.voters.resize(seats_.size());
+    for (PeerIndex peer = 0; peer < seats_.size(); ++peer) {
+        barrier.voters[peer] = timing_voter(peer);
+        if (!barrier.voters[peer]) barrier.drains[peer] = epoch;
+    }
+    barrier.drains[self_] = drain; checkpoint_ = std::move(barrier);
+    if (agreement_ || held_ || resync_ || timing_ || (mesh_ && mesh_->running()))
+        return abort_checkpoint("a roster or timing transition overlaps capture");
+    Bytes frame{checkpoint_drain_kind}; append(frame, epoch, 8); append(frame, drain, 8);
+    if (auto sent = broadcast_checkpoint(frame); !sent) return sent;
+    auto early = std::exchange(early_checkpoint_, {});
+    for (const auto& message : early) {
+        if (auto accepted = receive_checkpoint(message); !accepted) return accepted;
+    }
+    return core::Result<void>::success();
+}
+core::Result<void> LockstepSession::receive_checkpoint(const Received& received) {
+    if (!checkpoint_callbacks_ || received.from >= seats_.size() || received.from == self_)
+        return refused<void>(session_errors::malformed, "save control without an agreed save service");
+    if (!(checkpoint_ ? checkpoint_->voters[received.from] : timing_voter(received.from)))
+        return core::Result<void>::success();
+    const auto kind = received.frame.front();
+    const std::size_t expected_size = kind == checkpoint_proof_kind ? 105U : (kind == checkpoint_release_kind ? 10U : 17U);
+    if (received.frame.size() != expected_size)
+        return refused<void>(session_errors::malformed, "invalid save control size");
+    auto body = std::span<const std::uint8_t>(received.frame).subspan(1);
+    std::uint64_t epoch{};
+    if (!read(body, epoch, 8) || !epoch)
+        return refused<void>(session_errors::malformed, "truncated save epoch");
+    if (epoch <= completed_checkpoint_) return core::Result<void>::success();
+    if (!checkpoint_) {
+        // Another peer can finish the trigger tick before this peer. Controls
+        // cannot activate a barrier: only the sealed SaveRequest can do that.
+        // The bounded queue is consumed on begin and discarded on refusal.
+        if (epoch <= adapter_->completed_tick() || epoch > adapter_->completed_tick() + input_horizon()
+            || early_checkpoint_.size() >= 4 * seats_.size())
+            return refused<void>(session_errors::malformed, "save control outside the pending sealed horizon");
+        early_checkpoint_.push_back(received);
+        return core::Result<void>::success();
+    }
+    auto& barrier = *checkpoint_;
+    if (epoch != barrier.epoch) return refused<void>(session_errors::malformed, "overlapping save epochs");
+    if (kind == checkpoint_drain_kind) {
+        std::uint64_t drain{};
+        if (!read(body, drain, 8) || !body.empty() || drain < epoch
+            || drain > options_.final_tick_count || drain > epoch + input_horizon())
+            return refused<void>(session_errors::malformed, "invalid save drain frontier");
+        auto& previous = barrier.drains[received.from];
+        if (previous && *previous != drain) return refused<void>(session_errors::conflicting_duplicate, "save drain frontier changed");
+        previous = drain;
+    } else if (kind == checkpoint_cutoff_kind) {
+        std::uint64_t cutoff{};
+        if (received.from != checkpoint_callbacks_->host || !read(body, cutoff, 8) || !body.empty()
+            || cutoff < *barrier.drains[self_] || cutoff > epoch + input_horizon()
+            || cutoff > options_.final_tick_count || (barrier.cutoff && *barrier.cutoff != cutoff))
+            return refused<void>(session_errors::malformed, "invalid host save cutoff");
+        barrier.cutoff = cutoff;
+    } else if (kind == checkpoint_proof_kind) {
+        if (body.size() != 96) return refused<void>(session_errors::malformed, "invalid save proof size");
+        CheckpointProof proof{};
+        for (auto& digest : proof) { std::copy_n(body.begin(), digest.size(), digest.begin()); body = body.subspan(digest.size()); }
+        const auto [at, inserted] = barrier.proofs.emplace(received.from, proof);
+        if (!inserted && at->second != proof) return refused<void>(session_errors::conflicting_duplicate, "save proof changed");
+    } else if (kind == checkpoint_release_kind) {
+        std::uint64_t success{};
+        if (!read(body, success, 1) || success > 1 || !body.empty()
+            || (success && received.from != checkpoint_callbacks_->host))
+            return refused<void>(session_errors::malformed, "invalid save release");
+        if (!success) {
+            if (received.from == checkpoint_callbacks_->host)
+                return abort_checkpoint("the host refused capture agreement", false);
+            if (self_ != checkpoint_callbacks_->host)
+                return refused<void>(session_errors::malformed, "save refusal request is not addressed to the host");
+            return abort_checkpoint("a peer could not capture or agree");
+        }
+        barrier.release = true;
+    }
+    return core::Result<void>::success();
+}
+core::Result<bool> LockstepSession::service_checkpoint() {
+    const auto refuse_save = [&](std::string message) -> core::Result<bool> {
+        auto aborted = abort_checkpoint(std::move(message));
+        if (!aborted) return core::Result<bool>::failure(aborted.error());
+        return core::Result<bool>::success(checkpoint_.has_value());
+    };
+    auto& barrier = *checkpoint_;
+    const auto finish = [&]() -> core::Result<bool> {
+        if (self_ == checkpoint_callbacks_->host && !barrier.release) {
+            Bytes frame{checkpoint_release_kind}; append(frame, barrier.epoch, 8); append(frame, 1, 1);
+            if (auto sent = broadcast_checkpoint(frame); !sent) return core::Result<bool>::failure(sent.error());
+            barrier.release = true;
+        }
+        if (!barrier.release) return core::Result<bool>::success(true);
+        auto committed = checkpoint_callbacks_->commit();
+        if (!committed) return core::Result<bool>::failure(committed.error());
+        completed_checkpoint_ = barrier.epoch; checkpoint_.reset();
+        return core::Result<bool>::success(false);
+    };
+    // Only a host release resolves the barrier. An unresolvable hold ends the
+    // session via its normal connection-loss route, without a history decision.
+    const auto host = checkpoint_callbacks_->host;
+    if (self_ != host && !barrier.release
+        && (!timing_voter(host) || transport_->link(host) == LinkState::closed))
+        return core::Result<bool>::failure(connection_loss(host, "save barrier unresolved: host connection lost"));
+    if (!barrier.proofs_matched && barrier.captured
+        && barrier.proofs.size() == static_cast<std::size_t>(std::count(barrier.voters.begin(), barrier.voters.end(), true))) {
+        barrier.proofs_matched = std::all_of(barrier.proofs.begin(), barrier.proofs.end(), [&](const auto& row) {
+            return row.second == barrier.proofs.at(self_);
+        });
+    }
+    if (barrier.proofs_matched && !barrier.decision_since_ms) barrier.decision_since_ms = last_now_.value_or(0);
+    if (barrier.proofs_matched && barrier.release) return finish();
+    // Two minutes permits delayed release beyond ordinary completeness timeout.
+    // Wall-clock expiry terminates participation, never aborts or commits history.
+    constexpr std::uint64_t decision_timeout_ms = 120'000;
+    if (self_ != host
+        && last_now_.value_or(0) - barrier.decision_since_ms.value_or(barrier.since_ms) >= decision_timeout_ms)
+        return core::Result<bool>::failure(connection_loss(host, "save barrier unresolved: host connection lost"));
+    if (barrier.proofs_matched) return finish();
+    if (barrier.refusal_requested) return core::Result<bool>::success(true);
+    if (self_ == checkpoint_callbacks_->host
+        && last_now_.value_or(0) - barrier.since_ms >= options_.completeness_timeout_ms)
+        return refuse_save("capture agreement timed out");
+    if (agreement_ || held_ || resync_ || timing_ || (mesh_ && mesh_->running()))
+        return refuse_save("a roster or timing transition interrupted capture");
+    for (PeerIndex peer = 0; peer < seats_.size(); ++peer) {
+        if (barrier.voters[peer] != timing_voter(peer)) return refuse_save("the save voter roster changed");
+        if (peer != self_ && barrier.voters[peer] && transport_->link(peer) == LinkState::closed)
+            return refuse_save("a required peer stream closed");
+    }
+    if (self_ == checkpoint_callbacks_->host && !barrier.cutoff
+        && std::all_of(barrier.drains.begin(), barrier.drains.end(), [](const auto& value) { return value.has_value(); })) {
+        std::uint64_t cutoff = barrier.epoch;
+        for (const auto& drain : barrier.drains) cutoff = std::max(cutoff, *drain);
+        barrier.cutoff = cutoff;
+        Bytes frame{checkpoint_cutoff_kind}; append(frame, barrier.epoch, 8); append(frame, cutoff, 8);
+        if (auto sent = broadcast_checkpoint(frame); !sent) return core::Result<bool>::failure(sent.error());
+    }
+    const auto limit = barrier.cutoff.value_or(*barrier.drains[self_]);
+    if (adapter_->completed_tick() < limit) return core::Result<bool>::success(false);
+    if (!barrier.cutoff) return core::Result<bool>::success(true);
+    if (adapter_->completed_tick() != limit || !pending_.empty()) return refuse_save("accepted input remains beyond the save barrier");
+    if (!barrier.captured) {
+        std::map<sim::SeatId, std::uint64_t> sequences;
+        for (PeerIndex peer = 0; peer < seats_.size(); ++peer)
+            if (barrier.voters[peer] && command_cursors_[peer]) sequences.emplace(seats_[peer].seat, *command_cursors_[peer]);
+        auto captured = checkpoint_callbacks_->capture(sequences);
+        if (!captured) return refuse_save(captured.error().message);
+        barrier.proofs.emplace(self_, captured.value()); barrier.captured = true;
+        Bytes frame{checkpoint_proof_kind}; append(frame, barrier.epoch, 8);
+        for (const auto& digest : captured.value()) frame.insert(frame.end(), digest.begin(), digest.end());
+        if (auto sent = broadcast_checkpoint(frame); !sent) return core::Result<bool>::failure(sent.error());
+    }
+    if (barrier.proofs.size() != static_cast<std::size_t>(std::count(barrier.voters.begin(), barrier.voters.end(), true)))
+        return core::Result<bool>::success(true);
+    for (const auto& [peer, proof] : barrier.proofs) {
+        (void)peer;
+        if (proof != barrier.proofs.at(self_)) return refuse_save("canonical capture, state or frontier digests differ");
+    }
+    barrier.proofs_matched = true;
+    barrier.decision_since_ms = last_now_.value_or(0);
+    return finish();
 }
 
 } // namespace eawr::net

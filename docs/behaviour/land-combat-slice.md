@@ -36,7 +36,7 @@ The following choices remain unqualified retail questions. Their named constants
 - Q7: no cover/surface/high-ground combat modifiers, fog, LOS, crush, garrison, abilities,
   reinforcement, victory/retreat, AI or hardpoint-vehicle combat are added here.
 
-Land checkpoint section 18 is version 6. It retains each living squad's shared target
+Land checkpoint section 18 is version 7. It retains each living squad's shared target
 and scan deadline. Existing child-state records already retain member health/weapons,
 live projectiles, projectile identity allocation and delayed damage; their retained
 partition buffers also feed canonical hashes. Restore validates surviving identities,

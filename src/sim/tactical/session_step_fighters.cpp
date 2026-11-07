@@ -313,9 +313,19 @@ core::Result<void> session_detail::Tick::service_death_projectiles_and_spins(con
     // Replacements and generic removal never enter this journal.
     if (impl_->durability.damage) for (const auto& dead : killed) {
         const auto* profile = impl_->combat.find(dead.type_id);
-        if (profile == nullptr || profile->death_projectiles.empty()) continue;
+        if (profile == nullptr) continue;
+        const auto authored = profile->death_projectile_authored != 0 ? profile->death_projectile_authored
+            : static_cast<std::uint32_t>(profile->death_projectiles.size());
+        if (authored == 0) continue;
         CombatRandom random(impl_->setup.seed, tick, dead.entity_id, death_projectile_selection_slot);
-        const auto choice = random.uniform(0, static_cast<std::uint32_t>(profile->death_projectiles.size() - 1));
+        const auto drawn = random.uniform(0, authored - 1);
+        // #5696: the drawn authored entry may have been dropped at load (it names no projectile): nothing spawns.
+        auto choice = drawn;
+        if (profile->death_projectile_authored != 0) {
+            const auto found = std::find(profile->death_projectile_slots.begin(), profile->death_projectile_slots.end(), drawn);
+            if (found == profile->death_projectile_slots.end()) continue;
+            choice = static_cast<std::uint32_t>(found - profile->death_projectile_slots.begin());
+        }
         auto origin = dead.position;
         auto height = math::add(origin.z, profile->ranged_target_z_adjust);
         if (!height) return core::Result<void>::failure(height.error());

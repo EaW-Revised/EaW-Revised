@@ -4,8 +4,33 @@
 #include "renderer_internal.hpp"
 #include "texture_budget.hpp"
 #include "particle_culling.hpp"
+#include "global_shadow_quality.hpp"
 
 namespace eawr::presentation::godot_backend {
+
+namespace {
+detail::GlobalShadowQuality directional_shadow_quality;
+
+void apply_directional_shadow_settings(RenderingServer& rendering, const GodotRenderer::LightingState& lighting) {
+    rendering.directional_shadow_atlas_set_size(lighting.shadow_atlas_size, true);
+    std::optional<RenderingServer::ShadowQuality> shadow_quality;
+    switch (lighting.shadow_filter) {
+    case GodotRenderer::ShadowFilter::soft_low:
+        shadow_quality = RenderingServer::SHADOW_QUALITY_SOFT_LOW;
+        break;
+    case GodotRenderer::ShadowFilter::soft_medium:
+        shadow_quality = RenderingServer::SHADOW_QUALITY_SOFT_MEDIUM;
+        break;
+    case GodotRenderer::ShadowFilter::soft_high:
+        shadow_quality = RenderingServer::SHADOW_QUALITY_SOFT_HIGH;
+        break;
+    }
+    if (shadow_quality) {
+        directional_shadow_quality.apply(static_cast<std::uint64_t>(rendering.get_instance_id()),
+            static_cast<int>(*shadow_quality), [&] { rendering.directional_soft_shadow_filter_set_quality(*shadow_quality); });
+    }
+}
+}
 
 [[nodiscard]] std::string utf8(const String& value) {
     const CharString converted = value.utf8();
@@ -50,6 +75,10 @@ GodotShaderCache::Stats GodotShaderCache::stats() const noexcept {
 
 GodotRenderer::Impl::Impl(Node3D& owner, std::shared_ptr<GodotShaderCache> shaders, const bool attach_scene)
     : attach_scene_(attach_scene), owner_(owner), shader_cache_(std::move(shaders)) {
+    if (detail::TextureCensusRegistry::enabled().load(std::memory_order_relaxed)) {
+        detail::TextureCensusRenderers::instance().add(this);
+        census_registered_ = true;
+    }
     RenderingServer* rendering = RenderingServer::get_singleton();
     if (!rendering || owner_.get_world_3d().is_null() || owner_.get_viewport() == nullptr) {
         fail(diagnostic_codes::backend_unavailable,
@@ -90,11 +119,20 @@ GodotRenderer::Impl::Impl(Node3D& owner, std::shared_ptr<GodotShaderCache> shade
 }
 
 GodotRenderer::Impl::~Impl() {
+    if (census_registered_) detail::TextureCensusRenderers::instance().remove(this);
+    distance_band::cameras.erase(scenario_.get_id());
     if (attach_scene_) particle_culling::clear_camera(scenario_);
     // Fog bindings go first, while every material RID is still valid.
     disable_fog();
     RenderingServer* rendering = RenderingServer::get_singleton();
     if (!rendering) return;
+    for (const auto& [unit, quad] : diagnostic_quads_) {
+        static_cast<void>(unit);
+        if (quad.rid.is_valid()) rendering->free_rid(quad.rid);
+    }
+    if (diagnostic_quad_mesh_.is_valid()) rendering->free_rid(diagnostic_quad_mesh_);
+    if (diagnostic_quad_material_.is_valid()) rendering->free_rid(diagnostic_quad_material_);
+    if (diagnostic_quad_shader_.is_valid()) rendering->free_rid(diagnostic_quad_shader_);
     for (const auto& [entity, instance] : instances_) {
         static_cast<void>(entity);
         if (instance.rid.is_valid()) render_churn::record(render_churn::owner(instance.category_role), render_churn::Event::freed);
@@ -111,6 +149,8 @@ GodotRenderer::Impl::~Impl() {
         if (texture.is_valid()) render_churn::free_rid(*rendering, texture, render_churn::Owner::model_resource);
     }
     for (const detail::GpuItem& item : shared_gpu_items_) detail::gpu_memory_ledger().remove(item);
+    for (const auto& [owner_kind, name, item] : shared_census_)
+        detail::TextureCensusRegistry::instance().remove(this, owner_kind, name, item);
     // Every resource released its pool references above; nothing is left
     // unless a reference was lost, and then the texture still goes.
     const std::uint64_t frame = drawn_frame();
@@ -251,18 +291,9 @@ void GodotRenderer::Impl::set_lighting(const GodotRenderer::LightingState& light
     rendering->light_directional_set_blend_splits(sun_light_, lighting.shadow_blend_splits);
     rendering->light_set_param(sun_light_, RenderingServer::LIGHT_PARAM_SHADOW_MAX_DISTANCE,
         lighting.shadow_max_distance);
-    rendering->directional_shadow_atlas_set_size(lighting.shadow_atlas_size, true);
-    switch (lighting.shadow_filter) {
-    case GodotRenderer::ShadowFilter::soft_low:
-        rendering->directional_soft_shadow_filter_set_quality(RenderingServer::SHADOW_QUALITY_SOFT_LOW);
-        break;
-    case GodotRenderer::ShadowFilter::soft_medium:
-        rendering->directional_soft_shadow_filter_set_quality(RenderingServer::SHADOW_QUALITY_SOFT_MEDIUM);
-        break;
-    case GodotRenderer::ShadowFilter::soft_high:
-        rendering->directional_soft_shadow_filter_set_quality(RenderingServer::SHADOW_QUALITY_SOFT_HIGH);
-        break;
-    }
+    detail::apply_shadow_settings_if_enabled(lighting.shadows, [&] {
+        apply_directional_shadow_settings(*rendering, lighting);
+    });
     if (lighting.shadow_bias) {
         rendering->light_set_param(sun_light_, RenderingServer::LIGHT_PARAM_SHADOW_BIAS, *lighting.shadow_bias);
     }
@@ -286,6 +317,9 @@ void GodotRenderer::Impl::set_lighting(const GodotRenderer::LightingState& light
 void GodotRenderer::Impl::set_shadows_enabled(const bool enabled) {
     RenderingServer* rendering = RenderingServer::get_singleton();
     if (!rendering || !sun_light_.is_valid()) return;
+    detail::apply_shadow_settings_if_enabled(enabled && lighting_.has_value(), [&] {
+        apply_directional_shadow_settings(*rendering, *lighting_);
+    });
     rendering->light_set_shadow(sun_light_, enabled);
 }
 
@@ -307,6 +341,10 @@ void GodotRenderer::Impl::set_camera(const FixedCamera& camera) {
     rendering->camera_set_transform(camera_, camera_transform);
     if (attach_scene_) particle_culling::set_camera(scenario_, camera);
     view_transform_ = camera_transform;
+    if (render_categories::ablation != "off") {
+        distance_band::cameras.insert_or_assign(scenario_.get_id(), camera);
+        update_diagnostic_instances(*rendering);
+    }
     for (auto& [entity, instance] : instances_) {
         const auto resource = resources_.find(instance.asset_id);
         if (resource != resources_.end() && !resource->second.billboard_modes.empty()) {
@@ -399,7 +437,8 @@ core::Result<void> GodotRenderer::upload(
     const MaterialDescription& material) {
     if (assets::geometry_stripped(model)) {
         return core::Result<void>::failure({.code = std::string(diagnostic_codes::upload_failed),
-            .message = "renderer upload was handed a geometry-stripped emitter metadata model"});
+            .message = "renderer upload was handed a geometry-stripped emitter metadata model",
+            .logical_path = std::nullopt, .line = std::nullopt, .column = std::nullopt, .source_id = std::nullopt});
     }
     return impl_->upload(asset_id, model, texture, material);
 }
@@ -412,7 +451,8 @@ core::Result<void> GodotRenderer::upload(
     const std::span<const BindingTexture> binding_textures) {
     if (assets::geometry_stripped(model)) {
         return core::Result<void>::failure({.code = std::string(diagnostic_codes::upload_failed),
-            .message = "renderer upload was handed a geometry-stripped emitter metadata model"});
+            .message = "renderer upload was handed a geometry-stripped emitter metadata model",
+            .logical_path = std::nullopt, .line = std::nullopt, .column = std::nullopt, .source_id = std::nullopt});
     }
     return impl_->upload(asset_id, model, texture, material, binding_textures);
 }
@@ -423,11 +463,13 @@ core::Result<void> GodotRenderer::upload(
     const std::span<const BindingTexture> binding_textures) {
     if (model.valid() && assets::geometry_stripped(model.view().original)) {
         return core::Result<void>::failure({.code = std::string(diagnostic_codes::upload_failed),
-            .message = "renderer upload was handed a geometry-stripped emitter metadata model"});
+            .message = "renderer upload was handed a geometry-stripped emitter metadata model",
+            .logical_path = std::nullopt, .line = std::nullopt, .column = std::nullopt, .source_id = std::nullopt});
     }
     if (!model.valid()) {
         return core::Result<void>::failure({.code = std::string(diagnostic_codes::upload_failed),
-            .message = "renderer upload has a missing model or invalid surface selection"});
+            .message = "renderer upload has a missing model or invalid surface selection",
+            .logical_path = std::nullopt, .line = std::nullopt, .column = std::nullopt, .source_id = std::nullopt});
     }
     return impl_->upload(asset_id, model.view(), texture, material, binding_textures, model);
 }

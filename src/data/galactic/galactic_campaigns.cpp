@@ -104,6 +104,9 @@ void load_campaigns(const Catalog& catalog, GalacticData& data) {
         campaign.planet_auto_reveal = record.boolean("Planet_Auto_Reveal");
         campaign.is_autoresolve_allowed = record.boolean("Is_Autoresolve_Allowed");
         campaign.autoresolve_exclusion_locations = record.names("Autoresolve_Exclusion_Locations");
+        if (campaign.autoresolve_exclusion_locations.size() % 2 != 0)
+            record.issue(IssueKind::bad_value, nullptr, "Autoresolve_Exclusion_Locations",
+                campaign.autoresolve_exclusion_locations.back(), "expected a layer after the final location (WAR-75)");
         campaign.corruption_level_overrides = location_levels(record, "Corruption_Level_Override");
         campaign.human_victory_conditions = record.names("Human_Victory_Conditions");
         campaign.ai_victory_conditions = record.names("AI_Victory_Conditions");

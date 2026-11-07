@@ -5,10 +5,13 @@
 #include "eawr/platform/campaign_battle_view.hpp"
 #include "eawr/sim/galactic/types.hpp"
 #include "eawr/presentation/galactic_pause.hpp"
+#include "eawr/presentation/camera/camera.hpp"
 
 // Private to the galactic mode's translation units (galactic_*.cpp).
 #include "galactic_mode.hpp"
 #include <chrono>
+#include <future>
+#include "eawr/assets/ui_map_markers.hpp"
 #include "galactic_hud_fixture.hpp"
 #include "campaign_capture_metrics.hpp"
 #include "galaxy_snapshot_stub.hpp"
@@ -17,12 +20,14 @@
 #include "scene_content.hpp"
 #include "route_lines.hpp"
 #include "planet_hud.hpp"
+#include "command_control_state.hpp"
 #include "hud_retained.hpp"
 #include "fleet_stacks.hpp"
 #include "fleet_panels.hpp"
 #include "fleet_traits.hpp"
 #include "fleet_drag.hpp"
 #include "ground_hud.hpp"
+#include "planet_detail_layout.hpp"
 #include "orbit_hud.hpp"
 #include "radar_hud.hpp"
 #include "corruption_hud.hpp"
@@ -43,6 +48,7 @@
 #include "ui/theme_builder.hpp"
 #include <godot_cpp/classes/control.hpp>
 #include <godot_cpp/classes/label.hpp>
+#include <godot_cpp/classes/v_box_container.hpp>
 #include <godot_cpp/classes/button.hpp>
 #include "galactic_audio.hpp"
 #include "battle_dialog.hpp"
@@ -86,6 +92,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace pugi { class xml_document; }
@@ -227,6 +234,12 @@ struct GalacticMode::State final {
     std::unique_ptr<platform::PreparedLiveCampaign> campaign_root;
     std::function<std::vector<std::string>()> memory_reader;
     std::vector<GalacticMemorySnapshot> memory_snapshots;
+    // Model LRU trim at the end of campaign preparation (--eawr-gc-prep-trim). Counters are cumulative
+    // unique_loads, so the delta between the trim point and start_game counts load-thread re-decodes.
+    struct PrepTrim final {
+        bool recorded{}, applied{}, started{};
+        std::uint64_t retained_before{}, retained_after{}, unique_loads_at_trim{}, unique_loads_at_start{};
+    } prep_trim;
     // Faction and AI player type the runtime installed (log-only; empty when AI is off or restored).
     struct NativeAiRow { sim::galactic::PlayerId player{}; std::string faction, player_type; };
     std::vector<NativeAiRow> native_ai_players;
@@ -259,7 +272,12 @@ struct GalacticMode::State final {
     std::string lan_notice_text;
     std::uint64_t lan_clock_refusal_seen{};
     godot::Label* lan_notice_label{};
-    std::array<godot::Button*, 4> lan_clock_buttons{};
+    // #5507: a refused hero-ability drop always says why (same label look as the LAN notice, 4 s).
+    godot::Label* ability_notice_label{};
+    std::uint64_t ability_notice_until_msec{}, ability_event_cursor{};
+    std::string ability_notice_text, ability_notice_shown;
+    void refuse_hero_ability(std::string text);
+    void service_ability_notice();
     void service_lan_hud();
     void service_lan_acceptance_battle();
     std::uint64_t acceptance_next_battle_order{};
@@ -273,6 +291,7 @@ struct GalacticMode::State final {
     std::optional<assets::MegaTextureAtlas> command_atlas;
     std::unique_ptr<UiTextures> command_textures;
     std::map<std::string, godot::Ref<godot::Texture2D>, std::less<>> command_texture_cache;
+    std::vector<core::LoadNote> pending_texture_notes; // published at the next HUD update
     data::ui::CommandBarCatalog command_catalog;
     data::ui::ShellAnchors command_anchors;
     presentation::ui::HudFaction command_faction{presentation::ui::HudFaction::empire};
@@ -308,7 +327,7 @@ struct GalacticMode::State final {
     // colours, the fiscal pip, the fast-forward state), not by the publication: most publications change none of it.
     struct HudCommandKey final {
         galactic_view::ObjectId selection{};
-        bool space_tab{}, levels{}, income{}, clock_enabled{}, paused{};
+        bool space_tab{}, levels{}, income{}, clock_enabled{}, fast_forward_enabled{}, paused{};
         std::size_t page{};
         std::optional<sim::math::Fixed> speed;
         galactic_view::CameraState tier{};
@@ -334,7 +353,7 @@ struct GalacticMode::State final {
         std::uint32_t width{}, height{};
         galactic_view::CameraState tier{};
         double alpha{};
-        bool levels{}, income{}, hud_enabled{}, tutorial_locked{};
+        bool levels{}, income{}, bonus_layer{}, hud_enabled{}, tutorial_locked{};
         friend bool operator==(const HudLabelKey&, const HudLabelKey&) = default;
     };
     std::optional<HudLabelKey> hud_label_key;
@@ -360,7 +379,7 @@ struct GalacticMode::State final {
     // Everything a placement reads that is neither the planet's own facts nor its screen point.
     struct PlanetLabelEnvironment final {
         std::uint32_t width{}, height{};
-        bool levels{}, income{}, hud_enabled{}, tutorial_locked{};
+        bool levels{}, income{}, bonus_layer{}, hud_enabled{}, tutorial_locked{};
         friend bool operator==(const PlanetLabelEnvironment&, const PlanetLabelEnvironment&) = default;
     };
     std::unordered_map<galactic_view::ObjectId, PlanetLabelRecord> planet_label_records;
@@ -395,6 +414,7 @@ struct GalacticMode::State final {
     void service_production_tooltip();
     std::optional<std::size_t> current_pip;
     bool clock_controls_enabled{};
+    bool fast_forward_controls_enabled{}; // TM-04: off with several humans, also in a LAN match
     // #1979: profile-to-speed selection is not published yet.
     std::optional<sim::math::Fixed> fast_forward_factor;
     // Strategic speed this client last submitted; trusted only while displayed_snapshot is still the snapshot seen then.
@@ -456,6 +476,7 @@ struct GalacticMode::State final {
     [[nodiscard]] bool build_hero_action_hud();
     void update_hero_action_hud();
     void choose_hero_action(std::size_t index);
+    [[nodiscard]] std::size_t hero_action_offered() const;
     void close_hero_action();
     void write_hero_action_report(std::ostream&) const;
     std::map<std::string, galactic_view::ProductionArt> production_art;
@@ -470,11 +491,16 @@ struct GalacticMode::State final {
     std::map<std::string, std::string> choice_pad;
     std::map<galactic_view::ObjectId, godot::TextureRect*> production_icons;
     std::map<galactic_view::ObjectId, godot::TextureRect*> corruption_info_icons;
+    std::map<galactic_view::ObjectId, godot::TextureRect*> planet_bonus_icons; // Filtered bonus icon per planet (GHUDL-18).
     std::map<galactic_view::ObjectId, godot::Vector2> hud_planet_anchors; // Projected planet points of the last label pass.
     std::vector<std::string> corruption_planet_icons; // GameConstants, by corruption type then the information icon.
     std::size_t choice_page{};
     galactic_view::ObjectId choice_planet{};
     [[nodiscard]] godot::Ref<godot::Texture2D> command_texture(std::string_view name);
+    [[nodiscard]] godot::Ref<godot::Texture2D> radar_view_texture(std::string_view name);
+    // Same lookup for a probe whose miss is an expected, handled fallback (no unresolved-texture warning).
+    [[nodiscard]] godot::Ref<godot::Texture2D> command_texture_optional(std::string_view name);
+    [[nodiscard]] godot::Ref<godot::Texture2D> command_texture_lookup(std::string_view name, bool warn_if_missing);
     void configure_command_bar_text(const presentation::ui::ShellPlacement& placement, EawrHudText& label,
         const data::ui::CommandBarComponent& component, const data::ui::ShellAnchor& anchor);
     bool configure_command_bar_constants(const pugi::xml_document& document);
@@ -484,6 +510,9 @@ struct GalacticMode::State final {
     bool build_command_bar_shell();
     void build_command_bar_labels(const data::ui::TextDatabase* text);
     void build_command_bar_controls(const data::ui::TextDatabase* text);
+    void build_command_controls(const std::vector<std::string>& names, const std::set<std::string>& story_controls,
+        const data::ui::TextDatabase* text, bool first_build);
+    void add_story_controls(const data::ui::TextDatabase* text);
     void build_command_bar_choices(const pugi::xml_document& document);
     void build_command_bar_queues();
     void finish_command_bar_controls();
@@ -500,6 +529,7 @@ struct GalacticMode::State final {
         const sim::galactic::GalacticClock& clock, bool fiscal_available);
     [[nodiscard]] bool build_command_bar();
     void update_command_bar();
+    [[nodiscard]] galactic_view::ClockGates clock_gates() const;
     [[nodiscard]] bool build_fleet_hud();
     void update_fleet_hud();
     void rebuild_fleet_projection(const bool publication_changed);
@@ -539,6 +569,7 @@ struct GalacticMode::State final {
     data::ui::ShellAnchors fleet_anchors;
     std::map<std::string, godot::TextureButton*> fleet_buttons;
     std::map<std::string, godot::Label*> fleet_counts;
+    std::map<std::string, godot::TextureRect*> fleet_stealth_marks; // q1..q3_fleet: icon_fleet0n stealth alternate on a card.
     // TEXT_FLEET_PANE_n at the authored text_fleet1..3 anchors of the organize shell.
     std::array<EawrHudText*, 3> fleet_captions{};
     std::array<std::vector<std::string>, 3> fleet_group_buttons;
@@ -683,13 +714,61 @@ struct GalacticMode::State final {
     EawrTacticalHud* advanced_map_shell{};
     godot::TextureRect* planet_bonus_icon{};
     data::ui::ShellAnchors advanced_map_anchors;
+    // Advanced-map header and capacity readouts (map_shell bones) and the focused view's open button.
+    std::map<std::string, EawrHudText*> advanced_map_labels;
+    std::map<std::string, std::string> advanced_map_captions; // Static caption text by component name.
+    godot::TextureRect* advanced_map_allegiance{};
+    godot::TextureRect* advanced_map_weather{}; // The `weather` bone: the selected planet's weather icon and its hover text.
+    EawrHudButton* advanced_open_button{};
+    // GHUD-R45 / H030: the PLANET INFO button of the focused view and its full-screen dialog.
+    EawrHudButton* planet_info_button{};
+    EawrHudText* planet_info_caption{};
+    godot::Control* planet_info_dialog{};
+    godot::Control* planet_info_panel{};
+    godot::Label* planet_info_title{};
+    godot::VBoxContainer* planet_info_content{};
+    std::array<std::string, 6> planet_info_texts; // button, tactical, advantages, history, weather, close
+    galactic_view::ObjectId planet_info_planet{};
+    void build_planet_info();
+    void open_planet_info();
+    void close_planet_info();
+    void update_planet_info(const presentation::ui::ShellPlacement& placement);
+    // GPD-14: the advanced map orbiting ground-unit tray, read-only.
+    std::array<EawrHudButton*, 20> land_fleet_buttons{};
+    std::array<std::optional<sim::galactic::TypeId>, 20> land_fleet_shown{}; // nullopt = no icon set yet
+    std::array<godot::TextureRect*, 20> land_fleet_hover{};          // non-blocking hover art
+    std::array<godot::Label*, 20> land_fleet_counts{};
+    void update_advanced_land_tray(const presentation::ui::ShellPlacement& placement);
+    // GPD-06: per-map cache starts its work only when the screen opens.
+    std::shared_ptr<const data::Catalog> marker_catalog;
+    std::map<std::string, std::vector<assets::UiMapMarker>> marker_cache;
+    struct MarkerLoadResult { std::string path; std::vector<assets::UiMapMarker> markers; std::string error; };
+    std::future<MarkerLoadResult> marker_load;
+    void update_advanced_map_markers();
+    std::array<EawrHudButton*, 80> detail_build_pads{};
+    std::array<EawrHudButton*, 10> detail_unit_pads{};
+    std::array<godot::TextureRect*, 80> detail_shield_rings{};
+    galactic_view::PlanetDetailLayout detail_layout;
+    std::shared_ptr<const sim::galactic::GalacticSnapshot> detail_layout_publication;
+    galactic_view::ObjectId detail_layout_planet{};
+    void update_advanced_map_pads(const presentation::ui::ShellPlacement& placement);
+    galactic_view::PlanetDetailAccess detail_access() const;
+    std::optional<std::pair<bool, std::size_t>> detail_drag;
+    bool detail_moving{}, detail_defaults_sent{};
+    galactic_view::ObjectId detail_open_planet{};
+    void detail_pointer(int kind, godot::Vector2 point);
+    bool detail_hit(godot::Vector2 point) const;
+    void build_advanced_map_labels();
+    void update_advanced_map_labels();
+    void update_advanced_map_weather(const presentation::ui::ShellPlacement& placement);
+    void update_advanced_open_button(const presentation::ui::ShellPlacement& placement);
     std::array<EawrGalacticRadar*, 2> radar_controls{};
     std::array<godot::TextureButton*, 2> radar_zoom_buttons{};
     std::array<godot::Ref<godot::Texture2D>, 2> radar_zoom_icons;
     std::optional<std::size_t> radar_zoom_variant;
     std::array<std::map<galactic_view::ObjectId, godot::Control*>, 2> radar_blips;
     struct RadarBlipKey final {
-        bool discovered{}, selected{}, visible{};
+        bool discovered{}, selected{}, visible{}, pending{};
         float r{}, g{}, b{}, x{}, y{};
         bool operator==(const RadarBlipKey&) const = default;
     };
@@ -702,6 +781,8 @@ struct GalacticMode::State final {
     std::array<godot::TextureRect*, 2> radar_view_icons{};
     std::shared_ptr<const sim::galactic::GalacticSnapshot> radar_publication;
     galactic_view::ObjectId radar_selection{};
+    // #5508: planet of the pending tactical battle the local player is told about (radar blip flash).
+    galactic_view::ObjectId pending_battle_planet{}, radar_pending_planet{};
     godot::Vector2 radar_viewport;
     std::uint64_t radar_positions{}, hud_zoom_requests{}, radar_rebuilds{};
     std::optional<galactic_view::Vec3> last_radar_position;
@@ -714,6 +795,7 @@ struct GalacticMode::State final {
     std::map<galactic_view::ObjectId, PlanetLevels> planet_levels;
     std::optional<std::array<std::size_t, 2>> name_size_thresholds;
     bool ground_hero_preference{}; // GGS-09: local image preference, outside simulation state.
+    bool bonus_layer_visible{}; // galactic filter bit 4 (b_filters2); retail starts with every filter off
     bool base_levels_visible{}; // Local filter adapter; callback/default remains unverified.
     godot::TextureRect* allegiance_icon{};
     void refresh_hud_facts();
@@ -743,6 +825,7 @@ struct GalacticMode::State final {
     galactic_view::PlayerId hud_offers_player{};
     std::uint64_t hud_offer_index_builds{};
     void update_planet_levels(galactic_view::ObjectId id, godot::Vector2 anchor, float scale, float alpha);
+    void update_planet_bonus_icon(galactic_view::ObjectId id, const std::string& icon, godot::Vector2 anchor, float scale, float alpha);
     void update_planet_status_icons(galactic_view::ObjectId id, godot::Vector2 anchor, float scale, float alpha);
     std::optional<data::ui::CommandBarComponent> planet_name_style;
     std::unique_ptr<FontProvider> hud_fonts;
@@ -755,7 +838,7 @@ struct GalacticMode::State final {
     std::uint64_t animation_updates{};
     // Opt-in main-thread attribution. The main/animation/camera totals include
     // their nested phases; these are CPU enqueue times, not GPU completion.
-    enum class FramePhase : std::size_t { main, snapshot, instances, animation, sample, bind, material_clock, corruption, camera, submit, routes, hud_facts, hud_commands, hud_fleets, hud_ground, hud_orbit, hud_radar, hud_labels, hud_weapon, count };
+    enum class FramePhase : std::size_t { main, snapshot, instances, animation, sample, bind, material_clock, corruption, camera, submit, routes, hud_facts, hud_commands, hud_fleets, hud_ground, hud_orbit, hud_radar, hud_labels, hud_weapon, hud_total, lighting, visibility, count };
     struct FramePhaseCost final { double milliseconds{}, worst_call_ms{}; std::uint64_t calls{}; };
     std::array<FramePhaseCost, static_cast<std::size_t>(FramePhase::count)> frame_phase_costs{};
     struct FramePhaseMeasure final {
@@ -777,12 +860,20 @@ struct GalacticMode::State final {
         }
     };
     [[nodiscard]] FramePhaseMeasure measure_frame(const FramePhase phase) {
-        return FramePhaseMeasure(perf_requested ? &frame_phase_costs[static_cast<std::size_t>(phase)] : nullptr);
+        return FramePhaseMeasure((perf_requested || options.zoom_timing) ? &frame_phase_costs[static_cast<std::size_t>(phase)] : nullptr);
     }
+    struct ZoomTimingFrame final {
+        std::uint64_t frame{}, entry_usec{};
+        int camera_state{};
+        std::array<double, static_cast<std::size_t>(FramePhase::count)> phase_ms{};
+    };
+    std::vector<ZoomTimingFrame> zoom_timing_frames;
+    std::array<double, static_cast<std::size_t>(FramePhase::count)> zoom_previous_costs{};
     // Per seat (ADR-020): the camera belongs to the seat, never to the faction.
     std::map<galactic_view::SeatId, galactic_view::OrbitCamera> cameras;
     std::map<galactic_view::SeatId, galactic_view::PlanetCamera> flights;
     galactic_view::CameraConstants camera_constants;
+    std::optional<presentation::camera::Constants> edge_scroll_constants;
     std::string constants_sha256;
     std::optional<galactic_view::CameraLighting> applied_light;
     galactic_view::ObjectId selected_planet{};
@@ -868,7 +959,7 @@ struct GalacticMode::State final {
     godot::SubViewportContainer* galaxy_container{};
     godot::SubViewport* galaxy_viewport{};
     std::shared_ptr<const BattleContent> battle_content;
-    std::shared_ptr<const LiveSessionView::PreparedBattle> prepared;
+    std::shared_ptr<const live_session::PreparedBattle> prepared;
     std::shared_ptr<const campaign::ConflictRecord> presented_conflict;
     std::shared_ptr<const platform::LiveAutoResolveOutcome> restored_auto_summary;
     [[nodiscard]] platform::LiveGameFrame battle_dialog_frame() const;
@@ -929,7 +1020,7 @@ struct GalacticMode::State final {
     std::string queued_underway; // the purchase hook's type, voiced once audio exists
     std::shared_ptr<MapMode> tactical;
     godot::Node3D* tactical_host{};
-    std::vector<std::shared_ptr<const LiveSessionView::PreparedBattle>> battles;
+    std::vector<std::shared_ptr<const live_session::PreparedBattle>> battles;
     std::vector<std::uint64_t> entry_ticks;
     std::size_t cycle{};
     std::weak_ptr<const void> owner_lifetime, child_lifetime;
@@ -966,6 +1057,7 @@ struct GalacticMode::State final {
     // Interactive input: held pan keys and a middle-button orbit drag.
     std::set<std::int64_t> held;
     bool orbiting{};
+    std::array<float, 2> orbit_travel{}; // #5601: net middle-drag travel in viewport fractions (click-reset test)
     bool scrolling{};
     std::optional<std::array<float, 2>> pointer_warp;
 
@@ -974,6 +1066,16 @@ struct GalacticMode::State final {
     [[nodiscard]] bool refresh_game();
     [[nodiscard]] bool queue_requested_build();
     void request_pause(bool value);
+    // WST-37: raises a clicked HUD component to this seat's story plots as STORY_CLICK_GUI.
+    void submit_gui_click(const std::string& component);
+    // One press of a command-bar control by a human or a FORCE_CLICK_GUI reward (#5857); press state of the controls
+    // a mod authors is kept in authored_controls (command_control_state.hpp), and forced requests are drained per frame.
+    void press_command_control(const std::string& name);
+    void service_forced_clicks();
+    galactic_view::ControlStates authored_controls;
+    std::uint64_t forced_click_cursor{};
+    std::set<std::string> forced_click_reported; // (control, reason) pairs already warned about; diagnostics only
+    bool forced_click_busy{};
     [[nodiscard]] bool prepare_handoff();
     // True while the loading or tactical scene owns the frame.
     [[nodiscard]] bool process_handoff(double delta);

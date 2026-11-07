@@ -195,19 +195,21 @@ Status reserve(const fs::path& root, const Limits& limits, const std::uint64_t i
 std::optional<Key> make_key(const Identity& i) {
     if (!digest(i.root_sha256) || !digest(i.package_sha256) || !digest(i.capability_manifest)
         || !digest(i.options_manifest_sha256) || i.descriptor_version == 0
-        || i.result_schema_version == 0 || i.options_manifest_version == 0
+        || i.result_schema_version == 0 || i.options_manifest_version == 0 || i.parser_schema == 0
         || (i.form != Form::compiled && i.form != Form::source)) return std::nullopt;
     const std::array required{i.logical, i.compiler_abi, i.capability_manifest, i.selection_policy, i.resolver_policy,
         i.translator, i.emitter, i.binding_policy, i.state_policy, i.technique_policy, i.admission_policy,
         i.godot_engine, i.shader_abi, i.language, i.renderer, i.backend, i.platform, i.architecture};
     if (std::any_of(required.begin(), required.end(), [](const auto& value) { return value.empty(); })) return std::nullopt;
     Bytes bytes;
-    text(bytes, "eawr-shader-translation-cache-key-v1");
+    text(bytes, "eawr-shader-translation-cache-key-v2");
+    text(bytes, i.root_source); text(bytes, i.root_layer); text(bytes, i.root_origin); word(bytes, i.parser_schema);
     text(bytes, i.logical); text(bytes, i.root_sha256); word(bytes, i.form == Form::source ? 1 : 0);
     word(bytes, i.includes.size());
     for (const auto& include : i.includes) {
         if (include.logical.empty() || include.parent.empty() || !digest(include.content_sha256)) return std::nullopt;
         text(bytes, include.parent); text(bytes, include.logical); text(bytes, include.content_sha256);
+        text(bytes, include.source_id); text(bytes, include.layer_id); text(bytes, include.origin);
     }
     tokens(bytes, i.macros); tokens(bytes, i.compiler_options);
     word(bytes, i.stages.size());

@@ -90,3 +90,21 @@ the retained destination and uses ordinary orbital conflict admission.
 The positive overview gesture and land-battle result were witnessed in the
 FoC debug build 3.00.045. The implementation uses WGM-37/39/84 and the retained
 transport identities; it introduces no unit-name or stock-cap checks.
+
+## Negative Cheap/Expensive_Bribe_Cost (GC-BRIBE-NEG)
+
+Debug build: the two bribe-cost tags are plain per-type integer reads in the
+object-type parameter table, with no minimum or maximum recorded for them, and
+their getters return the stored field unchanged. Retail therefore loads a
+negative value as authored; it does not clamp, ignore or refuse it. Our
+movement-input builder follows that: the authored value is kept and an
+`EAWR-LOAD-1037` note (accepted, retail-accepts) is written with layer, file and
+line. The sum of several leaf costs for a path planet is still ignored when it
+is not positive. Unverified: how the retail galactic bribe total treats one
+negative leaf next to positive leaves (the sim adds them signed).
+
+Other checks in the same builder that still abort the match on authored data
+(not changed, retail behaviour not yet established): missing Hyperspace_Speed
+on a hyperspace-eligible leaf, a negative or oversized Squadron_Capacity, a
+missing or invalid Object_Max_Speed_Multiplier_Galactic, a faction missing its
+movement factor or corruption flag, and a missing Corruption_Hyperspace_Bonus.

@@ -12,6 +12,7 @@
 #include <deque>
 #include <exception>
 #include <filesystem>
+#include <functional>
 #include <fstream>
 #include <ios>
 #include <iostream>
@@ -45,7 +46,15 @@ struct Bus {
 class FakeTransport final : public net::MessageTransport {
 public:
     FakeTransport(Bus& bus, std::uint32_t self) : bus_(bus), self_(self) {}
+    // Test hook: refuse kind-34 evidence frames longer than this, as a transport frame limit does (0 = no limit).
+    std::size_t refuse_evidence_over{};
     core::Result<void> send(std::uint32_t to, std::span<const std::uint8_t> frame) override {
+        if (refuse_evidence_over != 0 && !frame.empty() && frame[0] == net::desync_evidence_kind && frame.size() > refuse_evidence_over) {
+            core::Diagnostic refused;
+            refused.code = "EAWR-NET-0204";
+            refused.message = "frame exceeds the transport limit";
+            return core::Result<void>::failure(std::move(refused));
+        }
         bus_.inbox.at(to).push_back({self_, {frame.begin(), frame.end()}});
         return core::Result<void>::success();
     }
@@ -178,6 +187,33 @@ void synthetic(const std::filesystem::path& directory, std::uint64_t fault, std:
     // Transport remains usable after the diagnostic freeze.
     good(pair.a.send(1, std::array<std::uint8_t, 1>{7}));
     require(pair.b.poll().has_value(), "transport died when simulation froze");
+}
+
+// #5519: a campaign-sized canonical state (a 9-10 MB galaxy plus a child battle is about 12 MB) must keep the default two
+// exchange points, so a divergence in the first half of a window still gets the last agreed encoding. Uses the library's
+// default retention budget, not a test budget. Each encoding starts with its tick so the bundle names the point it kept.
+void retention_on_a_campaign_sized_state(const std::filesystem::path& directory, std::uint64_t fault) {
+    constexpr std::uint64_t every = 10, end = 40;
+    Pair pair(directory, net::DesyncOptions{}.max_retained_bytes, every);
+    std::vector<std::uint8_t> encoding(12 * 1024 * 1024, 9);
+    for (std::uint64_t tick = 0; tick <= end; ++tick) {
+        const std::vector<std::uint8_t> input{static_cast<std::uint8_t>(tick), 7};
+        encoding[0] = static_cast<std::uint8_t>(tick);
+        good(pair.left.record(tick, digest(tick), encoding, input, tick == end));
+        good(pair.right.record(tick, digest(tick, tick >= fault), encoding, input, tick == end));
+        pair.drain();
+        if (pair.left.frozen()) break;
+    }
+    const auto detected = ((fault + every - 1) / every) * every;
+    check_report(pair, fault, detected);
+    // The nearest retained point to the first divergent tick: the previous exchange for an early fault, else the latest.
+    const auto expected = fault - (detected - every) <= detected - fault ? detected - every : detected;
+    for (const auto* monitor : {&pair.left, &pair.right}) {
+        const auto session = bundle_file(monitor->report()->bundle, "session.bin");
+        require(session.size() == encoding.size(), "the campaign-sized encoding was retained");
+        require(static_cast<std::uint8_t>(session.front()) == static_cast<std::uint8_t>(expected),
+            "the bundle keeps the retained point nearest to the first divergent tick");
+    }
 }
 
 struct TraceRow { std::uint64_t tick{}; std::string hash; std::vector<std::uint8_t> input, encoding; };
@@ -719,6 +755,185 @@ void adaptive_departure_bounds() {
 
 } // namespace
 
+
+// The owner's incident shape: both worlds agree, only the canonical input of a few ticks differs. With evidence
+// sharing on, each peer's own bundle must hold the other peer's differing batches (checked against the other
+// peer's exchanged hash), name the first differing byte, and say what session.bin is.
+struct EvidencePair {
+    Bus bus;
+    FakeTransport a{bus, 0}, b{bus, 1};
+    net::DesyncMonitor left, right;
+    static net::DesyncOptions options(bool share) {
+        net::DesyncOptions options;
+        options.match_identity = "scripted-test-match";
+        options.match_setup = {1, 2, 3};
+        options.build_identity = "test-build";
+        options.exchange_every = 30;
+        options.share_evidence = share;
+        options.replay_journal = [] { return std::vector<std::uint8_t>{'j', 'r', 'n'}; };
+        return options;
+    }
+    explicit EvidencePair(bool share = true) : left(a, options(share)), right(b, options(share)) {}
+    void drain() {
+        for (unsigned rounds = 0; rounds < 10; ++rounds) {
+            bool progress = false;
+            for (const auto& [transport, monitor] : std::array<std::pair<FakeTransport*, net::DesyncMonitor*>, 2>{{{&a, &left}, {&b, &right}}}) {
+                while (auto received = transport->poll()) { good(monitor->receive(received->from, received->frame)); progress = true; }
+            }
+            if (!progress) return;
+        }
+        throw std::runtime_error("evidence exchange did not quiesce");
+    }
+};
+
+std::vector<std::uint8_t> evidence_batch(std::uint64_t tick, std::uint8_t tail) {
+    std::vector<std::uint8_t> bytes(300, static_cast<std::uint8_t>(tick));
+    bytes.back() = tail;
+    return bytes;
+}
+
+// Records ticks 0..60 on both peers; the right peer's batches at ticks 40 and 41 differ in their last byte.
+void record_evidence_ticks(EvidencePair& pair, const std::function<void()>& exchange) {
+    for (std::uint64_t tick = 0; tick <= 60 && !(pair.left.frozen() && pair.right.frozen()); ++tick) {
+        const bool differs = tick == 40 || tick == 41;
+        const std::vector<std::uint8_t> encoding{static_cast<std::uint8_t>(tick), 9};
+        good(pair.left.record(tick, digest(tick), encoding, evidence_batch(tick, 1)));
+        good(pair.right.record(tick, digest(tick), encoding, evidence_batch(tick, differs ? 2 : 1)));
+        exchange();
+    }
+}
+
+// Delivers frames until both inboxes are quiet, keeping kind-34 evidence frames aside.
+void drain_without_evidence(EvidencePair& pair, std::vector<net::Received>& withheld) {
+    for (unsigned rounds = 0; rounds < 10; ++rounds) {
+        bool progress = false;
+        for (auto* side : {&pair.a, &pair.b}) {
+            auto& monitor = side == &pair.a ? pair.left : pair.right;
+            while (auto frame = side->poll()) {
+                progress = true;
+                if (frame->frame[0] == net::desync_evidence_kind) { withheld.push_back(*frame); continue; }
+                good(monitor.receive(frame->from, frame->frame));
+            }
+        }
+        if (!progress) {
+            std::stable_sort(withheld.begin(), withheld.end(), [](const auto& left, const auto& right) { return left.from < right.from; });
+            return;
+        }
+    }
+    throw std::runtime_error("evidence exchange did not quiesce");
+}
+
+void input_only_divergence_shares_evidence() {
+    EvidencePair pair;
+    record_evidence_ticks(pair, [&] { pair.drain(); });
+    require(pair.left.frozen() && pair.right.frozen(), "input-only divergence must freeze both peers");
+    for (const auto* monitor : {&pair.left, &pair.right}) {
+        const auto& report = *monitor->report();
+        require(report.channel == "canonical input" && report.first_divergent_tick == 40, "wrong input incident");
+        const std::string other = monitor == &pair.left ? "1" : "0";
+        const auto remote = bundle_file(report.bundle, "remote-peer-" + other + "-inputs.bin");
+        require(remote.starts_with("eawr-desync-input-v1\n"), "remote evidence framing");
+        const auto shipped = [&](std::uint64_t tick, std::uint8_t tail) {
+            const auto bytes = evidence_batch(tick, tail);
+            return remote.find(std::string(bytes.begin(), bytes.end())) != std::string::npos;
+        };
+        // The bundle holds the OTHER peer's batches: tail 2 in the left bundle, tail 1 in the right one.
+        const std::uint8_t expected_tail = monitor == &pair.left ? 2 : 1;
+        require(shipped(40, expected_tail) && shipped(41, expected_tail), "remote differing batches missing");
+        require(!shipped(39, expected_tail) && !shipped(42, expected_tail), "agreeing ticks must not be shipped");
+        const auto diff = bundle_file(report.bundle, "input-diff.txt");
+        require(diff.find("tick 40 peer " + other) != std::string::npos && diff.find("first_differing_offset=299") != std::string::npos,
+            "input diff must name the first differing byte");
+        require(bundle_file(report.bundle, "session-journal.bin") == "jrn", "replay journal missing");
+        require(bundle_file(report.bundle, "README.txt").find("not a restorable save") != std::string::npos,
+            "README must say session.bin is hash-only");
+        require(!monitor->waiting_for_evidence() && monitor->waiting_for_peers().empty(),
+            "both evidence frames arrived; nothing is left to wait for");
+    }
+}
+
+void evidence_is_authenticated_and_bounded() {
+    // An incident keeps the link open until the other peer's evidence has arrived.
+    {
+        EvidencePair pair;
+        std::vector<net::Received> withheld;
+        record_evidence_ticks(pair, [&] { drain_without_evidence(pair, withheld); });
+        require(pair.left.report() && pair.left.waiting_for_evidence(), "an incident must wait for the peer's evidence");
+        require(pair.left.waiting_for_peers().empty(), "the evidence wait must stay out of the lockstep voter list");
+        require(withheld.size() == 2, "each peer must send exactly one evidence frame");
+        // A batch that does not hash to the sender's row is refused; the genuine frame is then accepted.
+        auto forged = withheld[1].frame;
+        require(withheld[1].from == 1 && withheld[0].from == 0, "withheld frames are ordered by sender");
+        forged.back() ^= 0x55;
+        require(!pair.left.receive(1, forged), "forged evidence accepted");
+    }
+    {
+        EvidencePair pair;
+        std::vector<net::Received> withheld;
+        record_evidence_ticks(pair, [&] { drain_without_evidence(pair, withheld); });
+        for (const auto& frame : withheld) good((frame.from == 0 ? pair.right : pair.left).receive(frame.from, frame.frame));
+        require(!pair.left.waiting_for_evidence() && !pair.right.waiting_for_evidence(), "genuine evidence must settle both peers");
+        require(!pair.left.receive(1, withheld[1].frame), "duplicate evidence accepted");
+    }
+    // Sharing off: no evidence frame is produced, nothing waits for one and the bundle keeps its nine files.
+    {
+        EvidencePair pair(false);
+        std::vector<net::Received> withheld;
+        record_evidence_ticks(pair, [&] { drain_without_evidence(pair, withheld); });
+        require(withheld.empty(), "evidence sent while sharing is off");
+        require(pair.left.report() && !pair.left.waiting_for_evidence(), "off must not wait for evidence");
+        require(pair.left.report()->bundle.files.size() == 10, "off keeps the v1 bundle plus the journal file");
+    }
+    // Structurally invalid evidence is refused.
+    {
+        EvidencePair pair;
+        require(!pair.left.receive(1, std::array<std::uint8_t, 1>{net::desync_evidence_kind}), "empty evidence accepted");
+    }
+}
+
+// Large batches: the evidence frame stays under the match transport's default 1 MiB frame limit, what did not fit is
+// listed in the bundle, and a refused send is recorded rather than dropped silently.
+void evidence_respects_the_transport_limit() {
+    const auto big_batch = [](std::uint64_t tick, std::uint8_t tail) {
+        const bool large = tick >= 40 && tick <= 42;
+        std::vector<std::uint8_t> bytes(large ? 300 * 1024 : 300, static_cast<std::uint8_t>(tick));
+        bytes.back() = tail;
+        return bytes;
+    };
+    const auto run = [&](EvidencePair& pair, std::vector<net::Received>& withheld) {
+        for (std::uint64_t tick = 0; tick <= 60 && !(pair.left.frozen() && pair.right.frozen()); ++tick) {
+            const bool differs = tick >= 40 && tick <= 42;
+            good(pair.left.record(tick, digest(tick), {}, big_batch(tick, 1)));
+            good(pair.right.record(tick, digest(tick), {}, big_batch(tick, differs ? 2 : 1)));
+            drain_without_evidence(pair, withheld);
+        }
+    };
+    {
+        EvidencePair pair;
+        std::vector<net::Received> withheld;
+        run(pair, withheld);
+        require(withheld.size() == 2, "each peer sends one evidence frame");
+        for (const auto& frame : withheld) require(frame.frame.size() < 1024 * 1024 - 21, "evidence frame over the transport limit");
+        for (const auto& frame : withheld) good((frame.from == 0 ? pair.right : pair.left).receive(frame.from, frame.frame));
+        const auto notes = bundle_file(pair.left.report()->bundle, "evidence-notes.txt");
+        require(notes.find("tick 41") != std::string::npos && notes.find("tick 42") != std::string::npos
+            && notes.find("tick 40") == std::string::npos, "the budget notes must name the batches left out");
+        require(bundle_file(pair.left.report()->bundle, "input-diff.txt").find("tick 40 peer 1") != std::string::npos,
+            "the batch that fit is still diffed");
+    }
+    {
+        EvidencePair pair;
+        pair.a.refuse_evidence_over = pair.b.refuse_evidence_over = 1000;
+        std::vector<net::Received> withheld;
+        run(pair, withheld);
+        require(withheld.empty(), "a refused send must not reach the peer");
+        require(bundle_file(pair.left.report()->bundle, "evidence-notes.txt").find("was not sent: EAWR-NET-0204") != std::string::npos,
+            "a failed evidence send must be recorded in the bundle");
+        require(pair.left.waiting_for_evidence() && pair.left.waiting_for_peers().empty(),
+            "a missing evidence frame holds only the evidence wait");
+    }
+}
+
 int main(int argc, char** argv) {
     try {
         require(argc == 3, "usage: desync_monitor_tests fixture artifact-directory");
@@ -734,6 +949,8 @@ int main(int argc, char** argv) {
         synthetic(directory, 48, 90, false, 1);
         synthetic(directory, 48, 90, false, 7);
         synthetic(directory, 48, 55, false, 100);
+        retention_on_a_campaign_sized_state(directory, 12); // early: the previous exchange point must survive
+        retention_on_a_campaign_sized_state(directory, 17); // late: the newest point
         malformed_and_bounds(directory);
         asynchronous_peers(directory, false);
         asynchronous_peers(directory, true);
@@ -744,6 +961,9 @@ int main(int argc, char** argv) {
         repair_replay_crosses_a_retired_window(directory);
         notice_agrees_without_rows(directory);
         report_window_survives_late_note(directory);
+        input_only_divergence_shares_evidence();
+        evidence_is_authenticated_and_bounded();
+        evidence_respects_the_transport_limit();
         std::cout << "desync monitor contracts passed\n";
         return 0;
     } catch (const std::exception& exception) {

@@ -31,6 +31,30 @@ using galactic_test::expect;
 using sim::math::Fixed;
 Fixed whole(const std::int64_t n) { return Fixed::from_integer(n).value(); }
 
+void normalized_account_return() {
+    tactical::TacticalSetup setup;
+    setup.players = {{1, 0, 100, 1}};
+    setup.campaign.emplace();
+    tactical::EconomyPlayer player;
+    player.player = 1;
+    player.credit_cap = whole(-1);
+    setup.campaign->players.push_back(player);
+    tactical::EconomyView account;
+    account.player = 1;
+    std::vector<tactical::EconomyView> accounts{account};
+    auto capped = campaign::space_rule_return(setup, {}, accounts);
+    expect(capped && capped.value().credits.size() == 1 && capped.value().credits[0].credits == Fixed{},
+        "negative authored campaign cap returns the normalized zero cap");
+    auto& authored = setup.campaign->players[0];
+    authored.ai = true;
+    authored.credit_cap = whole(100);
+    authored.strategic_credits = whole(-1);
+    accounts[0].credits = whole(5);
+    auto retained = campaign::space_rule_return(setup, {}, accounts);
+    expect(retained && retained.value().credits.size() == 1 && retained.value().credits[0].credits == whole(5),
+        "negative retained strategic credits normalize before campaign return without losing the battle result");
+}
+
 units::UnitTables synthetic_tables() {
     units::UnitTables tables;
     for (const auto tag : {"Object_Max_Health_Multiplier_Space", "Hull_Vs_Hard_Points_Health_Constraint",
@@ -668,7 +692,7 @@ void installed() {
 }
 }
 int case_galactic_space_rules_tests(int argc, char**) {
-    try { if (argc > 1) installed(); else { proof(); campaign_pad_difficulty(); carrier_codec(); reserve_admission(); presentation_gates(); } }
+    try { if (argc > 1) installed(); else { normalized_account_return(); proof(); campaign_pad_difficulty(); carrier_codec(); reserve_admission(); presentation_gates(); } }
     catch (const std::exception& error) { expect(false, error.what()); }
     return galactic_test::failures == 0 ? 0 : 1;
 }

@@ -99,7 +99,7 @@ void BattleInput::record_pick_candidates(const ui::PickRay& pick_ray) {
         const auto contact = ui::pick_contact(pick_ray, unit);
         const auto box = ui::ray_box_contact(pick_ray, unit.box);
         if (!contact && !box) continue;
-        PickCandidate candidate{unit.entity, unit.part};
+        PickCandidate candidate{unit.entity, unit.part, {}, {}, {}};
         if (contact) {
             ui::BattleUnit geometry = unit;
             geometry.sphere_radius = 0.0F;

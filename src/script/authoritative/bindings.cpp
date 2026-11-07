@@ -266,10 +266,11 @@ public:
                 if (status != 0) {
                     const char* message = lua_tostring(state_, -1);
                     const ::std::string text = message != nullptr ? message : "proximity callback failed";
-                    report(text.find(codes::missing_api) != ::std::string::npos ? codes::missing_api : codes::script_error, text);
+                    add_lua_error(instance_, text.find(codes::missing_api) != ::std::string::npos ? codes::missing_api : codes::script_error, text);
                     instance_.rollback(mark);
                 }
                 lua_settop(state_, top);
+                if (instance_.outcome == InstanceOutcome::faulted) return core::Result<void>::success();
                 if (instance_.sandbox->fault() != sf::SandboxFault::none) return core::Result<void>::success();
                 if (generation != list.generation || instance_.exit_requested) break;
             }
@@ -349,6 +350,26 @@ int generic_call_object(lua_State* state) { return generic_call_with(state, true
 // A handle method: upvalues are the binding index and the handle.
 int bound_method(lua_State* state) { return generic_call_with(state, false, true); }
 
+// An audit lookup returns a callable, but records only actual calls, not probes.
+int audit_missing_call(lua_State* state) {
+    Instance& instance = instance_of(state);
+    instance.shared->config.missing_call_sink->called(instance.id,
+        ::std::string_view(lua_tostring(state, lua_upvalueindex(1)), lua_strlen(state, lua_upvalueindex(1))));
+    lua_pushnil(state);
+    return 1;
+}
+
+int audit_missing_index(lua_State* state) {
+    if (lua_type(state, 2) != LUA_TSTRING) { lua_pushnil(state); return 1; }
+    const auto name = ::std::string_view(lua_tostring(state, 2), lua_strlen(state, 2));
+    if (!instance_of(state).shared->config.missing_call_sink->stub_global(name)) {
+        lua_pushnil(state); return 1;
+    }
+    lua_pushvalue(state, 2);
+    lua_pushcclosure(state, audit_missing_call, 1);
+    return 1;
+}
+
 // `__index` of every handle: a method of the handle's kind, bound to it, or nil.
 int handle_index_body(lua_State* state) {
     Instance& instance = *running_instance;
@@ -367,12 +388,33 @@ int handle_index_body(lua_State* state) {
 int handle_index(lua_State* state) {
     instance_of(state);
     const int results = handle_index_body(state);
-    if (results == 0) lua_pushnil(state);
+    if (results == 0) {
+        if (running_instance->shared->config.missing_call_sink && lua_type(state, 2) == LUA_TSTRING) {
+            sf::HostHandle handle;
+            if (running_instance->sandbox->to_handle(state, 1, handle)) {
+                lua_pushfstring(state, "handle[%d].%s", static_cast<int>(handle.kind), lua_tostring(state, 2));
+                lua_pushcclosure(state, audit_missing_call, 1);
+                return 1;
+            }
+        }
+        lua_pushnil(state);
+    }
     return 1;
 }
 
 int object_not_callable(lua_State* state) {
     return luaL_error(state, "attempt to call binding object `%s'", lua_tostring(state, lua_upvalueindex(1)));
+}
+
+int audit_object_index(lua_State* state) {
+    lua_pushvalue(state, 2);
+    lua_rawget(state, lua_upvalueindex(1));
+    if (!lua_isnil(state, -1)) return 1;
+    lua_pop(state, 1);
+    if (lua_type(state, 2) != LUA_TSTRING) { lua_pushnil(state); return 1; }
+    lua_pushfstring(state, "%s.%s", lua_tostring(state, lua_upvalueindex(2)), lua_tostring(state, 2));
+    lua_pushcclosure(state, audit_missing_call, 1);
+    return 1;
 }
 
 // ---- Threads (L-20 to L-26) ----
@@ -718,6 +760,10 @@ void install_object(Instance& instance, lua_State* state, const ObjectSpec& spec
         lua_rawset(state, -3);
     }
     instance.sandbox->freeze_table(-1);
+    if (instance.shared->config.missing_call_sink) {
+        lua_pushlstring(state, spec.name.data(), spec.name.size());
+        lua_pushcclosure(state, audit_object_index, 2);
+    }
     lua_rawset(state, -3);
     instance.sandbox->freeze_table(-1);
     lua_setmetatable(state, -2);
@@ -837,7 +883,16 @@ void install_bindings(Instance& instance) {
     }
     for (const ObjectSpec& spec : objects) install_object(instance, state, spec);
     for (const auto& [name, spec] : generic) install_object(instance, state, spec);
-    if (!instance.shared->methods.empty()) instance.sandbox->set_handle_index(handle_index);
+    if (!instance.shared->methods.empty() || instance.shared->config.missing_call_sink)
+        instance.sandbox->set_handle_index(handle_index);
+    if (instance.shared->config.missing_call_sink) {
+        lua_newtable(state);
+        lua_pushliteral(state, "__index");
+        lua_pushcfunction(state, audit_missing_index);
+        lua_rawset(state, -3);
+        instance.sandbox->freeze_table(-1);
+        lua_setmetatable(state, LUA_GLOBALSINDEX);
+    }
     lua_settop(state, 0);
 }
 
@@ -870,6 +925,15 @@ void push_value(lua_State* state, const Value& value) {
 void add_diagnostic(Instance& instance, ::std::string_view code, ::std::string message) {
     instance.staging.diagnostics.push_back(
         ScriptDiagnostic{::std::string(code), ::std::move(message), instance.tick, instance.id, instance.current_thread});
+    if (instance.outcome == InstanceOutcome::faulted && !instance.fault_diagnostic)
+        instance.fault_diagnostic = instance.staging.diagnostics.size() - 1;
+}
+
+void add_lua_error(Instance& instance, ::std::string_view code, ::std::string message) {
+    // Owner policy: only an uncaught Lua failure retires the GC provider.
+    // BindingContext::report can diagnose a sourced fallback and continue.
+    if (instance.shared->config.galactic_clock) instance.outcome = InstanceOutcome::faulted;
+    add_diagnostic(instance, code, ::std::move(message));
 }
 
 void end_slot(Instance& instance, ::std::size_t index) {
@@ -889,3 +953,31 @@ void end_slot(Instance& instance, ::std::size_t index) {
 }
 
 } // namespace eawr::script::authoritative::detail
+
+namespace eawr::script::authoritative {
+namespace {
+core::Diagnostic global_value_error(std::string message) {
+    core::Diagnostic out; out.code = std::string(codes::invalid_request); out.message = std::move(message); return out;
+}
+}
+core::Result<void> register_shared_global_values(ScriptScheduler& scripts, GlobalValueReader reader) {
+    if (auto added = scripts.register_binding("GlobalValue.Get", [reader = std::move(reader)](
+            BindingContext&, const ValueList& args) {
+        const auto* key = args.empty() ? nullptr : std::get_if<std::string>(&args[0].data);
+        const auto found = key && reader ? reader(*key) : std::nullopt;
+        return core::Result<ValueList>::success(found ? ValueList{*found} : ValueList{});
+    }); !added) return added;
+    return scripts.register_binding("GlobalValue.Set", [](BindingContext& context, const ValueList& args) {
+        if (args.size() != 2 || !std::holds_alternative<std::string>(args[0].data))
+            return core::Result<ValueList>::failure(global_value_error("GlobalValue.Set expects a name and a value"));
+        if (std::holds_alternative<Handle>(args[1].data))
+            return core::Result<ValueList>::failure(global_value_error("GlobalValue.Set rejects engine objects (L-55)"));
+        if (std::holds_alternative<std::vector<Value>>(args[1].data)) {
+            context.report(codes::unsupported_api, "GlobalValue.Set: table identity is unsupported; registry unchanged (L-55)");
+            context.issue_command(std::string(global_value_command), {args[0]});
+        } else context.issue_command(std::string(global_value_command), args);
+        return core::Result<ValueList>::success({});
+    });
+}
+
+} // namespace eawr::script::authoritative

@@ -134,7 +134,7 @@ class SpaceSourceCases:
         build = source.index("auto built = terrain::build(map);")
         self.assertLess(branch, build, "the space branch must precede the land-only terrain build")
         population = (ROOT / "apps/viewer/src/map_mode_ready_population.cpp").read_text(encoding="utf-8")
-        self.assertIn("return state.ready_space(host, map, catalog, catalog_failure);", source)
+        self.assertIn("state.ready_space(host, map, catalog, catalog_failure,", source)
         self.assertIn("state.space->ready(host, map", population)
         # A space map's frame is the space view's (then the #82 battle input's), never the land loop.
         live = (ROOT / "apps/viewer/src/map_mode_live.cpp").read_text(encoding="utf-8")

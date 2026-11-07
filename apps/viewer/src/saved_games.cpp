@@ -3,6 +3,7 @@
 #include "galactic/save_dialog_model.hpp"
 
 #include "eawr/platform/saved_games.hpp"
+#include "eawr/checkpoint/checkpoint.hpp"
 
 #include <algorithm>
 #include <ctime>
@@ -141,7 +142,11 @@ std::vector<ui::LoadGameEntry> saved_game_entries(const std::span<const SavedGam
 }
 
 DirectorySavedGameStore::DirectorySavedGameStore(fs::path directory, SavedGameClock calendar, const bool require_campaign)
-    : directory_(std::move(directory)), calendar_(std::move(calendar)), require_campaign_(require_campaign) {}
+    : DirectorySavedGameStore(std::move(directory), std::move(calendar),
+                              require_campaign ? SavedGameFilter::single_player : SavedGameFilter::all) {}
+
+DirectorySavedGameStore::DirectorySavedGameStore(fs::path directory, SavedGameClock calendar, const SavedGameFilter filter)
+    : directory_(std::move(directory)), calendar_(std::move(calendar)), filter_(filter) {}
 
 std::vector<SavedGameFile> DirectorySavedGameStore::files(std::string& problem) const {
     std::vector<SavedGameFile> files;
@@ -161,7 +166,8 @@ std::vector<SavedGameFile> DirectorySavedGameStore::files(std::string& problem) 
     for (std::size_t index = 0; index < count; ++index) {
         const platform::LiveSaveSlot& slot = slots.value()[index];
         // WGS-161: multiplayer saves are not in the single-player Load list.
-        if (require_campaign_ && slot.campaign && slot.campaign->multiplayer) continue;
+        if (slot.campaign && filter_ != SavedGameFilter::all
+            && slot.campaign->multiplayer != (filter_ == SavedGameFilter::multiplayer)) continue;
         SavedGameFile file;
         file.name = slot.name;
         file.description = slot.description;
@@ -170,8 +176,11 @@ std::vector<SavedGameFile> DirectorySavedGameStore::files(std::string& problem) 
         file.galactic_frame = slot.galactic_frame;
         file.bytes = slot.bytes;
         file.child = slot.child;
+        file.skirmish = slot.skirmish;
         if (slot.diagnostic) file.problem = slot.diagnostic->message;
-        else if (require_campaign_ && !slot.campaign) file.problem = "This save records no campaign.";
+        // #3989: listed so the player sees it; loading a skirmish battle save is the next step of the feature.
+        else if (slot.skirmish) file.problem = "This skirmish battle save cannot be loaded in this build yet.";
+        else if (filter_ != SavedGameFilter::all && !slot.campaign) file.problem = "This save records no campaign.";
         files.push_back(std::move(file));
     }
     return files;
@@ -192,6 +201,54 @@ ui::DeleteResult DirectorySavedGameStore::erase(const std::string_view name) {
     error.clear();
     if (!fs::is_regular_file(target, error)) return ui::DeleteResult::missing;
     return platform::delete_saved_game(directory_, name) ? ui::DeleteResult::deleted : ui::DeleteResult::failed;
+}
+
+ui::SavedGameListing checked_saved_game_listing(const DirectorySavedGameStore& source,
+    const std::function<std::string(std::span<const std::uint8_t>)>& admission,
+    const std::function<void(std::string_view, std::span<const std::uint8_t>)>& observe) {
+    auto listing = source.list();
+    const auto directory = source.directory().generic_u8string();
+    for (auto& row : listing.entries) if (row.playable) {
+        auto bytes = platform::read_saved_game_bytes(std::string(directory.begin(), directory.end()), row.file_name);
+        if (bytes && observe) observe(row.file_name, bytes.value());
+        row.problem = bytes ? admission(bytes.value()) : bytes.error().message;
+        row.playable = row.problem.empty();
+    }
+    return listing;
+}
+
+std::optional<mods::ModDescription> saved_game_mod_description(std::span<const std::uint8_t> bytes) {
+    const auto saved = checkpoint::parse_checkpoint(bytes);
+    if (!saved) return {};
+    const auto* section = saved.value().find(checkpoint::SectionId::mod_list);
+    // Version 1 is the mod-description section this viewer understands.
+    if (!section || section->version != 1) return {};
+    return mods::decode_description(section->bytes);
+}
+
+std::string saved_game_mod_details(std::span<const std::uint8_t> bytes, const mods::ModDescription& mounted) {
+    return saved_game_mod_details(saved_game_mod_description(bytes), mounted);
+}
+
+std::string saved_game_mod_details(const std::optional<mods::ModDescription>& description, const mods::ModDescription& mounted) {
+    if (!description) return "Mods: unavailable";
+    std::string text = "Mods: ";
+    if (description->entries.empty()) text += description->complete ? "None" : "Unknown";
+    for (const auto& entry : description->entries) {
+        if (&entry != &description->entries.front()) text += ", ";
+        text += !entry.name.empty() ? entry.name : !entry.key.empty() ? entry.key : "Unknown mod";
+    }
+    const auto findings = mods::compare_descriptions(*description, mounted);
+    text += mods::description_needs_confirmation(*description, mounted) ? "\nDifferent from mounted mods"
+        : findings.empty() ? "\nMatches mounted mods" : "\nMatch could not be fully checked";
+    return text;
+}
+
+ui::DeleteResult SnapshotSavedGameStore::erase(const std::string_view name) {
+    const auto result = source_->erase(name);
+    if (result == ui::DeleteResult::deleted || result == ui::DeleteResult::missing)
+        std::erase_if(listing_.entries, [&](const auto& row) { return row.file_name == name; });
+    return result;
 }
 
 } // namespace eawr::viewer

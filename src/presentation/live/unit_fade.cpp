@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <iterator>
+#include <span>
 
 namespace eawr::presentation::live {
 namespace {
@@ -90,39 +91,47 @@ void StealthBlend::service(const bool on, const double transition_seconds) {
         1.0 / static_cast<double>(sim::tactical::logical_frames_per_second));
 }
 
-void UnitFade::advance(const std::span<const sim::EntityId> visible, const std::span<const sim::EntityId> alive,
-                       const double frames, const std::span<const sim::EntityId> immediate) {
-    // Both spans are ascending IDs (the snapshot's own contract); grow the lifetime set with
-    // whatever `alive` has not held before, remembering which entities were new to it.
-    std::vector<sim::EntityId> first_sight;
-    for (const sim::EntityId entity : alive) {
-        if (!std::binary_search(ever_seen_.begin(), ever_seen_.end(), entity)) first_sight.push_back(entity);
-    }
-    if (!first_sight.empty()) {
-        ever_seen_.insert(ever_seen_.end(), first_sight.begin(), first_sight.end());
-        std::sort(ever_seen_.begin(), ever_seen_.end());
-    }
+namespace {
 
-    // FW-18/FW-21: a unit the session no longer holds is forgotten at once, whatever its opacity.
-    for (auto entry = fading_.begin(); entry != fading_.end();) {
-        entry = std::binary_search(alive.begin(), alive.end(), entry->first) ? std::next(entry) : fading_.erase(entry);
-    }
+// The inputs of UnitFade::advance are strictly ascending by contract. A caller that breaks it gets the
+// normalised (sorted, unique) copy, so the walks below decide as a sorted input would.
+std::span<const sim::EntityId> ascending(const std::span<const sim::EntityId> ids, std::vector<sim::EntityId>& scratch) {
+    bool ordered = true;
+    for (std::size_t index = 1; index < ids.size() && ordered; ++index) ordered = ids[index - 1] < ids[index];
+    if (ordered) return ids;
+    scratch.assign(ids.begin(), ids.end());
+    std::sort(scratch.begin(), scratch.end());
+    scratch.erase(std::unique(scratch.begin(), scratch.end()), scratch.end());
+    return scratch;
+}
 
-    // FW-17: a unit new to `alive` this call starts at full opacity when shown (the battle's
-    // opening roster, or one born since); one `alive` already held before starts a real ease.
-    for (const sim::EntityId entity : visible) {
-        auto entry = fading_.find(entity);
-        if (entry != fading_.end()) {
-            entry->second.target_visible = true;
-            continue;
+// Moves `cursor` to the first id not below `entity`; true when it stands on `entity`.
+bool reaches(const std::span<const sim::EntityId> ids, std::size_t& cursor, const sim::EntityId entity) {
+    while (cursor < ids.size() && ids[cursor] < entity) ++cursor;
+    return cursor < ids.size() && ids[cursor] == entity;
+}
+
+} // namespace
+
+void UnitFade::advance(const std::span<const sim::EntityId> visible_in, const std::span<const sim::EntityId> alive_in,
+                       const double frames, const std::span<const sim::EntityId> immediate_in) {
+    // The spans are ascending IDs (the snapshot's own contract); everything below is a merge walk over them and
+    // the ascending entries, each entry independent of the others, so the result equals a keyed lookup per entity.
+    const std::span<const sim::EntityId> visible = ascending(visible_in, sorted_visible_);
+    const std::span<const sim::EntityId> alive = ascending(alive_in, sorted_alive_);
+    const std::span<const sim::EntityId> immediate = ascending(immediate_in, sorted_immediate_);
+
+    // Grow the lifetime set with whatever `alive` has not held before, remembering which entities were new to it.
+    first_sight_.clear();
+    {
+        std::size_t seen = 0;
+        for (const sim::EntityId entity : alive) {
+            if (!reaches(ever_seen_, seen, entity)) first_sight_.push_back(entity);
         }
-        const bool spawned_now = std::binary_search(first_sight.begin(), first_sight.end(), entity)
-            || std::binary_search(immediate.begin(), immediate.end(), entity);
-        fading_.emplace(entity, State{spawned_now ? 1.0 : 0.0, 0.0, true});
     }
-    // FW-17: every other tracked unit starts or continues easing toward hidden.
-    for (auto& [entity, state] : fading_) {
-        if (!std::binary_search(visible.begin(), visible.end(), entity)) state.target_visible = false;
+    if (!first_sight_.empty()) {
+        ever_seen_.insert(ever_seen_.end(), first_sight_.begin(), first_sight_.end());
+        std::inplace_merge(ever_seen_.begin(), ever_seen_.end() - static_cast<std::ptrdiff_t>(first_sight_.size()), ever_seen_.end());
     }
 
     // Aggregate whole logical-frame steps, then apply at most one fractional step.
@@ -131,36 +140,85 @@ void UnitFade::advance(const std::span<const sim::EntityId> visible, const std::
     const double whole = std::floor(elapsed);
     const double fraction = elapsed - whole;
     const double frame_seconds = 1.0 / static_cast<double>(sim::tactical::logical_frames_per_second);
-    for (auto& [entity, state] : fading_) {
-        const double target = state.target_visible ? 1.0 : 0.0;
-        // WSU-05 / FW-25: tagged models jump; their dim copy is a separate draw.
-        if (std::binary_search(immediate.begin(), immediate.end(), entity)) {
-            state.value = target;
-            state.velocity = 0.0;
+
+    next_.clear();
+    std::size_t old_at = 0, visible_at = 0, alive_at = 0, first_at = 0, immediate_at = 0;
+    sim::EntityId previous_visible = 0;
+    bool any_visible = false;
+    // Walk the union of the tracked entries and the visible ids in ascending order.
+    while (old_at < fading_.size() || visible_at < visible.size()) {
+        const bool have_old = old_at < fading_.size();
+        const bool have_visible = visible_at < visible.size();
+        const sim::EntityId entity = have_old && (!have_visible || fading_[old_at].entity <= visible[visible_at])
+            ? fading_[old_at].entity : visible[visible_at];
+        const bool is_old = have_old && fading_[old_at].entity == entity;
+        bool is_visible = false;
+        while (visible_at < visible.size() && visible[visible_at] <= entity) {
+            if (visible[visible_at] == entity && !(any_visible && previous_visible == entity)) is_visible = true;
+            previous_visible = visible[visible_at];
+            any_visible = true;
+            ++visible_at;
+        }
+        // FW-18/FW-21: a unit the session no longer holds is forgotten at once, whatever its opacity.
+        const bool is_alive = reaches(alive, alive_at, entity);
+        State state;
+        if (is_old && is_alive) {
+            state = fading_[old_at].state;
+            state.target_visible = is_visible; // FW-17: a shown unit eases up, every other tracked unit eases toward hidden
+        } else if (is_visible) {
+            // FW-17: a unit new to `alive` this call starts at full opacity when shown; one `alive` already held starts a real ease.
+            const bool spawned_now = reaches(first_sight_, first_at, entity) || reaches(immediate, immediate_at, entity);
+            state = State{spawned_now ? 1.0 : 0.0, 0.0, true};
+        } else {
+            if (is_old) ++old_at;
             continue;
         }
-        ease(state.value, state.velocity, target, looks_.smooth_seconds, frame_seconds, whole);
-        ease(state.value, state.velocity, target, looks_.smooth_seconds, fraction * frame_seconds);
+        if (is_old) ++old_at;
+        const double target = state.target_visible ? 1.0 : 0.0;
+        // WSU-05 / FW-25: tagged models jump; their dim copy is a separate draw.
+        if (reaches(immediate, immediate_at, entity)) {
+            state.value = target;
+            state.velocity = 0.0;
+        } else {
+            ease(state.value, state.velocity, target, looks_.smooth_seconds, frame_seconds, whole);
+            ease(state.value, state.velocity, target, looks_.smooth_seconds, fraction * frame_seconds);
+        }
+        state.value = std::clamp(state.value, 0.0, 1.0);
+        // FW-18: fully faded out and still hidden; stop drawing and forget it.
+        if (!state.target_visible && state.value <= looks_.hide_threshold) continue;
+        next_.push_back({entity, state});
     }
-    for (auto& [entity, state] : fading_) state.value = std::clamp(state.value, 0.0, 1.0);
-
-    // FW-18: fully faded out and still hidden; stop drawing and forget it.
-    for (auto entry = fading_.begin(); entry != fading_.end();) {
-        const bool done = !entry->second.target_visible && entry->second.value <= looks_.hide_threshold;
-        entry = done ? fading_.erase(entry) : std::next(entry);
-    }
+    fading_.swap(next_);
 }
 
 std::optional<float> UnitFade::opacity(const sim::EntityId entity) const noexcept {
-    const auto entry = fading_.find(entity);
-    if (entry == fading_.end()) return std::nullopt;
-    return static_cast<float>(entry->second.value);
+    const auto entry = std::lower_bound(fading_.begin(), fading_.end(), entity,
+        [](const Entry& candidate, const sim::EntityId id) { return candidate.entity < id; });
+    if (entry == fading_.end() || entry->entity != entity) return std::nullopt;
+    return static_cast<float>(entry->state.value);
+}
+
+std::optional<float> UnitFade::opacity_walk(const sim::EntityId entity, std::size_t& cursor) const noexcept {
+    if (cursor > fading_.size() || (cursor > 0 && fading_[cursor - 1].entity >= entity)) {
+        cursor = static_cast<std::size_t>(std::lower_bound(fading_.begin(), fading_.end(), entity,
+            [](const Entry& candidate, const sim::EntityId id) { return candidate.entity < id; }) - fading_.begin());
+    }
+    while (cursor < fading_.size() && fading_[cursor].entity < entity) ++cursor;
+    if (cursor == fading_.size() || fading_[cursor].entity != entity) return std::nullopt;
+    return static_cast<float>(fading_[cursor].state.value);
 }
 
 std::vector<sim::EntityId> UnitFade::drawn() const {
     std::vector<sim::EntityId> result;
     result.reserve(fading_.size());
-    for (const auto& [entity, state] : fading_) result.push_back(entity);
+    for (const Entry& entry : fading_) result.push_back(entry.entity);
+    return result;
+}
+
+std::vector<UnitFade::Row> UnitFade::rows() const {
+    std::vector<Row> result;
+    result.reserve(fading_.size());
+    for (const Entry& entry : fading_) result.push_back({entry.entity, entry.state.value, entry.state.velocity, entry.state.target_visible});
     return result;
 }
 

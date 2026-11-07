@@ -4,7 +4,7 @@
 
 namespace eawr::viewer::galactic {
 [[nodiscard]] inline bool hero_action_fixture(std::string_view name) {
-    return name == "theft" || name == "theft-single" || name == "neutralization";
+    return name == "theft" || name == "theft-single" || name == "theft-many" || name == "neutralization";
 }
 // Explicit copied snapshot fixture, never campaign state or action execution.
 [[nodiscard]] inline std::shared_ptr<const sim::galactic::GalacticSnapshot> hero_action_fixture_snapshot(
@@ -29,6 +29,9 @@ namespace eawr::viewer::galactic {
     h::TheftPreparation theft;
     theft.choices = {{10,101,1000,f(250),h::Fixed::from_ratio(3,4).value(),f(60),name == "theft-single"}};
     if (name != "theft-single") theft.choices.push_back({10,101,1001,f(2000),f(1),f(70),false});
+    // WGCH-188: a list longer than the twelve buttons still opens, showing what fits.
+    if (name == "theft-many") for (int extra = 0; extra < 11; ++extra)
+        theft.choices.push_back({10,101,static_cast<h::Id>(1100 + extra),f(100 + extra),f(1),f(60),false});
     h::NeutralizationPreparation neutral;
     neutral.choices = {{10,101,20,1002,false,true,f(200),f(120),f(240)},
         {10,101,21,1003,false,false,f(400),f(120),f(300)},

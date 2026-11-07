@@ -9,7 +9,6 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
-#include <optional>
 #include <tuple>
 #include <utility>
 #include <vector>

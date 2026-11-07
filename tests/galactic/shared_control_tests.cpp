@@ -4,6 +4,7 @@
 #include <exception>
 #include <variant>
 #include "../support/env.hpp"
+#include "eawr/vfs/vfs.hpp"
 #include "../support/check.hpp"
 #include "../support/result.hpp"
 #include "../support/lockstep_loopback.hpp"

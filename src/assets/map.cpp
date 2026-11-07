@@ -1,4 +1,5 @@
 #include "eawr/core/load_profile.hpp"
+#include "eawr/vfs/vfs.hpp"
 #include "asset_internal.hpp"
 #include "eawr/assets/map.hpp"
 #include "eawr/data/tag_trace.hpp"
@@ -13,6 +14,10 @@
 #include <utility>
 
 namespace eawr::assets {
+std::string describe_source_vec3(const SourceVec3& value) {
+    return std::to_string(value.x) + ", " + std::to_string(value.y) + ", " + std::to_string(value.z);
+}
+
 std::uint32_t object_type_crc(const std::string_view logical_name) noexcept {
     std::uint32_t crc = 0xffffffffU;
     for (const unsigned char raw : logical_name) {

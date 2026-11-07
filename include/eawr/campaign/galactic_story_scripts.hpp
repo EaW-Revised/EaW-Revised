@@ -7,9 +7,10 @@
 
 #include "eawr/core/result.hpp"
 #include "eawr/script/authoritative/scheduler.hpp"
+#include "eawr/script/authoritative/galactic_bridge.hpp"
 #include "eawr/sim/galactic/story_engine.hpp"
 #include "eawr/sim/galactic/types.hpp"
-#include "eawr/vfs/vfs.hpp"
+#include "eawr/vfs/vfs_fwd.hpp"
 
 #include <cstdint>
 #include <map>
@@ -19,6 +20,7 @@
 #include <string>
 #include <string_view>
 #include <vector>
+#include <utility>
 
 namespace eawr::campaign {
 
@@ -33,10 +35,17 @@ struct GalacticStoryPlayers {
     struct Player {
         sim::galactic::PlayerId id{};
         std::string faction;
+        std::string difficulty{"Normal"};
     };
     std::vector<std::string> factions;
     std::vector<Player> players;
     std::optional<sim::galactic::PlayerId> local_player;
+    std::vector<std::pair<std::string, sim::galactic::PlanetId>> planets;
+    std::vector<std::pair<std::string, sim::galactic::TypeId>> types{};
+    // Project deviation (co-op design D5): the one faction every human seat holds in a networked single-player-rules
+    // session. Derived from the agreed roster, so it is the same on every peer; a multiplayer scheduler exposes
+    // `Find_Player("local")` as this player only, never a per-peer local one.
+    std::optional<sim::galactic::PlayerId> shared_local_player{};
 };
 
 // Immutable content of one campaign start: the pinned script modules and which sub-plot runs which one.
@@ -58,6 +67,10 @@ public:
     [[nodiscard]] const std::vector<Entry>& entries() const noexcept { return entries_; }
     [[nodiscard]] const std::map<std::string, std::string>& modules() const noexcept { return modules_; }
     [[nodiscard]] const std::vector<std::string>& notes() const noexcept { return notes_; }
+    // True when any pinned module names Spawn_Unit or Prevent_AI_Usage (a lexical scan at load, comments included, so
+    // it only errs toward true). Only such a campaign runs its story instances through the ordered native shadow;
+    // every other campaign keeps the partitioned story service and its previous hashes.
+    [[nodiscard]] bool uses_immediate_effects() const noexcept { return uses_immediate_effects_; }
     // The entry of the sub-plot with this file name, or null.
     [[nodiscard]] const Entry* find(std::string_view subplot) const noexcept;
     // Stable text over module paths and bytes and the sub-plot bindings, for the content identity.
@@ -67,6 +80,7 @@ private:
     std::vector<Entry> entries_;
     std::map<std::string, std::string> modules_;
     std::vector<std::string> notes_;
+    bool uses_immediate_effects_{};
 };
 
 // The story scheduler of a galactic campaign: the content's modules pinned, the Library and Story directories on
@@ -75,7 +89,8 @@ private:
 // and clock. `multiplayer`: the game mode is a multiplayer one (RGC-196: Free_Random uses the synchronised stream).
 [[nodiscard]] core::Result<script::authoritative::ScriptScheduler> create_galactic_story_scheduler(
     const GalacticStoryScripts&, script::authoritative::SessionConfig base, bool multiplayer = false,
-    const GalacticStoryPlayers& players = {});
+    const GalacticStoryPlayers& players = {}, script::authoritative::GalacticSnapshotReader = {},
+    script::authoritative::GlobalValueReader = {});
 
 // A fresh campaign start: one instance per bound sub-plot, then the engine's initialization events
 // (`Base_Definitions`, then the `main` thread) for the first service. A script whose chunk fails is left out and

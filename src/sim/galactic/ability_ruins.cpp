@@ -138,6 +138,7 @@ core::Result<void> GalacticSession::Impl::execute_planet_ruins(const RuinsPlan& 
     {
         auto& surface = control->planets[index];
         surface.landed.clear();
+        surface.ground_layout.clear();
         surface.ground_base = {}; // the ground base level refreshes after clearing
         surface.transition_modifiers.clear(); // WGCH-67: political modifiers clear regardless of the flag
         dirty[static_cast<std::size_t>(StateSection::control)] = true;

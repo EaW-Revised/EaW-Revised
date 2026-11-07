@@ -10,12 +10,16 @@ struct LandFactionStart {
     std::string faction;
     std::vector<std::string> forces;
     bool forces_authored{true}; // false means the tag was absent, distinct from an authored empty list.
+    // Vehicles-only start: the stock vehicle companies a human of this faction starts with instead of
+    // `forces` (see set_land_vehicles_only). Empty = this faction has no vehicle set; its defaults stay.
+    std::vector<std::string> vehicle_forces;
     std::vector<sim::galactic::IncomeCurvePoint> company_cap;
 };
 struct LandStartInputs {
     StartInputs common;
     assets::Map map;
     std::vector<LandFactionStart> factions;
+    bool human_vehicles_only{}; // one-switch vehicles-only land start for human slots; land only, no rules change
     units::UnitTables static_tables; // scene types and every authored pre-built marker candidate
 };
 
@@ -55,6 +59,14 @@ struct LandStart {
     const vfs::Vfs&, const data::Catalog&, SetupMapQuery query = {});
 [[nodiscard]] core::Result<LandStartInputs> read_land_start_inputs(
     const Fixture&, const vfs::Vfs&, const data::Catalog&, const units::UnitTables&);
+// The stock vehicle companies a vehicles-only human start gives `faction` (empty for a faction without a set,
+// e.g. a mod faction). Names only; build_land_start checks each is a generic-team vehicle company.
+[[nodiscard]] std::vector<std::string> land_vehicle_start_forces(std::string_view faction);
+// True for a company that moves on the generic team locomotor and whose members all carry a vehicle collision
+// class (Vehicle, Large Vehicle, Giant Vehicle): no infantry container team, no air or empty member list.
+[[nodiscard]] bool is_land_vehicle_company(const units::LandCompany& company) noexcept;
+// Turns the switch on: sets human_vehicles_only and fills every faction's vehicle_forces.
+void set_land_vehicles_only(LandStartInputs& inputs, bool enabled);
 // WLEN-53..56, LC-46: pure start construction. L5 validates/places company members
 // through L2 plans and L4. Unbound scene objects remain census-only, with named notes.
 [[nodiscard]] core::Result<LandStart> build_land_start(

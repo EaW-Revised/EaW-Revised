@@ -43,7 +43,9 @@ public:
     // `game_menu` is the in-game menu itself (IDD_GAME_OPTIONS_DIALOG, in_game context only): Options opens
     // the hub, whose Back returns here; Resume closes the screen; Quit Game asks first, then closes it with
     // quit_requested() set.
-    enum class Page : std::uint8_t { hub, audio, video, performance, advanced_video, gameplay, keyboard, network, game_menu };
+    // `save_game` is the game menu's Save page (IDD_SAVE_GAME_DIALOG, #3989), open only when Options::save_game is set.
+    enum class Page : std::uint8_t { hub, audio, video, performance, tweaks, advanced_video, gameplay, keyboard, network, game_menu,
+                                     save_game };
 
     struct Options final {
         // The content the caller already mounted (its VFS); otherwise the roots below are mounted
@@ -61,6 +63,12 @@ public:
         // but not applied.
         bool apply_window{true};
         bool multiplayer{}; // #5130 contextual hover-name default.
+        // #3989: the game menu's Save, for a battle that can be saved (a local single-player skirmish).
+        // `save_names` lists the saves the Save page shows; `save_game` saves under the chosen name
+        // (`overwrite` once the player confirmed replacing a save) and is false when it refused. Unset:
+        // Save stays disabled. Load stays disabled either way (loading a skirmish save is not built yet).
+        std::function<std::vector<std::string>()> save_names;
+        std::function<bool(const std::string& name, bool overwrite)> save_game;
     };
 
     // One state a control showed, for the report and the GPU case.
@@ -134,12 +142,17 @@ private:
     void load_draft_into_controls();
     void sync_draft_from_controls();
     void apply_preview();
+    void update_tweaks_dirty();
+    void update_performance_dirty();
 
     // Signal sinks, bound with the gadget id.
     void on_pressed(godot::String id);
     void on_toggled(bool pressed, godot::String id);
     void on_value_changed(double value, godot::String id);
     void on_item_selected(int64_t index, godot::String id);
+    void on_focus_changed(godot::String id, bool focused);
+    // #5856: the viewport changed size while the screen is up; re-centre by rebuilding the page.
+    void on_viewport_resized();
 
     void handle_button(const std::string& id);
     void commit_page(bool leave);
@@ -149,6 +162,9 @@ private:
     // The hub's Back (and Esc on it): the game menu when that opened the screen, else closes it.
     void leave_hub();
     void ask_quit();
+    // #3989: the Save page's Save: a new name saves at once, an existing one asks first (TEXT_SAVE_CONFIRM).
+    void save_named(const std::string& name, bool overwrite);
+    void ask_overwrite(std::string name);
     void on_confirm_result(int64_t result);
     void close_screen();
     void apply_committed(const presentation::ui::VideoSettings& previous_video);
@@ -165,13 +181,22 @@ private:
     std::string failure_;
     Page page_{Page::hub};
     int keyboard_page_{1};
+    int performance_scroll_{};
     bool file_existed_{};
     bool shown_{};
     bool built_{};
     // Opened on the game menu: the hub is one level below it.
     bool menu_root_{};
     bool quit_requested_{};
+    // The viewport size the current page was laid out for (0 = none yet).
+    float built_width_{};
+    float built_height_{};
+    bool resize_connected_{};
     int64_t confirm_id_{};
+    // What the open confirmation box answers: Quit Game, or replacing the save named `overwrite_name_`.
+    enum class Confirm : std::uint8_t { quit, overwrite };
+    Confirm confirm_{Confirm::quit};
+    std::string overwrite_name_;
     // The page being filled: control signals fire while values are set and must not edit the draft.
     bool loading_{};
     bool dirty_{};

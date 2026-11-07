@@ -10,6 +10,8 @@
 #include <functional>
 #include <optional>
 #include <span>
+#include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -189,6 +191,11 @@ struct StackAccumulator final {
         icons.push_back(std::move(icon));
     }
     return icons;
+}
+
+// icon_fleet0n Icon_Alternate_Texture_Name[0]: the stealth mark art of an all-stealth card, empty otherwise.
+inline std::string_view stealth_mark_art(const bool all_stealth, const std::span<const std::string> alternates) {
+    return all_stealth && !alternates.empty() ? std::string_view{alternates.front()} : std::string_view{};
 }
 
 } // namespace eawr::viewer::galactic

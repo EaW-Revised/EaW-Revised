@@ -1,6 +1,7 @@
 #include "replay_internal.hpp"
 #include <algorithm>
 #include <functional>
+#include <optional>
 #include <tuple>
 #include <set>
 
@@ -272,8 +273,12 @@ core::Result<void> validate_setup(const TacticalSetup& setup) {
         if (!setup.first_free_entity_id || setup.campaign->players.empty() || !setup.free_garrisons.empty())
             return invalid("requires a shared allocator, accounts and no free starting templates");
         EconomyRules accounts; accounts.campaign = true; accounts.players = setup.campaign->players;
+        // Admission uses the same safe account values as session construction. The
+        // session seam records these notes; replay validation has no diagnostic sink.
+        core::LoadNoteBuffer notes;
+        normalize_economy(accounts, notes);
         if (auto valid = validate_economy(accounts, setup.players); !valid) return valid;
-        for (const auto& p : setup.campaign->players)
+        for (const auto& p : accounts.players)
             if (!p.credit_cap || p.credits > *p.credit_cap) return invalid("account needs a bounded campaign credit cap");
         EntityId previous{};
         for (const auto& r : setup.campaign->reserves) {
@@ -581,7 +586,7 @@ core::Result<void> validate_replay(const TacticalReplay& replay) {
             }
         }
         if (record.use.unit == invalid_entity_id || record.use.ability == AbilityKind::none
-            || static_cast<std::uint8_t>(record.use.ability) > static_cast<std::uint8_t>(AbilityKind::rocket_attack)
+            || static_cast<std::uint8_t>(record.use.ability) > static_cast<std::uint8_t>(AbilityKind::super_laser)
             || static_cast<std::uint8_t>(record.use.action) < static_cast<std::uint8_t>(AbilityAction::activate)
             || static_cast<std::uint8_t>(record.use.action) > static_cast<std::uint8_t>(AbilityAction::autofire_off)) {
             return fail<void>(diagnostic_codes::invalid_command, label + " names no unit, ability or action", path);

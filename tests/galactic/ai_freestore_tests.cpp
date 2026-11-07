@@ -1,4 +1,5 @@
 #include "../support/self_test.hpp"
+#include "eawr/vfs/vfs.hpp"
 #include "../support/env.hpp"
 #include "../support/result.hpp"
 #include "galactic_support.hpp"
@@ -69,6 +70,94 @@ void gates() {
     fleet.parent = 0; fleet.parent_is_planet = false; fleet.object.directly_parented_to_planet = false;
     expect(!ga::freestore_admission(fleet, 1), "parentless fleet is excluded even if in transit");
     fleet.parent = 10; expect(ga::freestore_admission(fleet, 1), "nonplanet-parent fleet passes its specific gate");
+}
+void phase_rollback(const eawr::sim::PartitionExecutor& executor) {
+    ga::QualifiedFreestore owner;
+    auto first = actor(20); first.unit_ai = true;
+    auto second = actor(21), transferred = actor(22), foreign = actor(23);
+    foreign.object.owner = 2;
+    done(owner.update(first)); done(owner.update(second)); done(owner.update(transferred)); done(owner.update(foreign));
+    done(owner.initialize(1, std::array<eawr::sim::EntityId, 3>{20, 21, 22}));
+    done(owner.initialize(2, std::array<eawr::sim::EntityId, 1>{23}));
+    static_cast<void>(take(owner.publish(executor)));
+    const auto before = owner.encode(); const auto hash = owner.record_sync_hash();
+    const std::array players{gc::GalacticPlayer{1, 1, 0}, gc::GalacticPlayer{2, 2, 0}, gc::GalacticPlayer{3, 3, 0}};
+    const auto mutate = [&](ga::QualifiedFreestore& target) {
+        done(target.set_prefer_ground(20, false));
+        expect(take(target.reserve(1, 20, 77)), "phase fixture reserves actual free actor");
+        expect(target.assign(1, 20, 77) == ga::FreestoreAssignment::assigned, "phase fixture removes reserved membership");
+        expect(take(target.offer(1, 20)), "phase fixture reoffers actor at callback tail");
+        done(target.consume_additions(1, 2));
+        target.lost(21);
+        auto moved = *target.facts(22); moved.object.owner = 2;
+        done(target.owner_changed(moved, true));
+        auto fresh = actor(24); fresh.object.owner = 3;
+        done(target.update(fresh)); done(target.initialize(3, std::array<eawr::sim::EntityId, 1>{24}));
+        // Simulate a birth projection inside an accepted immediate shadow.
+        // Such callbacks suppress semantic intent recording, so sparse touched
+        // keys must cover them independently of the operation replay chain.
+        {
+            auto private_owner = target.clone();
+            {
+                auto callback = private_owner.suspend_intents();
+                done(private_owner.update(actor(25)));
+                expect(take(private_owner.offer(1, 25)), "private birth projection offers new actor");
+            }
+            auto nested = private_owner.clone();
+            done(nested.set_prefer_ground(20, true));
+            private_owner.replace(nested);
+            target.replace(private_owner);
+        }
+        static_cast<void>(take(target.publish(executor)));
+    };
+    ga::QualifiedFreestore oracle; done(oracle.restore(before, 1000, players)); mutate(oracle);
+    const auto after = oracle.encode();
+    for (const bool throws : {false, true}) for (const bool after_mutation : {false, true}) {
+        const auto copies = owner.store_copy_count();
+        auto phase = take(owner.begin_phase());
+        expect(phase->undo_entries() == 0 && owner.store_copy_count() == copies,
+            "freestore begin copies no facts, membership stores or archive");
+        expect(!owner.begin_phase(), "freestore phase rejects nesting");
+        bool caught{};
+        try {
+            const auto result = [&]() -> eawr::core::Result<void> {
+                if (after_mutation) {
+                    mutate(owner);
+                    expect(owner.encode() == after && owner.record_sync_hash() == oracle.record_sync_hash(),
+                        "successful phase reads and private publications match the unchanged native path");
+                    expect(owner.store_copy_count() == copies,
+                        "direct phase writes and sparse clone replacement add no full root membership COW copy");
+                    expect(phase->undo_entries() > 0, "freestore retains only changed operation rows");
+                }
+                if (throws) throw std::runtime_error("freestore phase fixture");
+                eawr::core::Diagnostic diagnostic; diagnostic.code = "freestore-phase-fixture";
+                return eawr::core::Result<void>::failure(std::move(diagnostic));
+            }();
+            expect(!result && result.error().code == "freestore-phase-fixture", "freestore keeps Result failure identity");
+        } catch (const std::runtime_error& exception) { caught = std::string_view(exception.what()) == "freestore phase fixture"; }
+        expect(caught == throws, "freestore keeps deterministic exception identity");
+        done(phase->rollback());
+        expect(owner.encode() == before && owner.record_sync_hash() == hash && owner.record_sync_hash() == owner.record_sync_hash(true),
+            "freestore rollback restores exact facts, memberships, reservations, callback order, managers and lost identities");
+        expect(!phase->rollback(), "freestore phase settles once");
+    }
+    auto retry = take(owner.begin_phase()); mutate(owner); done(retry->commit());
+    expect(owner.encode() == after && owner.record_sync_hash() == oracle.record_sync_hash(),
+        "successful freestore retry publishes exact normal-path result on 1/2/4/8 workers");
+    ga::QualifiedFreestore resumed; done(resumed.restore(owner.encode(), 1000, players));
+    expect(resumed.record_sync_hash() == owner.record_sync_hash(), "freestore retry round-trips through existing checkpoint bytes");
+    {
+        auto unsettled = take(resumed.begin_phase());
+        static_cast<void>(unsettled);
+        bool rejected{};
+        try { ga::QualifiedFreestore moved(std::move(resumed)); static_cast<void>(moved); }
+        catch (const std::logic_error&) { rejected = true; }
+        expect(rejected, "active freestore cannot move away from its token");
+        done(resumed.set_prefer_ground(20, false));
+    }
+    bool refused{};
+    try { static_cast<void>(resumed.record_sync_hash()); } catch (const std::logic_error&) { refused = true; }
+    expect(refused && !resumed.begin_phase(), "unsettled freestore phase refuses canonical continuation");
 }
 void landing_gates_and_preference() {
     auto unit = actor(); unit.object.transport = unit.unit_ai = true;
@@ -567,6 +656,30 @@ void movement(eawr::platform::ThreadWorkerAdapter& executor, std::string& baseli
     transient.tracked_movement = false; done(owner.update(transient));
     expect(take(actions.admit_freestore_move(1, 20, 2)), "reserved direct move is admitted through real native fleet operations");
     const auto request = actions.movements().begin()->first; const auto moved_fleet = actions.movements().begin()->second.actor;
+    const auto phase_before = take(actions.capture()); const auto phase_hash = take(actions.state_hash());
+    const auto world_before = world.state_sha256();
+    for (const bool throws : {false, true}) for (const bool after_mutation : {false, true}) {
+        auto phase = take(actions.begin_phase());
+        bool caught{};
+        try {
+            const auto result = [&]() -> eawr::core::Result<void> {
+                if (after_mutation) {
+                    done(actions.movement_conflict(request, 1, false));
+                    done(actions.retire_movement(request));
+                    expect(phase->work().movements == 1 && !actions.movements().at(request).registered
+                        && !owner.facts(20)->tracked_movement, "movement and freestore phase fixture mutates real retained owners");
+                }
+                if (throws) throw std::runtime_error("movement phase fixture");
+                eawr::core::Diagnostic diagnostic; diagnostic.code = "movement-phase-fixture";
+                return eawr::core::Result<void>::failure(std::move(diagnostic));
+            }();
+            expect(!result, "movement phase Result failure preserved");
+        } catch (const std::runtime_error& exception) { caught = std::string_view(exception.what()) == "movement phase fixture"; }
+        expect(caught == throws, "movement phase exception identity preserved");
+        done(phase->rollback());
+        expect(take(actions.capture()).components == phase_before.components && take(actions.state_hash()) == phase_hash
+            && world.state_sha256() == world_before, "movement rollback restores registry, derived actor index and freestore tracking without world writes");
+    }
     expect(moved_fleet != 10 && owner.contains(1, 20) && owner.reservations(1)->at(20) == 77
         && actions.movements().begin()->second.freestore_actor == 20 && owner.facts(20)->tracked_movement,
         "multiobject split preserves actor/membership/reservation and retains actual block association");
@@ -867,8 +980,17 @@ function ExtraPrefer(unit) assert(unit.Set_Prefer_Ground_Over_Space(false, true)
     done(scripts.submit_event(prevent)); const auto committed = take(scripts.service(executor));
     expect(committed.diagnostics.empty() && !owner->contains(1, 20) && owner->facts(20)->ai_usable && read("AfterPrevent") == ga::Number(1),
         "actual Lua Prevent_AI_Usage publishes ordered shadow and same-call count without flag false");
+    // Independent malformed callbacks each start from a healthy checkpoint;
+    // the live failed timeline must still retire its GC identity.
+    const auto isolated_fault = [&](const auth::ScriptEvent& event) {
+        const auto healthy = take(scripts.save(executor));
+        done(scripts.submit_event(event)); auto failed = take(scripts.service(executor));
+        expect(scripts.retired_instances() == std::vector<std::uint64_t>{1}, "failed freestore callback retires its provider");
+        done(scripts.load(healthy)); (void)take(scripts.service(executor));
+        return failed;
+    };
     prevent.key.tick = 6; prevent.name = "FailedPrevent"; prevent.arguments = {auth::Value{auth::Handle{eawr::script::foc::handle_game_object, 21}}};
-    done(scripts.submit_event(prevent)); const auto rejected = take(scripts.service(executor));
+    const auto rejected = isolated_fault(prevent);
     expect(rejected.diagnostics.size() == 1 && owner->contains(1, 21), "failed Lua transaction discards private freestore writes");
     auto unit_ai = *owner->facts(21); unit_ai.unit_ai = true; done(owner->update(unit_ai));
     prevent.key.tick = 7; prevent.name = "Prefer";
@@ -880,11 +1002,11 @@ function ExtraPrefer(unit) assert(unit.Set_Prefer_Ground_Over_Space(false, true)
     done(scripts.submit_event(prevent)); (void)take(scripts.service(executor));
     expect(owner->facts(21)->prefer_ground, "actual mod setter can restore true");
     prevent.key.tick = 9; prevent.name = "FailedPrefer"; prevent.arguments.pop_back();
-    done(scripts.submit_event(prevent)); const auto failed_preference = take(scripts.service(executor));
+    const auto failed_preference = isolated_fault(prevent);
     expect(failed_preference.diagnostics.size() == 1 && owner->facts(21)->prefer_ground,
         "failed Lua transaction discards preference mutation");
     prevent.key.tick = 10; prevent.name = "MissingPrefer";
-    done(scripts.submit_event(prevent)); const auto missing_preference = take(scripts.service(executor));
+    const auto missing_preference = isolated_fault(prevent);
     expect(missing_preference.diagnostics.size() == 1 && owner->facts(21)->prefer_ground,
         "missing Boolean takes the script error route without mutation");
     prevent.key.tick = 11; prevent.name = "ExtraPrefer";
@@ -952,7 +1074,14 @@ function NotAPlanet(unit, other) Usable = other.Get_Is_Planet_AI_Usable() end
     const auto invoke = [&](std::string name, auth::ValueList args) {
         auth::ScriptEvent event; event.key = {scripts.completed_tick() + 1, auth::first_simulation_producer, 1, sequence++};
         event.target = 1; event.kind = auth::ScriptEvent::Kind::call; event.name = std::move(name); event.arguments = std::move(args);
-        done(scripts.submit_event(event)); return take(scripts.service(executor));
+        const auto healthy = take(scripts.save(executor));
+        done(scripts.submit_event(event)); auto report = take(scripts.service(executor));
+        if (!report.removed_instances.empty()) {
+            expect(scripts.retired_instances() == std::vector<std::uint64_t>{1}, "malformed object callback retires its GC provider");
+            // Restore only to isolate the next argument-contract case.
+            done(scripts.load(healthy)); (void)take(scripts.service(executor));
+        }
+        return report;
     };
     const auto flag = [&](std::string_view name) {
         const auto value = take(scripts.read_global(1, name));
@@ -1236,7 +1365,7 @@ int case_galactic_ai_freestore_tests(int argc, char** argv) {
     }
     try { if (argc == 2 && std::string_view(argv[1]) == "--installed") installed();
         else { gates(); landing_gates_and_preference(); overlay_contracts(); std::vector<std::uint8_t> return_baseline; std::string baseline, movement_baseline, direct_baseline, landing_baseline, callbacks_baseline;
-            for (const auto workers : {1U, 2U, 4U, 8U}) { eawr::platform::ThreadWorkerAdapter executor(workers); player_publications(executor); retained(executor, return_baseline); automatic_landing(executor, landing_baseline); movement(executor, movement_baseline); direct_movement(executor, direct_baseline); fresh_conversion(executor); continuation(executor, baseline); lua(executor); selector(executor); const auto callbacks = object_callbacks(executor); if (callbacks_baseline.empty()) callbacks_baseline = callbacks; else expect(callbacks_baseline == callbacks, "object callback answers are equal on 1/2/4/8 workers"); }
+            for (const auto workers : {1U, 2U, 4U, 8U}) { eawr::platform::ThreadWorkerAdapter executor(workers); phase_rollback(executor); player_publications(executor); retained(executor, return_baseline); automatic_landing(executor, landing_baseline); movement(executor, movement_baseline); direct_movement(executor, direct_baseline); fresh_conversion(executor); continuation(executor, baseline); lua(executor); selector(executor); const auto callbacks = object_callbacks(executor); if (callbacks_baseline.empty()) callbacks_baseline = callbacks; else expect(callbacks_baseline == callbacks, "object callback answers are equal on 1/2/4/8 workers"); }
         }
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
     return galactic_test::failures ? 1 : 0;

@@ -278,6 +278,9 @@ struct TacticalLoad final {
     std::string failure;
 };
 
+// Hand-over state of the attract load's environment steps (sky models, scene cache, built placements).
+struct ReadyScratch;
+
 class EnvironmentView final {
 public:
     void owner_census(diagnostics::OwnerCensus& output) const;
@@ -287,8 +290,23 @@ public:
     ~EnvironmentView() { release(); }
 
     [[nodiscard]] bool ready(Node3D& host, const assets::Map& map, const vfs::Vfs& filesystem,
-                             const assets::ObjectTypeCatalog& catalog, bool catalog_loaded,
-                             const std::string& catalog_failure);
+                              const assets::ObjectTypeCatalog& catalog, bool catalog_loaded,
+                              const std::string& catalog_failure, const EnqueueLoadStep& enqueue = {});
+    [[nodiscard]] bool prepare_ready(Node3D& host, const assets::Map& map, const vfs::Vfs& filesystem,
+                                    const assets::ObjectTypeCatalog& catalog, bool catalog_loaded,
+                                    const std::string& catalog_failure);
+    // The pieces prepare_ready runs back to back; the attract load runs each as its own load step.
+    [[nodiscard]] bool prepare_head(Node3D& host, const assets::Map& map, const vfs::Vfs& filesystem,
+                                    const std::string& catalog_failure);
+    void prepare_renderer(Node3D& host, const vfs::Vfs& filesystem);
+    void prepare_sky(bool secondary, const assets::Map& map, const vfs::Vfs& filesystem,
+                     const assets::ObjectTypeCatalog& catalog, bool catalog_loaded, ReadyScratch& scratch);
+    void prepare_scene(const assets::Map& map, const vfs::Vfs& filesystem, const std::string& catalog_failure,
+                       ReadyScratch& scratch);
+    [[nodiscard]] bool prepare_placement(const assets::Map& map, const vfs::Vfs& filesystem,
+                                         const scene::Placement& placement, ReadyScratch& scratch);
+    [[nodiscard]] bool populate_ready(const assets::Map& map, const EnqueueLoadStep& enqueue);
+    [[nodiscard]] bool finish_ready();
     [[nodiscard]] std::optional<int> process(double delta);
     // Why ready() returned false (empty otherwise): the cause the report also carries.
     [[nodiscard]] const std::string& failure() const noexcept { return failure_; }
@@ -299,6 +317,8 @@ public:
     void camera_event(const viewer::camera_input::RawEvent& event);
     void camera_focus(bool focused);
     void camera_pointer_left();
+    void camera_sample_pointer(float x, float y);
+    void camera_clear_pointer_sample();
     void camera_viewport(float width, float height);
     // The attract's locked view moves its eye and look-at (SpaceEnvironment::set_attract_pose).
     void set_attract_pose(const std::array<float, 3>& eye, const std::array<float, 3>& target);

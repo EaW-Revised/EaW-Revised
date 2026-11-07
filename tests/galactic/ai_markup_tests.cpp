@@ -18,6 +18,7 @@
 #include "eawr/platform/sim_workers.hpp"
 
 #include <exception>
+#include <stdexcept>
 
 namespace {
 namespace ai = eawr::script::foc::ai;
@@ -89,6 +90,56 @@ ai::AiData data() {
         <Hint>Variable_Target.Hints.Mod_Hint</Hint><Unknown>Variable_Target.Hints.Unknown</Unknown>
         </Equations>)"}}, [](std::string_view, std::string_view) -> std::optional<ai::Real> { return {}; }));
     ai::AiData out; out.equations = std::move(equations); out.players["QUERY"] = ai::PlayerType{}; return out;
+}
+void phase_contracts() {
+    ai::GalacticMarkup markup({}, {1}, {1}, {10, 20, 30});
+    const std::array keys{ai::GalacticMarkupKey{1, false, 10}, ai::GalacticMarkupKey{1, false, 20}};
+    auto initial = markup.state();
+    const auto handle = must(markup.apply(initial, 1, keys, ai::real(2), {}));
+    markup.replace(std::move(initial));
+    const auto before = markup.encode(); const auto before_hash = markup.record_sync_hash();
+    const auto publication = markup.snapshot(); const auto before_revision = markup.revision();
+    const auto mutate = [&] {
+        auto staged = markup.state();
+        static_cast<void>(must(markup.apply(staged, 1, keys, ai::real(3), handle)));
+        markup.replace(std::move(staged));
+        staged = markup.state();
+        static_cast<void>(must(markup.apply(staged, 1, keys, ai::real(4), {})));
+        markup.replace(std::move(staged));
+        markup.retain_planets(snapshot(true)->planets());
+    };
+    for (const bool throws : {false, true}) for (const bool after_mutation : {false, true}) {
+        auto phase = must(markup.begin_phase());
+        expect(!phase->retained_publication(), "markup begin retains no full native state or archive");
+        expect(!markup.begin_phase(), "markup phase rejects nesting");
+        bool caught{};
+        try {
+            const auto failed = [&]() -> eawr::core::Result<void> {
+                if (after_mutation) {
+                    mutate(); expect(phase->retained_publication() && markup.encode() != before,
+                        "markup first replacement retains its moved original across multiple publications and planet pruning");
+                }
+                if (throws) throw std::runtime_error("markup phase fixture");
+                eawr::core::Diagnostic diagnostic; diagnostic.code = "markup-phase-fixture";
+                return eawr::core::Result<void>::failure(std::move(diagnostic));
+            }();
+            expect(!failed, "markup Result failure preserved");
+        } catch (const std::runtime_error& exception) { caught = std::string_view(exception.what()) == "markup phase fixture"; }
+        expect(caught == throws, "markup exception identity preserved");
+        must(phase->rollback());
+        expect(markup.encode() == before && markup.record_sync_hash() == before_hash
+            && markup.record_sync_hash() == markup.record_sync_hash(true) && markup.snapshot() == publication,
+            "markup rollback restores exact values, handles, target domain, digest and original immutable snapshot");
+        must(markup.validate(markup.state()));
+    }
+    expect(markup.revision() > before_revision, "markup rollback invalidates process-local revisions monotonically");
+    auto retry = must(markup.begin_phase()); mutate(); const auto after = markup.encode(); must(retry->commit());
+    expect(markup.encode() == after && !retry->commit(), "markup retry publishes once");
+    ai::GalacticMarkup abandoned({}, {1}, {1}, {10});
+    { auto phase = must(abandoned.begin_phase()); static_cast<void>(phase); }
+    bool refused{};
+    try { static_cast<void>(abandoned.record_sync_hash()); } catch (const std::logic_error&) { refused = true; }
+    expect(refused && !abandoned.begin_phase(), "unaccounted markup phase refuses canonical continuation");
 }
 std::string lifetime_contracts(unsigned workers) {
     eawr::platform::ThreadWorkerAdapter executor(workers);
@@ -229,7 +280,9 @@ std::string lifetime_contracts(unsigned workers) {
     report=must(scripts.service(executor)); expect(report.managed_handles.released == 1 && value(world) == ai::Real{}, "next clean invocation collects rollback orphan");
     expect(resumed_report.managed_handles.released == 1 && world->markup()->encode() == restored_world->markup()->encode()
         && must(scripts.save(executor)) == must(restored.save(executor)), "save after rollback resumes at the same release boundary");
-    call(scripts, "Hold"); const auto before_fault=world->markup()->encode(); report=call(scripts, "Fault");
+    expect(scripts.retired_instances() == std::vector<std::uint64_t>{7}, "uncaught markup failure permanently retires its GC identity");
+    must(scripts.create_instance(11, "mod.lua"));
+    call(scripts, "Hold", {}, 11); const auto before_fault=world->markup()->encode(); report=call(scripts, "Fault", {}, 11);
     expect(!report.diagnostics.empty() && report.managed_handles.censuses == 0 && world->markup()->encode() == before_fault,
         "quota fault skips release during rollback/removal");
     report=must(scripts.service(executor)); expect(report.managed_handles.released == 1 && value(world) == ai::Real{}, "clean empty invocation releases faulted-instance ownership");
@@ -418,19 +471,28 @@ std::string contracts(unsigned workers) {
     const auto planet_count = must(scripts.read_global(7, "path_count"));
     expect(report.diagnostics.empty() && planet_count && std::get<ai::Real>(planet_count->data) == ai::real(3),
         "Lua Get_All_Planets returns the three bound planets");
+    // Each invalid callback is an independent case from the same healthy
+    // checkpoint. An uncaught GC error retires identity 7 for that timeline.
+    const auto healthy = must(scripts.save(executor));
+    const auto fault_call = [&](std::string name, auth::ValueList args) {
+        must(scripts.load(healthy));
+        auto failed = call(std::move(name), std::move(args));
+        expect(scripts.retired_instances() == std::vector<std::uint64_t>{7}, "invalid markup callback retires the GC provider before independent restore");
+        return failed;
+    };
     for (const auto* method : {"Destroy", "Release"}) {
-        report = call(method, {});
+        report = fault_call(method, {});
         expect(!report.diagnostics.empty() && world->markup()->encode() == retained,
             "markup handles reject unsupported lifetime methods without changing contributions");
     }
     expect(world->containing_planet(40) == 10, "non-planet negative fixture is a live fleet at its own parent planet");
-    report = call("InvalidTarget", {player, foc::detail::handle(foc::handle_game_object, 40)});
+    report = fault_call("InvalidTarget", {player, foc::detail::handle(foc::handle_game_object, 40)});
     expect(!report.diagnostics.empty() && world->markup()->encode() == retained,
         "live non-planet target refuses replacement rather than silently skipping or marking its parent");
-    report = call("InvalidTarget", {player, foc::detail::handle(foc::handle_game_object, 999)});
+    report = fault_call("InvalidTarget", {player, foc::detail::handle(foc::handle_game_object, 999)});
     expect(!report.diagnostics.empty() && world->markup()->encode() == retained,
         "unavailable target root refuses replacement without silently removing its previous contribution");
-    report = call("Fail", {player, a});
+    report = fault_call("Fail", {player, a});
     expect(!report.diagnostics.empty() && world->markup()->encode() == retained, "failed Lua resume rolls back replacement and handle allocation");
     const auto saved = must(world->capture()); const auto digest = must(world->state_hash());
     expect(saved.components.size() == 1 && saved.components.contains("GALACTIC_PERCEPTION"), "perception owns one composed native component including markup");
@@ -459,6 +521,7 @@ std::string contracts(unsigned workers) {
 int case_galactic_ai_markup_tests() {
     try {
         encoded_bytes_contract();
+        phase_contracts();
         std::string baseline;
         for (const auto workers : {1U, 2U, 4U, 8U}) {
             const auto digest = contracts(workers) + lifetime_contracts(workers);

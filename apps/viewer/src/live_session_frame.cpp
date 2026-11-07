@@ -1,6 +1,7 @@
 #include "eawr/battle/start.hpp"
 #include "eawr/core/load_profile.hpp"
 #include "live_session_view.hpp"
+#include "eawr/presentation/particles/lane_guard.hpp"
 #include "eawr/presentation/ui/pads.hpp"
 
 #include "shutdown_trace.hpp"
@@ -14,6 +15,7 @@
 #include "eawr/skirmish/roster_gate.hpp"
 #include "eawr/sim/tactical/replay.hpp"
 #include "eawr/units/unit_tables.hpp"
+#include "eawr/units/content_selection.hpp"
 
 #include "viewer_path.hpp"
 
@@ -183,11 +185,17 @@ std::optional<double> LiveSessionView::clone_birth_tick(const std::size_t ship) 
 
 core::Result<BattleScene::Update> LiveSessionView::frame(BattleScene& population, GodotRenderer& renderer,
                                                      const double delta) {
+    if (trace_frames_) clock_trace_.valid = false;
+    particles::lane::guard_main(); // L1.2: counts a main-thread call while a lane job owns this state; never aborts
     FrameTimer frame_timer(trace_frames_ ? &live_frame_ms_ : nullptr);
     arrival_slots_.population = &population;
     arrival_slots_.renderer = &renderer;
     // Render-thread work bound: at most options_.arrival_slot_budget (default 8) new hull/clone pairs per frame.
     arrival_slots_.remaining = options_.arrival_slot_budget;
+    // A battle loaded from a save composes everything present at its first frame at once, so a later frame
+    // never measures that catch-up.
+    if (std::exchange(unbounded_arrivals_, false))
+        arrival_slots_.remaining = std::numeric_limits<decltype(arrival_slots_.remaining)>::max();
     arrival_slots_.frame_grown = 0;
     arrival_slots_.growth_ms = 0.0;
     arrival_slots_.undrawn.clear();
@@ -234,6 +242,9 @@ core::Result<BattleScene::Update> LiveSessionView::frame(BattleScene& population
         const double rate = (phase_ == Phase::running || phase_ == Phase::quitting) && time_.running()
             ? 1000.0 / static_cast<double>(1000U / time_.target_rate()) : 0.0;
         const double advance = std::isfinite(delta) && delta > 0.0 ? delta * rate : 0.0;
+        if (trace_frames_) {
+            clock_trace_ = {newest, presented_tick_, 0.0, advance, delta, rate, static_cast<double>(time_.target_rate()), true, time_.running()};
+        }
         presented_tick_ = std::clamp(presented_tick_ + advance, std::max(0.0, newest - 1.0), newest);
         alpha = presented_tick_ - (newest - 1.0);
         if (phase_ == Phase::results || phase_ == Phase::returning) {
@@ -242,6 +253,7 @@ core::Result<BattleScene::Update> LiveSessionView::frame(BattleScene& population
             presented_tick_ = newest;
             alpha = 1.0;
         }
+        if (trace_frames_) clock_trace_.after = presented_tick_;
         if (phase_ == Phase::ready || phase_ == Phase::quitting) {
             last_shown_ = frames_ > options_.warmup_frames ? frames_ - 1U - options_.warmup_frames : 0U;
         }
@@ -379,7 +391,7 @@ core::Result<BattleScene::Update> LiveSessionView::frame(BattleScene& population
 core::Diagnostic LiveSessionView::frame_failure(std::string message) const {
     if (options_.lan) godot::UtilityFunctions::print("EAWR net event=battle-end reason=viewer-error tick=",
         session_ ? session_->completed_tick() : 0, " code=EAWR-VIEWER-LIVE-SESSION");
-    return {.code = "EAWR-VIEWER-LIVE-SESSION", .message = std::move(message)};
+    return {.code = "EAWR-VIEWER-LIVE-SESSION", .message = std::move(message), .logical_path = {}, .line = {}, .column = {}, .source_id = {}};
 }
 
 void LiveSessionView::synchronize_frame_lan() {
@@ -734,11 +746,14 @@ std::optional<core::Diagnostic> LiveSessionView::remember_frame_fog(const std::s
         std::vector<sim::EntityId>& immediate,
         std::vector<live::FogGhosts::Observation>& observations) {
     if (fog_memory_types_.empty() && tables_) {
+        const units::FootprintTypeSelection selection(*tables_);
         for (const auto& type : tables_->units) {
+            if (!selection.keeps(type)) continue;
             fog_memory_types_.emplace(battle::type_id(type.id),
                 std::pair{type.last_state_visible_under_fow, type.initial_state_visible_under_fow});
         }
         for (const auto& type : tables_->obstacles) {
+            if (!selection.keeps(type)) continue;
             fog_memory_types_.emplace(battle::type_id(type.id),
                 std::pair{type.last_state_visible_under_fow, type.initial_state_visible_under_fow});
         }
@@ -1440,7 +1455,11 @@ void LiveSessionView::finish() {
                                                        content_->combat, victory_, content_->fog, content_->abilities,
                                                        economy_, content_->map_box);
         shutdown_trace::mark("finish: headless replay done");
-        headless_equal_ = headless && headless.value() == hashes_;
+        // A loaded battle knows no hashes before its saved tick: compare the ticks it ran.
+        const auto from = std::min<std::size_t>(static_cast<std::size_t>(loaded_tick_), hashes_.size());
+        headless_equal_ = headless && headless.value().size() == hashes_.size()
+            && std::equal(hashes_.begin() + static_cast<std::ptrdiff_t>(from), hashes_.end(),
+                headless.value().begin() + static_cast<std::ptrdiff_t>(from));
         if (!headless) finish_status_ = "headless replay failed: " + core::format_diagnostic(headless.error());
     }
     if (const auto failure = session_->failure()) {
@@ -1448,6 +1467,9 @@ void LiveSessionView::finish() {
         finish_status_ = "simulation_failed";
         save_failure_replay();
     }
+    // A failed or unreached save is the status of a battle that otherwise stopped cleanly; an earlier
+    // failure (the simulation, the headless replay) stays the status.
+    if (save_error_ && *save_error_ && finish_status_ == "stopped") finish_status_ = **save_error_;
     if (!options_.hashes_path.empty()) {
         std::ofstream output(options_.hashes_path, std::ios::binary | std::ios::trunc);
         output << "tick,sha256\n";

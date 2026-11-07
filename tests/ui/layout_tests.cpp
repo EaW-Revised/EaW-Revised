@@ -311,6 +311,26 @@ void shell_contracts() {
            "UI-L2: the shell offset moves right and up in reference units");
 }
 
+// #5856: check the layout rule centres the in-game menu (IDD_GAME_OPTIONS_DIALOG, 321 x 328)
+// for each viewport under both rule sets; resize wiring is covered by the rig.
+void game_menu_centres_on_live_viewport() {
+    const std::array<Viewport, 7> sizes{{{1920U, 1080U}, {2560U, 1080U}, {3840U, 1080U}, {5120U, 1440U},
+                                          {1024U, 768U}, {1280U, 720U}, {800U, 600U}}};
+    for (const LayoutRules rules : {LayoutRules::aspect_correct, LayoutRules::retail}) {
+        for (const Viewport viewport : sizes) {
+            const auto space = layout::reference_space(viewport, rules);
+            const auto placed = layout::place_dialog({0, 0, 321, 328}, Placement::centre, space);
+            const std::string label = "game menu " + name_of(viewport) + (rules == LayoutRules::retail ? " retail" : " aspect");
+            const PixelRect area = layout::safe_area(space);
+            const double expected_x = rules == LayoutRules::retail ? viewport.width / 2.0 : area.x + area.width / 2.0;
+            expect(near(placed.frame.x + placed.frame.width / 2.0, expected_x, 1.0e-6), label + ": centred horizontally");
+            expect(near(placed.frame.y + placed.frame.height / 2.0, viewport.height / 2.0, 1.0e-6), label + ": centred vertically");
+            // The centre of the safe area is the centre of the window: the safe area is itself centred.
+            expect(near(area.x + area.width / 2.0, viewport.width / 2.0, 1.0e-6), label + ": safe area centred on the window");
+        }
+    }
+}
+
 void retail_dialog_contracts() {
     // Retail UI-L3 against the predicted sizes in design section 1.4.
     const PixelRect skirmish_hd = layout::scale_rc({0, 0, 965, 422}, retail_space({1280U, 720U}));
@@ -419,6 +439,46 @@ void aspect_correct_dialog_contracts() {
            "D4 UI-L4 1280x1024: the gadget area is centred vertically");
     expect(near(tall_full.origin_x, layout::place_dialog({0, 0, 320, 240}, Placement::centre, tall).frame.x, 1.0e-9),
            "D4 UI-L4 1280x1024: full-screen gadgets sit where the centred dialog does");
+}
+
+void fit_16x9_contracts() {
+    struct Row {
+        std::uint32_t width, height;
+        double x, y, w, h;
+        const char* name;
+    };
+    // The box is the largest centred 16:9 area: pillarbox when wider, letterbox when narrower.
+    const Row rows[] = {
+        {1024, 768, 0.0, 96.0, 1024.0, 576.0, "4:3"},
+        {1920, 1200, 0.0, 60.0, 1920.0, 1080.0, "16:10"},
+        {1920, 1080, 0.0, 0.0, 1920.0, 1080.0, "16:9"},
+        {2560, 1080, 320.0, 0.0, 1920.0, 1080.0, "21:9"},
+        {3840, 1080, 960.0, 0.0, 1920.0, 1080.0, "32:9"},
+    };
+    for (const Row& row : rows) {
+        const auto box = layout::fit_16x9({row.width, row.height});
+        expect(rect_near(box, {row.x, row.y, row.w, row.h}, 0.0), std::string("UI-L6 fit_16x9 ") + row.name);
+        expect(near(box.width * 9.0, box.height * 16.0, 16.0), std::string("UI-L6 box is 16:9 ") + row.name);
+    }
+    // 16:9 is the whole viewport, so the plate there is what it was before.
+    const auto hd = layout::place_dialog({0, 0, 1024, 768}, Placement::full_screen,
+                                         layout::reference_space({1920U, 1080U}, layout::LayoutRules::retail));
+    expect(rect_near(hd.frame, {0.0, 0.0, 1920.0, 1080.0}, 0.0), "UI-L6 16:9 plate covers the viewport");
+    // On 21:9 the plate is laid out in the box: same size as at 16:9, no stretch.
+    const auto box = layout::fit_16x9({2560U, 1080U});
+    const auto wide = layout::place_dialog({0, 0, 1024, 768}, Placement::full_screen,
+        layout::reference_space({static_cast<std::uint32_t>(box.width), static_cast<std::uint32_t>(box.height)},
+                                layout::LayoutRules::retail));
+    expect(rect_near(wide.frame, {0.0, 0.0, 1920.0, 1080.0}, 0.0) && near(wide.scale_x, hd.scale_x, 0.0)
+               && near(wide.scale_y, hd.scale_y, 0.0), "UI-L6 21:9 plate keeps its 16:9 scale");
+    // Without the box the same plate is stretched over the whole 21:9 window.
+    const auto stretched = layout::place_dialog({0, 0, 1024, 768}, Placement::full_screen,
+                                                layout::reference_space({2560U, 1080U}, layout::LayoutRules::retail));
+    expect(!near(stretched.scale_x, wide.scale_x, 1e-9) && stretched.frame.width > wide.frame.width,
+           "UI-L6 the box is what keeps the plate from stretching");
+    expect(rect_near(layout::fit_16x9({0U, 0U}), {}, 0.0), "UI-L6 empty viewport");
+    expect(rect_near(layout::fit_16x9({1U, 1080U}), {}, 0.0), "UI-L6 a viewport too narrow for a box is empty");
+    expect(rect_near(layout::fit_16x9({1920U, 1U}), {959.0, 0.0, 1.0, 1.0}, 0.0), "UI-L6 a one-pixel-high viewport keeps a one-pixel box");
 }
 
 void font_contracts() {
@@ -622,7 +682,9 @@ void layout_contracts() {
     wide_shell_contracts();
     shell_contracts();
     retail_dialog_contracts();
+    game_menu_centres_on_live_viewport();
     aspect_correct_dialog_contracts();
+    fit_16x9_contracts();
     font_contracts();
     corpus_contracts();
 }

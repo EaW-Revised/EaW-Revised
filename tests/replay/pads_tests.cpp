@@ -4,6 +4,7 @@
 #include "../../src/sim/tactical/session_types.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <array>
 #include <atomic>
 #include <cstddef>

@@ -1,12 +1,18 @@
+#include "eawr/assets/memory.hpp"
+#include "eawr/vfs/vfs.hpp"
+#include "../revised_layer.hpp"
 #include "eawr/core/ascii.hpp"
 #include "eawr/core/diagnostic.hpp"
+#include "eawr/core/gc_load_trace.hpp"
 #include "eawr/core/json_text.hpp"
 #include "galactic_mode_internal.hpp"
+#include "battle_content.hpp"
 #include "family_textures.hpp"
 #include "model_preview.hpp"
 
 #include "eawr/core/sha256.hpp"
 #include "eawr/core/text.hpp"
+#include "eawr/presentation/camera/constants_source.hpp"
 #include "eawr/presentation/space/environment_scene.hpp"
 #include "eawr/presentation/space/space.hpp"
 #include "eawr/scene/scene.hpp"
@@ -21,6 +27,7 @@
 #include <algorithm>
 #include <pugixml.hpp>
 #include <cmath>
+#include <limits>
 #include <numbers>
 #include <sstream>
 #include <unordered_set>
@@ -288,6 +295,13 @@ void Overlay::release() {
 using namespace galactic_detail;
 
 bool GalacticMode::State::mount() {
+    if (options.setup_content && !options.restore_save && !options.lan_start) {
+        const auto& setup = *options.setup_content;
+        if (!setup.filesystem || !setup.catalog || setup.profile.empty()) {
+            failure = "the campaign setup content snapshot is incomplete";
+            return false;
+        }
+    }
     if (options.game_root.empty() && options.mod_root.empty()) return true;  // placeholders only
     const std::filesystem::path expansion = options.game_root / "corruption" / "Data";
     const std::filesystem::path base = options.game_root / "GameData" / "Data";
@@ -309,10 +323,23 @@ bool GalacticMode::State::mount() {
         if (profile == "foc") roots.emplace_back("expansion", expansion);
     }
     roots.emplace_back("base", base);
+    mount_revised_layer(roots);
     auto chain = vfs::resolve_manifest_chain(roots);
     if (!chain) {
         failure = core::format_diagnostic(chain.error());
         return false;
+    }
+    std::vector<std::string> requested_layers;
+    for (const auto& manifest : chain.value()) requested_layers.push_back(manifest.mount.layer_id);
+    if (options.setup_content && !options.restore_save && !options.lan_start) {
+        const auto& setup = *options.setup_content;
+        if (setup.matches_chain(options.game_root, options.mod_root, profile, requested_layers)) {
+            filesystem = setup.filesystem;
+            audio_catalog = setup.catalog;
+            layers = setup.layers;
+            return true;
+        }
+        core::gc_load::trace.mark("gc.mount.content_chain_mismatch");
     }
     std::vector<vfs::MountSpec> specs;
     for (auto& manifest : chain.value()) {
@@ -385,8 +412,17 @@ bool GalacticMode::State::load_camera_constants() {
         || loaded.focused_pitch <= -90.0F || loaded.focused_pitch >= 0.0F) {
         failure = "galactic camera constants have an invalid domain"; return false;
     }
+    const auto tactical_bytes = filesystem->open("data/xml/tacticalcameras.xml");
+    if (!tactical_bytes) { failure = core::format_diagnostic(tactical_bytes.error()); return false; }
+    const auto tactical_hash = hash_bytes(tactical_bytes.value());
+    const auto constants_hash = hash_bytes(bytes.value());
+    auto edge_constants = presentation::camera::load_constants(
+        {tactical_bytes.value(), "data/xml/tacticalcameras.xml", tactical_hash},
+        {bytes.value(), "data/xml/gameconstants.xml", constants_hash}, presentation::camera::Mode::space);
+    if (!edge_constants) { failure = core::format_diagnostic(edge_constants.error()); return false; }
+    edge_scroll_constants = std::move(edge_constants.value().constants);
     camera_constants = loaded;
-    constants_sha256 = hash_bytes(bytes.value());
+    constants_sha256 = constants_hash;
     return true;
 }
 
@@ -394,6 +430,15 @@ bool GalacticMode::State::upload_models() {
     std::map<std::string, std::size_t> by_path;
     std::map<std::string, assets::Texture> textures;
     sim::AssetId next_asset = 1;
+    // Census runs only: every 12th distinct model, sample where the upload phase holds its memory.
+    std::size_t marked_bucket = std::numeric_limits<std::size_t>::max();
+    const auto sample_memory = [&] {
+        if (!MemoryAttribution::enabled() || models.size() / 12 == marked_bucket) return;
+        marked_bucket = models.size() / 12;
+        std::uint64_t texture_bytes = 0;
+        for (const auto& entry : textures) texture_bytes += assets::payload_capacity(entry.second).texture_payload_bytes;
+        MemoryAttribution::load_detail("gc.upload_models", models.size(), texture_bytes);
+    };
     const auto load_texture = [&](const std::string_view declared, std::string& logical) -> std::optional<assets::Texture> {
         const auto path = probe_texture(*filesystem, declared);
         if (!path) return std::nullopt;
@@ -432,6 +477,7 @@ bool GalacticMode::State::upload_models() {
             planet_models[planet.id] = models[known->second].status == "drawn" ? std::optional(known->second) : std::nullopt;
             continue;
         }
+        sample_memory();
         ModelUpload upload;
         upload.layer = planet_layer(planet.id);
         upload.logical_path = planet.model;

@@ -1,4 +1,6 @@
 #include "galactic/scene_content.hpp"
+#include "eawr/data/xml.hpp"
+#include "eawr/vfs/vfs.hpp"
 #include "eawr/core/diagnostic.hpp"
 #include "eawr/core/text.hpp"
 #include "eawr/campaign/mp_lobby_catalog.hpp"
@@ -40,6 +42,11 @@ void planet_bonus_metadata(const data::galactic::GalacticData& tables) {
         [&](const auto a, const auto b) { return text.entries[a].crc < text.entries[b].crc; });
     const auto* planet = tables.planet("Beta");
     assert(planet && planet->planet_ability_icon == "mod_bonus.tga");
+    assert(planet->planet_weather_icon == "mod_weather.tga" && planet->planet_weather_name == "MOD_WEATHER");
+    // Hover text: name, then info on its own line; either alone stands without a separator.
+    assert(weather_tooltip({"i.tga", "Storm", "Wind"}) == std::string("Storm") + '\n' + "Wind");
+    assert(weather_tooltip({"i.tga", "Storm", ""}) == "Storm" && weather_tooltip({"i.tga", "", "Wind"}) == "Wind");
+    assert(planet->describe_history == "MOD_HISTORY");
     assert(planet->planet_ability_name == "MOD_NAME" && planet->planet_ability_description == "MOD_DESCRIPTION");
     std::vector<std::string> diagnostics;
     const auto bonus = planet_ability_metadata(*planet, &text, diagnostics);
@@ -117,7 +124,10 @@ void campaign_art_is_data_driven() {
       <Planet Name="Beta"><Variant_Of_Existing_Type>Alpha</Variant_Of_Existing_Type>
       <Galactic_Position>99,0,10</Galactic_Position><Scale_Factor>TBD</Scale_Factor>
       <Planet_Ability_Name>MOD_NAME</Planet_Ability_Name><Planet_Ability_Description>MOD_DESCRIPTION</Planet_Ability_Description>
-      <Planet_Ability_Icon>mod_bonus.tga</Planet_Ability_Icon></Planet>
+      <Planet_Ability_Icon>mod_bonus.tga</Planet_Ability_Icon>
+      <Encyclopedia_Weather_Icon>mod_weather.tga</Encyclopedia_Weather_Icon>
+      <Encyclopedia_Weather_Name>MOD_WEATHER</Encyclopedia_Weather_Name>
+      <Describe_History>MOD_HISTORY</Describe_History></Planet>
       <SpaceUnit Name="Crusader_Gunship"><Icon_Name>i_gunship.tga</Icon_Name><Text_ID>TEXT_UNIT_GUNSHIP</Text_ID>
       <Encyclopedia_Text>TEXT_ENC_GUNSHIP_1, TEXT_ENC_MISSING TEXT_ENC_GUNSHIP_2</Encyclopedia_Text>
       <MP_Encyclopedia_Text>TEXT_ENC_MULTIPLAYER</MP_Encyclopedia_Text><Ranking_In_Category>90</Ranking_In_Category></SpaceUnit>
@@ -195,7 +205,18 @@ void campaign_art_is_data_driven() {
         "Multiplayer_Sandbox_Origin", ""));
     assert(!load_scene_content(filesystem.value(), catalog.value().catalog, multiplayer_tables,
         "Multiplayer_Sandbox_Origin", "Absent"));
-    assert(!load_scene_content(filesystem.value(), catalog.value().catalog, tables.value(), "Art", "Other"));
+    // A listed single-player entry with an authored human faction takes the override (co-op); a story or tutorial
+    // entry and one without a human faction keep refusing it.
+    assert(load_scene_content(filesystem.value(), catalog.value().catalog, tables.value(), "Art", "Other"));
+    for (const auto flag : {0, 1, 2, 3}) {
+        auto flagged = tables.value();
+        auto& entry = flagged.campaigns.front();
+        if (flag == 0) entry.is_story_campaign = true;
+        if (flag == 1) entry.tutorial = true;
+        if (flag == 2) entry.is_listed = false;
+        if (flag == 3) entry.starting_active_player.clear();
+        assert(!load_scene_content(filesystem.value(), catalog.value().catalog, flagged, "Art", "Other"));
+    }
     const auto& scene = content.value();
     assert(std::abs(scene.corruption_parameters.brightness[0]-0.2F) < 0.00001F
         && std::abs(scene.corruption_parameters.brightness[1]-1.4F) < 0.00001F);

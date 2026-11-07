@@ -57,7 +57,11 @@ public:
         record(std::move(label), tick, true);
     }
     // A new battle restarts the tick marks.
-    void battle_started() { next_mark_ = 0; memory_tick_pending_ = true; }
+    void battle_started() {
+        next_mark_ = 0;
+        memory_tick_pending_ = true;
+        census_tick_pending_ = true;
+    }
     // Godot frees released resources a few frames later; sample again once the setup
     // screen has drawn `settle_frames` frames after the battle went.
     static constexpr std::uint32_t settle_frames = 30;
@@ -69,6 +73,12 @@ public:
         if (settle_ != 0 && --settle_ == 0) sample("setup_settled");
     }
     void at_tick(const double tick) {
+        if (census_tick_pending_ && tick >= 600.0) {
+            // A direct start never calls battle_started(), so pending starts true (like the tick-1200 mark)
+            // and the census switch is read once, here.
+            census_tick_pending_ = false;
+            if (GodotRenderer::texture_census_enabled()) startup_trace.memory_tick_600();
+        }
         if (memory_tick_pending_ && tick >= 1200.0) {
             memory_tick_pending_ = false;
             startup_trace.memory_tick_1200();
@@ -94,6 +104,7 @@ public:
 
 private:
     bool memory_tick_pending_{true};
+    bool census_tick_pending_{true};
     void ensure_journal() {
         if (!log_path_text_.empty()) return;
         auto* os = godot::OS::get_singleton();

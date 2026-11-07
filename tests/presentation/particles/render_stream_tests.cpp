@@ -1,4 +1,5 @@
 #include "render_test_support.hpp"
+#include "eawr/vfs/vfs.hpp"
 #include "../../../apps/viewer/src/galactic/corruption_budget.hpp"
 
 #include <atomic>
@@ -411,8 +412,8 @@ void test_legacy_moving_kite() {
     camera.right = {1, 0, 0}; camera.up = {0, 1, 0};
     const auto plan = particles::plan_emitter(emitter, 0);
     particles::build_stream(plan, cpu.particles().first(1), camera, stream);
-    expect(stream.quads == 1 && close(stream.bounds_min.x, 94) && close(stream.bounds_max.x, 111),
-           "MD-07: full-speed kite has an authored-length backward streak");
+    expect(stream.quads == 1 && close(stream.bounds_min.x, 107.5F) && close(stream.bounds_max.x, 111),
+           "MD-09: an inheriting kite at a tenth of the fixed reference speed stretches a tenth of its length");
     if (stream.vertices.size() != 4) return;
     const auto& across_first = stream.vertices[1];
     const auto& across_second = stream.vertices[2];
@@ -426,7 +427,17 @@ void test_legacy_moving_kite() {
     particle.motion_velocity = {50, 0, 0};
     stream.clear();
     particles::build_stream(plan, std::span{&particle, 1}, camera, stream);
-    expect(close(stream.bounds_min.x, 101.5F), "MD-07: a slower kite shortens its tail against the reference speed");
+    expect(close(stream.bounds_min.x, 108.25F), "MD-09: a slower kite shortens its tail against the reference speed");
+    // MD-09: the reference is fixed, so a particle born by a stationary emitter (hull hit) is not
+    // stretched to the full authored length; only reaching the reference speed gives full length.
+    particle.motion_velocity = {1000, 0, 0};
+    stream.clear();
+    particles::build_stream(plan, std::span{&particle, 1}, camera, stream);
+    expect(close(stream.bounds_min.x, 94), "MD-09: a kite at the reference speed has the authored-length streak");
+    particle.motion_velocity = {2000, 0, 0};
+    stream.clear();
+    particles::build_stream(plan, std::span{&particle, 1}, camera, stream);
+    expect(close(stream.bounds_min.x, 94), "MD-09: a faster kite is capped at the authored length");
     particle.motion_velocity = {};
     stream.clear();
     particles::build_stream(plan, std::span{&particle, 1}, camera, stream);
@@ -955,7 +966,10 @@ public:
 // its statistics and its batch have grown.
 void test_batch_present_allocates_nothing() {
     CountingBackend backend;
+    // Measures the build and upload of a present; a clean present does neither.
+    particles::EffectRegistry::set_clean_present_default(false);
     particles::EffectRegistry registry(backend);
+    particles::EffectRegistry::set_clean_present_default(true);
     particles::SystemDefinition system;
     auto glow = drawable_emitter(); glow.translater_id = 26; glow.position.point = {0.0F, 2.0F, 0.0F};
     for (std::size_t emitter = 0; emitter < 4; ++emitter) system.emitters.push_back(glow);

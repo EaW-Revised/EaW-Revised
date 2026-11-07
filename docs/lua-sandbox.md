@@ -209,7 +209,9 @@ campaign. It returns the first registered player of that faction in player-ID or
 has no player. `local`, in any case, uses the recorded observer's player; a headless session without that observer returns
 no values. It does not substitute the script owner or a human player. In multiplayer, `local` always returns no values:
 a per-peer local identity inside the lockstep simulation would desynchronize peers. This is a deliberate project
-deviation from retail's per-machine local slot (WST-91). Unknown factions and invalid arguments emit a
+deviation from retail's per-machine local slot (WST-91). The one exception is co-op on single-player rules, where every
+human seat holds the same faction: `local` then returns that faction's player on every peer (project deviation, co-op
+design D5), derived from the agreed roster and never from a peer's own profile. Unknown factions and invalid arguments emit a
 diagnostic, request script exit and return no values; `pcall` cannot cancel that exit request. The current invocation
 returns normally, as with `_ScriptExit`.
 

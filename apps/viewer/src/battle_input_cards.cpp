@@ -321,15 +321,19 @@ void BattleInput::hero_click(const sim::EntityId hero, const bool hostile, const
             const auto squadron = live.squadron_of().find(represented);
             return squadron == live.squadron_of().end() ? represented : squadron->second;
         },
-        [&](const sim::tactical::TacticalInstance& target, const bool focus) {
-            if (!live.can_control(target)) return;
+        [&](const sim::tactical::TacticalInstance& target, const bool focus, const bool own) {
             const sim::EntityId entity = target.entity_id;
-            const std::array<sim::EntityId, 1> selected{entity};
-            const bool changed = selection_.replace(selected);
-            pad_palette_.close();
-            refresh_cards(live);
-            if (changed) acknowledge(Acknowledgement::Kind::select);
-            note("hero select " + std::to_string(hero) + " represented " + std::to_string(entity));
+            // A teammate's hero (or a unit this seat cannot control) is never selected, but still takes the focus.
+            if (own && live.can_control(target)) {
+                const std::array<sim::EntityId, 1> selected{entity};
+                const bool changed = selection_.replace(selected);
+                pad_palette_.close();
+                refresh_cards(live);
+                if (changed) acknowledge(Acknowledgement::Kind::select);
+                note("hero select " + std::to_string(hero) + " represented " + std::to_string(entity));
+            } else if (!focus) {
+                return;
+            }
             // WHE-75: sole selection, including a double click; no world type selection.
             if (focus) {
                 const auto real = [](const sim::math::Fixed value) {
@@ -385,7 +389,7 @@ void BattleInput::refresh_abilities(const LiveSessionView& live) {
     }
     ready_abilities_.stage(std::move(staged));
     const ui::AbilityState& state = ability_state_ != nullptr ? *ability_state_ : ready_abilities_;
-    ability_bar_ = card_slots_ == 0 ? ui::AbilityBar{} : ui::ability_bar(card_layout_, card_units_, state, nullptr);
+    ability_bar_ = card_slots_ == 0 ? ui::AbilityBar{} : ui::ability_bar(card_layout_, card_units_, state, ability_icon_);
     // RG-03: unsupported authored abilities retain their disabled button and a reason.
     for (auto& button : ability_bar_.buttons) {
         for (const auto& unit : card_units_) {

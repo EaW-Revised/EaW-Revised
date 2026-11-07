@@ -17,7 +17,7 @@
 #include "eawr/data/ui/dialog_catalog.hpp"
 #include "eawr/presentation/ui/fonts.hpp"
 #include "eawr/presentation/ui/layout.hpp"
-#include "eawr/vfs/vfs.hpp"
+#include "eawr/vfs/vfs_fwd.hpp"
 
 #include <array>
 #include <cstddef>

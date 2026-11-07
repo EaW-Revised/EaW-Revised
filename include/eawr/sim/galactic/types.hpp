@@ -7,6 +7,7 @@
 #include "eawr/sim/seat.hpp"
 #include "eawr/sim/math/geometry.hpp"
 #include "eawr/sim/galactic/observer_types.hpp"
+#include "eawr/sim/galactic/shared_rows.hpp"
 
 #include <array>
 #include <cstddef>
@@ -358,6 +359,11 @@ struct TacticalBuiltStructure {
     PlayerId owner{};
     friend bool operator==(const TacticalBuiltStructure&, const TacticalBuiltStructure&) = default;
 };
+struct GroundLayoutEntry {
+    EntityId object{};
+    std::uint32_t marker{};
+    friend bool operator==(const GroundLayoutEntry&, const GroundLayoutEntry&) = default;
+};
 struct ControlPlanet {
     PlanetId planet{};
     TypeId type{}; // capture history is per original planet type, WGM-76
@@ -372,6 +378,7 @@ struct ControlPlanet {
     std::vector<ControlTransitionModifier> transition_modifiers;
     math::Fixed capture_reward{};
     std::vector<TacticalBuiltStructure> built_structures; // retained build order, WGT-84
+    std::vector<GroundLayoutEntry> ground_layout; // assigned markers, sorted by object identity
     friend bool operator==(const ControlPlanet&, const ControlPlanet&) = default;
 };
 struct ControlRoute {
@@ -566,7 +573,7 @@ struct PlanetProduction {
     std::int64_t landed_transports{}, maximum_ground_forces{};
     // Legacy setup-only gate; live WGEP-24/38 checks use fleet_blockers when supplied.
     bool enabled{}, surface_accessible{}, starbase_blocked{};
-    std::vector<ProductionOffer> offers; // ascending type ID; planet restrictions already filtered
+    SharedRows<ProductionOffer> offers; // ascending type ID; planet restrictions already filtered; shared between publications
     std::array<std::vector<ProductionEntry>, 2> queues;
     std::vector<ProductionObject> objects; // ground units/structures; orbital structures
     friend bool operator==(const PlanetProduction&, const PlanetProduction&) = default;
@@ -1281,6 +1288,13 @@ struct GalacticSetup {
     std::optional<EconomyCorruptionState> economy_corruption; // GC tag 15 / section 17
     std::optional<GalacticAbilitySetup> ability_host; // coordinator-reserved GC tag 17 / section 20
     std::optional<VictoryState> victory{}; // coordinator-reserved tag 14
+    // Campaign planners always set transport explicitly. Standalone setup producers
+    // may omit it to follow their existing victory/economy mode defaults.
+    std::optional<bool> networked_transport{};
+    [[nodiscard]] bool uses_network_transport() const noexcept {
+        return networked_transport.value_or(victory ? victory->context.multiplayer
+            : economy_corruption && economy_corruption->multiplayer);
+    }
     friend bool operator==(const GalacticSetup&, const GalacticSetup&) = default;
 };
 

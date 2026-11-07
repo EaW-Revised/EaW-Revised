@@ -8,9 +8,11 @@
 #include <string>
 #include <vector>
 #include "../support/env.hpp"
+#include "eawr/vfs/vfs.hpp"
 #include "../support/result.hpp"
 #include "galactic_support.hpp"
 #include "galactic/map_input.hpp"
+#include "eawr/data/xml.hpp"
 #include "eawr/platform/live_game_session.hpp"
 
 #include <chrono>

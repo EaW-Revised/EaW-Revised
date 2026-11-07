@@ -1,6 +1,7 @@
 #include "lockstep_session_internal.hpp"
 #include <algorithm>
 #include <set>
+#include <limits>
 
 namespace eawr::net {
 using namespace lockstep_detail;
@@ -9,7 +10,18 @@ LockstepSession::LockstepSession(SessionAdapter& adapter, MessageTransport& tran
     std::vector<PeerSeat> seats, SessionOptions options, SessionMonitor* monitor)
     : adapter_(&adapter), transport_(&transport), seats_(std::move(seats)), options_(options), self_(transport.self()),
       received_through_(seats_.size()), command_cursors_(seats_.size()), accepted_(seats_.size()), monitor_(monitor), departed_(seats_.size()), quit_in_batch_(seats_.size()), quit_seen_(seats_.size()), recovery_(seats_.size()),
-      next_policy_tick_(64 * std::max<std::uint64_t>(1, options.input_delay / 2)), initial_input_delay_(options.input_delay) {
+      next_policy_tick_(options.initial_tick + 64 * std::max<std::uint64_t>(1, options.input_delay / 2)), initial_input_delay_(options.input_delay) {
+    initial_tick_ = options.initial_tick;
+    next_seal_ = initial_tick_;
+    std::fill(received_through_.begin(), received_through_.end(), initial_tick_);
+    for (PeerIndex peer = 0; peer < seats_.size(); ++peer) {
+        const auto at = options.producer_sequences.find(seats_[peer].seat);
+        if (at == options.producer_sequences.end()) continue;
+        // Saved cursors are inclusive maxima, including a valid sequence zero.
+        command_cursors_[peer] = at->second;
+        if (peer == self_) next_sequence_ = at->second == std::numeric_limits<std::uint64_t>::max()
+            ? at->second : at->second + 1;
+    }
     last_sent_batch_.resize(seats_.size());
     if (options_.mesh)
         mesh_ = std::make_unique<MeshIncident>(transport, static_cast<MeshSeats>((1U << seats_.size()) - 1U), *options_.mesh);
@@ -18,7 +30,8 @@ LockstepSession::LockstepSession(SessionAdapter& adapter, MessageTransport& tran
 core::Result<LockstepSession> LockstepSession::create(SessionAdapter& adapter, MessageTransport& transport,
     std::vector<PeerSeat> seats, SessionOptions options, SessionMonitor* monitor) {
     const auto count = transport.peer_count();
-    if (count < 2 || count > max_match_seats || transport.self() >= count || seats.size() != count || adapter.completed_tick() != 0
+    if (count < 2 || count > max_match_seats || transport.self() >= count || seats.size() != count || adapter.completed_tick() != options.initial_tick
+        || options.initial_tick > options.final_tick_count
         || options.input_delay == 0 || options.input_delay > max_input_delay || options.final_tick_count > max_session_ticks
         || options.completeness_timeout_ms == 0 || options.max_frames_per_pump == 0)
         return refused<LockstepSession>(session_errors::options, "invalid roster, initial tick or session options");
@@ -92,9 +105,9 @@ core::Result<PumpResult> LockstepSession::pump(const std::uint64_t now_ms) {
     last_now_ = now_ms;
     if (!recorded_zero_ && !(options_.reconnect && options_.reconnect->rejoin_source)) {
         if (monitor_) {
-            const bool end = options_.final_tick_count == 0;
-            const auto encoding = monitor_->needs_encoding(0, end) ? adapter_->canonical_state() : Bytes{};
-            auto recorded = monitor_->record(0, adapter_->state_hash(), encoding, {}, end);
+            const bool end = options_.final_tick_count == initial_tick_;
+            const auto encoding = monitor_->needs_encoding(initial_tick_, end) ? adapter_->canonical_state() : Bytes{};
+            auto recorded = monitor_->record(initial_tick_, adapter_->state_hash(), encoding, {}, end);
             if (!recorded) return fail(recorded.error());
         }
         recorded_zero_ = true;
@@ -102,10 +115,20 @@ core::Result<PumpResult> LockstepSession::pump(const std::uint64_t now_ms) {
     // Receive even when an exchange/freeze blocks advancement, and after the final tick.
     bool receive_drained = false;
     for (std::size_t count = 0; count < options_.max_frames_per_pump; ++count) {
-        auto frame = transport_->poll();
+        std::optional<Received> frame;
+        if (!galactic_recovery_input_.empty()) {
+            frame = std::move(galactic_recovery_input_.front());
+            galactic_recovery_input_.pop_front();
+            galactic_recovery_input_bytes_ -= frame->frame.size();
+        } else frame = transport_->poll();
         if (!frame) { receive_drained = true; break; }
         auto accepted = receive(std::move(*frame));
         if (!accepted) return fail(accepted.error());
+    }
+    if (checkpoint_) {
+        auto saved = service_checkpoint();
+        if (!saved) return fail(saved.error());
+        if (saved.value()) return core::Result<PumpResult>::success({});
     }
     if (auto meshed = service_mesh(now_ms, receive_drained); !meshed) return fail(meshed.error());
     const auto tick = adapter_->completed_tick();
@@ -237,6 +260,7 @@ core::Result<PumpResult> LockstepSession::pump(const std::uint64_t now_ms) {
         return core::Result<PumpResult>::success({});
     }
     waiting_.reset();
+    if (galactic_recovery_gate_ && !galactic_recovery_gate_()) return core::Result<PumpResult>::success({});
     if (monitor_ && !monitor_->may_step() && !held_) return core::Result<PumpResult>::success({});
     // Repaired streams can fill the old gap before the decision arrives. Only
     // the shared confirmation permits continuation; ordinary convergence and
@@ -255,6 +279,7 @@ core::Result<PumpResult> LockstepSession::pump(const std::uint64_t now_ms) {
         if (!bytes) return fail(bytes.error());
         canonical.push_back({departure.key, std::move(bytes).value()});
     }
+    if (recovery_rejoin_) canonical.push_back(*recovery_rejoin_);
     std::sort(canonical.begin(), canonical.end(), [](const auto& left, const auto& right) { return left.key < right.key; });
     PumpResult result;
     for (const auto& input : canonical)
@@ -294,6 +319,8 @@ core::Result<PumpResult> LockstepSession::pump(const std::uint64_t now_ms) {
         }
         reconnect_controls_.erase(tick);
     }
+    recovery_rejoin_.reset();
+    if (commit_observer_) commit_observer_(tick, canonical, stepped.value());
     ready_.erase(tick);
     if (mesh_ && tick > input_horizon()) {
         for (auto row = recovery_[self_].begin(); row != recovery_[self_].lower_bound(tick - input_horizon()); ++row) {
@@ -332,6 +359,10 @@ core::Result<PumpResult> LockstepSession::pump(const std::uint64_t now_ms) {
     if (departure_handler_ && !result.departures.empty()) {
         auto handled = departure_handler_(result.departures);
         if (!handled) return fail(handled.error());
+    }
+    if (checkpoint_callbacks_ && adapter_->checkpoint_requested() && !checkpoint_) {
+        auto begun = begin_checkpoint();
+        if (!begun) return fail(begun.error());
     }
     return core::Result<PumpResult>::success(std::move(result));
 }

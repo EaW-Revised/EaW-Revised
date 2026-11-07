@@ -7,7 +7,10 @@
 // Diagnostic tool: use exactly the scene loader's current candidate sequence.
 #include "../../src/scene/scene_internal.hpp"
 
+#include <algorithm>
+#include <fstream>
 #include <set>
+#include <sstream>
 
 namespace asset_validate_internal {
 namespace {

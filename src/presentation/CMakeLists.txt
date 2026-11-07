@@ -7,6 +7,6 @@ target_include_directories(
     PUBLIC
         "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>"
 )
-target_link_libraries(eawr_presentation PUBLIC eawr::core eawr::data eawr::sim PRIVATE pugixml::pugixml)
+target_link_libraries(eawr_presentation PUBLIC eawr::core eawr::data eawr::sim eawr::assets PRIVATE pugixml::pugixml)
 target_compile_features(eawr_presentation PUBLIC cxx_std_20)
 eawr_target_project_warnings(eawr_presentation)

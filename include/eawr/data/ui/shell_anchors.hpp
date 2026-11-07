@@ -8,7 +8,7 @@
 #include "eawr/assets/assets.hpp"
 #include "eawr/core/result.hpp"
 #include "eawr/data/ui/command_bar.hpp"
-#include "eawr/vfs/vfs.hpp"
+#include "eawr/vfs/vfs_fwd.hpp"
 
 #include <array>
 #include <cstddef>

@@ -53,6 +53,11 @@ elseif(EAWR_GNS_PROVIDER STREQUAL "FETCH")
     endif()
     eawr_gns_patch_turn_permission_refresh("${eawr_gns_source_SOURCE_DIR}")
     eawr_gns_patch_turn_diagnostics("${eawr_gns_source_SOURCE_DIR}")
+    if(CMAKE_CROSSCOMPILING AND CMAKE_HOST_SYSTEM_NAME STREQUAL "Linux" AND WIN32)
+        set(_eawr_gns_linux_host_protoc ON)
+        include("${CMAKE_CURRENT_LIST_DIR}/EawrGnsHostProtoc.cmake")
+        eawr_gns_patch_host_protoc("${eawr_gns_source_SOURCE_DIR}")
+    endif()
     FetchContent_GetProperties(eawr_protobuf_source)
     if(NOT eawr_protobuf_source_POPULATED)
         FetchContent_Populate(eawr_protobuf_source)
@@ -120,15 +125,32 @@ elseif(EAWR_GNS_PROVIDER STREQUAL "FETCH")
         INSTALL_COMMAND "${CMAKE_COMMAND}" --install <BINARY_DIR> --config ${_eawr_gns_config}
         BUILD_BYPRODUCTS "${_eawr_gns_protobuf_lib}" "${_eawr_gns_protoc}"
     )
+    set(_eawr_host_protoc_args)
+    set(_eawr_host_protoc_dep)
+    if(_eawr_gns_linux_host_protoc)
+        set(_eawr_host_protoc "${_eawr_gns_prefix}/host-protobuf/protoc")
+        ExternalProject_Add(eawr_gns_host_protoc
+            SOURCE_DIR "${eawr_protobuf_source_SOURCE_DIR}/cmake"
+            BINARY_DIR "${_eawr_gns_prefix}/host-protobuf"
+            DOWNLOAD_COMMAND "" UPDATE_COMMAND "" INSTALL_COMMAND ""
+            CMAKE_ARGS -DCMAKE_BUILD_TYPE:STRING=Release -Dprotobuf_BUILD_TESTS:BOOL=OFF
+                -Dprotobuf_BUILD_SHARED_LIBS:BOOL=OFF -Dprotobuf_WITH_ZLIB:BOOL=OFF
+            BUILD_COMMAND "${CMAKE_COMMAND}" --build <BINARY_DIR> --target protoc --parallel 2
+            BUILD_BYPRODUCTS "${_eawr_host_protoc}"
+        )
+        set(_eawr_host_protoc_args "-DGNS_HOST_PROTOC:FILEPATH=${_eawr_host_protoc}")
+        set(_eawr_host_protoc_dep eawr_gns_host_protoc)
+    endif()
     ExternalProject_Add(eawr_gns_build
         SOURCE_DIR "${eawr_gns_source_SOURCE_DIR}"
         BINARY_DIR "${_eawr_gns_prefix}/gns-build"
         DOWNLOAD_COMMAND "" UPDATE_COMMAND ""
-        DEPENDS eawr_gns_protobuf_build
+        DEPENDS eawr_gns_protobuf_build ${_eawr_host_protoc_dep}
         BUILD_ALWAYS TRUE
         CMAKE_ARGS ${_eawr_gns_common_args}
             "-DCMAKE_PREFIX_PATH:PATH=${_eawr_gns_install}"
             "-DProtobuf_PROTOC_EXECUTABLE:FILEPATH=${_eawr_gns_protoc}"
+            ${_eawr_host_protoc_args}
             "-DUSE_CRYPTO:STRING=${_eawr_gns_crypto}"
             -DBUILD_STATIC_LIB:BOOL=ON -DBUILD_SHARED_LIB:BOOL=OFF
             -DBUILD_EXAMPLES:BOOL=OFF -DBUILD_TESTS:BOOL=OFF -DBUILD_TOOLS:BOOL=OFF

@@ -2,6 +2,9 @@
 #include "input_routing_mode.hpp"
 
 #include "capture_viewport.hpp"
+#include "camera_input.hpp"
+#include "edge_pointer.hpp"
+#include "galactic/galaxy_view.hpp"
 #include "viewer_path.hpp"
 
 #include "ui/input_routing.hpp"
@@ -23,6 +26,7 @@
 #include <godot_cpp/classes/window.hpp>
 #include <godot_cpp/variant/callable_method_pointer.hpp>
 
+#include <array>
 #include <cmath>
 #include <fstream>
 #include <functional>
@@ -127,6 +131,10 @@ struct InputRoutingMode::State {
     ui::ReferenceSpace space;
     ui::ShellPlacement placement;
     EawrUiHitMask* mask{};
+    Rect2 edge_faceplate;
+    viewer::camera_input::Adapter edge_adapter{viewer::camera_input::Context::space, true};
+    presentation::camera::Constants edge_constants;
+    bool legacy_edge_stopped{};
     Button* stop{};
     Button* move{};
     LineEdit* edit{};
@@ -304,7 +312,10 @@ bool InputRoutingMode::State::build(Node3D& node) {
     CanvasLayer* layer = memnew(CanvasLayer);
     node.add_child(layer);
     mask = memnew(EawrUiHitMask);
-    mask->set_hit_test([this](const double x, const double y) { return hud.hit_test_screen({x, y}, space); });
+    mask->set_hit_test([this](const double x, const double y) {
+        return edge_faceplate.has_point(Vector2(static_cast<float>(x), static_cast<float>(y)))
+            || hud.hit_test_screen({x, y}, space);
+    });
     layer->add_child(mask);
     mask->set_position(Vector2());
     mask->set_size(size);
@@ -340,6 +351,24 @@ bool InputRoutingMode::State::build(Node3D& node) {
     close->set_position(size * 0.5F - Vector2(60.0F, 20.0F));
     close->set_size(Vector2(120.0F, 40.0F));
     modal->hide();
+
+    constexpr std::string_view edge_table = R"({"schema":"eawr-camera-bindings","version":1,
+        "provenance":"project-authored","notice":"edge routing fixture","edge_scroll":true,
+        "bindings":[{"id":"space.right.d","action":"pan_right","context":"space",
+        "device":"keyboard","control":"D","trigger":"held","scale":1}]})";
+    if (!edge_adapter.activate(edge_table) || !edge_adapter.set_viewport(static_cast<float>(width), static_cast<float>(height))) {
+        failure = "edge camera fixture could not activate";
+        return false;
+    }
+    edge_constants.distance_min = 100.0F; edge_constants.distance_max = 500.0F;
+    edge_constants.distance_default = 300.0F;
+    edge_constants.pitch_min = 20.0F; edge_constants.pitch_max = 60.0F; edge_constants.pitch_default = 40.0F;
+    edge_constants.yaw_min = -180.0F; edge_constants.yaw_max = 180.0F;
+    edge_constants.fov_min = 30.0F; edge_constants.fov_max = 50.0F; edge_constants.fov_default = 40.0F;
+    edge_constants.near_clip = 5.0F; edge_constants.far_clip = 8000.0F;
+    edge_constants.tactical_min_scroll_speed = 600.0F; edge_constants.tactical_max_scroll_speed = 2400.0F;
+    edge_constants.tactical_edge_scroll_region = 2.0F; edge_constants.tactical_offscreen_scroll_region = 50.0F;
+    edge_constants.push_scroll_speed_modifier = 1.0F;
 
     active = this;
     stop->connect("pressed", callable_mp_static(&State::on_button).bind(static_cast<int64_t>(stop_button)));
@@ -549,6 +578,75 @@ void InputRoutingMode::State::script() {
             }
             return {};
         }});
+    // Put a stopping HUD surface at each viewport edge. The pointer exits after
+    // the last event, then the frame sample must recover without another event.
+    struct EdgeCase { const char* name; Vector2 point; int x; int y; bool button; };
+    const std::array<EdgeCase, 4> edges{{
+        {"left edge over Stop", {1.0F, 360.0F}, -1, 0, true},
+        {"right edge over faceplate", {1278.0F, 360.0F}, 1, 0, false},
+        {"top edge over Stop", {640.0F, 1.0F}, 0, -1, true},
+        {"bottom edge over faceplate", {640.0F, 718.0F}, 0, 1, false},
+    }};
+    for (const auto& edge : edges) {
+        steps.push_back({edge.name, "UI-I1", [this, edge] {
+            edge_faceplate = edge.button ? Rect2() : Rect2(edge.point - Vector2(8, 8), Vector2(16, 16));
+            stop->set_position(edge.button ? edge.point - Vector2(8, 8) : Vector2(500, 300));
+            stop->set_size(Vector2(16, 16));
+            viewer::camera_input::RawEvent motion_event;
+            motion_event.kind = viewer::camera_input::RawKind::mouse_motion;
+            motion_event.has_position = true;
+            motion_event.position_x = edge.point.x; motion_event.position_y = edge.point.y;
+            const auto handled = edge_adapter.handle(motion_event);
+            edge_adapter.pointer_left();
+            const auto legacy = edge_adapter.take_step(edge_constants);
+            legacy_edge_stopped = handled && legacy && legacy.value().pan_x == 0.0F && legacy.value().pan_y == 0.0F;
+        }, [this, edge]() -> std::string {
+            if (!legacy_edge_stopped) return "mouse exit did not clear the event-only pointer";
+            const auto point = edge.point;
+            if (edge.button ? !stop->get_global_rect().has_point(point) : !edge_faceplate.has_point(point))
+                return "the edge point is not over the stopping HUD surface";
+            const auto focus = input_focus(*viewport);
+            const bool feed_allowed = map_pointer_feed_allowed({focus, false, false, false}, true, false, false);
+            route_pointer_sample(feed_allowed, point.x, point.y,
+                [this](const float x, const float y) { edge_adapter.sample_pointer(x, y); },
+                [this] { edge_adapter.clear_pointer_sample(); });
+            const auto intent = edge_adapter.take_step(edge_constants);
+            if (!intent || intent.value().pan_x != static_cast<float>(edge.x)
+                || intent.value().pan_y != -static_cast<float>(edge.y)) return "polled tactical edge did not pan";
+            viewer::camera_input::TacticalPose pose{};
+            const auto moved = viewer::camera_input::advance_pose(edge_constants, pose, intent.value(), 0.5F, 0.1F);
+            if (!moved || moved.value().target == pose.target) return "tactical camera did not move";
+            const auto gc = presentation::camera::edge_scroll(edge_constants, point.x, point.y,
+                static_cast<float>(width), static_cast<float>(height));
+            if (!gc || gc.value().axis_x != edge.x || gc.value().axis_y != edge.y)
+                return "galactic edge selected the wrong direction";
+            viewer::galactic::GalaxyView galaxy{};
+            galaxy.bounds = {{-100, -100, 0}, {100, 100, 0}};
+            viewer::galactic::PlanetCamera gc_camera;
+            const auto before = gc_camera.pose().target;
+            gc_camera.pan(galaxy, static_cast<float>(gc.value().axis_x), static_cast<float>(gc.value().axis_y));
+            if (gc_camera.pose().target == before) return "galactic camera did not move";
+            modal->show();
+            const auto blocked_focus = input_focus(*viewport);
+            const bool blocked_map = map_pointer_feed_allowed({blocked_focus, false, false, false}, true, false, false);
+            const bool blocked_gc = galactic_pointer_feed_allowed(true, true, false, blocked_focus.modal_open);
+            const auto gc_before_block = gc_camera.pose().target;
+            if (blocked_gc) gc_camera.pan(galaxy, static_cast<float>(gc.value().axis_x), static_cast<float>(gc.value().axis_y));
+            const bool gc_stopped = gc_camera.pose().target == gc_before_block;
+            route_pointer_sample(blocked_map, point.x, point.y,
+                [this](const float x, const float y) { edge_adapter.sample_pointer(x, y); },
+                [this] { edge_adapter.clear_pointer_sample(); });
+            modal->hide();
+            if (blocked_map || blocked_gc || !gc_stopped || edge_adapter.pointer_valid())
+                return "modal did not block map and galactic edges";
+            edge_adapter.set_focus(false);
+            edge_adapter.sample_pointer(point.x, point.y);
+            const bool invalid_while_unfocused = !edge_adapter.pointer_valid();
+            edge_adapter.set_focus(true);
+            if (!invalid_while_unfocused) return "an unfocused camera accepted a pointer sample";
+            return {};
+        }});
+    }
 }
 
 void InputRoutingMode::State::drain() {

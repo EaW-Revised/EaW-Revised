@@ -1,4 +1,5 @@
 #include "eawr/core/load_profile.hpp"
+#include "eawr/core/tick_profile.hpp"
 #include "eawr/sim/tactical/session.hpp"
 
 #include "eawr/sim/tactical/formation.hpp"
@@ -412,6 +413,7 @@ core::Result<void> session_detail::Tick::commit_environmental_hits(std::vector<L
         const auto hull = unit.durability->hull;
         const auto shields = unit.durability->shields;
         hit.take_damage_multiplier = unit.take_damage_mode;
+        hit.target_script_invulnerable = unit.script_invulnerable;
         hit.defense = math::Fixed::from_raw(unit.upgrade_bonuses[4].raw()
             + (unit.arrival_vulnerable_until ? impl_->economy.vulnerability.raw() : 0));
         const auto applied = apply_hit(*profile, *damage_rules, *unit.durability, hit, tick);
@@ -592,6 +594,7 @@ void session_detail::Tick::service_asteroid_contact(LiveUnit& unit, std::size_t&
             const auto arrival_defense = unit.arrival_vulnerable_until ? impl_->economy.vulnerability : math::Fixed{};
             hit.defense = math::Fixed::from_raw(unit.upgrade_bonuses[4].raw() + arrival_defense.raw());
             hit.take_damage_multiplier = predicted->take_damage_mode;
+            hit.target_script_invulnerable = predicted->script_invulnerable;
             asteroid_scratch.deliveries[index].push_back(hit);
             if (!redirect_recipients(unit.state.entity_id).empty()) continue;
             auto outcome = apply_hit(profile, *damage_rules, *predicted->durability, hit, tick);
@@ -864,33 +867,39 @@ core::Result<void> session_detail::CombatPhases::commit_survivors() {
     survivors.reserve(inputs.size());
     surviving_instances.reserve(inputs.size());
     auto& capture_candidates = context_.surviving_.value().capture_candidates.emplace(0);
-    for (const auto& job : capture_jobs) {
-        capture_candidates += job.inspected;
-        if (pads.at(job.id) != job.next) {
-            context_.impl_->pad_stage.touch(job.id);
-            pads.at(job.id) = job.next;
+    {
+        core::tick_profile::Scope pads_scope("serial.tactical.commit_survivors.pads");
+        for (const auto& job : capture_jobs) {
+            capture_candidates += job.inspected;
+            if (pads.at(job.id) != job.next) {
+                context_.impl_->pad_stage.touch(job.id);
+                pads.at(job.id) = job.next;
+            }
         }
     }
-    for (std::size_t index = 0; index < inputs.size(); ++index) {
-        const auto job = std::lower_bound(capture_jobs.begin(), capture_jobs.end(), inputs[index].state.entity_id,
-            [](const CaptureJob& entry, const EntityId id) { return entry.id < id; });
-        if (job != capture_jobs.end() && job->id == inputs[index].state.entity_id && job->owner != job->before) {
-            auto before = inputs[index].state;
-            before.owner = job->before;
-            context_.track_victory_change(&before, &inputs[index].state, true);
-            // WNO-23: sequence carries the previous owner for selection/control-group removal.
-            events.push_back(Event{context_.tick, EventKind::pad_captured, job->owner, job->before, job->id});
+    {
+        core::tick_profile::Scope loop_scope("serial.tactical.commit_survivors.loop");
+        for (std::size_t index = 0; index < inputs.size(); ++index) {
+            const auto job = std::lower_bound(capture_jobs.begin(), capture_jobs.end(), inputs[index].state.entity_id,
+                [](const CaptureJob& entry, const EntityId id) { return entry.id < id; });
+            if (job != capture_jobs.end() && job->id == inputs[index].state.entity_id && job->owner != job->before) {
+                auto before = inputs[index].state;
+                before.owner = job->before;
+                context_.track_victory_change(&before, &inputs[index].state, true);
+                // WNO-23: sequence carries the previous owner for selection/control-group removal.
+                events.push_back(Event{context_.tick, EventKind::pad_captured, job->owner, job->before, job->id});
+            }
+            tick_work.level_matrix_builds += inputs[index].matrix_builds;
+            tick_work.banked_matrix_builds += inputs[index].banked_matrix_builds;
+            if (serviced[index].unit_destroyed) {
+                killed.push_back(inputs[index].state);
+                continue;
+            }
+            survivors.push_back(std::move(inputs[index]));
+            surviving_instances.push_back(std::move(instances[index]));
         }
-        tick_work.level_matrix_builds += inputs[index].matrix_builds;
-        tick_work.banked_matrix_builds += inputs[index].banked_matrix_builds;
-        if (serviced[index].unit_destroyed) {
-            killed.push_back(inputs[index].state);
-            continue;
-        }
-        survivors.push_back(std::move(inputs[index]));
-        surviving_instances.push_back(std::move(instances[index]));
+        instances = std::move(surviving_instances);
     }
-    instances = std::move(surviving_instances);
 
     return core::Result<void>::success();
 }

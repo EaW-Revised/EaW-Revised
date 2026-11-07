@@ -1,3 +1,5 @@
+#include "revised_layer.hpp"
+#include "eawr/vfs/vfs.hpp"
 #include "viewer_profile_arguments.hpp"
 #include "ui_gallery_internal.hpp"
 
@@ -59,6 +61,7 @@ bool UiGalleryMode::State::load() {
     }
     roots.emplace_back("expansion", expansion);
     roots.emplace_back("base", base);
+    mount_revised_layer(roots);
     std::vector<vfs::MountSpec> specs;
     for (const auto& [id, root] : roots) {
         auto manifest = vfs::resolve_manifest_mount(id, root);

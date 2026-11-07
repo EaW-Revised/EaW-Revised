@@ -1,4 +1,5 @@
 #include "eawr/core/json_text.hpp"
+#include <system_error>
 #include "space_environment_internal.hpp"
 #include "startup_trace.hpp"
 #include "render_profile_viewport.hpp"

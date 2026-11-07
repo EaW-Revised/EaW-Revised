@@ -12,6 +12,12 @@ target_compile_features(land_movement_tests PRIVATE cxx_std_20)
 eawr_target_project_warnings(land_movement_tests)
 add_test(NAME land_movement_contracts COMMAND land_movement_tests)
 
+add_executable(land_overlay_tests land_overlay_tests.cpp)
+target_link_libraries(land_overlay_tests PRIVATE eawr::skirmish eawr::platform)
+target_compile_features(land_overlay_tests PRIVATE cxx_std_20)
+eawr_target_project_warnings(land_overlay_tests)
+add_test(NAME land_overlay_contracts COMMAND land_overlay_tests)
+
 add_executable(land_generic_team_tests land_generic_team_tests.cpp)
 target_link_libraries(land_generic_team_tests PRIVATE eawr::checkpoint eawr::skirmish eawr::platform)
 target_compile_features(land_generic_team_tests PRIVATE cxx_std_20)
@@ -70,13 +76,14 @@ set_tests_properties(skirmish_attract_cycle PROPERTIES SKIP_REGULAR_EXPRESSION "
 set(EAWR_SKIRMISH_FIXTURES "${CMAKE_CURRENT_LIST_DIR}/fixtures")
 
 add_executable(skirmish_start_tests skirmish_start_tests.cpp
+    minimap_default_evidence.cpp
     skirmish_start_synthetic_tests.cpp
     skirmish_start_placement_tests.cpp
     skirmish_setup_contract_tests.cpp
     skirmish_start_placed_tests.cpp
     skirmish_start_foc_tests.cpp
     skirmish_start_pad_tests.cpp)
-target_link_libraries(skirmish_start_tests PRIVATE eawr::skirmish eawr::platform)
+target_link_libraries(skirmish_start_tests PRIVATE eawr::skirmish eawr::platform eawr::ui_model)
 target_compile_features(skirmish_start_tests PRIVATE cxx_std_20)
 eawr_target_project_warnings(skirmish_start_tests)
 add_test(NAME skirmish_start_contracts COMMAND skirmish_start_tests "${EAWR_SKIRMISH_FIXTURES}")
@@ -182,8 +189,12 @@ set_tests_properties(foc_plan_battle PROPERTIES SKIP_REGULAR_EXPRESSION "SKIPPED
 add_test(NAME foc_plan_long_tail COMMAND foc_plan_tests --attack-long-tail 30437)
 set_tests_properties(foc_plan_long_tail PROPERTIES SKIP_REGULAR_EXPRESSION "SKIPPED:"
     LABELS "long;batch-only" TIMEOUT 780)
-add_test(NAME foc_ai_economy COMMAND foc_plan_tests 12000 "" "" --economy)
-set_tests_properties(foc_ai_economy PROPERTIES SKIP_REGULAR_EXPRESSION "SKIPPED:")
+add_test(NAME foc_ai_economy_2 COMMAND foc_plan_tests 12000 "" "" --economy 2)
+set_tests_properties(foc_ai_economy_2 PROPERTIES SKIP_REGULAR_EXPRESSION "SKIPPED:")
+add_test(NAME foc_ai_economy_4 COMMAND foc_plan_tests 12000 "" "" --economy 4)
+set_tests_properties(foc_ai_economy_4 PROPERTIES SKIP_REGULAR_EXPRESSION "SKIPPED:")
+add_test(NAME foc_ai_economy_8 COMMAND foc_plan_tests 12000 "" "" --economy 8)
+set_tests_properties(foc_ai_economy_8 PROPERTIES SKIP_REGULAR_EXPRESSION "SKIPPED:")
 add_test(NAME foc_ai_reinforce_position COMMAND foc_plan_tests 3600
     "${CMAKE_CURRENT_BINARY_DIR}/reinforce-position.eawr-replay" "" --reinforce-regression)
 set_tests_properties(foc_ai_reinforce_position PROPERTIES SKIP_REGULAR_EXPRESSION "SKIPPED:")
@@ -193,6 +204,29 @@ foreach(faction Rebel Empire Underworld)
     add_test(NAME foc_ai_special_weapon_${faction} COMMAND foc_plan_tests --special-weapons ${faction} 18000)
     set_tests_properties(foc_ai_special_weapon_${faction} PROPERTIES SKIP_REGULAR_EXPRESSION "SKIPPED:")
 endforeach()
+
+# Skirmish battle saves (docs/checkpoint-format.md "Skirmish battle saves"): the tactical-host codec, and
+# with installed game data a stock 3v3 AI battle saved at three ticks, loaded and continued on 1 and 8 workers
+# with every hash equal to the uninterrupted run. Optional: --mod-root <chain> --map <path> for a mod scene.
+add_executable(skirmish_save_tests save_tests.cpp)
+target_link_libraries(skirmish_save_tests PRIVATE eawr::checkpoint eawr::skirmish eawr::platform eawr::platform_live_ai)
+target_compile_features(skirmish_save_tests PRIVATE cxx_std_20)
+eawr_target_project_warnings(skirmish_save_tests)
+# The viewer's header-only skirmish save hints (#3989), checked with the save file they go into.
+target_include_directories(skirmish_save_tests PRIVATE "${PROJECT_SOURCE_DIR}/apps/viewer/src")
+add_test(NAME skirmish_save_contracts COMMAND skirmish_save_tests
+    --cursor-fixture "${PROJECT_SOURCE_DIR}/tests/replay/fixtures/tactical-v2.eawr-replay")
+eawr_add_game_data_test(NAME skirmish_save_continue_installed COMMAND skirmish_save_tests --installed 2400)
+# The committed small space save (tests/skirmish/fixtures/saves/): equal to a fresh save, loads, continues on 1 and 8
+# workers. After a format change: skirmish_save_tests --save-fixture <replay> <save> --write, or
+# tools/replay/skirmish_save_fixture.py --log <this test's verbose log> on a pool build.
+add_test(NAME skirmish_save_fixture COMMAND skirmish_save_tests --save-fixture
+    "${PROJECT_SOURCE_DIR}/tests/replay/fixtures/tactical-v2.eawr-replay"
+    "${PROJECT_SOURCE_DIR}/tests/skirmish/fixtures/saves/tactical-v2-host.eawr-ckp")
+add_test(NAME python_skirmish_save_fixture_tool
+    COMMAND "${Python3_EXECUTABLE}" -m pytest -q "${CMAKE_CURRENT_SOURCE_DIR}/test_save_fixture_tool.py"
+    WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}")
+set_tests_properties(skirmish_save_continue_installed PROPERTIES SKIP_REGULAR_EXPRESSION "SKIPPED:" TIMEOUT 3600)
 
 # The Empire AI's burn attack on the starbase after the Rebel fleet is gone (#532): needs EAWR_EAW_GAME_ROOT.
 add_executable(foc_burn_tests foc_burn_tests.cpp)
@@ -344,6 +378,24 @@ add_test(NAME land_session_contracts COMMAND land_session_tests)
 set_tests_properties(land_session_contracts PROPERTIES TIMEOUT 900)
 eawr_add_game_data_test(NAME land_session_stock_map COMMAND land_session_tests --installed)
 set_tests_properties(land_session_stock_map PROPERTIES SKIP_REGULAR_EXPRESSION "SKIPPED:" TIMEOUT 900)
+
+# #3207 G1-b: the FoC AI host on a land session (workers, reverse order, checkpoint restore).
+add_executable(land_ai_session_tests land_ai_session_tests.cpp)
+target_link_libraries(land_ai_session_tests PRIVATE eawr::script_foc eawr::skirmish eawr::platform)
+target_compile_features(land_ai_session_tests PRIVATE cxx_std_20)
+eawr_target_project_warnings(land_ai_session_tests)
+add_test(NAME land_ai_session_contracts COMMAND land_ai_session_tests)
+set_tests_properties(land_ai_session_contracts PROPERTIES TIMEOUT 300)
+
+add_executable(land_ai_plan_audit_tests land_ai_plan_audit.cpp)
+target_link_libraries(land_ai_plan_audit_tests PRIVATE eawr::script_foc eawr::skirmish)
+target_compile_features(land_ai_plan_audit_tests PRIVATE cxx_std_20)
+eawr_target_project_warnings(land_ai_plan_audit_tests)
+eawr_add_game_data_test(NAME land_ai_plan_audit COMMAND land_ai_plan_audit_tests
+    "${CMAKE_CURRENT_BINARY_DIR}/land-ai-plan-audit.txt")
+set_tests_properties(land_ai_plan_audit PROPERTIES
+    SKIP_REGULAR_EXPRESSION "SKIPPED:" LABELS "game-data" TIMEOUT 1800)
+
 
 add_executable(land_combat_tests land_combat_tests.cpp)
 target_link_libraries(land_combat_tests PRIVATE eawr::checkpoint eawr::skirmish eawr::platform)

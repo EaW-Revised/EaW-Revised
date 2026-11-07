@@ -725,8 +725,10 @@ void nested_live_stealth() {
     fleet.members = {{1, 0}}; movement.contents[0].children = {{1, 0}};
     expect(!gc::fleet_combat_skip(fleet, records, &movement), "cyclic payload refuses boundedly");
 }
-void root_checkpoint_and_parity(bool positive_planet = false, bool due_heroes = false) {
+void root_checkpoint_and_parity(bool positive_planet = false, bool due_heroes = false,
+    bool empty_templates = false, bool invalid_transport = false) {
     Fixture fixture;
+    if (empty_templates) { fixture.source(10).company_units.clear(); fixture.source(11).squadron_units.clear(); }
     fixture.source(10).population_value = f(3); fixture.source(11).population_value = f(2);
     for (const auto id : {10U, 11U}) {
         fixture.source(id).build_cost_credits = f(1); fixture.source(id).build_time_seconds = f(1);
@@ -792,6 +794,7 @@ void root_checkpoint_and_parity(bool positive_planet = false, bool due_heroes = 
         expect(bool(original), "fixture binds original census types"); if (!original) return;
         context.census.types.push_back(original.value());
     }
+    if (invalid_transport) context.movement.types[2].transport = false;
     context.census.types.push_back({100, positive_planet ? f(4) : f(0), 0});
     context.location_originals.push_back({1, 100, 0, 1, 0, false, false, 0, 0, gc::ActorCombatRole::unavailable, {}, {}});
     if (due_heroes) for (const gc::PlanetId id : {2ULL, 3ULL}) {
@@ -824,6 +827,75 @@ void root_checkpoint_and_parity(bool positive_planet = false, bool due_heroes = 
         if (!root) std::cerr << root.error().message << '\n';
         expect(bool(root), "stock allocator creates full persistent CampaignRoot"); if (!root) return;
         const auto& setup = root.value().game()->galaxy().setup();
+        if (invalid_transport) {
+            const auto notes = root.value().load_notes();
+            expect(std::any_of(notes.begin(), notes.end(), [](const auto& note) {
+                return note.code == "EAWR-LOAD-1300" && note.action == eawr::core::LoadAction::skipped_object;
+            }), "invalid transport produces a load note");
+            const auto& census = setup.census->types;
+            const auto company = std::find_if(census.begin(), census.end(), [](const auto& row) { return row.type == 10; });
+            expect(company != census.end() && !company->company && !company->transport,
+                "invalid company is removed from the census construction binding");
+            const auto& nested = *setup.production->nested_creation;
+            const auto row = std::find_if(nested.types.begin(), nested.types.end(), [](const auto& value) { return value.type == 10; });
+            const auto squadron = std::find_if(nested.types.begin(), nested.types.end(), [](const auto& value) { return value.type == 11; });
+            expect(row != nested.types.end() && row->role == gc::NestedCreationRole::other
+                && squadron != nested.types.end() && squadron->role == gc::NestedCreationRole::squadron && squadron->members.size() == 2,
+                "invalid company is omitted while a valid composite remains intact");
+            const auto& offers = setup.production->planets.front().offers;
+            expect(!offers[0].direct_build_allowed && offers[1].direct_build_allowed,
+                "only the unusable company offer is disabled");
+            auto& game = *root.value().game();
+            const eawr::platform::ThreadWorkerAdapter executor(workers);
+            const gc::GalacticSession::NativeProductionRequest request{1, 1, 10, {}};
+            auto world = gc::GalacticSession::create(setup);
+            expect(bool(world), "omitted company setup creates a direct-construction owner");
+            if (!world) return;
+            const auto frontier = world.value().next_entity_id();
+            auto placed = world.value().place_due_hero(request, cp::stock_native_force_builder(services.stock_starting_forces, request), executor);
+            expect(placed && !placed.value().primary && world.value().next_entity_id() == frontier,
+                "direct construction of an omitted company safely produces no actors");
+            auto shadow = world.value().begin_native_actions(1);
+            expect(bool(shadow), "native action shadow opens for an omitted company");
+            if (shadow) {
+                auto made = shadow.value().create_force(request, cp::stock_native_force_shadow_builder(services.stock_starting_forces, request), executor);
+                expect(made && made.value().empty() && shadow.value().next_entity_id() == frontier,
+                    "shadow construction of an omitted company safely produces no actors");
+            }
+            const auto stepped = game.step(executor);
+            expect(bool(stepped), "campaign with unusable company transport advances");
+            if (stepped) {
+                const auto hash = game.state_sha256();
+                if (reference.empty()) reference.push_back(hash);
+                else expect(hash == reference.front(), "unusable company continuation is deterministic across workers");
+            }
+            continue;
+        }
+        if (empty_templates) {
+            const auto notes = root.value().load_notes();
+            expect(std::count_if(notes.begin(), notes.end(), [](const auto& note) {
+                return note.code == "EAWR-LOAD-1032" && note.action == eawr::core::LoadAction::skipped_object;
+            }) == 2, "empty company and squadron each emit a skipped-object note");
+            const auto& nested = *setup.production->nested_creation;
+            for (const auto id : {10U, 11U}) {
+                const auto row = std::find_if(nested.types.begin(), nested.types.end(),
+                    [&](const auto& value) { return value.type == id; });
+                expect(row != nested.types.end() && row->role == gc::NestedCreationRole::other && row->members.empty(),
+                    "empty template is omitted before production validation");
+                const auto& offers = setup.production->planets.front().offers;
+                const auto offer = std::find_if(offers.begin(), offers.end(), [&](const auto& value) { return value.type == id; });
+                expect(offer != offers.end() && !offer->direct_build_allowed, "omitted template cannot be produced");
+            }
+            const eawr::platform::ThreadWorkerAdapter executor(workers);
+            auto stepped = root.value().game()->step(executor);
+            expect(bool(stepped), "campaign with empty templates advances");
+            if (stepped) {
+                const auto hash = root.value().game()->state_sha256();
+                if (reference.empty()) reference.push_back(hash);
+                else expect(hash == reference.front(), "empty-template continuation is deterministic across workers");
+            }
+            continue;
+        }
         if (due_heroes) {
             const eawr::platform::ThreadWorkerAdapter executor(workers);
             auto& game = *root.value().game();
@@ -1127,6 +1199,6 @@ int case_galactic_starting_forces_tests() {
     duplicate_authored_starbases();
     level_one_starbase_clears_space_structures();
     excess_special_structures();
-    allocation_and_identity(); nested_live_stealth(); guards_and_hostility(); bases_structures_and_chains(); root_checkpoint_and_parity(); root_checkpoint_and_parity(true); root_checkpoint_and_parity(false, true); initial_ability_predicates(); initial_relations(); initial_geometry(); initial_movement_roles();
+    allocation_and_identity(); nested_live_stealth(); guards_and_hostility(); bases_structures_and_chains(); root_checkpoint_and_parity(); root_checkpoint_and_parity(true); root_checkpoint_and_parity(false, true); root_checkpoint_and_parity(false, false, true); root_checkpoint_and_parity(false, false, false, true); initial_ability_predicates(); initial_relations(); initial_geometry(); initial_movement_roles();
     return galactic_test::failures ? 1 : 0;
 }

@@ -1,0 +1,122 @@
+# Area labels for every CTest test, from the one central table tests/test_labels.txt (docs/test-index.md).
+#
+# `ctest -L ai`, `ctest -L checkpoint` and so on run one area; the labels sit next to the tier labels of
+# EawrTestTiers.cmake (fast, slow, gpu, ci-tools) and the kind labels (game-data, long, batch-only ...).
+# The table has `test <glob>` rows (matched on the test name) and `dir <prefix/>` rows (matched on the source
+# directory of the CMakeLists.txt that registers the test); a leading - on a label removes it again. The same rules
+# are implemented in tools/test_index/label_table.py, and tests/ci/test_test_index.py runs both on every test name.
+#
+# eawr_apply_area_labels() runs from eawr_check_test_tiers() after every add_subdirectory and fails the configure
+# for a test that no rule reaches. The table is maintainer-side: when the file is absent (a tree exported without
+# it) nothing is applied and nothing fails.
+include_guard(GLOBAL)
+
+# The path lives in a global property, not a variable: include_guard(GLOBAL) lets the first include win, and a
+# directory that includes EawrTestTiers.cmake early (apps/gc_bench) would otherwise keep the variable in its own scope,
+# leaving the root list file with an empty path and no labels at all.
+set_property(GLOBAL PROPERTY EAWR_TEST_LABEL_TABLE "${CMAKE_CURRENT_LIST_DIR}/../tests/test_labels.txt")
+
+# Reads the `test` and `dir` rows into EAWR_TEST_LABEL_RULES, a list of "kind|pattern|labels" entries.
+function(_eawr_read_label_rules out_rules)
+    set(rules "")
+    get_property(table GLOBAL PROPERTY EAWR_TEST_LABEL_TABLE)
+    if(table STREQUAL "")
+        message(FATAL_ERROR "cmake/EawrTestLabels.cmake did not record the path of tests/test_labels.txt")
+    endif()
+    if(EXISTS "${table}")
+        file(STRINGS "${table}" lines REGEX "^(test|dir)[ ]")
+        foreach(line IN LISTS lines)
+            string(REGEX REPLACE "[ ]+" ";" fields "${line}")
+            list(GET fields 0 kind)
+            list(GET fields 1 pattern)
+            list(GET fields 2 labels)
+            list(APPEND rules "${kind}|${pattern}|${labels}")
+        endforeach()
+    endif()
+    set(${out_rules} "${rules}" PARENT_SCOPE)
+endfunction()
+
+# The area labels of one test: eawr_area_labels(<rules> <test name> <source directory relative to the root> <out>).
+function(eawr_area_labels rules name directory out_labels)
+    set(added "")
+    set(removed "")
+    if(directory STREQUAL "")
+        set(place "")
+    else()
+        set(place "${directory}/")
+    endif()
+    foreach(rule IN LISTS rules)
+        string(REPLACE "|" ";" parts "${rule}")
+        list(GET parts 0 kind)
+        list(GET parts 1 pattern)
+        list(GET parts 2 labels)
+        set(hit FALSE)
+        if(kind STREQUAL "test")
+            string(REPLACE "*" ".*" expression "${pattern}")
+            if(name MATCHES "^${expression}$")
+                set(hit TRUE)
+            endif()
+        elseif(kind STREQUAL "dir")
+            string(LENGTH "${pattern}" length)
+            string(LENGTH "${place}" place_length)
+            if(NOT place_length LESS length)
+                string(SUBSTRING "${place}" 0 ${length} head)
+                if(head STREQUAL pattern)
+                    set(hit TRUE)
+                endif()
+            endif()
+        endif()
+        if(hit)
+            string(REPLACE "," ";" label_list "${labels}")
+            foreach(label IN LISTS label_list)
+                if(label MATCHES "^-")
+                    string(SUBSTRING "${label}" 1 -1 label)
+                    list(APPEND removed "${label}")
+                else()
+                    list(APPEND added "${label}")
+                endif()
+            endforeach()
+        endif()
+    endforeach()
+    list(REMOVE_DUPLICATES added)
+    if(removed)
+        list(REMOVE_ITEM added ${removed})
+    endif()
+    list(SORT added)
+    set(${out_labels} "${added}" PARENT_SCOPE)
+endfunction()
+
+function(_eawr_apply_area_labels_in directory rules root)
+    get_property(tests DIRECTORY "${directory}" PROPERTY TESTS)
+    file(RELATIVE_PATH relative "${root}" "${directory}")
+    get_property(unlabelled GLOBAL PROPERTY EAWR_TESTS_WITHOUT_AREA_LABEL)
+    foreach(test IN LISTS tests)
+        eawr_area_labels("${rules}" "${test}" "${relative}" labels)
+        if(labels STREQUAL "")
+            list(APPEND unlabelled "${test} (${relative})")
+        else()
+            set_property(TEST "${test}" DIRECTORY "${directory}" APPEND PROPERTY LABELS ${labels})
+        endif()
+    endforeach()
+    set_property(GLOBAL PROPERTY EAWR_TESTS_WITHOUT_AREA_LABEL "${unlabelled}")
+    get_property(children DIRECTORY "${directory}" PROPERTY SUBDIRECTORIES)
+    foreach(child IN LISTS children)
+        _eawr_apply_area_labels_in("${child}" "${rules}" "${root}")
+    endforeach()
+endfunction()
+
+# Root list file, after every add_subdirectory (called from eawr_check_test_tiers()).
+function(eawr_apply_area_labels)
+    _eawr_read_label_rules(rules)
+    if(NOT rules)
+        return()
+    endif()
+    set_property(GLOBAL PROPERTY EAWR_TESTS_WITHOUT_AREA_LABEL "")
+    _eawr_apply_area_labels_in("${CMAKE_SOURCE_DIR}" "${rules}" "${CMAKE_SOURCE_DIR}")
+    get_property(unlabelled GLOBAL PROPERTY EAWR_TESTS_WITHOUT_AREA_LABEL)
+    if(unlabelled)
+        list(JOIN unlabelled "\n  " listed)
+        message(FATAL_ERROR "These tests have no area label; add a `test` row (or a `dir` row for a new directory) to "
+                            "tests/test_labels.txt, then run python tools/test_index/generate_test_index.py:\n  ${listed}")
+    endif()
+endfunction()

@@ -9,6 +9,7 @@
 #include <cstddef>
 #include <string>
 #include "../support/env.hpp"
+#include "eawr/vfs/vfs.hpp"
 #include "../support/result.hpp"
 // #4058: an AI-on galactic save only grows by its recording. Runs the stock Sandbox_Equal_Footing_Empire campaign
 // (idle human, native AI on the other seats), measures the checkpoint section sizes as the days go by, and proves

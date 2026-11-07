@@ -2,6 +2,7 @@
 # Paths are absolute so both projects can include this list directly.
 
 set(EAWR_ASSETS_SOURCES
+    "${CMAKE_CURRENT_LIST_DIR}/shader_source.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/effect_reader.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/effect_program.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/animation.cpp"
@@ -11,5 +12,6 @@ set(EAWR_ASSETS_SOURCES
     "${CMAKE_CURRENT_LIST_DIR}/mega_texture.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/model.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/texture.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/texture_chain.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/texture_codecs.cpp"
 )

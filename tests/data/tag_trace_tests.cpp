@@ -1,6 +1,7 @@
 // #628: the load-time tag trace (docs/tag-coverage.md).
 
 #include "../support/temp_dir.hpp"
+#include "eawr/vfs/vfs.hpp"
 #include "data_test_support.hpp"
 #include "eawr/data/tag_trace.hpp"
 #include "eawr/data/xml.hpp"

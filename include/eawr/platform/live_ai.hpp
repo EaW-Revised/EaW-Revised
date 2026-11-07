@@ -8,12 +8,13 @@
 #include "eawr/sim/tactical/types.hpp"
 #include "eawr/skirmish/start.hpp"
 #include "eawr/units/unit_tables.hpp"
-#include "eawr/vfs/vfs.hpp"
+#include "eawr/vfs/vfs_fwd.hpp"
 
 #include <memory>
 #include <vector>
 
 namespace eawr::script::foc { struct AiJournal; }
+namespace eawr::skirmish { struct LandStart; struct LandStartInputs; }
 
 namespace eawr::platform {
 class BattleScoring;
@@ -28,6 +29,13 @@ struct LiveAi {
 // from the mounted FoC view (skirmish::ai_modules).
 // The optional journal observes the same production host; normal callers leave it null.
 [[nodiscard]] core::Result<LiveAi> live_ai(const skirmish::SkirmishStart& start, const skirmish::StartInputs& inputs,
+    const units::UnitTables& tables, const vfs::Vfs& files,
+    std::shared_ptr<const BattleScoring> scoring = {},
+    std::shared_ptr<script::foc::AiJournal> journal = {}, bool trace_proposals = false);
+
+// #3207 G1-b: the same for a land start (skirmish::land_ai_setup). The scripted session wraps the land
+// TacticalSession exactly as it wraps a space one; land stays behind EAWR_ENABLE_LAND_SKIRMISH in the viewer.
+[[nodiscard]] core::Result<LiveAi> live_land_ai(const skirmish::LandStart& start, const skirmish::LandStartInputs& inputs,
     const units::UnitTables& tables, const vfs::Vfs& files,
     std::shared_ptr<const BattleScoring> scoring = {},
     std::shared_ptr<script::foc::AiJournal> journal = {}, bool trace_proposals = false);

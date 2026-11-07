@@ -9,8 +9,16 @@
 
 #include <functional>
 
+namespace eawr::campaign { class CampaignSetupPlan; }
+namespace eawr::data::galactic { struct GalacticData; }
+
 namespace eawr::platform {
 struct PreparedCampaignBattle;
+
+// Derive presentation policy from the agreed campaign plan, including after restore.
+[[nodiscard]] std::optional<CampaignRetreatPolicy> campaign_retreat_policy(
+    const campaign::CampaignSetupPlan&, const data::galactic::GalacticData&,
+    const campaign::ConflictRecord&, const std::map<sim::galactic::TypeId, bool>&);
 
 // Engine-owned configuration, deliberately separate from the presentation-safe
 // live facade. Runs before its simulation thread; captured services outlive stop().

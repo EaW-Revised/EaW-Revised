@@ -13,6 +13,8 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <new>
+#include "eawr/sim/replay.hpp"
 #include <optional>
 #include <set>
 #include <span>
@@ -537,6 +539,239 @@ void free_fleet_signal_contracts() {
         }
         if (baseline.empty()) baseline = trace;
         expect(trace == baseline, "free begin/end/ground/retreat/loss owner bytes equal on1/2/4/8");
+    }
+}
+
+namespace {
+// Empty actor domain; actual production Runtime owners and world credit journal.
+// Each successful sibling consumes the preceding owner's staged credit balance.
+struct NativeIsolationFixture {
+    struct Instance {
+        galactic::GalacticSession* world{};
+        cp::GalacticAiRuntimeView view;
+        std::map<galactic::PlayerId, std::size_t> calls;
+        std::function<auth::ScriptScheduler*()> battle_scripts;
+    };
+    std::shared_ptr<eawr::platform::ThreadWorkerAdapter> executor;
+    galactic::GalacticSetup layout;
+    std::shared_ptr<cp::GalacticAiRuntimeSetup> setup;
+    eawr::platform::CampaignServiceConfiguration configuration;
+    std::vector<std::shared_ptr<Instance>> instances;
+    NativeIsolationFixture(std::size_t workers, std::set<galactic::PlayerId> faults, bool throws, bool after, bool published = false, bool late = false, bool infrastructure = false)
+        : executor(std::make_shared<eawr::platform::ThreadWorkerAdapter>(workers)),
+          layout(galactic::synthetic_galaxy({.seed = 42, .planets = 3, .players = 3, .fleets_per_player = 0})),
+          setup(std::make_shared<cp::GalacticAiRuntimeSetup>()) {
+        const auto fixed = [](std::int64_t value) { return must(eawr::sim::math::Fixed::from_integer(value)); };
+        layout.rules.maximum_fleet_movement_distance = fixed(0); layout.rules.fiscal_cycle_frames = 18000;
+        layout.fleet_control.emplace(); layout.player_economy.emplace(); layout.fiscal.emplace(); layout.production.emplace();
+        layout.fiscal->credit_cap_per_planet = fixed(1000); layout.production->maximum_human_queue = 1;
+        for (auto& seat : layout.seats) { seat.kind = galactic::SeatKind::ai; seat.human_side_id = 0; }
+        setup->executor = executor; setup->content = std::make_shared<eawr::script::foc::ai::GalacticSelectionContent>();
+        setup->content_identity = std::string(64, 'b'); setup->immediate_instances = setup->immediate_requests = 16;
+        setup->perception.seed = 42; setup->lifecycle.categories = {{"OFFENSIVE", 1}};
+        setup->lifecycle.service_periods = {1, 1, 1, 1, 1, 1};
+        for (const auto& player : layout.players) {
+            const auto id = player.player_id;
+            layout.player_economy->players.push_back({id, fixed(100), fixed(1000), 1, 5});
+            layout.fiscal->players.push_back({id, false, fixed(1)});
+            galactic::ProductionPlayer builder; builder.player = id; builder.pay_as_you_go = builder.uses_population_cap = true;
+            layout.production->players.push_back(builder);
+            setup->perception.players.push_back({id, id, "FIXTURE", "NORMAL", false, true, false, 0});
+            setup->lifecycle.players.push_back({id, "FIXTURE", "NORMAL", {}, {}});
+        }
+        for (const auto& planet : layout.planets) {
+            layout.fiscal->planets.push_back({planet.id, {}});
+            galactic::PlanetProduction location; location.planet = planet.id; location.target_owner = planet.owner;
+            layout.production->planets.push_back(location);
+            setup->perception.planets.push_back({planet.id, "P" + std::to_string(planet.id), planet.id, {}, {}, {}, {}, {}});
+        }
+        setup->lifecycle.xml = {
+            {"data/xml/ai/players/fixture.xml", R"(<AIPlayerType><Name>Fixture</Name><Templates><Galactic>Default</Galactic></Templates><Difficulty_Adjustments><Normal>Normal</Normal></Difficulty_Adjustments></AIPlayerType>)"},
+            {"data/xml/ai/templates/fixture.xml", R"(<AITemplates><Default><Budget><Offensive>One</Offensive></Budget></Default></AITemplates>)"},
+            {"data/xml/ai/perceptualequations/fixture.xml", "<Equations><One>1</One></Equations>"},
+            {"data/xml/difficultyadjustments.xml", R"(<Difficulty_Adjustments><Difficulty_Adjustment Name="Normal"/></Difficulty_Adjustments>)"}
+        };
+        for (const auto& [path, contents] : setup->lifecycle.xml) { static_cast<void>(contents); setup->lifecycle.xml_paths.push_back(path); }
+        setup->modules = {{"Data/Scripts/Library/PGAICommands.lua", "function Base_Definitions() EnemyContrastTypes={} FriendlyContrastTypes={} end"}};
+        if (late) {
+            setup->lifecycle.xml["data/xml/ai/players/fixture.xml"] = R"(<AIPlayerType><Name>Fixture</Name><GalacticFreeStoreScript>Late</GalacticFreeStoreScript><Templates><Galactic>Default</Galactic></Templates><Difficulty_Adjustments><Normal>Normal</Normal></Difficulty_Adjustments></AIPlayerType>)";
+            setup->modules.emplace("Data/Scripts/FreeStore/Late.lua", "Seen = 0\nfunction Base_Definitions() Seen = Seen + 1; NativeLateFixture() end\nfunction main() while true do coroutine.yield(true) end end\n");
+        }
+        const auto late_faults = faults;
+        must(cp::configure_galactic_ai_runtime(configuration, setup, [this, faults = std::move(faults), throws, after, published, late, infrastructure] {
+            auto instance = std::make_shared<Instance>(); cp::GalacticAiRuntimeProviders providers;
+            providers.execution_writers_tracked = true; // This fixture has no external execution writers.
+            providers.execution_input = [](auto player, const auto& snapshot, const auto&, const auto&, const auto*) {
+                ga::ExecutionRouteInput input; input.player = player;
+                // The publication owner requires the complete live node domain,
+                // even when this no-goal fixture offers no movement edges.
+                for (const auto& planet : snapshot.planets())
+                    input.planets.push_back({planet.id, planet.position, {}, {}, {}, true});
+                return eawr::core::Result<ga::ExecutionRouteInput>::success(std::move(input));
+            };
+            providers.build_budgets = [](const auto&, const auto&, const auto&) {
+                return eawr::core::Result<cp::GalacticAiRuntimeProviders::BuildBudgetPublication>::success(
+                    std::make_shared<const std::vector<eawr::script::foc::ai::GalacticBudgetBuild>>());
+            };
+            providers.prepare_connectivity = [](const auto&, auto&, auto&, const auto&) {
+                return eawr::core::Result<eawr::script::foc::ai::GalacticConnectivity>::success({});
+            };
+            providers.bind_actions = [instance](auto&, auto& world, auto&, auto, auto, auto) {
+                instance->world = &world;
+                return eawr::core::Result<void>::success();
+            };
+            providers.initialize_freestore = [instance, faults, throws, after, published, late, infrastructure](auto player, auto& actions, const auto&, const auto&) -> eawr::core::Result<void> {
+                ++instance->calls[player];
+                const auto fault = [&]() -> eawr::core::Result<void> {
+                    if (published) (void)must(instance->world->set_technology({player, 2, false, false}));
+                    if (throws && infrastructure) throw std::bad_alloc();
+                    if (throws) throw std::runtime_error("injected native provider exception");
+                    eawr::core::Diagnostic error; error.code = infrastructure ? std::string(eawr::sim::diagnostic_codes::worker_failure) : "NATIVE-PROVIDER-FIXTURE"; error.message = "injected native provider Result";
+                    return eawr::core::Result<void>::failure(std::move(error));
+                };
+                if (!late && faults.contains(player) && !after) return fault();
+                must(actions.qualified_freestore().initialize(player, {}));
+                std::int64_t delta = 10;
+                if (player > 1) for (const auto& account : instance->world->snapshot()->player_economy()->players)
+                    if (account.player == player - 1) delta += account.credits.raw() / eawr::sim::math::Fixed::scale - 100;
+                (void)must(instance->world->add_credits(player, must(eawr::sim::math::Fixed::from_integer(delta)), must(eawr::sim::math::Fixed::from_integer(1))));
+                return !late && faults.contains(player) ? fault() : eawr::core::Result<void>::success();
+            };
+            if (late) providers.publish_freestore = [](const auto& actions, auto& input, const auto&, const auto& admitted) {
+                auto published_pool = actions.qualified_freestore().publish(admitted);
+                if (!published_pool) return eawr::core::Result<void>::failure(published_pool.error());
+                input.pool = std::move(published_pool).value(); return eawr::core::Result<void>::success();
+            };
+            providers.freestore_types = {{1, ga::FreestoreKind::unit, false}};
+            providers.prepare_child_scripts = [](auto, auto, auto) {
+                cp::GalacticAiRuntimeProviders::ChildScripts result; result.parent_queries = [](const auto&) { return cp::GalacticParentQuery{}; };
+                return eawr::core::Result<cp::GalacticAiRuntimeProviders::ChildScripts>::success(std::move(result));
+            };
+            providers.prepare_battle = [instance](auto, auto, auto scheduler) {
+                instance->battle_scripts = std::move(scheduler);
+                return cp::GalacticAiRuntimeProviders::BattleListener(
+                [](const auto&) -> eawr::core::Result<void> { throw std::runtime_error("isolation fixture has no battles"); }); };
+            providers.placement = [](const auto&, const auto&, auto) -> eawr::core::Result<galactic::GalacticSession::NativeForcePlacement> { throw std::runtime_error("isolation fixture has no placement"); };
+            providers.shadow_placement = [](const auto&, const auto&, auto) -> eawr::core::Result<galactic::GalacticSession::NativeForcePlacement> { throw std::runtime_error("isolation fixture has no shadow placement"); };
+            providers.observe = [this, instance](auto view) { instance->view = std::move(view); instances.push_back(instance); };
+            return eawr::core::Result<cp::GalacticAiRuntimeProviders>::success(std::move(providers));
+        }));
+        if (late) {
+            const auto binding = [late_faults](auth::BindingContext& context, const auth::ValueList&) {
+                if (context.instance() <= 3 && late_faults.contains(static_cast<galactic::PlayerId>(context.instance())))
+                    context.issue_command(std::string(ga::verb_freestore_move), {});
+                return eawr::core::Result<auth::ValueList>::success({});
+            };
+            // Bind before the checkpoint loader validates the scheduler identity.
+            // Native installation runs later and must not introduce a new API.
+            const auto fresh = configuration.configure_native_ai;
+            configuration.configure_native_ai = [fresh, binding](auto& game) {
+                auto configured = fresh(game); if (!configured) return configured;
+                return game.galactic_scripts()->ai_scheduler().register_binding("NativeLateFixture", binding);
+            };
+            const auto prepare = configuration.restore.prepare_galactic;
+            configuration.restore.prepare_galactic = [prepare, binding] {
+                auto prepared = prepare(); if (!prepared) return prepared;
+                auto bound = prepared.value().schedulers.first.register_binding("NativeLateFixture", binding);
+                if (!bound) return decltype(prepared)::failure(bound.error());
+                return prepared;
+            };
+        }
+    }
+    cp::GameSession create(const galactic::GalacticSetup& source) {
+        auto game = must(cp::GameSession::create(source)); must(configuration.configure_native_ai(game)); return game;
+    }
+};
+}
+void native_provider_isolation_contracts() {
+    std::string reference;
+    for (const auto workers : eawr::platform::determinism_worker_counts()) {
+        std::string trace;
+        for (const auto fault : {1U, 2U, 3U}) for (const bool throws : {false, true}) for (const bool after : {false, true}) {
+            NativeIsolationFixture fixture(workers, {fault}, throws, after);
+            auto game = fixture.create(fixture.layout); const auto live = fixture.instances.back();
+            const auto first = must(game.step(*fixture.executor));
+            expect(live->battle_scripts && live->battle_scripts() == &game.galactic_scripts()->ai_scheduler(),
+                "battle callback retains the parent scheduler after native phase cleanup, including provider retirement");
+            const auto manager = live->view.manager.lock(); expect(bool(manager), "live native isolation manager is retained");
+            if (!manager->provider_retired(fault) || manager->lifecycle().retired_providers.size() != 1) {
+                std::cerr << "isolation context workers=" << workers << " fault=" << fault << " throws=" << throws << " after=" << after << " retired=";
+                for (const auto& [player, reason] : manager->lifecycle().retired_providers) std::cerr << player << ':' << static_cast<unsigned>(reason) << ',';
+                std::cerr << " calls="; for (const auto& [player, count] : live->calls) std::cerr << player << ':' << count << ',';
+                std::cerr << " lifecycle="; for (const auto& player : manager->lifecycle().players) std::cerr << player.selected.player << ':' << player.initialized << ',';
+                std::cerr << '\n';
+            }
+            expect(manager->provider_retired(fault) && manager->lifecycle().retired_providers.size() == 1,
+                "first/middle/last deterministic native fault retires exactly its actual provider");
+            std::int64_t prior = 100;
+            for (const auto& account : game.galaxy().snapshot()->player_economy()->players) {
+                const auto expected = account.player == fault ? 100 : 100 + 10 + prior - 100;
+                expect(account.credits.raw() / eawr::sim::math::Fixed::scale == expected,
+                    "successful sibling reads rolled-back predecessor credits and never duplicates a provisional write");
+                prior = expected;
+            }
+            expect(game.galaxy().native_post_publication_faults() == 0, "unpublished native faults do not count as published-output refusals");
+            const auto recording = must(galactic::parse_replay(must(galactic::write_replay(game.record()))));
+            auto replayed = fixture.create(recording.setup);
+            std::string replay_hash;
+            for (std::uint64_t tick = 0; tick < recording.final_tick_count; ++tick) replay_hash = must(replayed.step(*fixture.executor)).state_hash.get();
+            expect(replay_hash == game.state_sha256() && must(galactic::write_replay(replayed.record())) == must(galactic::write_replay(game.record()))
+                && must(replayed.save_galactic_ai()).state->components == must(game.save_galactic_ai()).state->components,
+                "recorded input reconstruction reproduces retirement hashes, native effect journal and canonical provider state");
+            const auto saved_ai = must(game.save_galactic_ai());
+            const auto ids = ck::game_identities(fixture.layout); const auto bytes = must(ck::save_game_checkpoint(game, ids));
+            auto loaded = must(ck::load_game_checkpoint(bytes, ids, fixture.configuration.restore, *fixture.executor));
+            expect(must(ck::save_game_checkpoint(loaded.session, ids)) == bytes
+                && must(loaded.session.save_galactic_ai()).state->components == saved_ai.state->components, "faulted retirement and every native owner recapture exact checkpoint bytes");
+            for (unsigned tick = 0; tick < 3; ++tick)
+                expect(must(game.step(*fixture.executor)).state_hash.get() == must(loaded.session.step(*fixture.executor)).state_hash.get(),
+                    "faulted checkpoint continues sibling native services with identical hashes");
+            trace += first.state_hash.get() + replay_hash;
+        }
+        for (const auto fault : {1U, 2U, 3U}) {
+            NativeIsolationFixture late(workers, {fault}, false, true, false, true);
+            auto game = late.create(late.layout); const auto live = late.instances.back();
+            (void)must(game.step(*late.executor));
+            std::cerr << "late isolation context fault=" << fault << " instances=";
+            for (const auto id : game.galactic_scripts()->ai_scheduler().instances()) std::cerr << id << ',';
+            std::cerr << " calls="; for (const auto& [player, count] : live->calls) std::cerr << player << ':' << count << ',';
+            std::cerr << " retired="; for (const auto id : game.galactic_scripts()->ai_scheduler().retired_instances()) std::cerr << id << ',';
+            std::cerr << '\n';
+            expect(live->view.manager.lock()->provider_retired(fault), "native fault in the after-Lua command tail retires its actual chain owner");
+            for (galactic::PlayerId player = 1; player <= 3; ++player) {
+                if (player == fault) continue;
+                const auto seen = must(game.galactic_scripts()->ai_scheduler().read_global(player, "Seen"));
+                expect(seen && std::get<eawr::script::numeric::LuaNumber>(seen->data) == eawr::script::numeric::LuaNumber(1)
+                    && live->calls.at(player) == 2, "late native retry reruns native siblings but restores their Lua callbacks to once-only state");
+            }
+            const auto ids = ck::game_identities(late.layout); const auto bytes = must(ck::save_game_checkpoint(game, ids));
+            auto loaded = must(ck::load_game_checkpoint(bytes, ids, late.configuration.restore, *late.executor));
+            expect(must(ck::save_game_checkpoint(loaded.session, ids)) == bytes
+                && must(game.step(*late.executor)).state_hash.get() == must(loaded.session.step(*late.executor)).state_hash.get(),
+                "late native fault checkpoint restores retired ownership and attached Lua continuation exactly");
+        }
+        for (const bool throws : {false, true}) {
+            NativeIsolationFixture successive(workers, {1, 2}, throws, true);
+            auto game = successive.create(successive.layout); const auto live = successive.instances.back();
+            (void)must(game.step(*successive.executor));
+            const auto manager = live->view.manager.lock();
+            expect(manager && manager->provider_retired(1) && manager->provider_retired(2) && !manager->provider_retired(3)
+                && live->calls.at(1) == 1 && live->calls.at(2) == 1 && live->calls.at(3) == 1,
+                "two successive faults retire in bounded attempts while the third native sibling runs once from the original root");
+            NativeIsolationFixture infrastructure(workers, {2}, throws, true, false, false, true);
+            auto broken = infrastructure.create(infrastructure.layout); const auto infrastructure_attempt = infrastructure.instances.back();
+            expect(!broken.step(*infrastructure.executor) && infrastructure_attempt->calls.at(1) == 1
+                && infrastructure_attempt->calls.at(2) == 1 && !infrastructure_attempt->calls.contains(3)
+                && !infrastructure_attempt->view.manager.lock()->provider_retired(2),
+                "executor Result and allocation exception remain infrastructure refusal with no retirement or retry");
+            NativeIsolationFixture published(workers, {2}, throws, true, true);
+            auto refused = published.create(published.layout); const auto attempted = published.instances.back();
+            const auto failed = refused.step(*published.executor);
+            expect(!failed && attempted->calls.at(1) == 1 && attempted->calls.at(2) == 1 && !attempted->calls.contains(3)
+                && refused.galaxy().native_post_publication_faults() == 1 && !attempted->view.manager.lock()->provider_retired(2),
+                "fault after live output preserves refusal, does not roll back/retire/retry, and does not repeat callbacks");
+        }
+        if (reference.empty()) reference = trace; else expect(trace == reference, "whole native provider isolation, checkpoint and input replay equal on 1/2/4/8 workers");
     }
 }
 
@@ -1084,11 +1319,34 @@ void mp_ai_uses_authored_faction_basic_ai() {
     expect(selected.size() == 2 && selected[0].player == galactic::PlayerId{2}
         && selected[0].player_type == "Copper_Mod_Controller" && selected[1].player_type == "Jade_Mod_Controller",
         "GCMP-AI-01 selects each playable MP AI faction's own mod-authored Basic_AI, without campaign pairs");
+    fixture.options.rules_flavour = cp::CampaignRulesFlavour::single_player;
+    expect(!fixture.select(), "networked SP rules resolve authored AI_Player_Control instead of Basic_AI");
+    fixture.data.campaigns.front().ai_player_control = {{"Copper", "Jade_Mod_Controller"}};
+    const auto authored_sp = must(fixture.select());
+    expect(authored_sp.size() == 1 && authored_sp.front().player == galactic::PlayerId{2}
+        && authored_sp.front().player_type == "Jade_Mod_Controller",
+        "SP rules keep authored controller selection independently of multiplayer transport");
+    fixture.options.rules_flavour.reset();
+    fixture.data.campaigns.front().ai_player_control = {{"Copper", "Unresolved_Solo_Controller"}};
     // Mode is an agreed runtime input, not campaign menu metadata.
     fixture.options.mode = cp::CampaignSetupMode::single_player;
     expect(!fixture.select(), "single-player still resolves its authored pair, even on an MP-listed definition");
     fixture.data.campaigns.front().ai_player_control.clear();
     expect(must(fixture.select()).empty(), "single-player does not borrow the multiplayer Basic_AI extension");
+}
+
+void shared_story_local_player_needs_sp_rules_and_one_human() {
+    MpSelectionFixture fixture;
+    const auto plan_for = [&] { return must(cp::plan_campaign_setup(fixture.data, {}, fixture.data.campaigns.front().name, fixture.options)); };
+    // Multiplayer flavour with one human observer: no shared local player, whatever the seat count.
+    expect(fixture.options.rules_flavour != cp::CampaignRulesFlavour::single_player
+        && plan_for().human_observers().size() == 1 && !cp::shared_story_local_player(plan_for()),
+        "co-op: multiplayer rules with one human observer give no shared local player");
+    fixture.options.rules_flavour = cp::CampaignRulesFlavour::single_player;
+    const auto shared = cp::shared_story_local_player(plan_for());
+    expect(shared && *shared == galactic::PlayerId{1}, "co-op: single-player rules with one human observer share that faction as local");
+    fixture.options.mode = cp::CampaignSetupMode::single_player;
+    expect(!cp::shared_story_local_player(plan_for()), "single-player mode keeps the per-run local player, no shared one");
 }
 
 void mp_ai_uses_agreed_difficulty_mapping() {

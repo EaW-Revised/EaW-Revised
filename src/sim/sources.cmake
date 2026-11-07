@@ -8,6 +8,7 @@ set(EAWR_SIM_SOURCES
     "${CMAKE_CURRENT_LIST_DIR}/tactical/land_path_service.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/tactical/land_placement.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/tactical/land_movement.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/tactical/land_debug_overlay.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/tactical/land_contacts.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/tactical/session_land.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/tactical/session_land_combat.cpp"

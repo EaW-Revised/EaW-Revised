@@ -90,6 +90,11 @@ struct SummaryView {
     std::optional<double> capacity;
 };
 struct LegendEntry { ReferenceIcon icon; std::string text; Rgb colour; };
+// GREF-19: pair the authored icon, text and RGB lists in authored order; the shortest list wins
+// (RGB is three components per entry). Text ids are resolved by the caller through `text`.
+[[nodiscard]] std::vector<LegendEntry> legend_entries(const std::vector<std::string>& icons,
+    const std::vector<std::string>& text_ids, const std::vector<int>& rgb,
+    const std::function<std::string(std::string_view)>& text);
 struct ReferenceFacts {
     std::uint32_t local_player{};
     std::optional<HistoryFacts> history;

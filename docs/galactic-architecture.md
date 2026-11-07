@@ -448,8 +448,9 @@ one-seat case; the faction table has no fixed count and includes non-playable ow
 - **Battles.** All active seats of a faction take part in every battle of their faction: the
   child battle receives the faction's seats, and `GameSession` forwards each seat's tactical
   command to the child as a command of the faction's tactical player, assigning that player's
-  next sequence in canonical seat order. The tactical session needs no seat concept and M2
-  replays are unchanged. FoC's multiplayer arbitration auto-resolves a battle that is not
+  next sequence in canonical seat order. The optional GC battle-controller policy retains
+  the authenticated issuing seat in the child stream (ADR-020); faction ownership remains
+  shared. FoC's multiplayer arbitration auto-resolves a battle that is not
   between two human sides (WGM-44); a coop side against AI uses single-player arbitration
   instead, with the choice taken from the first canonical choice command of its seats.
   Versus arbitration gets one side decision, derived from that side's first canonical
@@ -476,8 +477,43 @@ one-seat case; the faction table has no fixed count and includes non-playable ow
   viewer, never in the simulation; a player-save stores them per seat in the unhashed
   presentation-hints section. Intelligence is per faction: all its seats see the same snapshot
   view for seats of that faction.
+- **Cooperative mobile controllers.** Final GC battle entry derives the battle-controller
+  policy from the authoritative roster: it is always on when either participating
+  faction has at least two active human seats, on both human sides and against AI.
+  There is no lobby switch. Solo, one-human-per-side, no-human and standalone
+  skirmish battles retain ordinary faction commands. It splits deployed mobile roots in descending loaded population
+  order, with deterministic entity-ID ties and round-robin active human seats; heroes use that same
+  metric, and attached members follow their root. It never re-splits on checkpoint restore
+  or rebalances automatically. Seeded stable ties from the accepted plan remain follow-up
+  (legacy EAWR-5319).
+  Reinforcement tokens, credits and population capacity stay
+  shared per faction; a called-in root belongs to its authenticated caller for command
+  purposes. Structures remain shared. Faction ownership still determines fog, diplomacy,
+  victory, losses and returned fleets.
+  Gifts transfer selected roots only to an active human teammate of the same tactical
+  side. Empty selection is disabled/no-op; there is no receiver dialog or cooldown.
+  Heroes and called-in roots are transferable, current orders survive, attached members
+  follow their root, independent launched squadrons keep their controller, and future
+  launches follow the carrier. Retreat permission remains the existing faction rule.
+  Selection and control groups prune roots after transfer; presentation never grants
+  authoritative command rights. The common contract applies to ground when its provider
+  is integrated; this space acceptance does not claim an active ground provider.
+  An agreed departure redistributes mobile roots among remaining human teammates by
+  current root counts and seat-ID ties. With none left, the configured AI/passive fallback
+  applies; AI takeover requires an activated child provider, otherwise the side stays
+  passive with an explicit diagnostic. Rejoin follows current GC admission restrictions
+  and never reclaims old roots. No per-seat campaign assets or transfer history are added.
+  Synthetic acceptance in `tests/galactic/seat_roles_tests.cpp` runs split, both callers,
+  gift, departure, checkpoint continuation and ordinary faction return against AI and on
+  two human sides. Every parent tick matches GC replay and two-peer lockstep, the active
+  child matches standalone replay, and the corpus agrees on 1/2/4/8 entity workers.
+  `tests/net/galactic_live_driver_tests.cpp` covers authenticated adapter input/state
+  digests through the same transitions, while `tests/galactic/tactical_return_tests.cpp`
+  compares called-in/gifted/departed survivors with the ungifted faction return. No-human,
+  solo, one-human-per-side and standalone skirmish regressions preserve ordinary commands.
 - **Drop-out.** A seat leaving is a session-layer command injected by the session service at
-  an agreed tick; remaining faction seats keep commanding everything. Only when none remain
+  an agreed tick; remaining faction seats keep control, with the optional policy redistributing
+  the departing seat's mobile roots as above. Only when none remain
   does the setup's deterministic controller handover select AI (or the configured passive
   controller). Victory and defeat belong to the faction, shared by its seats. Reconnect
   reactivates the seat (M6).

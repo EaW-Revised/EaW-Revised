@@ -25,8 +25,8 @@
 #include <sstream>
 #include <string>
 #include <string_view>
-#include <utility>
 #include <vector>
+#include <utility>
 
 namespace {
 
@@ -42,6 +42,8 @@ struct Arguments final {
     bool combat{};
     std::filesystem::path mod_root; // #4589: a mod over FoC (Remake profile), read-only
     bool refusals{};                // every table's per-object refusals
+    std::vector<std::string> types; // extra object ids to load by name (#5559)
+    bool spawners{};                // print each loaded hangar: authored lists and the motion-table profile
 };
 
 void usage() {
@@ -69,6 +71,10 @@ std::optional<Arguments> arguments(const int argc, char** argv) {
             result.combat = true;
         } else if (flag == "--mod-root" && index + 1 < argc) {
             result.mod_root = argv[++index];
+        } else if (flag == "--type" && index + 1 < argc) {
+            result.types.emplace_back(argv[++index]);
+        } else if (flag == "--spawners") {
+            result.spawners = true;
         } else if (flag == "--refusals") {
             result.refusals = true;
         } else {
@@ -232,6 +238,7 @@ int main(const int argc, char** argv) {
             if (hardpoints != nullptr && !hardpoints->value.raw_text.empty()) input.types.push_back(definition.id);
         }
     }
+    for (const auto& name : args->types) input.types.push_back(name);
     auto tables = eawr::units::load_unit_tables(input);
     if (!tables) {
         std::cerr << eawr::core::format_diagnostic(tables.error()) << '\n';
@@ -291,6 +298,38 @@ int main(const int argc, char** argv) {
         for (const auto& row : value.notes) {
             std::cout << "note " << row.owner << " " << row.field << (row.value.empty() ? "" : " '" + row.value + "'")
                       << ": " << row.reason << '\n';
+        }
+    }
+    if (args->spawners) {
+        const auto motion = eawr::units::motion_table(value);
+        const auto name_of = [&value](const eawr::sim::tactical::TypeId id) {
+            for (const auto& unit : value.units) if (eawr::assets::object_type_crc(unit.id) == id) return unit.id;
+            return std::string("crc:") + std::to_string(id);
+        };
+        for (const auto& unit : value.units) {
+            if (!unit.spawner) continue;
+            std::cout << "spawner " << unit.id << " authored starting";
+            for (const auto& row : unit.spawner->starting) std::cout << " [" << row.squadron << " x" << row.count << ']';
+            std::cout << " reserve";
+            for (const auto& row : unit.spawner->reserves) std::cout << " [" << row.squadron << " x" << row.count << ']';
+            std::cout << '\n';
+        }
+        if (!motion) {
+            std::cout << "motion table: " << motion.error().message << '\n';
+        } else {
+            const auto& squadrons = motion.value().squadrons;
+            std::cout << "motion tables: craft " << squadrons.craft.size() << ", squadrons " << squadrons.squadrons.size()
+                      << ", spawners " << squadrons.spawners.size() << '\n';
+            for (const auto& squadron : squadrons.squadrons) {
+                std::cout << "squadron " << name_of(squadron.type_id) << " members " << squadron.members.size() << " max " << squadron.max_squad_size << '\n';
+            }
+            for (const auto& spawner : squadrons.spawners) {
+                std::cout << "profile " << name_of(spawner.type_id) << " bays " << spawner.bays.size() << " delay_frames " << spawner.delay_frames << " entries";
+                for (const auto& entry : spawner.entries) {
+                    std::cout << " [" << name_of(entry.squadron) << " starting " << entry.starting << " reserve " << entry.reserve << (entry.ship ? " ship" : "") << ']';
+                }
+                std::cout << '\n';
+            }
         }
     }
     if (args->movement) {

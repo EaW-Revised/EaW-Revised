@@ -17,6 +17,8 @@ namespace {
 inline constexpr std::array<std::uint8_t, 8> replay_magic{'E', 'A', 'W', 'R', 'G', 'C', 'R', 0};
 inline constexpr std::uint16_t flag_debug_commands = 1;
 inline constexpr std::uint16_t flag_header_extensions = 2;
+inline constexpr std::uint16_t flag_transport_explicit = 4;
+inline constexpr std::uint16_t flag_transport_networked = 8;
 inline constexpr std::uint16_t graph_rules_tag = 1;
 inline constexpr std::uint16_t fleet_control_tag = 2; // coordinator-reserved
 inline constexpr std::uint16_t player_economy_tag = 3; // coordinator-reserved
@@ -197,6 +199,8 @@ core::Result<std::vector<std::uint8_t>> write_replay(const GalacticReplay& repla
     Bytes bytes(replay_magic.begin(), replay_magic.end());
     detail::put_u16(bytes, galactic_replay_format_version);
     detail::put_u16(bytes, static_cast<std::uint16_t>((setup.debug_commands ? flag_debug_commands : 0)
+        | (setup.networked_transport.has_value() ? flag_transport_explicit : 0)
+        | (setup.networked_transport.value_or(false) ? flag_transport_networked : 0)
         | ((setup.rules.maximum_fleet_movement_distance || setup.player_economy || setup.seat_control || setup.movement || setup.fiscal || setup.control || setup.production || setup.census || !setup.outcomes.empty() || setup.observer || setup.income || setup.victory || setup.economy_corruption || setup.ability_host || setup.interactive_seat.value || !replay.native_effects.empty()) ? flag_header_extensions : 0)));
     detail::put_u32(bytes, galactic_rules_version);
     detail::put_bytes(bytes, setup.content_identity);
@@ -847,7 +851,10 @@ core::Result<void> parse_replay_preamble(sim::detail::Reader& reader, std::uint1
         return fail<Out>(diagnostic_codes::replay_version, "recorded under galactic rules version " + std::to_string(rules)
                 + ", this build runs " + std::to_string(galactic_rules_version), logical_path);
     }
-    if ((flags & ~(flag_debug_commands | flag_header_extensions)) != 0) return malformed("unknown header flags");
+    if ((flags & ~(flag_debug_commands | flag_header_extensions | flag_transport_explicit | flag_transport_networked)) != 0)
+        return malformed("unknown header flags");
+    if ((flags & flag_transport_networked) && !(flags & flag_transport_explicit))
+        return malformed("networked transport requires an explicit transport flag");
     return core::Result<void>::success();
 }
 
@@ -859,6 +866,7 @@ core::Result<void> parse_replay_header(sim::detail::Reader& reader, GalacticRepl
     };
     auto& setup = replay.setup;
     setup.debug_commands = (flags & flag_debug_commands) != 0;
+    if (flags & flag_transport_explicit) setup.networked_transport = (flags & flag_transport_networked) != 0;
     if (!reader.read_bytes(setup.content_identity) || !reader.read_bytes(setup.campaign_identity)
         || !reader.read_u64(setup.seed) || !reader.read_u64(replay.final_tick_count)) {
         return malformed("truncated header");

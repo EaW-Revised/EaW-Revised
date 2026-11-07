@@ -137,6 +137,14 @@ def generate(effective: Path, manifest: dict, registrations: dict) -> dict:
                           symbol.split(".")[-1] in declared_members)
             if symbol in {"Free_Random", "GameRandom.Free_Random"}:
                 status, target = "forbidden", "docs/lua-sandbox.md"
+            elif kind == "global" and symbol in {"FindPlanet", "Find_First_Object", "Find_Object_Type", "Spawn_Unit"}:
+                status, target = "partial", "src/campaign/galactic_story_scripts.cpp"
+            elif kind in {"method", "dotted"} and symbol.split(".")[-1] == "Prevent_AI_Usage":
+                status, target = "partial", "src/campaign/galactic_story_scripts.cpp"
+            elif kind in {"method", "dotted"} and symbol == "PlayerObject.Get_Difficulty":
+                status, target = "partial", "src/campaign/galactic_story_scripts.cpp"
+            elif kind in {"method", "dotted"} and symbol in {"GlobalValue.Get", "GlobalValue.Set"}:
+                status, target = "partial", "src/script/authoritative/bindings.cpp"
             elif symbol in INFRASTRUCTURE:
                 status, target = "bound", "src/script/authoritative/bindings.cpp"
             elif kind == "global" and symbol in helpers:

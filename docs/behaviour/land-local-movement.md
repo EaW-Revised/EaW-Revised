@@ -118,6 +118,19 @@ The proposal phases and the pair guard visit the contact rows that touch a membe
 member indices), not every retained row. `LandMovement::last_step_work` reports retained rows, row visits and
 pair-sweep candidates for the work-count budget test. No checkpoint field is added.
 
+Team slots (WLPA-84/85/86): a container team's members stand in rows behind the container. The slots are laid out when
+the squad first moves and again whenever the path heading leaves the last mapped axis by more than dot 0.99, so a
+squad re-forms for every path turn. The squad phase stages the new slots for its own members; the member phase of that
+step already walks to them and the ordered commit stores slots, mapped axis and rear extent together, so the WLPA-30
+gate uses the new rear extent from the next step. A squad's order is `reached` as soon as its parent arrives; its members
+keep finishing passive slot recovery afterwards. A company spawns as one rows layout per squad, one squad cell after the
+other along the side axis; the first squad's parent (the row-0 member nearest its layout centre) stands on the entry point, as the
+first squad did before the rows layout (a layout that started at the entry moved it 17 units into a wall corner on Naboo).
+Deviations from retail for the squad cohesion work (legacy EAWR-5163), each with its reason: moving Infantry/Bike pairs are stateless instead of the repulse
+contact state (WLPA-83, saves the contact scans); only the Rows arrangement exists, the Dartboard arrangement is
+not implemented (WLPA-84, rows give the same footprint without run-time sampling); the container order completes on
+arrival as retail's does (WLPA-85, verified in the debug build); the spawn layout is ours (WLPA-86, retail's is not traced).
+
 Requesting contacts sort by ascending distance score, with canonical object
 IDs supplying a total-order tie break. Distance is the alternative planner's
 explicit score, not a claim to have recovered every retail virtual score.
@@ -167,8 +180,10 @@ its temporary tracker and speed roles until completion or invalidation.
 Physical pair guards evaluate relative swept proposals in a partitioned phase,
 then stop blocked members and parent trackers in ordered commit. A current
 overlap may separate, but a new movement cannot deepen it or cross through the
-other proposal. WLPA-60 qualifies one infantry exception (a stop-gap until the contact selector reads the authored collision class that members now carry, WLPA-73): an existing moving/stopped
-repulsion pair is soft for the active mover's dynamic sweep. Its local avoidance,
+other proposal. WLPA-60 qualifies one infantry exception (a stop-gap until the contact selector reads the authored collision class that members now carry, WLPA-73): a moving/stopped
+pair of Infantry/Bike members is soft for the active mover's dynamic sweep, with or without a retained repulsion row
+(the peer's squad order not active, a reached squad counts as idle; WLPA-87: the row used to be a witness, and a company spawned in adjacent squad cells then froze at its first step into
+a neighbour cell, which stalled the Naboo stock move and combat witnesses). Its local avoidance,
 terrain/animation gates and idle peer pose remain effective; all other pair guards
 retain the conservative rule. This bounded exception follows the inspected retail
 member displacement chain, which writes its proposed XY position without a
@@ -184,6 +199,20 @@ WLPA-68/79: a path accepted while the squad is not moving first puts it in a sav
 walk-turning state (the parent rotates at the slowest member turn rate with no
 translation; a squad with a non-positive member turn rate never enters it). Members
 mirror the state, and slot correction or avoidance steer facing without zeroing speed.
+
+WLPA-88/89: a move order given to a squad that is translating along its own path
+does not drop the order. The squad keeps walking while the new path is searched from
+the nearer of the current leg end and one second of travel (`land_reorder_lookahead_ticks`).
+The old route is cut at that anchor. A result arriving in time is spliced behind the squad
+(`splice_path`); a longer search leaves it stopped at the anchor until it can turn in place.
+The first corner at the splice is checked against the
+interim smooth-start gate: smooth when the slowest member turns through it within one
+second. A sharper corner falls back to the old start: the order is dropped, the path is
+searched again from the squad position and the squad turns in place (WLPA-68). A
+standing start, a turning, yielded or recovering squad, a squad on a contact route and
+a generic-team squad take the old route unchanged. No retained field is added: the
+anchor is derived from the saved squad path and tracker, and the search start from the
+saved request, so a save inside the search window restores to the same splice.
 
 All settings, quota epoch/charge, contacts, counters, roles, locks, speed limits,
 blocked terrain target and ordinary/temporary trackers are typed checkpoint

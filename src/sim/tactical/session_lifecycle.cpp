@@ -40,6 +40,20 @@
 
 namespace eawr::sim::tactical {
 
+namespace {
+// Builder and direct inputs may arrive at different normalization stages.
+bool campaign_accounts_match(const std::vector<EconomyPlayer>& authored, const EconomyRules& economy) {
+    EconomyRules setup_accounts;
+    setup_accounts.players = authored;
+    EconomyRules bound_accounts;
+    bound_accounts.players = economy.players;
+    core::LoadNoteBuffer ignored;
+    normalize_economy(setup_accounts, ignored);
+    normalize_economy(bound_accounts, ignored);
+    return setup_accounts.players == bound_accounts.players;
+}
+} // namespace
+
 namespace session_detail {
 
 [[nodiscard]] std::string command_context(const CommandKey& key) {
@@ -270,7 +284,8 @@ TacticalSession::Impl::Impl(const TacticalSetup& source, const std::span<const S
 void TacticalSession::Impl::add_starbase(const UnitState& unit) {
         if (victory.condition == VictoryCondition::none
             || !std::binary_search(victory.starbase_types.begin(), victory.starbase_types.end(), unit.type_id)
-            || !std::binary_search(victory.contenders.begin(), victory.contenders.end(), unit.owner)) {
+            || (setup.domain != BattleDomain::land
+                && !std::binary_search(victory.contenders.begin(), victory.contenders.end(), unit.owner))) {
             return;
         }
         const StarbaseEntry entry{unit.entity_id, unit.owner};
@@ -355,7 +370,7 @@ core::Result<TacticalSession> TacticalSession::create(const TacticalSetup& setup
             diagnostic_codes::land_provider_unavailable, "land tactical provider unavailable: terrain field required (L1)"));
     }
     if (valid && (setup.campaign.has_value() != economy.campaign
-        || (setup.campaign && setup.campaign->players != economy.players)))
+        || (setup.campaign && !campaign_accounts_match(setup.campaign->players, economy))))
         valid = core::Result<void>::failure(detail::diagnostic(diagnostic_codes::invalid_setup, "campaign setup and economy binding differ"));
     if (valid) {
         valid = validate_sensors(sensors);
@@ -364,11 +379,12 @@ core::Result<TacticalSession> TacticalSession::create(const TacticalSetup& setup
     core::LoadNoteBuffer local_notes;
     auto owned_durability = prepare_durability(durability, load_notes ? *load_notes : local_notes);
     if (!owned_durability) return core::Result<TacticalSession>::failure(owned_durability.error());
-    if (valid && !motion.profiles.empty()) {
-        valid = validate_motion(motion);
-    } else if (valid) {
-        valid = validate_squadron_table(motion.squadrons);
-    }
+    // Preserve the profile-empty binding gate: footprint-only tables did not have a refusal here.
+    auto owned_motion = motion.profiles.empty()
+        ? core::Result<MotionTable>::success(motion)
+        : prepare_motion(motion, load_notes ? *load_notes : local_notes);
+    if (!owned_motion) return core::Result<TacticalSession>::failure(owned_motion.error());
+    if (motion.profiles.empty()) valid = validate_squadron_table(motion.squadrons);
     if (valid && fog) {
         valid = validate_fog_rules(*fog);
     }
@@ -381,13 +397,13 @@ core::Result<TacticalSession> TacticalSession::create(const TacticalSetup& setup
     if (valid) {
         valid = validate_abilities(abilities);
     }
-    if (valid && (!economy.empty() || !economy.command_bonuses.empty())) {
-        valid = validate_economy(economy, setup.players);
-    }
     if (!valid) {
         return core::Result<TacticalSession>::failure(valid.error());
     }
-    auto impl = std::make_unique<Impl>(setup, sensors, owned_durability.value(), motion, fog, combat, victory, abilities, economy, map_box);
+    auto owned_economy = prepare_economy(economy, setup.players, load_notes ? *load_notes : local_notes);
+    if (!owned_economy) return core::Result<TacticalSession>::failure(owned_economy.error());
+    auto impl = std::make_unique<Impl>(setup, sensors, owned_durability.value(), owned_motion.value(), fog, combat, victory,
+        abilities, owned_economy.value(), map_box);
     if (impl->initialization_error) return core::Result<TacticalSession>::failure(*impl->initialization_error);
     return core::Result<TacticalSession>::success(TacticalSession(std::move(impl)));
 }
@@ -402,7 +418,7 @@ core::Result<TacticalSession> TacticalSession::from_replay(const TacticalReplay&
             diagnostic_codes::land_provider_unavailable, "land tactical provider unavailable: terrain field required (L1)"));
     }
     if (valid && (replay.setup.campaign.has_value() != economy.campaign
-        || (replay.setup.campaign && replay.setup.campaign->players != economy.players)))
+        || (replay.setup.campaign && !campaign_accounts_match(replay.setup.campaign->players, economy))))
         valid = core::Result<void>::failure(detail::diagnostic(diagnostic_codes::invalid_setup, "campaign replay and economy binding differ"));
     if (valid && replay.setup.match_policy.value_or(SkirmishMatchPolicy{}) != economy.match_policy) {
         return core::Result<TacticalSession>::failure(detail::diagnostic(diagnostic_codes::invalid_setup,
@@ -415,11 +431,12 @@ core::Result<TacticalSession> TacticalSession::from_replay(const TacticalReplay&
     core::LoadNoteBuffer local_notes;
     auto owned_durability = prepare_durability(durability, load_notes ? *load_notes : local_notes);
     if (!owned_durability) return core::Result<TacticalSession>::failure(owned_durability.error());
-    if (valid && !motion.profiles.empty()) {
-        valid = validate_motion(motion);
-    } else if (valid) {
-        valid = validate_squadron_table(motion.squadrons);
-    }
+    // Preserve the profile-empty binding gate: footprint-only tables did not have a refusal here.
+    auto owned_motion = motion.profiles.empty()
+        ? core::Result<MotionTable>::success(motion)
+        : prepare_motion(motion, load_notes ? *load_notes : local_notes);
+    if (!owned_motion) return core::Result<TacticalSession>::failure(owned_motion.error());
+    if (motion.profiles.empty()) valid = validate_squadron_table(motion.squadrons);
     if (valid && fog) {
         valid = validate_fog_rules(*fog);
     }
@@ -432,15 +449,14 @@ core::Result<TacticalSession> TacticalSession::from_replay(const TacticalReplay&
     if (valid) {
         valid = validate_abilities(abilities);
     }
-    if (valid && (!economy.empty() || !economy.command_bonuses.empty())) {
-        valid = validate_economy(economy, replay.setup.players);
-    }
     if (!valid) {
         return core::Result<TacticalSession>::failure(valid.error());
     }
+    auto owned_economy = prepare_economy(economy, replay.setup.players, load_notes ? *load_notes : local_notes);
+    if (!owned_economy) return core::Result<TacticalSession>::failure(owned_economy.error());
     auto session = TacticalSession(
-        std::make_unique<Impl>(replay.setup, sensors, owned_durability.value(), motion, fog, combat, victory, abilities,
-            economy, map_box));
+        std::make_unique<Impl>(replay.setup, sensors, owned_durability.value(), owned_motion.value(), fog, combat, victory, abilities,
+            owned_economy.value(), map_box));
     if (session.impl_->initialization_error) return core::Result<TacticalSession>::failure(*session.impl_->initialization_error);
     for (const auto& command : replay.commands) {
         const auto submitted = session.submit(command);
@@ -473,9 +489,11 @@ core::Result<TacticalSession> TacticalSession::create(const TacticalSetup& setup
         if (!owned_durability) return core::Result<TacticalSession>::failure(owned_durability.error());
         if (auto valid = validate_combat(content.combat); !valid)
             return core::Result<TacticalSession>::failure(valid.error());
+        if (auto valid = validate_victory(content.victory, resolved.players); !valid)
+            return core::Result<TacticalSession>::failure(valid.error());
         // Land owns locomotion; the same authored combat and durability rows bind its members.
         auto impl = std::make_unique<Impl>(resolved, std::span<const SensorProfile>{}, owned_durability.value(), MotionTable{},
-            std::nullopt, content.combat, VictoryRules{}, AbilityTable{}, EconomyRules{}, content.map_box);
+            std::nullopt, content.combat, content.victory, AbilityTable{}, EconomyRules{}, content.map_box);
         if (impl->initialization_error) return core::Result<TacticalSession>::failure(*impl->initialization_error);
         if (auto initialized = impl->initialize_land(content); !initialized)
             return core::Result<TacticalSession>::failure(initialized.error());

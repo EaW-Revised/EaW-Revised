@@ -18,7 +18,7 @@ namespace eawr::sim::galactic::detail {
 
 inline constexpr std::array<std::uint8_t, 8> state_magic{'E', 'A', 'W', 'R', 'G', 'S', 'T', 0};
 inline constexpr std::array<std::uint8_t, 8> snapshot_magic{'E', 'A', 'W', 'R', 'G', 'S', 'N', 0};
-inline constexpr std::uint32_t state_encoding_version = 15;
+inline constexpr std::uint32_t state_encoding_version = 18;
 inline constexpr std::uint16_t section_version = 1;
 
 void put_u8(std::vector<std::uint8_t>& bytes, std::uint8_t value);
@@ -43,6 +43,8 @@ void encode_prepared_ability(std::vector<std::uint8_t>&, const PreparedAbility&)
 [[nodiscard]] std::optional<EconomyCorruptionState> decode_economy_corruption(std::span<const std::uint8_t>);
 [[nodiscard]] std::optional<IncomeSetup> decode_income(std::span<const std::uint8_t>);
 void encode_census(std::vector<std::uint8_t>&, const PopulationCensus&);
+// The same bytes with the object rows supplied separately, so a caller holding the rows elsewhere does not copy the census.
+void encode_census(std::vector<std::uint8_t>&, const PopulationCensus&, std::span<const CensusObject* const> objects);
 void encode_population(std::vector<std::uint8_t>&, std::span<const PopulationTotal>);
 [[nodiscard]] std::optional<PopulationCensus> decode_census(std::span<const std::uint8_t>);
 void encode_production(std::vector<std::uint8_t>& bytes, const ProductionSetup& production);
@@ -51,6 +53,11 @@ void encode_production(std::vector<std::uint8_t>& bytes, const ProductionSetup& 
 using ProductionOfferDigests = std::vector<std::array<std::uint8_t, 32>>;
 [[nodiscard]] ProductionOfferDigests production_offer_digests(const ProductionSetup&);
 void encode_production_hash(std::vector<std::uint8_t>&, const ProductionSetup&, const ProductionOfferDigests&);
+// The canonical encoding of each planet's immutable offer table (the exact bytes a planet row carries), built once per
+// owner and reused by the lockstep exchange encode (#5519). Same immutability contract as the offer digests above.
+using ProductionOfferRows = std::vector<std::vector<std::uint8_t>>;
+[[nodiscard]] ProductionOfferRows production_offer_rows(const ProductionSetup&);
+void encode_production(std::vector<std::uint8_t>& bytes, const ProductionSetup& production, const ProductionOfferRows& offer_rows);
 // Mutable admission inputs, excluding offer content and queue payment/countdown fields.
 void encode_production_menu_inputs(std::vector<std::uint8_t>&, const ProductionSetup&, PlayerId,
     std::span<const PlanetId> visible);

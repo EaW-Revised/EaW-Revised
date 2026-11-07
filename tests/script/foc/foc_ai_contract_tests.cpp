@@ -1,4 +1,5 @@
 #include "../../support/env.hpp"
+#include "eawr/vfs/vfs.hpp"
 #include "../../support/check.hpp"
 #include "foc_ai_contract_fixtures.hpp"
 #include "tactical_ai_world.hpp"

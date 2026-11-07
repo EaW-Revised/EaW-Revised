@@ -2,6 +2,7 @@
 #include "eawr/presentation/model_upload.hpp"
 #include "eawr/assets/memory.hpp"
 #include "mesh_hidden_geometry.hpp"
+#include "model_digest_memo.hpp"
 #include "model_recipe.hpp"
 #include "resource_residency.hpp"
 #include "upload_identity.hpp"
@@ -10,6 +11,7 @@
 #include <future>
 #include <iostream>
 #include <map>
+#include <new>
 
 int main() {
     using namespace eawr;
@@ -190,6 +192,77 @@ int main() {
             "a derived model that keeps a source path never releases (counted fallback)");
         ModelRecipe no_loader{ModelUpload{make(), {}}, {}, true};
         check(!no_loader.uploaded(stats) && stats.ever_fallback == 3, "missing loader is a counted fallback");
+    }
+
+    // The upload digest memo (#5197): one digest per shared model object, exactly model_identity, never a stale answer.
+    {
+        const auto make_model = [](const float height) {
+            auto model = std::make_shared<assets::Model>();
+            model->source.logical_path = "data/art/models/memo.alo";
+            model->bones.resize(1);
+            model->meshes.resize(1);
+            model->meshes[0].submeshes.resize(2);
+            for (auto& submesh : model->meshes[0].submeshes) {
+                submesh.vertices.resize(3);
+                submesh.vertices[1].position.y = height;
+                submesh.indices = {0, 1, 2};
+            }
+            return model;
+        };
+        int computed = 0;
+        const auto counted = [&computed](const assets::Model& model) {
+            ++computed;
+            return model_identity(model);
+        };
+        ModelDigestMemo memo;
+        const std::shared_ptr<const assets::Model> shared = make_model(1.0F);
+        const auto first = memo.identity(shared, counted);
+        check(first == model_identity(*shared), "the memo answers exactly the model_identity digest");
+        check(memo.identity(shared, counted) == first && memo.identity(shared) == first && computed == 1 && memo.size() == 1,
+            "every further surface of the same model is a hit, not another hash");
+        const std::shared_ptr<const assets::Model> other = make_model(2.0F);
+        check(memo.identity(other, counted) != first && computed == 2 && memo.size() == 2,
+            "a different model has its own digest and is hashed once");
+
+        // A freed model's address reused by another model (same storage, a fresh control block) must recompute.
+        alignas(assets::Model) unsigned char storage[sizeof(assets::Model)];
+        const auto keep_storage = [](const assets::Model*) {};
+        auto* original = new (storage) assets::Model(*make_model(1.0F));
+        std::shared_ptr<const assets::Model> live(original, keep_storage);
+        ModelDigestMemo reuse;
+        computed = 0;
+        const auto stale = reuse.identity(live, counted);
+        const assets::Model* address = original;
+        live.reset();
+        original->~Model();
+        auto* replacement = new (storage) assets::Model(*make_model(2.0F));
+        const std::shared_ptr<const assets::Model> reborn(replacement, keep_storage);
+        const auto fresh = reuse.identity(reborn, counted);
+        check(replacement == address && computed == 2 && fresh == model_identity(*replacement) && fresh != stale,
+            "a freed model's reused address gets a fresh hash, never the old model's digest");
+        check(reuse.identity(reborn, counted) == fresh && computed == 2, "and the new model is memoised from then on");
+        replacement->~Model();
+
+        // Recipes admitted with and without the memo end with the same identity, and both restore the same upload.
+        const ModelLoader loader = [&](const assets::Source&) -> std::optional<assets::Model> { return *make_model(1.0F); };
+        ModelRecipeStats memo_stats;
+        ModelRecipeStats plain_stats;
+        ModelDigestMemo recipe_memo;
+        const std::shared_ptr<const assets::Model> model_a = make_model(1.0F);
+        ModelRecipe via_memo_0{ModelUpload{model_a, ModelSurface{0, 0, false}}, loader, true};
+        ModelRecipe via_memo_1{ModelUpload{model_a, ModelSurface{0, 1, false}}, loader, true};
+        ModelRecipe plain{ModelUpload{make_model(1.0F), ModelSurface{0, 0, false}}, loader, true};
+        const auto from_memo = [&](const std::shared_ptr<const assets::Model>& model) { return recipe_memo.identity(model); };
+        check(via_memo_0.uploaded(memo_stats, from_memo) && via_memo_1.uploaded(memo_stats, from_memo) && plain.uploaded(plain_stats)
+                && via_memo_0.identity() == plain.identity() && via_memo_1.identity() == plain.identity() && recipe_memo.size() == 1,
+            "a recipe admitted through the memo has the identity of one admitted without it; sibling surfaces share one entry");
+        ModelRecipe::Batch memo_batch;
+        ModelRecipe::Batch plain_batch;
+        const auto restored = via_memo_0.read(memo_batch);
+        const auto expected = plain.read(plain_batch);
+        check(restored && expected && upload_identity_bytes(restored->view(), assets::Texture{}, MaterialDescription{})
+                == upload_identity_bytes(expected->view(), assets::Texture{}, MaterialDescription{}),
+            "evict -> restore after a memoised admission feeds identical upload inputs");
     }
     return checks.finish();
 }

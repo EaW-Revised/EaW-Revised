@@ -47,11 +47,36 @@ int main() {
     test_attachment_merge_stats();
     test_heat_pixel_change_bound();
     test_default_worker_count_table();
+    test_lane_guard_counts_and_never_aborts();
+    test_culling_latch_matches_live();
+    test_frame_number_latch_matches_live();
+    test_frame_work_merge_adds_once();
+#ifdef EAWR_LANE_CONTRACTS
+    test_particle_lane_contracts();
+#endif
+    test_catchup_defer_predicate();
     test_batch_matches_serial();
     test_attachment_batch_matches_serial();
     test_attachment_batch_requires_stats();
     test_batch_hashes_on_request();
     test_batch_work_counts();
+    test_clean_present_matches_rebuild();
+    test_unmoved_frame_keeps_streams();
+    test_clean_present_resubmits_after_incomplete_update();
+    test_clean_present_resubmits_only_deferred_instance();
+    test_clean_present_matches_rebuild_for_every_input();
+    test_clean_present_resubmits_deferred_moved_instance();
+    test_ordered_run_commits_in_order();
+    test_pipelined_commit_matches_serial_batches();
+    test_pipelined_commit_off_when_backend_forbids_overlap();
+    test_async_advance_matches_advance_all();
+    test_async_advance_falls_back_and_joins();
+    test_lazy_packing_matches_eager_commit();
+    test_lazy_packing_completes_after_failures();
+    test_lazy_packing_keeps_merged_groups_current();
+    test_lazy_packing_keeps_merged_groups_current_after_failures();
+    test_pipelined_failure_keeps_a_prefix_and_recovers();
+    test_catchup_screen_space_decision();
     test_offscreen_updates_and_bounds();
     test_empty_stream_residency();
     test_batch_rejects_repeats_and_unknown();

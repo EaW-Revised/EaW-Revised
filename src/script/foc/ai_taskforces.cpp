@@ -581,6 +581,8 @@ void Engine::service_taskforce_events() {
     const WorldView& view = *host_->view;
     for (auto& [plan_id, row] : ordered_runtime(&PlayerAi::running)) {
         auto& plan = *row;
+        if (galactic_provider_retired(plan.player)) continue;
+        select_native_fault_context(plan.player);
         auto* owner = player_ai(plan.player);
         if (!owner) continue;
         auto& taskforces_ = owner->taskforces;
@@ -659,9 +661,11 @@ void Engine::service_taskforce_events() {
     }
     // Unit_Damaged: this tick's hits on a TaskForce member, at most one queued per TaskForce
     // between two pumps of its thread.
-    if (host_->view == nullptr) return;
+    if (host_->view == nullptr) { clear_native_fault_context(); return; }
     for (auto& [plan_id, row] : ordered_runtime(&PlayerAi::running)) {
         auto& plan = *row;
+        if (galactic_provider_retired(plan.player)) continue;
+        select_native_fault_context(plan.player);
         auto* owner = player_ai(plan.player);
         if (!owner) continue;
         auto& taskforces_ = owner->taskforces;
@@ -688,6 +692,7 @@ void Engine::service_taskforce_events() {
             }
         }
     }
+    clear_native_fault_context();
 }
 
 // WTA-28: of the four boxes of half-size `half` around the target point, one per quadrant, the one
@@ -805,6 +810,9 @@ void Engine::service_blocks() {
     auto running_ = all_plans();
     for (auto& [id, row] : ordered_runtime(&PlayerAi::blocks)) {
         auto& block = *row;
+        const auto chain = static_cast<tactical::PlayerId>(galactic_chain_owner(block.instance));
+        if (galactic_provider_retired(chain)) continue;
+        select_native_fault_context(chain);
         if (block.kind == Block::Kind::galactic_invade && block.galactic_request) {
             const auto* actions = dynamic_cast<const galactic_ai::NativeActions*>(host_->galactic_execution.get());
             const auto* invasion = actions ? actions->invasion_status(block.galactic_request) : nullptr;
@@ -914,6 +922,7 @@ void Engine::service_blocks() {
         const bool escort_object = destination != nullptr && block.order == Block::Order::guard;
         if (block.movers.empty() && !escort_object && !(enemy_object && block.attack)) block.finished = true;
     }
+    clear_native_fault_context();
 }
 
 } // namespace eawr::script::foc::ai

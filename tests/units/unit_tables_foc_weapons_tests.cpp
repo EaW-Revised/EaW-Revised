@@ -290,6 +290,30 @@ void foc_barrage_buttons(eawr::units::LoadInput input) {
 void foc_super_capitals(eawr::units::LoadInput input) {
     namespace tactical = eawr::sim::tactical;
     namespace math = eawr::sim::math;
+    // WSPL-01: stock mission-only super weapons bind when their authored types enter a battle.
+    {
+        auto super_input = input;
+        super_input.types = {"Death_Star_II", "Eclipse_Super_Star_Destroyer"};
+        super_input.obstacles.clear();
+        const auto stock = eawr::units::load_unit_tables(super_input);
+        expect(static_cast<bool>(stock), "WSPL-01: stock super-laser authors load");
+        if (stock) {
+            const auto abilities = eawr::units::ability_table(stock.value());
+            expect(static_cast<bool>(abilities), "WSPL-01: stock super-laser ability profiles bind");
+            if (abilities) for (const auto* name : {"Death_Star_II", "Eclipse_Super_Star_Destroyer"}) {
+                const auto* profile = abilities.value().find(eawr::assets::object_type_crc(name));
+                expect(profile && tactical::ability_slot(*profile, tactical::AbilityKind::super_laser).has_value(),
+                    std::string("WSPL-01: stock super-laser ability is available: ") + name);
+            }
+            auto altered = stock.value();
+            for (auto& unit : altered.units)
+                std::erase_if(unit.special_abilities, [](const auto& special) {
+                    return special.kind == tactical::SpecialAbilityKind::super_laser;
+                });
+            expect(eawr::units::content_identity(altered) != eawr::units::content_identity(stock.value()),
+                "WSPL-01: stock super-laser handler contributes to content identity");
+        }
+    }
     input.types = {"Eclipse_Super_Star_Destroyer", "Executor_Super_Star_Destroyer", "UM12_SUPER_STAR_DESTROYER"};
     input.obstacles.clear();
     const auto loaded = eawr::units::load_unit_tables(input);

@@ -1,4 +1,5 @@
 #include "eawr/assets/assets.hpp"
+#include "../../apps/viewer/src/galactic/radar_texture_lookup.hpp"
 #include "../ui/ui_test_support.hpp"
 
 #include <algorithm>
@@ -162,6 +163,67 @@ void fixtures() {
     expect(!excessive && excessive.error().code == diagnostic_codes::limit,
            "texture pixel budget rejects one row beyond 8192 squared");
 }
+void shadowed_atlas_entries() {
+    eawr::test::ui::TempTree tree("atlas-layers");
+    const auto top = tree.root / "top";
+    const auto base = tree.root / "base";
+    auto top_dir = directory(16, 8);
+    top_dir.resize(4U + 81U); put(top_dir, 0, 1);
+    write_bytes(top / "art/textures/mt_commandbar.mtd", top_dir);
+    auto top_page = bmp(); top_page[54] = std::byte{0x55};
+    write_bytes(top / "art/textures/mt_commandbar.tga", top_page);
+    write_bytes(base / "art/textures/mt_commandbar.mtd", directory(16, 8));
+    write_bytes(base / "art/textures/mt_commandbar.tga", bmp());
+    const std::array mounts{
+        eawr::vfs::MountSpec{"top", top, "data", {}},
+        eawr::vfs::MountSpec{"base", base, "data", {}}};
+    auto mounted = eawr::vfs::Vfs::mount(mounts);
+    expect(bool(mounted), "layered atlas fixture mounts");
+    if (!mounted) return;
+    const auto effective = load_mega_texture_atlas(mounted.value(), "data/art/textures/mt_commandbar.mtd");
+    expect(effective && effective.value().directory.find("A") && !effective.value().directory.find("B"),
+           "effective atlas retains precedence for shared entries");
+    const auto lower = load_shadowed_atlas_entry(mounted.value(), "data/art/textures/mt_commandbar.mtd", "b");
+    expect(lower && lower.value() && lower.value()->directory.find("B") &&
+           lower.value()->directory.source.layer_id == "base" && lower.value()->page.source.layer_id == "base" &&
+           lower.value()->page.mips[0].bytes[0] == std::byte{0x10},
+           "shadowed entry uses its own directory and backing page");
+    // Exercise the viewer's actual radar consumer path, including materialization
+    // and its delegation back to the ordinary cached HUD lookup.
+    if (effective) {
+        const auto path = "data/art/textures/mt_commandbar.mtd";
+        int original_calls = 0;
+        const auto original = [&] { ++original_calls; return 7; };
+        const auto materialize = [](const MegaTextureAtlas& atlas, const eawr::presentation::ui::ThemeTexture& slot)
+            -> std::optional<int> {
+            if (slot.origin != eawr::presentation::ui::TextureOrigin::atlas) return std::nullopt;
+            return static_cast<int>(std::to_integer<unsigned char>(atlas.page.mips[0].bytes[0]));
+        };
+        const auto lookup = [&](const MegaTextureAtlas* atlas, const char* name) {
+            return eawr::viewer::galactic::radar_texture_lookup(&mounted.value(), atlas, path, name,
+                original, materialize);
+        };
+        expect(lookup(&effective.value(), "A") == 7 && original_calls == 1,
+               "radar consumer preserves effective atlas and ordinary cache");
+        expect(lookup(&effective.value(), "B") == 0x10 && original_calls == 1,
+               "radar consumer materializes the matching lower-layer page");
+        expect(lookup(nullptr, "B") == 7 && original_calls == 2,
+               "radar consumer does not skip a failed effective atlas");
+        expect(lookup(&effective.value(), "absent") == 7 && original_calls == 3,
+               "radar consumer delegates an absent entry to the original lookup");
+        write_bytes(top / "art/textures/B.tga", bmp());
+        auto with_standalone = eawr::vfs::Vfs::mount(mounts);
+        expect(bool(with_standalone), "standalone fixture remounts");
+        if (with_standalone) {
+            const auto found = eawr::viewer::galactic::radar_texture_lookup(&with_standalone.value(),
+                &effective.value(), path, "B", original, materialize);
+            expect(found == 7 && original_calls == 4, "radar consumer preserves standalone precedence");
+        }
+    }
+    const auto missing = load_shadowed_atlas_entry(mounted.value(), "data/art/textures/mt_commandbar.mtd", "absent");
+    expect(missing && !missing.value(), "missing entry remains missing");
+}
+
 void corpus() {
     const auto check = [](const eawr::vfs::Vfs& filesystem, const std::string& name) {
         auto atlas = load_mega_texture_atlas(filesystem, "data/art/textures/mt_commandbar.mtd");
@@ -182,6 +244,7 @@ void corpus() {
 int main() {
     malformed_bmp();
     fixtures();
+    shadowed_atlas_entries();
     corpus();
     return eawr::test::ui::failures() == 0 ? 0 : 1;
 }

@@ -1,18 +1,26 @@
 #include "model_methods.hpp"
 #include "loadcheck.hpp"
+#include "records.hpp"
+#include "profile_locks.hpp"
 #include "eawr/mods/chain.hpp"
 #include "eawr/core/sha256.hpp"
+#include "eawr/core/text.hpp"
 #include "eawr/mods/profile.hpp"
 #include "install_discovery.hpp"
 #include "launcher_state.hpp"
+#include "eawr/presentation/ui/settings.hpp"
+#include "eawr/platform/ui_files.hpp"
 #ifdef _WIN32
 #include "win_platform.hpp"
 #endif
 #include <algorithm>
 #include <array>
 #include <charconv>
+#include <chrono>
+#include <fstream>
 #include <random>
 #include <stdexcept>
+#include <system_error>
 
 namespace eawr::mods_service {
 namespace {
@@ -73,6 +81,27 @@ bool paths(const J& params, std::string_view name, std::vector<fs::path>& out) {
         out.push_back(p);
     }
     return true;
+}
+// <user data>/mods/cache/content, only when every level resolves beneath the user-data root without redirects
+// (the rule loadcheck's cache folder follows); otherwise digests stay in memory.
+fs::path content_cache_folder(const fs::path& user_data) {
+    if (user_data.empty()) return {};
+    std::error_code ec;
+    auto folder = fs::weakly_canonical(user_data, ec);
+    if (ec) return {};
+    for (const char* part : {"mods", "cache", "content"}) {
+        folder /= part;
+        if (fs::weakly_canonical(folder, ec) != folder || ec) return {};
+    }
+    return folder;
+}
+mods::ContentDigests& content_digests(ModelState& m) {
+    if (!m.digests) {
+        mods::ContentDigestOptions options;
+        options.cache_folder = content_cache_folder(m.user_data);
+        m.digests = std::make_shared<mods::ContentDigests>(std::move(options));
+    }
+    return *m.digests;
 }
 void refresh(ModelState& m) {
     m.catalog = mods::discover(m.discovery);
@@ -138,6 +167,76 @@ std::optional<fs::path> profile_path(ModelState& m, const std::string& id) {
     if (!ec && fs::is_symlink(status)) return {};
     return target;
 }
+namespace ui = presentation::ui;
+ui::PlayerSettings revised_settings(const ModelState& m) {
+    const auto text = platform::read_text_file(m.user_data / "eawr-settings.cfg");
+    return text ? ui::parse_settings(*text).settings : ui::PlayerSettings{};
+}
+std::string revised_row(const ModelState& m) {
+    const auto settings = revised_settings(m);
+    const auto override_path = settings.revised_layer_path ? path_from_utf8(*settings.revised_layer_path) : fs::path{};
+    const bool bad_override = !override_path.empty() && !override_path.is_absolute();
+    const auto root = !override_path.empty() && !bad_override ? override_path : m.player_dir / "Revised";
+    std::error_code ec;
+    const bool present = fs::is_directory(root / "Data", ec);
+    return "{\"key\":\"builtin:revised\",\"kind\":\"builtin\",\"name\":\"Revised\",\"enabled\":"
+        + std::string(settings.revised_layer_enabled ? "true" : "false") + ",\"root\":"
+        + (present ? json_quote(path_to_utf8(root)) : "null") + ",\"why\":\"builtin\",\"state\":"
+        + json_quote(present ? "installed" : "missing") + ",\"note\":"
+        + (bad_override ? json_quote("Relative Revised layer path ignored")
+            : present ? "null" : json_quote("Revised data folder is missing")) + '}';
+}
+bool strip_builtin_layers(mods::Profile& profile) {
+    std::vector<std::size_t> removed;
+    for (std::size_t i = 0; i < profile.layers.size(); ++i)
+        if (profile.layers[i].key.starts_with("builtin:")) removed.push_back(i);
+    if (removed.empty()) return false;
+    for (auto& separator : profile.separators)
+        separator.before -= static_cast<std::size_t>(std::count_if(removed.begin(), removed.end(),
+            [&](std::size_t i) { return i < separator.before; }));
+    std::erase_if(profile.layers, [](const auto& layer) { return layer.key.starts_with("builtin:"); });
+    profile.accepted = {};
+    return true;
+}
+mods::ProfileResult load_service_profile(const fs::path& file, bool& stripped) {
+    auto result = mods::load_profile(file);
+    if (result.profile) {
+        stripped = strip_builtin_layers(*result.profile);
+        return result;
+    }
+    // Older rows may have a null/missing root. Remove built-ins before core validation.
+    const auto bytes = platform::read_text_file(file);
+    auto json = bytes ? mods::steam::parse_json(*bytes) : std::nullopt;
+    if (!json || json->kind != J::Kind::object || !json->member("format") || !json->member("version")) return result;
+    auto field = [&](std::string_view name) -> J* {
+        for (std::size_t i = 0; i < json->keys.size(); ++i)
+            if (json->keys[i] == name) return &json->values[i];
+        return nullptr;
+    };
+    auto* layers = field("layers");
+    if (!layers || layers->kind != J::Kind::array) return result;
+    std::vector<std::size_t> removed;
+    for (std::size_t i = 0; i < layers->array.size(); ++i)
+        if (const auto* key = layers->array[i].string_member("key"); key && key->starts_with("builtin:")) removed.push_back(i);
+    if (removed.empty()) return result;
+    if (auto* separators = field("separators"); separators && separators->kind == J::Kind::array) {
+        for (auto& separator : separators->array) {
+            for (std::size_t i = 0; i < separator.keys.size(); ++i) {
+                if (separator.keys[i] != "before" || separator.values[i].kind != J::Kind::number) continue;
+                auto& before = separator.values[i].number;
+                if (before < 0 || before > static_cast<double>(layers->array.size())) continue;
+                before -= static_cast<double>(std::count_if(removed.begin(), removed.end(),
+                    [&](std::size_t index) { return static_cast<double>(index) < before; }));
+            }
+        }
+    }
+    std::erase_if(layers->array, [](const auto& layer) {
+        const auto* key = layer.string_member("key"); return key && key->starts_with("builtin:");
+    });
+    auto sanitized = mods::profile_from_json(encode(*json));
+    if (sanitized.profile) { sanitized.profile->accepted = {}; stripped = true; return sanitized; }
+    return result;
+}
 std::string profile_rows(const ModelState& m, const mods::Profile& p, bool& ok) {
     std::string rows = "[";
     for (const auto& layer : p.layers) {
@@ -153,6 +252,8 @@ std::string profile_rows(const ModelState& m, const mods::Profile& p, bool& ok) 
         rows += "{\"key\":" + json_quote(layer.key) + ",\"name\":" + json_quote(r ? r->name : layer.key)
             + ",\"why\":" + json_quote(p.order_source) + ",\"state\":" + json_quote(mods::to_string(state)) + '}';
     }
+    if (rows.size() > 1) rows += ',';
+    rows += revised_row(m);
     return rows + ']';
 }
 }
@@ -166,6 +267,65 @@ std::string install_kind(const fs::path& root) {
     return mods::steam::lower_ascii(path_to_utf8(common.filename())) == "common"
         && mods::steam::lower_ascii(path_to_utf8(common.parent_path().filename())) == "steamapps" ? "steam" : "other";
 }
+}
+Reply method_settings_set_builtin_layer(Service& service, const J& params) {
+    const auto* key = params.string_member("key");
+    const auto* enabled = params.member("enabled");
+    if (!key || *key != "builtin:revised" || !enabled || enabled->kind != J::Kind::boolean)
+        return invalid("key must be builtin:revised and enabled must be boolean");
+    if (service.model.user_data.empty()) return Reply::fail(kInternalError, "settings folder unavailable");
+    const auto target = service.model.user_data / "eawr-settings.cfg";
+    std::error_code ec;
+    fs::create_directories(service.model.user_data, ec);
+    if (ec) return Reply::fail(kInternalError, "cannot create settings folder");
+    fs::path staging;
+    for (unsigned attempt = 0; attempt < 100; ++attempt) {
+        const auto candidate = service.model.user_data / (".settings-" + std::to_string(
+            std::chrono::steady_clock::now().time_since_epoch().count()) + "-" + std::to_string(attempt));
+        if (fs::create_directory(candidate, ec)) { staging = candidate; break; }
+        ec.clear();
+    }
+    if (staging.empty()) return Reply::fail(kInternalError, "cannot reserve settings temporary file");
+    // Read after reserving the temporary location to minimize the read-modify-write window.
+    const auto original = platform::read_text_file(target);
+    const bool exists = fs::exists(target, ec);
+    if (ec || (!original && exists)) { fs::remove(staging, ec); return Reply::fail(kInternalError, "cannot read settings"); }
+    const auto loaded = original ? ui::parse_settings(*original) : ui::SettingsLoad{};
+    if (original && (loaded.defaulted || std::any_of(loaded.notes.begin(), loaded.notes.end(), [](const auto& note) {
+            return !note.starts_with("unknown setting ignored:") && note != "unknown online setting ignored";
+        }))) {
+        fs::remove(staging, ec);
+        return Reply::fail("EAWR-MODS-SVC-0015", "settings file is invalid or unsupported; it was not changed");
+    }
+    std::string text = original.value_or(ui::serialize_settings(ui::PlayerSettings{}));
+    std::string updated;
+    for (std::size_t pos = 0; pos < text.size();) {
+        const auto end = text.find('\n', pos);
+        const auto length = (end == std::string::npos ? text.size() : end + 1) - pos;
+        const std::string_view line(text.data() + pos, length);
+        const auto equals = line.find('=');
+        if (equals == std::string_view::npos || core::trim_view(line.substr(0, equals)) != "revised_layer_enabled")
+            updated.append(line);
+        pos += length;
+    }
+    if (!updated.empty() && updated.back() != '\n') updated += '\n';
+    updated += std::string("revised_layer_enabled=") + (enabled->boolean ? "1\n" : "0\n");
+    const auto temporary = staging / "settings.cfg";
+    bool written = false;
+    {
+        std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
+        output << updated;
+        output.close();
+        written = static_cast<bool>(output);
+    }
+    if (written) fs::rename(temporary, target, ec);
+    else ec = std::make_error_code(std::errc::io_error);
+    const bool saved = !ec;
+    std::error_code ignored;
+    fs::remove(temporary, ignored);
+    fs::remove(staging, ignored);
+    if (!saved) return Reply::fail(kInternalError, "cannot save settings");
+    return Reply::ok("{\"key\":\"builtin:revised\",\"enabled\":" + std::string(enabled->boolean ? "true" : "false") + '}');
 }
 Reply method_game_find(Service& service, const J& params) {
     auto& m = service.model;
@@ -194,6 +354,7 @@ Reply method_game_find(Service& service, const J& params) {
 #endif
         if (root.empty()) diagnostics.push_back({"EAWR-MODS-SVC-0012", "No Forces of Corruption installation found"});
     }
+    service.records().stop();
     m.game_root = root;
     m.discovery.mods_folder.reset();
     if (!root.empty()) {
@@ -228,6 +389,8 @@ Reply method_mods_discover(Service& service, const J& params) {
     m.discovery = std::move(input);
     refresh(m);
     std::vector<std::string> rows;
+    // Cache hits only: asking for the discovered records never starts a hashing job (chain.resolve does).
+    for (auto& r : m.catalog.records) content_digests(m).apply(r, false);
     for (const auto& r : m.catalog.records) rows.push_back(mods::record_to_json(r));
     return page(m, params, "mods.discover", "records", rows, ",\"warnings\":" + warnings(m.catalog.warnings));
 }
@@ -265,8 +428,15 @@ Reply method_chain_resolve(Service& service, const J& params) {
         if (out.back() != '[') out += ',';
         const auto it = std::find_if(catalog.records.begin(), catalog.records.end(), [&](const auto& r){ return r.key == row.key; });
         out += "{\"key\":" + json_quote(row.key) + ",\"name\":" + json_quote(it == catalog.records.end() ? row.key : it->name)
-            + ",\"why\":" + json_quote(row.why) + ",\"state\":" + json_quote(mods::to_string(row.state)) + '}';
+            + ",\"why\":" + json_quote(row.why) + ",\"state\":" + json_quote(mods::to_string(row.state));
+        // A mounted layer gets its content digest: ready from the cache, else pending with a background job queued.
+        if (it != catalog.records.end() && std::find(chain.layers.begin(), chain.layers.end(), row.key) != chain.layers.end()) {
+            out += ",\"content\":" + mods::content_digest_to_json(content_digests(m).lookup(*it, true));
+        }
+        out += '}';
     }
+    if (out.back() != '[') out += ',';
+    out += revised_row(m);
     out += "],\"edges\":[";
     for (const auto& e : chain.edges) {
         if (out.back() != '[') out += ',';
@@ -316,11 +486,53 @@ Reply method_chain_check(Service& service, const J& params) {
     return Reply::ok("{\"warnings\":" + rows(check.warnings) + ",\"diagnostics\":" + rows(check.diagnostics)
         + ",\"launchable\":" + (check.launchable ? "true" : "false") + '}');
 }
+std::string instance_list(const std::vector<int>& instances) {
+    std::string out = "[";
+    for (const int instance : instances) {
+        if (out.size() > 1) out += ',';
+        out += std::to_string(instance);
+    }
+    return out + ']';
+}
+// A profile a running game instance holds is read-only for everyone (UI or not): edits, renames, layer changes
+// and deletes are refused until the instance exits. The lock comes from the launcher's state files, not the caller.
+static std::optional<Reply> refuse_if_locked(const ModelState& m, const std::string& id) {
+    const ProfileBlock block = profile_block_for(m.user_data, id);
+    if (!block.blocked()) return std::nullopt;
+    std::string data = "{\"profile\":" + json_quote(id) + ",\"instances\":" + instance_list(block.instances);
+    if (!block.unreadable.empty()) data += ",\"unreadable\":" + instance_list(block.unreadable);
+    data += '}';
+    if (!block.instances.empty()) {
+        std::string where;
+        for (const int instance : block.instances) where += (where.empty() ? "" : ", ") + std::to_string(instance);
+        return Reply::fail(kProfileLocked, "profile \"" + id + "\" is running in game instance " + where + " and cannot be changed", data);
+    }
+    // Fail closed: the state of a game instance exists but cannot be read, so it is unknown whether it runs this profile.
+    std::string where;
+    for (const int instance : block.unreadable) where += (where.empty() ? "" : ", ") + std::to_string(instance);
+    return Reply::fail(kProfileLocked, "the running-game state of instance " + where + " could not be read, so profile \"" + id
+                       + "\" cannot be changed until that state is fixed or removed", data);
+}
+Reply method_profile_locks(Service& service, const J&) {
+    const ProfileLocks all = read_profile_locks(service.model.user_data);
+    std::string rows = "[";
+    for (const ProfileLock& lock : all.locks) {
+        if (rows.size() > 1) rows += ',';
+        rows += "{\"profile\":" + json_quote(lock.profile) + ",\"instances\":" + instance_list(lock.instances) + '}';
+    }
+    return Reply::ok("{\"locked\":" + rows + "],\"unreadable\":" + instance_list(all.unreadable) + '}');
+}
 Reply method_profile_save(Service& service, const J& params) {
     const auto* value = params.member("profile");
     if (!value || value->kind != J::Kind::object) return invalid("profile object is required");
+    if (const auto* layers = value->member("layers"); layers && layers->kind == J::Kind::array)
+        for (const auto& layer : layers->array)
+            if (const auto* key = layer.string_member("key"); key && key->starts_with("builtin:"))
+                return invalid("built-in layers cannot be saved in profiles");
     const auto parsed = mods::profile_from_json(encode(*value));
     if (parsed.error) return failure(*parsed.error);
+    if (const auto locked = refuse_if_locked(service.model, parsed.profile->id)) return *locked;
+    service.records().forget_profile(parsed.profile->id);
     if (const auto error = mods::save_profile(service.model.user_data, *parsed.profile)) return failure(*error);
     service.model.pages.clear();
     return Reply::ok("{\"profile\":" + mods::profile_to_json(*parsed.profile) + '}');
@@ -330,7 +542,8 @@ Reply method_profile_load(Service& service, const J& params) {
     const auto* id = params.string_member("id");
     const auto file = id ? profile_path(m, *id) : std::nullopt;
     if (!file) return invalid("invalid profile id or unsafe profile folder");
-    auto p = mods::load_profile(*file);
+    bool stripped = false;
+    auto p = load_service_profile(*file, stripped);
     if (p.error) return failure(*p.error);
     if (p.profile->id != *id) return invalid("profile id differs from file name");
     if (!m.discovered) refresh(m);
@@ -340,7 +553,8 @@ Reply method_profile_load(Service& service, const J& params) {
     bool ok = !resolved.error;
     const auto rows = profile_rows(m, *p.profile, ok);
     return Reply::ok("{\"profile\":" + mods::profile_to_json(*p.profile) + ",\"rows\":" + rows
-        + ",\"status\":" + json_quote(ok ? "ok" : "missing") + '}');
+        + ",\"status\":" + json_quote(ok ? "ok" : "missing")
+        + (stripped ? ",\"notes\":[\"Built-in layers were removed from the saved profile\"]" : "") + '}');
 }
 Reply method_profile_delete(Service& service, const J& params) {
     auto& m = service.model;
@@ -349,11 +563,35 @@ Reply method_profile_delete(Service& service, const J& params) {
     if (!file) return invalid("invalid profile id or unsafe profile folder");
     std::error_code ec;
     if (!fs::is_regular_file(*file, ec)) return failure({std::string(mods::codes::profile_io), "Profile is not a file"});
+    if (const auto locked = refuse_if_locked(m, *id)) return *locked;
     service.loadcheck().forget_profile(*id);
+    service.records().forget_profile(*id);
     const bool removed = fs::remove(*file, ec);
     if (ec || !removed) return failure({std::string(mods::codes::profile_io), "Cannot delete profile"});
     m.pages.clear();
     return Reply::ok("{\"deleted\":true}");
+}
+std::optional<mods::Profile> records_profile(Service& s, const J& params, Reply& error) {
+    const auto* id = params.string_member("profile");
+    if (!id) { error = invalid("profile must be an id"); return {}; }
+    J args; args.kind = J::Kind::object; args.keys = {"id"};
+    J value; value.kind = J::Kind::string; value.string = *id; args.values = {value};
+    const auto loaded = method_profile_load(s, args);
+    if (!loaded.error_code.empty()) { error = loaded; return {}; }
+    const auto doc = mods::steam::parse_json(loaded.result);
+    const auto* status = doc ? doc->string_member("status") : nullptr;
+    if (!status || *status != "ok" || doc->member("notes")) { error = invalid("profile is missing or unclean"); return {}; }
+    const auto* json = doc->member("profile");
+    auto parsed = json ? mods::profile_from_json(encode(*json)) : mods::ProfileResult{};
+    if (!parsed.profile) { error = invalid("profile unavailable"); return {}; }
+    // A read-only inspection must not silently follow a relocated saved layer.
+    const auto file = profile_path(s.model, *id);
+    const auto saved = file ? mods::load_profile(*file) : mods::ProfileResult{};
+    if (!saved.profile || saved.profile->layers != parsed.profile->layers) { error = invalid("profile roots are stale"); return {}; }
+    std::error_code ec;
+    if (s.model.game_root.empty() || !fs::is_directory(s.model.game_root / "corruption/Data", ec)
+        || !fs::is_directory(s.model.game_root / "GameData/Data", ec)) { error = invalid("game root unavailable"); return {}; }
+    return std::move(parsed.profile);
 }
 Reply method_profile_list(Service& service, const J& params) {
     auto& m = service.model;
@@ -369,7 +607,8 @@ Reply method_profile_list(Service& service, const J& params) {
     std::vector<std::string> rows;
     for (const auto& file : files) {
         const auto id = path_to_utf8(file.stem());
-        auto p = profile_path(m, id) ? mods::load_profile(file) : mods::ProfileResult{};
+        bool stripped = false;
+        auto p = profile_path(m, id) ? load_service_profile(file, stripped) : mods::ProfileResult{};
         const bool valid = p.profile.has_value() && p.profile->id == id;
         bool ok = valid;
         if (valid) (void)profile_rows(m, *p.profile, ok);

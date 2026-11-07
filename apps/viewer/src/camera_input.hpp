@@ -347,6 +347,9 @@ public:
     // fresh press, and pending pointer motion is dropped. Keys stay held. A
     // grab released this way never counts as a click.
     void pointer_left();
+    // A frame sample carries position only; it cannot create a drag.
+    void sample_pointer(float x, float y) noexcept;
+    void clear_pointer_sample() noexcept { pointer_valid_ = false; }
 
     // Routes one normalised event. Events that are unbound or arrive while the
     // adapter is ineligible are counted and ignored; malformed values fail

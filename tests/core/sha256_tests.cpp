@@ -31,6 +31,16 @@ void check(const std::span<const std::uint8_t> bytes, const std::string_view exp
         for (const auto byte : binary) { rendered += digits[byte >> 4U]; rendered += digits[byte & 15U]; }
         expect(rendered == expected, "binary SHA matches independent vector");
         expect(sha256_hex(bytes, backend) == expected, "hex SHA matches independent vector");
+        for (const std::size_t chunk : {1U, 7U, 63U, 64U, 65U, 4093U}) {
+            Sha256Hasher hasher(backend);
+            hasher.update({});
+            for (std::size_t offset = 0; offset < bytes.size(); offset += chunk) {
+                hasher.update(bytes.subspan(offset, std::min(chunk, bytes.size() - offset)));
+            }
+            expect(hasher.digest() == binary && hasher.hex_digest() == expected,
+                "incremental SHA matches independent vector across block and padding boundaries");
+            expect(hasher.hex_digest() == expected, "repeated digest snapshots do not finalize the context");
+        }
     }
     expect(sha256(bytes) == sha256(bytes, Sha256Backend::scalar), "default binary route equals fallback");
     expect(sha256_hex(bytes) == expected, "default hex route matches vector");
@@ -139,6 +149,11 @@ int main(int argc, char** argv) {
     const auto text = [](const std::string_view value) {
         return std::span<const std::uint8_t>(reinterpret_cast<const std::uint8_t*>(value.data()), value.size());
     };
+    Sha256Hasher snapshot;
+    snapshot.update(text("a"));
+    expect(snapshot.digest() == sha256(text("a")), "digest snapshots partial message");
+    snapshot.update(text("bc"));
+    expect(snapshot.digest() == sha256(text("abc")), "updates remain valid after digest snapshot");
     check(text("abc"), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
     check(text("hello"), "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824");
     check(text("The quick brown fox jumps over the lazy dog"),

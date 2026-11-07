@@ -8,6 +8,7 @@ namespace eawr::presentation::godot_backend {
 class LandBattleCamera final : public BattleCamera {
 public:
     LandBattleCamera(const FixedCamera& frame, viewer::MapCameraBridge* bridge) : frame_(frame), bridge_(bridge) {}
+    bool live_camera_free() const override { return bridge_ && bridge_->free_active(); }
     std::optional<camera::TacticalFrame> live_camera_frame() const override {
         return camera::TacticalFrame{frame_.width, frame_.height, frame_.vertical_fov_degrees,
             frame_.near_plane, frame_.far_plane, frame_.eye, frame_.target, frame_.up};

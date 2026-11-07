@@ -76,6 +76,19 @@ bool EawrLoadGameScreen::open(Node& parent, const LoadGameContext& context) {
     if (context.launcher) model_.set_saved_load_unavailable({});
     model_.refresh();
 
+    if (context.save_details) {
+        auto* list = gadget(list_id);
+        const auto position = list->get_position();
+        const auto size = list->get_size();
+        const float details_height = size.y * 0.35F;
+        list->set_size(Vector2(size.x, size.y - details_height));
+        details_ = memnew(RichTextLabel);
+        details_->set_position(position + Vector2(0, size.y - details_height));
+        details_->set_size(Vector2(size.x, details_height));
+        details_->set_mouse_filter(Control::MOUSE_FILTER_STOP);
+        built_.frame->add_child(details_);
+    }
+
     gadget(check_id)->connect("toggled", callable_mp(this, &EawrLoadGameScreen::on_check_toggled));
     gadget(list_id)->connect("item_selected", callable_mp(this, &EawrLoadGameScreen::on_item_selected));
     gadget(list_id)->connect("item_activated", callable_mp(this, &EawrLoadGameScreen::on_item_activated));
@@ -93,6 +106,12 @@ bool EawrLoadGameScreen::open(Node& parent, const LoadGameContext& context) {
     modal_->set_theme(boxes.theme);
     add_child(modal_);
     modal_->add_child(built_.frame);
+    if (details_) {
+        const auto style = kit_text_style(*gadget(list_id), "List_Box");
+        if (style.font.is_valid()) details_->add_theme_font_override("normal_font", style.font);
+        if (style.size > 0) details_->add_theme_font_size_override("normal_font_size", style.size);
+        details_->add_theme_color_override("default_color", style.top);
+    }
     parent.add_child(this);
     sync();
     // A directory that could not be listed is told to the player, as the in-game dialog does.
@@ -158,6 +177,11 @@ void EawrLoadGameScreen::sync() {
         dates_.emplace_back(row, date);
     }
     if (const auto selected = model_.selected()) list->select(static_cast<int32_t>(*selected));
+    if (details_) {
+        const auto* selected = model_.selected_entry();
+        details_->set_text(godot_text(selected && selected->kind == model::EntryKind::saved_game
+            ? context_.save_details(selected->file_name) : std::string{}));
+    }
     place_dates();
     auto* load = Object::cast_to<BaseButton>(gadget(load_id));
     load->set_disabled(!model_.can_load());
@@ -183,9 +207,15 @@ void EawrLoadGameScreen::place_dates() {
 }
 
 void EawrLoadGameScreen::_process(const double delta) {
-    static_cast<void>(delta);
     if (finished_) return;
     place_dates();
+    if (details_ && (details_elapsed_ += delta) >= 1.0) {
+        details_elapsed_ = 0.0;
+        const auto* selected = model_.selected_entry();
+        const auto value = godot_text(selected && selected->kind == model::EntryKind::saved_game
+            ? context_.save_details(selected->file_name) : std::string{});
+        if (details_->get_text() != value) details_->set_text(value);
+    }
     if (!pending_load_) return;
     if (launch_frames_ > 0) {
         --launch_frames_;

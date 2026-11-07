@@ -4,6 +4,7 @@
 #include "eawr/net/gns_transport.hpp"
 #include "eawr/platform/sim_workers.hpp"
 #include <array>
+#include <filesystem>
 #include <atomic>
 #include <chrono>
 #include <fstream>

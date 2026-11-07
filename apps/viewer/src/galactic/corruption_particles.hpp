@@ -1,6 +1,7 @@
 #pragma once
 
 #include "corruption_visuals.hpp"
+#include "eawr/data/xml.hpp"
 #include "corruption_budget.hpp"
 #include "particle_adapter.hpp"
 #include "scene_content.hpp"

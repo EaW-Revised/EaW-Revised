@@ -6,7 +6,7 @@
 
 #include "eawr/core/diagnostic.hpp"
 #include "eawr/data/ui/text_database.hpp"
-#include "eawr/data/xml.hpp"
+#include "eawr/data/xml_fwd.hpp"
 
 #include <array>
 #include <cstddef>

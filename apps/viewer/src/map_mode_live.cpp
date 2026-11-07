@@ -10,6 +10,9 @@
 #include "viewer_path.hpp"
 #include "land_battle_camera.hpp"
 #include "settings_store.hpp"
+#include "polled_pointer.hpp"
+#include "edge_pointer.hpp"
+#include "ui/input_routing.hpp"
 #include "eawr/core/tick_profile.hpp"
 
 #include <godot_cpp/classes/project_settings.hpp>
@@ -102,6 +105,16 @@ void MapMode::State::record_frame_trace(double delta, const core::tick_profile::
     if (state.perf_trace && state.live_session) {
         PerfTrace::Frame trace_frame;
         trace_frame.frame_ms = delta * 1000.0;
+        const auto& clock = state.live_session->clock_trace();
+        trace_frame.clock_newest = clock.newest;
+        trace_frame.clock_before = clock.before;
+        trace_frame.clock_after = clock.after;
+        trace_frame.clock_advance = clock.advance;
+        trace_frame.clock_delta = clock.delta;
+        trace_frame.clock_rate = clock.rate;
+        trace_frame.clock_target_rate = clock.target_rate;
+        trace_frame.clock_valid = clock.valid;
+        trace_frame.clock_running = clock.running;
         trace_frame.presented_tick = static_cast<std::uint64_t>(std::max(0.0, state.live_session->presented_tick()));
         trace_frame.units = state.live_session->visible_units().size();
         if (const auto trace_snapshot = state.live_session->snapshot_at(trace_frame.presented_tick)) {
@@ -113,6 +126,13 @@ void MapMode::State::record_frame_trace(double delta, const core::tick_profile::
         }
         if (state.unit_emitters) trace_frame.emitter_particles = state.unit_emitters->particles();
         trace_frame.particle_ms = state.particle_ms;
+        trace_frame.lane_wall_ms = state.lane_wall_ms;
+        trace_frame.lane_start_delay_ms = state.lane_start_delay_ms;
+        trace_frame.lane_join_wait_ms = state.lane_join_wait_ms;
+        trace_frame.lane_violations = state.lane_violations;
+        trace_frame.lane_main_help_ms = state.lane_main_help_ms;
+        trace_frame.lane_main_help_tasks = state.lane_main_help_tasks;
+        trace_frame.lane_retirement_ms = state.lane_retirement_ms;
         trace_frame.emitter_frame_ms = state.emitter_frame_ms;
         if (state.unit_emitters) trace_frame.emitter_owner_ms = state.unit_emitters->owner_timings();
         if (state.battle_effects) {
@@ -142,6 +162,12 @@ void MapMode::State::record_frame_trace(double delta, const core::tick_profile::
         trace_frame.slot_growth_ms = state.live_session->slot_growth_ms();
         trace_frame.hud_ms = state.hud_ms;
         trace_frame.audio_ms = state.audio_ms;
+        if (state.battle_audio) {
+            trace_frame.audio_laps = state.battle_audio->trace_laps();
+            trace_frame.audio_counts = state.battle_audio->trace_counts();
+            trace_frame.audio_play_ms = state.battle_audio->trace_play_ms();
+            trace_frame.audio_digests = state.battle_audio->trace_digests();
+        }
         trace_frame.fog_ms = state.fog_ms;
         trace_frame.pose_ms = state.live_session->pose_ms();
         trace_frame.opacity_ms = state.live_session->opacity_ms();
@@ -159,6 +185,12 @@ void MapMode::State::record_frame_trace(double delta, const core::tick_profile::
             ++trace_frame.ticks;
             trace_frame.tick_ms += cost.total_ms;
             for (const platform::LivePhaseCost& phase : cost.phases) {
+                if (PerfTrace::sim_cadence_profile() && phase.name.starts_with("cadence.")) {
+                    trace_frame.sim_profile.emplace_back(std::to_string(cost.tick) + "." + phase.name, phase.ms);
+                }
+                if (PerfTrace::detailed_sim_profile() && phase.name.starts_with("profile.")) {
+                    trace_frame.sim_profile.emplace_back(std::to_string(cost.tick) + "." + phase.name, phase.ms);
+                }
                 if (phase.name == "ai") {
                     trace_frame.ai_ms += phase.ms;
                     trace_frame.ai_worst_ms = std::max(trace_frame.ai_worst_ms, phase.ms);
@@ -666,6 +698,22 @@ std::optional<int> MapMode::State::capture_map_frame() {
 std::optional<int> MapMode::process(const double delta) {
     State& state = *state_;
     state.service_game_menu();
+    if (state.pointer_host && state.options.interactive) {
+        const auto focus = input_focus(*state.pointer_host->get_viewport());
+        const bool ready = state.live_session && state.live_session->phase() == LiveSessionView::Phase::ready;
+        const bool movie = state.space && state.space->live_camera_movie();
+        const auto* display = DisplayServer::get_singleton();
+        const bool allowed = map_pointer_feed_allowed({focus, state.options.attract.has_value(), ready, movie},
+            display && display->window_is_focused(), state.menu_open, state.pointer_blocked);
+        const auto point = allowed ? polled_pointer(*state.pointer_host) : Vector2();
+        route_pointer_sample(allowed, point.x, point.y, [&state](const float x, const float y) {
+            if (state.space) state.space->camera_sample_pointer(x, y);
+            if (state.map_camera) state.map_camera->sample_pointer(x, y);
+        }, [&state] {
+            if (state.space) state.space->camera_clear_pointer_sample();
+            if (state.map_camera) state.map_camera->clear_pointer_sample();
+        });
+    }
     if (state.live_options.audio_pace && !state.live_options.real_time) {
         // ST-P2: driven audio recordings own their render clock (#474), including
         // rates below the player's 30 FPS floor. Menu/settings changes cannot replace it.
@@ -686,8 +734,6 @@ std::optional<int> MapMode::process(const double delta) {
     if (state.loading != nullptr && state.live_session && state.live_session->phase() == LiveSessionView::Phase::ready
         && state.loading->take_begin()) {
         state.begin_battle();
-        if (state.land_population)
-            UtilityFunctions::print("EAWR land camera viewport after Begin: ", state.camera.width, "x", state.camera.height);
     }
     state.sync_net_perf(delta);
     state.sync_perf_overlay();
@@ -712,6 +758,7 @@ std::optional<int> MapMode::process(const double delta) {
             state.sync_cards();
             state.sync_production();
             state.sync_minimap();
+            if (state.hud) state.hud->refresh_gift_layout();
         }
         state.record_frame_trace(delta, ui_recording);
         state.update_follow_camera(finished);
@@ -770,8 +817,41 @@ std::optional<int> MapMode::process(const double delta) {
     return state.capture_map_frame();
 }
 
-void MapMode::observe_pointer(const Ref<InputEvent>& event) {
-    if (state_->battle) state_->battle->observe_pointer(event);
+void MapMode::observe_pointer(const Ref<InputEvent>& event, const presentation::ui::InputFocus pointer_focus) {
+    State& state = *state_;
+    if (state.battle) state.battle->observe_pointer(event);
+    // #4571: edge scroll reads the pointer position, but a HUD Control with a stopping mouse
+    // filter consumes the motion before the world layer (MapMode::input) sees it, so the camera
+    // kept the last position from before the cursor entered the HUD and the bottom edge never
+    // scrolled. _input runs ahead of the GUI: feed the position alone (zero relative motion, so
+    // no drag, rotation or pan is added) to the camera; the world layer still delivers the
+    // real motion when the pointer is not over the HUD. The feed obeys the gates the world path
+    // applies (modal dialog, demo battle, ready phase, camera movie).
+    if (event.is_null()) return;
+    const auto* motion = Object::cast_to<InputEventMouseMotion>(event.ptr());
+    if (motion == nullptr) return;
+    const bool in_ready_phase = state.live_session && state.live_session->phase() == LiveSessionView::Phase::ready;
+    const bool camera_movie = state.space && state.space->live_camera_movie();
+    if (!presentation::ui::world_feeds_pointer_position({pointer_focus, state.options.attract.has_value(), in_ready_phase, camera_movie})) return;
+    auto raw = map_camera_event(event);
+    if (!raw) return;
+    raw->relative_x = 0.0F;
+    raw->relative_y = 0.0F;
+    if (state.space) {
+        state.space->camera_event(*raw);
+        return;
+    }
+    if (!state.map_camera) return;
+    // The land branch of input(): the saved WASD binding is applied before the event.
+    if (const auto* saved = ActiveSettings::get()) {
+        if (auto bound = state.map_camera->set_camera_keys(saved->camera_wasd); !bound) {
+            state.failure = core::format_diagnostic(bound.error());
+            return;
+        }
+    }
+    if (auto handled = state.map_camera->handle(*raw); !handled) {
+        state.failure = core::format_diagnostic(handled.error());
+    }
 }
 
 void MapMode::input(const Ref<InputEvent>& event) {
@@ -806,6 +886,16 @@ void MapMode::input(const Ref<InputEvent>& event) {
         && (pressed->get_physical_keycode() != KEY_NONE ? pressed->get_physical_keycode() : pressed->get_keycode())
             == KEY_F3) {
         state.set_perf_overlay(state.perf == nullptr || !state.perf->shown());
+        return;
+    }
+    // Land movement debug overlay (default off): F4 toggles it in a land battle; nothing else sees the key.
+    if (const auto* pressed = Object::cast_to<InputEventKey>(event.ptr());
+        pressed != nullptr && state.land_overlay != nullptr && pressed->is_pressed() && !pressed->is_echo()
+        && !pressed->is_shift_pressed() && !pressed->is_ctrl_pressed() && !pressed->is_alt_pressed()
+        && !pressed->is_meta_pressed()
+        && (pressed->get_physical_keycode() != KEY_NONE ? pressed->get_physical_keycode() : pressed->get_keycode())
+            == KEY_F4) {
+        state.land_overlay->set_shown(!state.land_overlay->shown());
         return;
     }
     if (state.space && state.space->live_camera_movie()) {
@@ -965,6 +1055,15 @@ void MapMode::focus(const bool focused) {
     ++state_->map_camera_focus_notifications;
     state_->map_camera->set_focus(focused);
 }
+
+bool MapMode::pointer_confine_allowed() const {
+    const State& state = *state_;
+    return state.options.interactive && !state.options.attract && !state.menu_open && !state.pointer_blocked && !state.completed
+        && !(state.live_session && state.live_session->phase() == LiveSessionView::Phase::ready)
+        && !(state.space && state.space->live_camera_movie());
+}
+
+void MapMode::set_pointer_blocked(const bool blocked) { state_->pointer_blocked = blocked; }
 
 void MapMode::pointer_left() {
     if (state_->battle) state_->battle->cancel();

@@ -1,4 +1,5 @@
 #include "eawr/campaign/galactic_story_scripts.hpp"
+#include "eawr/vfs/vfs.hpp"
 
 #include "galactic_story_random.hpp"
 #include "eawr/core/sha256.hpp"
@@ -7,7 +8,9 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <cstring>
+#include <map>
 #include <set>
 #include <utility>
 #include <vector>
@@ -73,6 +76,16 @@ core::Result<std::shared_ptr<const GalacticStoryScripts>> GalacticStoryScripts::
         if (!text.empty()) std::memcpy(text.data(), bytes.value().data(), bytes.value().size());
         out->modules_.emplace(path, std::move(text));
     }
+    const auto names_symbol = [](const std::string& text, std::string_view symbol) {
+        const auto word = [](char c) { return std::isalnum(static_cast<unsigned char>(c)) || c == '_'; };
+        for (auto at = text.find(symbol); at != std::string::npos; at = text.find(symbol, at + 1)) {
+            const auto end = at + symbol.size();
+            if ((at == 0 || !word(text[at - 1])) && (end >= text.size() || !word(text[end]))) return true;
+        }
+        return false;
+    };
+    for (const auto& [path, text] : out->modules_)
+        if (names_symbol(text, "Spawn_Unit") || names_symbol(text, "Prevent_AI_Usage")) { out->uses_immediate_effects_ = true; break; }
     std::uint64_t ordinal = 0;
     for (const auto& sub : subplots) {
         ++ordinal;
@@ -108,7 +121,8 @@ std::string GalacticStoryScripts::fingerprint() const {
 }
 
 core::Result<auth::ScriptScheduler> create_galactic_story_scheduler(const GalacticStoryScripts& content, auth::SessionConfig base,
-    bool multiplayer, const GalacticStoryPlayers& players) {
+    bool multiplayer, const GalacticStoryPlayers& players, auth::GalacticSnapshotReader reader,
+    auth::GlobalValueReader globals) {
     using Result = core::Result<auth::ScriptScheduler>;
     // Only scripted campaigns change anything: a story scheduler without scripts keeps its previous identity and hash.
     if (content.entries().empty()) return auth::ScriptScheduler::create(std::move(base), {});
@@ -120,20 +134,25 @@ core::Result<auth::ScriptScheduler> create_galactic_story_scheduler(const Galact
     if (auto added = manifest.add(player_module, std::string(player_source)); !added) return Result::failure(added.error());
     auto scheduler = auth::ScriptScheduler::create(std::move(base), std::move(manifest));
     if (!scheduler) return scheduler;
+    if (auto added = auth::register_shared_global_values(scheduler.value(), std::move(globals)); !added)
+        return Result::failure(added.error());
     // RGC-190..199: the weighted list and the two random calls. Everything else the stock and mod story starts need
     // that this host does not implement faults by name below.
     if (auto added = story_random::register_story_random(scheduler.value(), multiplayer); !added) return Result::failure(added.error());
     // WST-91/92: prepare the full faction database once; the first matching player is the lowest player-table ID.
     std::map<std::string, std::optional<sim::galactic::PlayerId>> factions;
     for (const auto& name : players.factions) factions.try_emplace(lower(name), std::nullopt);
-    bool local_registered = false;
+    bool local_registered = false, shared_registered = false;
     for (const auto& player : players.players) {
         local_registered |= players.local_player && player.id == *players.local_player;
+        shared_registered |= players.shared_local_player && player.id == *players.shared_local_player;
         const auto found = factions.find(lower(player.faction));
         if (found != factions.end() && (!found->second || player.id < *found->second)) found->second = player.id;
     }
     // Project deviation from WST-91: a per-peer local player cannot enter the multiplayer lockstep simulation.
-    const auto local = !multiplayer && local_registered ? players.local_player : std::nullopt;
+    // The shared co-op faction is the one deterministic exception: every peer derives the same value.
+    const auto local = multiplayer ? (shared_registered ? players.shared_local_player : std::nullopt)
+                                   : (local_registered ? players.local_player : std::nullopt);
     if (auto added = scheduler.value().register_binding("EAWR_Story_Player.Lookup", [factions = std::move(factions), local](
             auth::BindingContext& context, const auth::ValueList& arguments) {
         using Lookup = core::Result<auth::ValueList>;
@@ -156,12 +175,133 @@ core::Result<auth::ScriptScheduler> create_galactic_story_scheduler(const Galact
         if (player) return Lookup::success({auth::Value{auth::Handle{script::foc::handle_player, *player}}});
         return Lookup::success({});
     }); !added) return Result::failure(added.error());
+    std::map<std::uint64_t, std::string> difficulties;
+    for (const auto& player : players.players) {
+        const auto level = lower(player.difficulty);
+        difficulties.emplace(player.id, level == "easy" ? "Easy" : level == "normal" ? "Normal" : level == "hard" ? "Hard" : player.difficulty);
+    }
+    if (auto added = scheduler.value().register_method(script::foc::handle_player, "Get_Difficulty",
+        [difficulties = std::move(difficulties)](auth::BindingContext&, const auth::ValueList& arguments) {
+            using DifficultyResult = core::Result<auth::ValueList>;
+            const auto* self = arguments.empty() ? nullptr : std::get_if<auth::Handle>(&arguments.front().data);
+            if (!self || self->kind != script::foc::handle_player || !difficulties.contains(self->id))
+                return DifficultyResult::failure(problem("Get_Difficulty requires a registered player"));
+            return DifficultyResult::success({auth::Value::text(difficulties.at(self->id))});
+        }); !added) return Result::failure(added.error());
+    if (auto added = auth::register_galactic_first_object(scheduler.value(), players.types, players.planets,
+        std::move(reader)); !added) return Result::failure(added.error());
+    std::set<std::uint64_t> advisor_players;
+    for (const auto& player : players.players) advisor_players.insert(player.id);
+    if (auto added = scheduler.value().register_method(script::foc::handle_player, "Enable_Advisor_Hints",
+        [advisor_players = std::move(advisor_players)](auth::BindingContext& context, const auth::ValueList& arguments) {
+            using HintsResult = core::Result<auth::ValueList>;
+            const auto* self = arguments.empty() ? nullptr : std::get_if<auth::Handle>(&arguments.front().data);
+            if (arguments.size() != 3 || !self || self->kind != script::foc::handle_player
+                || !advisor_players.contains(self->id) || !std::get_if<std::string>(&arguments[1].data)
+                || !std::get_if<bool>(&arguments[2].data))
+                return HintsResult::failure(problem("Enable_Advisor_Hints requires a registered player, mode string and boolean"));
+            // Retail changes a per-player advisor presentation preference and
+            // returns nothing. The advisor presentation consumer is not hosted.
+            context.report(auth::codes::unsupported_api,
+                "Enable_Advisor_Hints presentation preference is unavailable; story script continues");
+            return HintsResult::success({});
+        }); !added) return Result::failure(added.error());
     if (auto added = scheduler.value().register_prelude(player_module); !added) return Result::failure(added.error());
+    std::map<std::string, sim::galactic::PlanetId> planets;
+    for (const auto& [name, id] : players.planets) {
+        const auto key = lower(name);
+        const auto found = planets.find(key);
+        if (found == planets.end() || id < found->second) planets.insert_or_assign(key, id);
+    }
+    if (auto added = scheduler.value().register_binding("FindPlanet", [planets = std::move(planets)](
+            auth::BindingContext& context, const auth::ValueList& arguments) {
+        using Lookup = core::Result<auth::ValueList>;
+        if (arguments.empty() || !std::holds_alternative<std::string>(arguments.front().data)) {
+            context.report(auth::codes::invalid_request, "FindPlanet requires a string first argument");
+            context.request_exit();
+            return Lookup::success({});
+        }
+        const auto found = planets.find(lower(std::get<std::string>(arguments.front().data)));
+        if (found == planets.end()) return Lookup::success({});
+        return Lookup::success({auth::Value{auth::Handle{script::foc::handle_game_object, found->second}}});
+    }); !added) return Result::failure(added.error());
+    // RGC-176..178: type lookup, creation and the AI hand-off. Creation and the free-store write run in the ordered
+    // native shadow of the story phase (the same journaled creation as the AI's forced production), so identities,
+    // streams and the replay journal are the session's own on every peer and worker count.
+    std::map<std::string, sim::galactic::TypeId> type_names;
+    for (const auto& [name, id] : players.types) {
+        const auto key = lower(name);
+        const auto found = type_names.find(key);
+        if (found == type_names.end() || id < found->second) type_names.insert_or_assign(key, id);
+    }
+    if (auto added = scheduler.value().register_binding("Find_Object_Type", [type_names = std::move(type_names)](
+            auth::BindingContext& context, const auth::ValueList& arguments) {
+        using Lookup = core::Result<auth::ValueList>;
+        if (arguments.empty() || !std::holds_alternative<std::string>(arguments.front().data)) {
+            context.report(auth::codes::invalid_request, "Find_Object_Type requires a string first argument");
+            context.request_exit();
+            return Lookup::success({});
+        }
+        const auto found = type_names.find(lower(std::get<std::string>(arguments.front().data)));
+        if (found == type_names.end()) return Lookup::success({});
+        return Lookup::success({auth::Value{auth::Handle{script::foc::handle_type, found->second}}});
+    }); !added) return Result::failure(added.error());
+    std::set<std::uint64_t> spawn_players, spawn_planets;
+    for (const auto& player : players.players) spawn_players.insert(player.id);
+    for (const auto& planet : players.planets) spawn_planets.insert(planet.second);
+    if (auto added = scheduler.value().register_binding("Spawn_Unit", [spawn_players = std::move(spawn_players), spawn_planets = std::move(spawn_planets)](
+            auth::BindingContext& context, const auth::ValueList& arguments) {
+        using Spawn = core::Result<auth::ValueList>;
+        const auto refuse = [&](std::string message) {
+            context.report(auth::codes::invalid_request, std::move(message));
+            context.request_exit();
+            return Spawn::success({});
+        };
+        // RGC-176: three arguments (extra ones are ignored), each checked in order; nothing is created on a refusal.
+        if (arguments.size() < 3) return refuse("Spawn_Unit requires a type, a planet and a player");
+        const auto* type = std::get_if<auth::Handle>(&arguments[0].data);
+        if (!type || type->kind != script::foc::handle_type || !type->id) return refuse("Spawn_Unit: parameter 1 is not an object type");
+        const auto* planet = std::get_if<auth::Handle>(&arguments[1].data);
+        if (!planet || planet->kind != script::foc::handle_game_object || !spawn_planets.contains(planet->id))
+            return refuse("Spawn_Unit: parameter 2 is not a planet");
+        const auto* player = std::get_if<auth::Handle>(&arguments[2].data);
+        if (!player || player->kind != script::foc::handle_player || !spawn_players.contains(player->id))
+            return refuse("Spawn_Unit: parameter 3 is not a player");
+        auto made = context.apply_immediate("galactic.spawn_unit", {arguments[2], arguments[1], arguments[0]});
+        if (!made) return made;
+        if (made.value().empty()) {
+            // RGC-178: a null creation is a script warning and no table.
+            context.report(auth::codes::script_warning, "Spawn_Unit: the type created no object");
+            return Spawn::success({});
+        }
+        return made;
+    }); !added) return Result::failure(added.error());
+    if (auto added = scheduler.value().register_method(script::foc::handle_game_object, "Prevent_AI_Usage",
+        [](auth::BindingContext& context, const auth::ValueList& arguments) {
+            using Prevent = core::Result<auth::ValueList>;
+            const auto* actor = arguments.size() == 2 ? std::get_if<auth::Handle>(&arguments[0].data) : nullptr;
+            const auto* flag = arguments.size() == 2 ? std::get_if<bool>(&arguments[1].data) : nullptr;
+            if (!actor || actor->kind != script::foc::handle_game_object || !flag)
+                return Prevent::failure(problem("Prevent_AI_Usage requires an object and a Boolean"));
+            auto applied = context.apply_immediate("galactic.story_prevent_ai_usage", arguments);
+            if (!applied) return applied;
+            const auto* done = !applied.value().empty() && applied.value().size() <= 2 ? std::get_if<bool>(&applied.value()[0].data) : nullptr;
+            if (!done) return Prevent::failure(problem("Prevent_AI_Usage native result is invalid"));
+            // L-57: no AI pool for the owner (a human seat) is a warning, and the script goes on. An object the AI
+            // free store does not track is a different warning.
+            if (!*done) {
+                const auto* reason = applied.value().size() == 2 ? std::get_if<std::string>(&applied.value()[1].data) : nullptr;
+                context.report(auth::codes::script_warning, reason && *reason == "actor"
+                    ? "Prevent_AI_Usage: the object is not known to the AI free store"
+                    : "Prevent_AI_Usage: the owner has no initialized AI pool");
+            }
+            return Prevent::success({});
+        }); !added) return Result::failure(added.error());
     // Debug sinks (PGDebug, NEW-L22): the engine writes them to its logs; here they have no effect and write no file.
     for (const std::string_view sink : {"_OuputDebug", "_ScriptMessage", "_CustomScriptMessage", "_MessagePopup", "DumpCallStack"})
         if (auto added = scheduler.value().register_binding(sink, [](auth::BindingContext&, const auth::ValueList&) {
                 return core::Result<auth::ValueList>::success(auth::ValueList{}); }); !added) return Result::failure(added.error());
-    std::vector<std::string_view> implemented{"Find_Player", "DiscreteDistribution.Create", "GameRandom", "_OuputDebug", "_ScriptMessage",
+    std::vector<std::string_view> implemented{"GlobalValue.Get", "GlobalValue.Set", "Find_First_Object", "Find_Object_Type", "Spawn_Unit", "FindPlanet", "Find_Player", "DiscreteDistribution.Create", "GameRandom", "_OuputDebug", "_ScriptMessage",
         "_CustomScriptMessage", "_MessagePopup", "DumpCallStack"};
     // `Object`, `Target`, `Budget`, `FreeStore` and `PlayerObject` are variables of the scripts (Common_Base_Definitions
     // clears them), and the inventory's "Object.x" names are methods of the wrappers they hold; bound as global tables they

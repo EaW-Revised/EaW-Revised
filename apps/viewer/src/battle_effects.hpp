@@ -5,7 +5,7 @@
 #include "presentation_constants.hpp"
 
 #include "eawr/assets/assets.hpp"
-#include "eawr/data/xml.hpp"
+#include "eawr/data/xml_fwd.hpp"
 #include "eawr/platform/live_session.hpp"
 #include "particle_adapter.hpp"
 #include "space_populate.hpp"
@@ -19,7 +19,7 @@
 #include "eawr/sim/tactical/combat.hpp"
 #include "eawr/sim/tactical/snapshot.hpp"
 #include "eawr/units/unit_tables.hpp"
-#include "eawr/vfs/vfs.hpp"
+#include "eawr/vfs/vfs_fwd.hpp"
 
 #include <godot_cpp/classes/node3d.hpp>
 
@@ -148,6 +148,8 @@ public:
     // #638: the pool the particle systems step on (null: the main thread alone); it must outlive
     // this object's frames.
     void set_workers(const particles::StepExecutor* workers) noexcept { registry_->set_executor(workers); }
+    // L1.2: the render backend, for the frame's latches (ParticleLatches); null once released.
+    [[nodiscard]] GodotParticleBackend* particle_backend() noexcept { return backend_.get(); }
     void measure_particles(bool on) noexcept {
         registry_->begin_measurement(on);
         measure_owner_ = on;
@@ -216,6 +218,7 @@ private:
         std::array<float, 4> colour{1.0F, 1.0F, 1.0F, 1.0F};
         std::string detonation;        // Projectile_Object_Detonation_Particle
         std::string lifetime_detonation; // Projectile_Lifetime_Detonation_Particle
+        std::string ground_detonation;   // Projectile_Ground_Detonation_Particle (land shots meeting the terrain)
         std::string death_explosion;    // Death_Explosions for countdown death (BP-70)
         std::string armor_reduced;     // Projectile_Object_Armor_Reduced_Detonation_Particle
         std::string shield_absorbed;   // Projectile_Absorbed_By_Shields_Particle
@@ -352,6 +355,7 @@ private:
             std::map<sim::EntityId, Source> sources;
             std::uint64_t segments_drawn{}, bolts_created{}, active_at_release{};
             std::array<float, 3> last_start{}, last_end{};
+            std::array<float, 6> last_uv_ends{};
         } lightning;
         std::string texture;
         float width{};
@@ -508,6 +512,7 @@ private:
         std::uint64_t unique_denied_flights{};
         std::uint64_t budget_refusals{}, allocation_failures{}, recipe_refusals{}, reserved_bytes{};
         std::size_t peak_requested{};
+        std::size_t ordinal{}; // creation order of the pool at plan time (fixed), for the slots' entity ids
         std::string_view last_refusal;
         std::uint64_t last_refusal_bytes{};
         bool budget_probe_available{};

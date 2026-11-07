@@ -170,6 +170,8 @@ struct CampaignSetupServices {
 class CampaignRoot final {
 public:
     [[nodiscard]] static core::Result<CampaignRoot> create(CampaignSetupPlan plan, const CampaignSetupServices& services);
+    // Adopt only after checkpoint identity and exact-recapture validation.
+    [[nodiscard]] static CampaignRoot from_restored(CampaignSetupPlan plan, GameSession game);
     [[nodiscard]] GameSession* game() noexcept { return game_ ? &*game_ : nullptr; }
     [[nodiscard]] const GameSession* game() const noexcept { return game_ ? &*game_ : nullptr; }
     [[nodiscard]] const CampaignSetupPlan* plan() const noexcept { return plan_ ? &*plan_ : nullptr; }

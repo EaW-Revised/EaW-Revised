@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.25)
 
-project(EawrViewer VERSION 0.1.0 LANGUAGES CXX)
+project(EawrViewer VERSION 0.3.2 LANGUAGES CXX)
 include("${CMAKE_CURRENT_LIST_DIR}/../../cmake/EawrSymbols.cmake")
 find_package(Threads REQUIRED)
 
@@ -248,6 +248,14 @@ target_compile_definitions(eawr_viewer PRIVATE $<$<CONFIG:Debug>:EAWR_VIEWER_DEB
 get_target_property(GODOTCPP_SUFFIX godot-cpp GODOTCPP_SUFFIX)
 set(PROJECT_BIN "${CMAKE_CURRENT_LIST_DIR}/project/bin")
 file(MAKE_DIRECTORY "${CMAKE_CURRENT_LIST_DIR}/project/common")
+if(WIN32)
+    add_executable(eawr_bink_helper bink_helper/main.cpp "${EAWR_ROOT}/src/presentation/godot/ui/bink_movie.cpp")
+    target_compile_features(eawr_bink_helper PRIVATE cxx_std_20)
+    target_link_libraries(eawr_bink_helper PRIVATE Threads::Threads)
+    set_target_properties(eawr_bink_helper PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "$<1:${CMAKE_CURRENT_LIST_DIR}/project/common>")
+    add_dependencies(eawr_viewer eawr_bink_helper)
+endif()
 configure_file("${EAWR_ROOT}/prototypes/common/scene.json"
     "${CMAKE_CURRENT_LIST_DIR}/project/common/scene.json" COPYONLY)
 configure_file("${EAWR_ROOT}/tests/replay/fixtures/original-v1.eawr-replay"

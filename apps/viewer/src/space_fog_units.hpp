@@ -3,12 +3,12 @@
 #include "space_fog.hpp"
 
 #include "eawr/assets/map.hpp"
-#include "eawr/data/xml.hpp"
+#include "eawr/data/xml_fwd.hpp"
 #include "eawr/presentation/godot/renderer.hpp"
 #include "eawr/presentation/space/space.hpp"
 #include "eawr/scene/scene.hpp"
 #include "eawr/sim/snapshot.hpp"
-#include "eawr/vfs/vfs.hpp"
+#include "eawr/vfs/vfs_fwd.hpp"
 
 #include <cstdint>
 #include <optional>

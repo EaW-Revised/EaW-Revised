@@ -126,7 +126,8 @@ class InputRoutingRuntime(unittest.TestCase):
         directory = pathlib.Path(tempfile.mkdtemp(prefix="eawr-input-routing-"))
         report = directory / "input_routing.json"
         completed = subprocess.run(
-            [executable, "--resolution", "1280x720", "--path", str(ROOT / "apps/viewer/project"), "--",
+            [executable, "--resolution", "1280x720", "--render-thread", "separate",
+             "--path", str(ROOT / "apps/viewer/project"), "--",
              "--eawr-input-routing", "--eawr-report", str(report)],
             cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=False, timeout=300)
         self.assertTrue(report.is_file(), completed.stdout)
@@ -139,7 +140,9 @@ class InputRoutingRuntime(unittest.TestCase):
         self.assertEqual({step["rule"] for step in result["steps"]}, RULES)
         self.assertGreaterEqual(len(result["steps"]), 21)
         names = {step["name"] for step in result["steps"]}
-        for name in ("opening a modal ends the world's holds", "closing the modal resurrects no hold"):
+        for name in ("opening a modal ends the world's holds", "closing the modal resurrects no hold",
+                     "left edge over Stop", "right edge over faceplate", "top edge over Stop",
+                     "bottom edge over faceplate"):
             self.assertIn(name, names)
         self.assertGreaterEqual(result["cancels"], 2)
         commands = result["commands"]

@@ -1,4 +1,6 @@
 #include "xml_internal.hpp"
+#include "eawr/vfs/vfs.hpp"
+#include "eawr/core/load_profile.hpp"
 #include "eawr/core/text.hpp"
 #include "eawr/data/xml.hpp"
 #include "eawr/core/sha256.hpp"
@@ -299,9 +301,38 @@ core::Result<ParsedDocument> parse_document(
     const std::span<const std::byte> bytes,
     const vfs::AssetRecord& record
 ) {
-    ParsedDocument parsed{.document = {}, .root = {}, .offsets = SourceOffsets(bytes)};
+    namespace profile = core::load_profile;
+    profile::Scope parse_scope(profile::Phase::xml_parse);
+    const profile::FileScope parse_timer(record.canonical_path, record.layer_id, &profile::FileCost::parse_ms);
+    ParsedDocument parsed{.document = {}, .root = {}, .offsets = SourceOffsets(bytes),
+                          .compatible_header = {}, .compatible_header_offset = 0};
     auto result = parsed.document.load_buffer(
         bytes.data(), bytes.size(), pugi::parse_full | pugi::parse_ws_pcdata, pugi::encoding_auto);
+    // The debug reader skips the first processing instruction through its first
+    // greater-than sign. Preserve authored offsets and retry only after strict failure.
+    const auto* text = reinterpret_cast<const char*>(bytes.data());
+    const std::string_view input_text(text, bytes.size());
+    std::size_t start = input_text.starts_with("\xef\xbb\xbf") ? 3 : 0;
+    while (start < input_text.size() && xml_space(static_cast<unsigned char>(input_text[start]))) ++start;
+    if (!result && input_text.substr(start).starts_with("<?")) {
+        const auto end = input_text.find('>', start + 2);
+        if (end != std::string_view::npos) {
+            const auto original_result = result;
+            std::vector<std::byte> compatible(bytes.begin(), bytes.end());
+            for (std::size_t i = start; i <= end; ++i) {
+                if (input_text[i] != '\r' && input_text[i] != '\n') compatible[i] = std::byte{' '};
+            }
+            parsed.document.reset();
+            result = parsed.document.load_buffer(compatible.data(), compatible.size(),
+                pugi::parse_full | pugi::parse_ws_pcdata, pugi::encoding_auto);
+            if (result) {
+                parsed.compatible_header = std::string(input_text.substr(start, end - start + 1));
+                parsed.compatible_header_offset = start;
+            } else {
+                result = original_result;
+            }
+        }
+    }
     std::optional<std::string> numeric_root_name;
     if (!result && (result.status == pugi::status_bad_start_element ||
                     result.status == pugi::status_unrecognized_tag)) {
@@ -346,6 +377,17 @@ core::Result<ParsedDocument> parse_document(
             diagnostic_codes::malformed_xml, "XML document has no root element", &source));
     }
     if (numeric_root_name) parsed.root.set_name(numeric_root_name->c_str());
+    if (profile::active) {
+        struct Counter final : pugi::xml_tree_walker {
+            std::uint64_t elements{};
+            bool for_each(pugi::xml_node& node) override { elements += node.type() == pugi::node_element; return true; }
+        } counter;
+        parsed.document.traverse(counter);
+        profile::file_cost(record.canonical_path, [&](profile::FileCost& cost) {
+            cost.bytes = bytes.size();
+            cost.tags = counter.elements;
+        });
+    }
     return core::Result<ParsedDocument>::success(std::move(parsed));
 }
 
@@ -637,15 +679,31 @@ void index_winners(Catalog::Impl& catalog, std::vector<core::Diagnostic>& diagno
         if (!catalog.definitions[i].id.empty()) catalog.by_id[ascii_lower(catalog.definitions[i].id)].push_back(i);
     }
     for (auto& [id, indexes] : catalog.by_id) {
+        // Layer precedence is unchanged (a stronger layer, i.e. a mod overriding vanilla, leads). Within one layer
+        // retail registers every definition in load order and a name lookup keeps the FIRST registration (debug
+        // build, PL-20): registry order, then place in the file. find_all() returns this order.
         std::stable_sort(indexes.begin(), indexes.end(), [&](const std::size_t left, const std::size_t right) {
             const auto& a = catalog.definitions[left];
             const auto& b = catalog.definitions[right];
             const auto ar = layer_rank(a.root.source.layer_id);
             const auto br = layer_rank(b.root.source.layer_id);
             if (ar != br) return ar > br;
-            if (a.registry_order != b.registry_order) return a.registry_order > b.registry_order;
-            return a.definition_order > b.definition_order;
+            if (a.registry_order != b.registry_order) return a.registry_order < b.registry_order;
+            return a.definition_order < b.definition_order;
         });
+        // Hardpoint bindings replace earlier bindings within a layer (ML-18).
+        // Reverse only their slots so other namespaces retain their lookup order.
+        for (std::size_t first = 0; first < indexes.size();) {
+            const auto rank = layer_rank(catalog.definitions[indexes[first]].root.source.layer_id);
+            auto end = first + 1;
+            while (end < indexes.size() && layer_rank(catalog.definitions[indexes[end]].root.source.layer_id) == rank) ++end;
+            std::vector<std::size_t> slots;
+            for (auto i = first; i < end; ++i)
+                if (catalog.definitions[indexes[i]].category == Category::hardpoint) slots.push_back(i);
+            for (std::size_t i = 0; i < slots.size() / 2; ++i)
+                std::swap(indexes[slots[i]], indexes[slots[slots.size() - 1 - i]]);
+            first = end;
+        }
         catalog.winners[id] = indexes.front();
         catalog.definitions[indexes.front()].winner = true;
         std::array<bool, static_cast<std::size_t>(Category::sfx) + 1> categories{};
@@ -659,7 +717,7 @@ void index_winners(Catalog::Impl& catalog, std::vector<core::Diagnostic>& diagno
             const auto& winner = catalog.definitions[indexes.front()];
             std::ostringstream message;
             message << "duplicate object ID '" << winner.id << "' has " << indexes.size()
-                    << " active definitions; strongest layer then later registry/definition order wins";
+                    << " active definitions; all are kept; name lookups answer the strongest layer's first registered one";
             diagnostics.push_back(diagnostic(diagnostic_codes::duplicate_id, message.str(),
                                              &winner.root.source, core::Severity::warning));
         }

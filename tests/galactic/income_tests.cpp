@@ -475,7 +475,7 @@ std::string planet_reduction_card(const gc::EconomicReduction& reduction, std::s
     const auto& row = reduction;
     // Preserve the profile's target binding through publication and admission.
     for (auto& planet : config.production->planets)
-        for (auto& offer : planet.offers) offer.type = row.type;
+        for (auto& offer : planet.offers.mutable_rows()) offer.type = row.type;
     for (auto& offer : config.income->offers) offer.type = row.type;
     config.income->types[0].reductions = {row};
     config.income->sources[0].owner = config.planets[0].owner;

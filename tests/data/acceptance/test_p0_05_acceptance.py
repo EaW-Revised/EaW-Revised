@@ -97,7 +97,7 @@ def build_fixture(root: Path) -> Path:
     return data
 
 
-def run(xml_scan: Path, fixture_data: Path, report: Path, profile: str = "eaw") -> dict:
+def run(xml_scan: Path, fixture_data: Path, report: Path, profile: str = "eaw", hard: bool = True) -> dict:
     receipt = report.with_suffix(".receipt.json")
     result = subprocess.run(
         [str(xml_scan), "--profile", profile, "--game-root", str(fixture_data),
@@ -110,7 +110,11 @@ def run(xml_scan: Path, fixture_data: Path, report: Path, profile: str = "eaw") 
     check(report.exists(), f"xml_scan did not write {report}: {result.stdout}{result.stderr}")
     check(receipt.exists(), "xml_scan did not write input receipt")
     payload = json.loads(report.read_text(encoding="utf-8"))
-    check(result.returncode == 1, f"fixture should retain hard missing/parser/resolution findings, got {result.returncode}")
+    if hard:
+        check(result.returncode == 1,
+              f"fixture should retain hard missing/parser/resolution findings, got {result.returncode}")
+    else:
+        check(result.returncode == 0, f"fixture should report only warnings, got {result.returncode}")
     return payload
 
 
@@ -277,7 +281,15 @@ def acceptance(xml_scan: Path) -> None:
             else:
                 write(registry, content)
             case_report = root / f"{case}.json"
-            run(xml_scan, case_data, case_report)
+            # A malformed registry root is a warning (the original game omits the unreadable file and goes on), and
+            # the object registry is the only source of unresolved variants here, so that case has no hard finding.
+            # A missing or wrong-root registry stays a hard error.
+            case_payload = run(xml_scan, case_data, case_report, hard=case != "malformed")
+            if case == "malformed":
+                check(any(row["code"] == "EAWR-XML-0003" and row["severity"] == "warning" and
+                          row["logical_path"] == "data/xml/gameobjectfiles.xml"
+                          for row in case_payload["diagnostics"]),
+                      "malformed registry root lost its warning diagnostic")
             attempted = receipt_for(case_report)["roots"][0]
             check(attempted["logical_path"] == "data/xml/gameobjectfiles.xml" and
                   attempted["outcome"] == ("missing" if content is None else "parse_error"),

@@ -60,6 +60,7 @@ void BattleAudio::meter_buses() {
                                   + static_cast<double>(data[index].y) * data[index].y;
                 }
                 bus.samples += static_cast<std::uint64_t>(frames.size());
+                tally(audio_trace::Count::meter_frames, static_cast<std::uint64_t>(frames.size()));
             }
         }
         const double peak_db = std::max(server->get_bus_peak_volume_left_db(bus.index, 0),

@@ -57,7 +57,7 @@ players state, snapshot and checkpoint section only when present; absent economy
 keeps legacy bytes unchanged. No new commands, events, state sections, checkpoint
 IDs or versions are introduced. The campaign identity additionally includes
 actual mode and admitted custom economy/hero inputs under the existing
-`eawr-campaign-setup-v1` domain. Replays and checkpoints reconstruct committed
+`eawr-campaign-setup-v2` domain. Replays and checkpoints reconstruct committed
 values without rerunning campaign planning or the startup providers.
 
 Contracts cover the three human factions and ordinary/story/tutorial/multiplayer

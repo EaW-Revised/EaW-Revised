@@ -44,7 +44,10 @@ request for the units of one ability group.
   for the ability type (a built-in table: DEFEND `i_sa_defend_mode.tga`, TURBO
   `i_sa_power_to_engines.tga`, POWER_TO_WEAPONS `i_sa_power_to_weapons.tga`, ION_CANNON_SHOT
   `i_sa_ion_cannon_shot.tga`, SPOILER_LOCK `i_sa_s_foil_mode.tga`, ...). An ability without an icon
-  in the table draws none.
+  in the table draws none. The debug build uses the last unit visited in the group, stopping at the
+  first ready unit; our presentation uses entity-ID order for that traversal so card order does not
+  change the icon. If an authored icon cannot be resolved, the button, mark and hover fall back to
+  the engine icon (project fallback).
 - AB-05 (ABE-2, ABE-7). The recharge dial is the button's `Build_Texture_Name`
   (`i_button_sa_recharge.tga`) at the group's largest recharge completion. A completion of 0 (no unit
   recharging) counts as 1, which draws no dial. The dial is the texture cut to a clock sweep: from

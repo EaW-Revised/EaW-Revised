@@ -4,13 +4,20 @@
 #include "eawr/core/gc_load_trace.hpp"
 #include "galactic_lobby_backend.hpp"
 #include "eawr/net/galactic_adapter.hpp"
+#include "eawr/checkpoint/game.hpp"
 
 #include <algorithm>
 
 namespace eawr::presentation::godot_backend {
 core::Result<std::unique_ptr<platform::LiveGameSession>> GalacticLaunch::start(platform::LiveGameSession::Options live) const {
+    if (finish_load_transport) {
+        auto finished = finish_load_transport();
+        if (!finished) return core::Result<std::unique_ptr<platform::LiveGameSession>>::failure(finished.error());
+    }
+    if (recovery_factory) match->configure_recovery_restore(recovery_factory(live.workers));
     live.step_driver = match->driver();
     live.services = services;
+    if (!live.saves.campaign) live.saves.campaign = saved_campaign;
     return platform::LiveGameSession::start(owner, std::move(live));
 }
 const sim::galactic::GalacticSetup& GalacticLaunch::layout() const { return owner->session->galaxy().setup(); }
@@ -32,8 +39,7 @@ void TcpLanMatch::pump_galactic_start() {
         flush_lobby_closes();
         if (!pumped) { set_failure(pumped.error()); return; }
         if (lobby_->snapshot().phase != net::LobbyPhase::starting && lobby_->snapshot().phase != net::LobbyPhase::committed) {
-            const auto message = lobby_->notice() ? lobby_->notice()->message : "The campaign room ended before commitment.";
-            set_failure(net::lobby_diagnostic(net::LobbyReason::setup_failed, message)); return;
+            set_failure(galactic_start_aborted(lobby_->notice())); return;
         }
         if (!view().host && !lobby_setup_accepted_ && lobby_->setup_phase() == net::SetupPhase::reviewing_offer) {
             auto accepted = lobby_->accept_setup();
@@ -90,10 +96,36 @@ std::shared_ptr<GalacticLaunch> TcpLanMatch::take_galactic_launch() {
     launch->roster = lobby_result_->snapshot();
     launch->plan = agreement->plan;
     launch->owner = std::make_shared<platform::PreparedLiveAgreement>(); launch->owner->session = agreement->session;
+    launch->owner->load_notes = agreement->load_notes;
+    launch->saved_campaign = galactic_->save_campaign_source(launch->options);
+    launch->owner->initial_tick = agreement->resume ? agreement->resume->completed_tick : 0;
     launch->services = std::static_pointer_cast<const platform::CampaignServiceConfiguration>(agreement->runtime_services);
     GalacticLanOptions options;
     const auto& offer = lobby_result_->setup().offer();
+    options.recovery_offer = offer;
+    // A separate immutable private factory; no live agreement enters its worker.
+    launch->recovery_factory = [backend = galactic_, offer](std::size_t workers) { return backend->recovery_factory(offer, workers); };
+    if (mesh_repair_auth_) {
+        auto auth = *mesh_repair_auth_; auth.epoch = 1;
+        options.repair_recovery_links = [this, auth = std::move(auth)] { return io_->transport.tcp->repair_closed_links(auth); };
+    }
+    // The live HUD consumes a copy projected onto the authenticated saved IDs.
+    // The staging room retains its own ephemeral admission identities.
+    for (std::size_t i = 0; i < launch->roster.seats.size(); ++i) {
+        launch->roster.seats[i].seat = offer.seats[i].seat;
+        launch->roster.seats[i].player = offer.seats[i].player;
+    }
+    options.initial_checkpoint = galactic_->checkpoint_bytes();
+    // Reuse the verified selected save on every peer. New games capture once
+    // during loading; an unavailable optional base never prevents the launch.
+    prepare_galactic_recovery_base(options, *agreement->session,
+        dynamic_cast<net::GalacticSessionAdapter*>(&lobby_result_->setup().adapter()), launch->owner->initial_tick);
     options.input_delay = offer.input_delay; options.final_tick_count = offer.final_tick_count;
+    std::vector<net::PeerIndex> native_peers;
+    for (const auto& seat : launch->roster.seats) native_peers.push_back(seat.peer);
+    options.quarantine_recovery_peer = [this, native_peers = std::move(native_peers)](net::PeerIndex peer) {
+        if (peer < native_peers.size()) static_cast<void>(io_->transport.tcp->close_peer(native_peers[peer]));
+    };
     options.final_output_drained = [this] { return !io_->transport.tcp->has_pending_output(); };
     for (const auto& seat : offer.seats) options.seats.push_back({seat.seat, true});
     if (lobby_stream_->self() >= offer.seats.size()) {
@@ -104,6 +136,11 @@ std::shared_ptr<GalacticLaunch> TcpLanMatch::take_galactic_launch() {
         [this](bool allowed) { gate_.advance_allowed = allowed; }, shared_from_this());
     handed_over_ = true;
     { const std::lock_guard lock(mutex_); view_.phase = LanPhase::running; }
+    launch->finish_load_transport = [self = shared_from_this()]() -> core::Result<void> {
+        if (auto failure = self->stop_load_pump()) { self->set_failure(*failure); return core::Result<void>::failure(*failure); }
+        return core::Result<void>::success();
+    };
+    start_load_pump();
     return launch;
 }
 

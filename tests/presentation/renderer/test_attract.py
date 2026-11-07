@@ -147,6 +147,27 @@ class AttractStructure(unittest.TestCase):
         host = (SRC / "viewer_host_camera_setup.cpp").read_text(encoding="utf-8")
         self.assertLess(host.index("attract_runner_.reset();"), host.index("map_mode_.reset();"))
 
+    def test_failed_load_retries_with_a_bounded_candidate_set(self):
+        runner = (SRC / "attract_runner.cpp").read_text(encoding="utf-8")
+        launch = runner[runner.index("[[nodiscard]] bool launch("):runner.index("[[nodiscard]] skirmish::AttractFrame")]
+        self.assertIn("candidates.reset(manager->settings().maps.size())", launch)
+        self.assertIn("candidates.next(*manager, now)", launch)
+        exhausted = launch[launch.index("if (!index) {"):launch.index("host = memnew(Node3D)")]
+        self.assertIn("manager->shutdown()", exhausted)
+        self.assertNotIn("flush_notes()", exhausted)
+        self.assertIn("note_failed_candidate({}, settings.maps[*index], failure)", launch)
+        process = runner[runner.index("void AttractRunner::process("):runner.index("bool AttractRunner::key(")]
+        self.assertEqual(process.count("state.note_failed_candidate(state.map_path, state.manager->settings().maps[*state.map_index], state.failure)"), 2)
+        self.assertEqual(process.count("state.launch(now_ms(), true)"), 2)
+        self.assertIn('note.code = "EAWR-LOAD-1235"', runner)
+        note = runner[runner.index("void note_failed_candidate("):runner.index("[[nodiscard]] bool launch(")]
+        self.assertIn("pending_notes.push_back", note)
+        self.assertIn("attract_note_limit", note)
+        self.assertIn("notes_suppressed", note)
+        self.assertNotIn("publish_viewer_load_notes", note[:note.index("void flush_notes()")])
+        stop = runner[runner.index("void AttractRunner::stop()"):runner.index("bool AttractRunner::running()")]
+        self.assertIn("state.flush_notes()", stop)
+
     def test_nothing_is_a_fixed_content_list_but_the_games_own_two_ai_names(self):
         # Mods change GameConstants: the runner takes the maps, delays and timeout from it.
         runner = (SRC / "attract_runner.cpp").read_text(encoding="utf-8")

@@ -8,6 +8,8 @@
 #include "land_test_support.hpp"
 #include "../support/env.hpp"
 #include "../support/reverse_partition_executor.hpp"
+#include "../../src/sim/tactical/checkpoint_fields_internal.hpp"
+#include "../../src/sim/tactical/land_checkpoint_fields_internal.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -27,7 +29,7 @@ template <class T> T take(core::Result<T> result) {
 }
 void must(core::Result<void> result) { if (!result) throw std::runtime_error(result.error().message); }
 
-TacticalContent content(std::shared_ptr<const LandTerrain> terrain, std::size_t member_count = 3) {
+TacticalContent content(std::shared_ptr<const LandTerrain> terrain, std::size_t member_count = 3, Fixed turn_rate = whole(2)) {
     TacticalContent result;
     result.domain = BattleDomain::land; result.land_terrain = std::move(terrain);
     result.land.clear_bit = clear;
@@ -35,6 +37,7 @@ TacticalContent content(std::shared_ptr<const LandTerrain> terrain, std::size_t 
     LandCompanyBinding binding;
     binding.type = 11; binding.company.id = "synthetic-company";
     binding.company.team_max_speed = whole(60); binding.company.max_squad_size = static_cast<std::uint32_t>(member_count);
+    binding.company.team_collision_class = units::LandCollisionGroup::infantry; // WLPA-82: the container's class makes the squad a body
     binding.effective_team_max_speed = whole(60);
     binding.formation_spacing = Fixed::from_ratio(1, 5).value();
     for (std::size_t i = 0; i < member_count; ++i) {
@@ -43,7 +46,7 @@ TacticalContent content(std::shared_ptr<const LandTerrain> terrain, std::size_t 
         member.create_team = true; member.movement_class = "walker"; member.max_speed = whole(80);
         member.locomotor = "synthetic-walking";
         binding.company.members.push_back(member);
-        binding.members.push_back({12, {whole(80), whole(120), whole(150), whole(2), whole(1), false, eawr::units::LandCollisionGroup::infantry}, 0, {}, {}, {}});
+        binding.members.push_back({12, {whole(80), whole(120), whole(150), turn_rate, whole(1), false, eawr::units::LandCollisionGroup::infantry}, 0, {}, {}, {}});
     }
     result.land.companies.push_back(std::move(binding));
     return result;
@@ -62,6 +65,98 @@ TacticalSetup setup() {
         result.units.push_back(unit);
     }
     return result;
+}
+
+Bytes checkpoint_bytes(const TacticalSession& session);
+void victory_contracts() {
+    auto input = setup();
+    input.units.resize(2);
+    input.units[0].position = {whole(100), whole(100), {}};
+    input.units[1].owner = 2;
+    input.units[1].position = {whole(190), whole(100), {}};
+    auto field = make_field(std::vector<std::string>(40, std::string(64, '.')));
+    auto rules = content(field.terrain, 1);
+    rules.victory.condition = VictoryCondition::all_enemy_units_destroyed;
+    rules.victory.relevant_types = {11};
+    rules.victory.contenders = {1, 2};
+    rules.victory.controlled_players = {1, 2};
+    rules.victory.installed_players = {1, 2};
+    DamageRules damage;
+    damage.shield_recharge_frames = 30; damage.damage_types = 1; damage.armor_types = 1;
+    damage.armor_mods = {whole(1)}; rules.durability.damage = damage;
+    DurabilityProfile health;
+    health.type_id = 12; health.max_hull = whole(4); health.allow_diminishing_firepower = false;
+    rules.durability.profiles.push_back(health);
+    CombatProfile gun;
+    gun.type_id = 12; gun.max_attack_distance = whole(150); gun.living_projectile_collision = true;
+    gun.collision = CollisionBox{{whole(-2), whole(-2), whole(-2)}, {whole(2), whole(2), whole(4)}};
+    WeaponProfile weapon;
+    weapon.range = whole(150); weapon.min_recharge_hundredths = weapon.max_recharge_hundredths = 100;
+    weapon.pulse_count = 1;
+    ShotProfile shot; shot.damage = whole(4); shot.speed = whole(4); shot.max_travel = whole(500);
+    weapon.shot = shot; gun.weapons.push_back(weapon); rules.combat.profiles.push_back(gun);
+    rules.combat.footprints.push_back({12, whole(2), whole(2), whole(2)});
+    std::vector<std::string> reference;
+    for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+        platform::ThreadWorkerAdapter executor(workers);
+        auto session = take(TacticalSession::create(input, rules));
+        must(session.submit({{0, 1, 1}, {1}, AttackPayload{2}}));
+        must(session.submit({{0, 2, 1}, {2}, AttackPayload{1}}));
+        std::vector<std::string> hashes;
+        bool restored = false;
+        for (int frame = 0; frame < 300; ++frame) {
+            const auto tick = take(session.step(executor));
+            hashes.push_back(tick.state_sha256);
+            if (session.outcome() && !restored) {
+                const auto bytes = checkpoint_bytes(session);
+                auto loaded = take(checkpoint::load_tactical_checkpoint(bytes,
+                    checkpoint::tactical_identities(input.content_identity),
+                    [&rules](const TacticalReplay& replay) { return TacticalSession::from_replay(replay, rules); }, executor));
+                session = std::move(loaded.session);
+                expect(checkpoint_bytes(session) == bytes, "pending land victory restores exactly");
+                restored = true;
+            }
+        }
+        expect(restored && session.outcome() && session.outcome()->winner >= 1 && session.outcome()->winner <= 2
+            && session.outcome()->end_tick <= session.completed_tick(), "mutual fire retains the first winner through battle end");
+        if (reference.empty()) reference = std::move(hashes);
+        else expect(hashes == reference, "land victory digests agree on 1/2/4/8 workers");
+    }
+    // One unarmed enemy and a distant allied component exercise the LC-70 relationship filter.
+    input.players.push_back({3, 1, 3, player_flag_commandable});
+    input.units[1].type_id = 22;
+    UnitState ally = input.units[0]; ally.entity_id = 3; ally.owner = 3;
+    ally.position = {whole(500), whole(500), {}}; input.units.push_back(ally);
+    rules.land.static_objects.push_back(22);
+    LandOccupation target_occupation; target_occupation.object = 2;
+    rules.land.occupations.push_back(target_occupation);
+    auto target_health = health; target_health.type_id = 22; rules.durability.profiles.push_back(target_health);
+    auto target_body = gun; target_body.type_id = 22; target_body.weapons.clear();
+    rules.combat.profiles.push_back(target_body);
+    rules.combat.footprints.push_back({22, whole(2), whole(2), whole(2)});
+    rules.victory.condition = VictoryCondition::enemy_base_components_destroyed;
+    rules.victory.starbase_types = {11, 22};
+    rules.victory.contenders = {1, 2, 3}; rules.victory.controlled_players = {1, 2, 3};
+    rules.victory.installed_players = {1, 2, 3};
+    sim::InlineExecutor executor;
+    auto base = take(TacticalSession::create(input, rules));
+    expect(players_allied(base.snapshot()->players(), 1, 3)
+        && players_hostile(base.snapshot()->players(), 1, 2), "LC-70 fixture has the intended player relationships");
+    expect(!base.outcome(), "LC-70 is event driven at battle start");
+    must(base.submit({{0, 1, 1}, {1}, AttackPayload{2}}));
+    bool target_destroyed = false;
+    for (int frame = 0; frame < 180 && !base.outcome(); ++frame) {
+        const auto step = take(base.step(executor));
+        for (const auto& event : step.snapshot->events())
+            target_destroyed |= event.kind == EventKind::unit_destroyed && event.unit == 2;
+    }
+    expect(target_destroyed && base.outcome() && base.outcome()->winner == 1 && base.unit_state(3),
+        "last enemy component ends battle while an allied component remains");
+    rules.victory.starbase_types.clear();
+    auto no_components = take(TacticalSession::create(input, rules));
+    must(no_components.submit({{0, 1, 1}, {1}, AttackPayload{2}}));
+    for (int frame = 0; frame < 180; ++frame) take(no_components.step(executor));
+    expect(!no_components.outcome(), "LC-70 never ends a component-free map at start or on unrelated deaths");
 }
 
 void commands(TacticalSession& session) {
@@ -226,7 +321,7 @@ void contracts() {
     expect(take(space_session.save_land_checkpoint_state()).empty(), "space raw land checkpoint bytes are absent");
     auto parsed = take(checkpoint::parse_checkpoint(checkpoint_bytes(session)));
     const auto* section = parsed.find(checkpoint::SectionId::land_state);
-    expect(section && section->version == 6 && !section->required, "land services use the optional allocated section");
+    expect(section && section->version == 9 && !section->required, "land services use the optional allocated section");
     auto missing = parsed;
     std::erase_if(missing.sections, [](const auto& s) { return s.id == static_cast<std::uint16_t>(checkpoint::SectionId::land_state); });
     expect(!checkpoint::load_tactical_checkpoint(take(checkpoint::write_checkpoint(missing)),
@@ -288,11 +383,28 @@ void contracts() {
         take(contact_session.step(serial));
         if (contact_session.land_movement()->contacts().empty()) continue;
         retained = true;
+        auto counted = contact_session.land_movement()->checkpoint();
+        const auto before_counts = contact_session.state_sha256();
+        counted.contacts.front().retry_remaining = counted.contacts.front().retry_remaining == 15 ? 14 : 15;
+        *const_cast<LandMovement*>(contact_session.land_movement()) = LandMovement::from_checkpoint(counted).value();
+        expect(contact_session.state_sha256() != before_counts, "contact retry contributes to the canonical hash");
+        auto hash = contact_session.state_sha256();
+        counted.squads.front().straggler_wait_remaining = counted.squads.front().straggler_wait_remaining == 14 ? 13 : 14;
+        *const_cast<LandMovement*>(contact_session.land_movement()) = LandMovement::from_checkpoint(counted).value();
+        expect(contact_session.state_sha256() != hash, "straggler count contributes to the canonical hash");
+        hash = contact_session.state_sha256();
+        counted.members.front().straggler_best_lag = whole(19);
+        *const_cast<LandMovement*>(contact_session.land_movement()) = LandMovement::from_checkpoint(counted).value();
+        expect(contact_session.state_sha256() != hash, "straggler best lag contributes to the canonical hash");
         const auto saved = checkpoint_bytes(contact_session);
         auto resumed = take(checkpoint::load_tactical_checkpoint(saved, checkpoint::tactical_identities(blocked.content_identity),
             factory(tables), serial));
         expect(resumed.session.land_movement()->checkpoint() == contact_session.land_movement()->checkpoint(),
             "a nonempty retained contact ledger round trips through the session section");
+        expect(resumed.session.land_movement()->contacts().front().retry_remaining == counted.contacts.front().retry_remaining
+            && resumed.session.land_movement()->squads().front().straggler_wait_remaining == counted.squads.front().straggler_wait_remaining
+            && resumed.session.land_movement()->members().front().straggler_best_lag == whole(19),
+            "checkpoint bytes restore both guards and best lag mid-count");
         for (int j = 0; j < 12; ++j) {
             take(contact_session.step(serial)); take(resumed.session.step(serial));
             expect(contact_session.canonical_state_bytes() == resumed.session.canonical_state_bytes(),
@@ -303,9 +415,9 @@ void contracts() {
     expect(retained, "session fixture exercises a moving/stopped retained contact");
 }
 
-// #4825: a three-member squad passes a building corner. Blocked members get their own short terrain
-// detour (WLPA-69), so the straggler gate (WLPA-30) reopens and the whole squad settles.
-struct CornerResult { Bytes state, checkpoint; bool crossed{}, settled{}, detoured{}, squad_route_untouched{true}; };
+// #4825 / WLPA-36/69: a three-member squad passes a building corner. Only the container tests its centre point; a soldier
+// whose slot falls into the blocked belt walks straight through it (retail clips corners) and holds nothing.
+struct CornerResult { Bytes state, checkpoint; bool crossed{}, settled{}, clipped{}, squad_route_untouched{true}; };
 CornerResult corner_formation(const sim::PartitionExecutor& executor, bool restore, bool reverse) {
     auto field = make_field(std::vector<std::string>(40, std::string(48, '.')));
     auto tables = content(field.terrain);
@@ -329,14 +441,16 @@ CornerResult corner_formation(const sim::PartitionExecutor& executor, bool resto
         const auto& squad = session.land_movement()->squads().front();
         result.crossed = result.crossed || (reverse ? squad.position.x < whole(260) : squad.position.x > whole(340));
         result.squad_route_untouched = result.squad_route_untouched && squad.temporary_first == 0;
-        bool detouring = false;
-        for (const auto& member : session.land_movement()->members())
-            detouring = detouring || member.detour_next < member.detour_path.nodes.size();
-        result.detoured = result.detoured || detouring;
-        if (!restored && detouring) {
+        for (const auto& member : session.land_movement()->members()) {
+            const auto column = land_cell_of(member.position.x, field.terrain->spacing(), field.columns);
+            const auto row = land_cell_of(member.position.y, field.terrain->spacing(), field.rows);
+            result.clipped = result.clipped || !column || !row || std::find(building.primary_cells.begin(),
+                building.primary_cells.end(), *row * field.columns + *column) != building.primary_cells.end();
+        }
+        if (!restored && tick == 150) {
             const auto saved = checkpoint_bytes(session);
             auto resumed = take(checkpoint::load_tactical_checkpoint(saved, identities, factory(tables), executor));
-            expect(checkpoint_bytes(resumed.session) == saved, "mid-detour land checkpoint bytes round trip");
+            expect(checkpoint_bytes(resumed.session) == saved, "mid-corner land checkpoint bytes round trip");
             session = std::move(resumed.session);
             restored = true;
         }
@@ -347,16 +461,167 @@ CornerResult corner_formation(const sim::PartitionExecutor& executor, bool resto
     return result;
 }
 
+// WLPA-88/89: a move order given to a squad that is walking does not stop it. The result of the search from the end of
+// its bounded segment is spliced in; a corner too sharp for the slowest member falls back to turning in place.
+struct ReorderResult { Bytes state, checkpoint; bool never_stopped{true}, turned{}, reached{}, old_end{}; };
+ReorderResult reorder_while_walking(const sim::PartitionExecutor& executor, bool restore, Fixed turn_rate, bool backward = false) {
+    auto field = make_field(std::vector<std::string>(40, std::string(48, '.')));
+    const auto tables = content(field.terrain, 3, turn_rate);
+    const auto initial = setup();
+    auto session = take(TacticalSession::create(initial, tables));
+    must(session.submit({{0, 1, 1}, {1}, MovePayload{{whole(620), whole(180), {}}}}));
+    must(session.submit({{60, 1, 20}, {1}, MovePayload{{whole(backward ? 60 : 400), whole(backward ? 180 : 500), {}}}}));
+    const auto identities = checkpoint::tactical_identities(initial.content_identity);
+    ReorderResult result;
+    for (int tick = 0; tick < 1100; ++tick) {
+        const auto before = session.land_movement()->squads().front().position;
+        take(session.step(executor));
+        const auto& squad = session.land_movement()->squads().front();
+        if (tick >= 60 && tick < 90 && turn_rate >= whole(1))
+            result.never_stopped = result.never_stopped && squad.position != before && squad.order == LandMoveOrder::following;
+        if (tick >= 60) result.turned = result.turned || squad.turning;
+        if (tick >= 60) result.old_end = result.old_end || squad.position.x >= whole(610);
+        if (restore && tick % 37 == 0) {
+            const auto saved = checkpoint_bytes(session);
+            auto resumed = take(checkpoint::load_tactical_checkpoint(saved, identities, factory(tables), executor));
+            expect(checkpoint_bytes(resumed.session) == saved, "land checkpoint bytes round trip across the re-order");
+            session = std::move(resumed.session);
+        }
+    }
+    const auto& squad = session.land_movement()->squads().front();
+    result.reached = squad.order == LandMoveOrder::reached && (backward ? squad.position.x < whole(100) : squad.position.y > whole(400));
+    result.state = session.canonical_state_bytes(); result.checkpoint = checkpoint_bytes(session);
+    return result;
+}
+
+void reorder_contracts() {
+    const sim::InlineExecutor serial;
+    for (const auto turn_rate : {whole(2), Fixed::from_ratio(1, 10).value()}) {
+        const bool smooth = turn_rate >= whole(1);
+        const auto baseline = reorder_while_walking(serial, false, turn_rate);
+        expect(baseline.reached, "the re-ordered squad reaches the new destination");
+        expect(!baseline.old_end, "a perpendicular re-order does not reach the old endpoint");
+        if (smooth) expect(baseline.never_stopped && !baseline.turned,
+            "WLPA-88 a smooth re-order keeps the squad walking: it never stops or turns in place");
+        else expect(baseline.turned, "WLPA-89 a corner too sharp for the slowest member falls back to turning in place");
+        const auto restored = reorder_while_walking(serial, true, turn_rate);
+        expect(restored.state == baseline.state && restored.checkpoint == baseline.checkpoint,
+            "save/restore across the re-order equals uninterrupted motion");
+        for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+            platform::ThreadWorkerAdapter threads(workers);
+            const auto parallel = reorder_while_walking(threads, false, turn_rate);
+            expect(parallel.state == baseline.state && parallel.checkpoint == baseline.checkpoint, "re-order equals on 1/2/4/8 workers");
+            test_support::ReverseOrderExecutor order(workers);
+            const auto reversed = reorder_while_walking(order, false, turn_rate);
+            expect(reversed.state == baseline.state && reversed.checkpoint == baseline.checkpoint, "re-order equals with reverse partitions");
+        }
+    }
+    const auto backward = reorder_while_walking(serial, false, whole(2), true);
+    expect(backward.reached && !backward.old_end, "a backward re-order does not walk to the old endpoint");
+}
+
+// Inspect the archived searches so this fixture proves the save is inside the search, rather than just near the order.
+std::map<sim::EntityId, LandSearch::Checkpoint> archived_land_searches(const TacticalSession& session) {
+    const auto bytes = take(session.save_land_checkpoint_state());
+    checkpoint_detail::Reader in(bytes);
+    std::uint16_t id{}, version{};
+    std::array<std::uint8_t, 32> terrain{};
+    std::uint32_t clear_bit{};
+    LandOccupancy::Checkpoint occupancy;
+    LandMovement::Checkpoint movement;
+    std::map<sim::EntityId, LandPathRequest> requests;
+    session_detail::LandCombatState combat;
+    in(id, version, terrain, clear_bit, occupancy, movement, requests, combat);
+    std::map<sim::EntityId, LandSearch::Checkpoint> searches;
+    const auto count = in.count();
+    for (std::uint64_t i = 0; i < count; ++i) {
+        sim::EntityId object{};
+        LandSearch::Checkpoint search;
+        in(object, search);
+        searches.emplace(object, std::move(search));
+    }
+    return searches;
+}
+
+struct MazeReorderResult { Bytes state, checkpoint; bool saved_in_flight{}, restarted{}, old_end{}, reached{}, cut{true}; };
+MazeReorderResult maze_reorder(const sim::PartitionExecutor& executor, bool restore, bool repeated = false) {
+    std::vector<std::string> picture(128, std::string(128, '.'));
+    for (int row = 20, wall_index = 0; row <= 110; row += 15, ++wall_index) {
+        for (int col = 0; col < 128; ++col) picture[row][col] = '#';
+        const int gap = wall_index % 2 == 0 ? 4 : 118;
+        for (int col = gap; col < gap + 6; ++col) picture[row][col] = '.';
+    }
+    const auto field = make_field(picture);
+    const auto tables = content(field.terrain, 1);
+    auto initial = setup();
+    initial.units.resize(1);
+    auto session = take(TacticalSession::create(initial, tables));
+    must(session.submit({{0, 1, 1}, {1}, MovePayload{{whole(2300), whole(180), {}}}}));
+    must(session.submit({{60, 1, 2}, {1}, MovePayload{{whole(2200), whole(2300), {}}}}));
+    if (repeated) must(session.submit({{70, 1, 3}, {1}, MovePayload{{whole(2100), whole(2300), {}}}}));
+    const auto identities = checkpoint::tactical_identities(initial.content_identity);
+    MazeReorderResult result;
+    std::optional<sim::math::Vec2> first_anchor;
+    std::uint64_t previous_work = 0;
+    for (int tick = 0; tick < 15000; ++tick) {
+        take(session.step(executor));
+        if (tick < 60) continue;
+        const auto& squad = session.land_movement()->squads().front();
+        result.old_end = result.old_end || (squad.position.x >= whole(2290) && squad.position.y < whole(200));
+        if (tick == 60 || (repeated && tick == 70))
+            result.cut = result.cut && squad.path.nodes.size() == squad.next_node + 1;
+        if (tick % 5 != 0) continue;
+        const auto searches = archived_land_searches(session);
+        const auto search = searches.find(1);
+        if (search != searches.end()) {
+            if (!first_anchor) first_anchor = search->second.request.start;
+            else if (search->second.request.start != *first_anchor && (!repeated || tick > 70)) result.restarted = true;
+            if ((!repeated || tick != 70) && search->second.stats.work < previous_work) result.restarted = true;
+            previous_work = search->second.stats.work;
+            if (tick == 65 && search->second.stats.work > 256) {
+                result.saved_in_flight = true;
+                if (restore) {
+                    const auto saved = checkpoint_bytes(session);
+                    auto resumed = take(checkpoint::load_tactical_checkpoint(saved, identities, factory(tables), executor));
+                    expect(checkpoint_bytes(resumed.session) == saved, "in-flight re-order checkpoint round trips");
+                    session = std::move(resumed.session);
+                }
+            }
+        }
+        const auto& current = session.land_movement()->squads().front();
+        if (current.order == LandMoveOrder::reached && current.position.y > whole(2200)) {
+            result.reached = current.position.x == whole(repeated ? 2100 : 2200);
+            break;
+        }
+    }
+    result.state = session.canonical_state_bytes(); result.checkpoint = checkpoint_bytes(session);
+    return result;
+}
+
+void maze_reorder_contracts() {
+    const sim::InlineExecutor serial;
+    const auto baseline = maze_reorder(serial, false);
+    const auto restored = maze_reorder(serial, true);
+    expect(baseline.saved_in_flight && restored.saved_in_flight, "maze re-order search spans several ticks at save");
+    expect(!baseline.restarted && !baseline.old_end && baseline.reached && baseline.cut,
+        "long search does not restart or reach the old end, and reaches the new destination");
+    expect(restored.state == baseline.state && restored.checkpoint == baseline.checkpoint,
+        "in-flight re-order save and restore matches uninterrupted session");
+    const auto repeated = maze_reorder(serial, false, true);
+    expect(repeated.saved_in_flight && !repeated.restarted && !repeated.old_end && repeated.reached && repeated.cut,
+        "repeated long-search re-order cuts old nodes and the last order wins without a restart");
+}
+
 void corner_formation_contracts() {
     const sim::InlineExecutor serial;
     for (const bool reverse : {false, true}) {
         const auto baseline = corner_formation(serial, false, reverse);
         expect(baseline.crossed && baseline.settled, "three-member squad passes the building corner and settles");
-        expect(baseline.squad_route_untouched, "corner members never install a squad-wide terrain route");
-        std::cout << "land corner formation reverse=" << reverse << " member-detours=" << baseline.detoured << '\n';
+        expect(baseline.squad_route_untouched, "corner soldiers never install a squad-wide terrain route");
+        std::cout << "land corner formation reverse=" << reverse << " soldiers-clipped=" << baseline.clipped << '\n';
         const auto restored = corner_formation(serial, true, reverse);
         expect(restored.state == baseline.state && restored.checkpoint == baseline.checkpoint,
-            "save/restore inside a member detour equals uninterrupted motion");
+            "save/restore at the corner equals uninterrupted motion");
         for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
             platform::ThreadWorkerAdapter threads(workers);
             const auto parallel = corner_formation(threads, false, reverse);
@@ -446,6 +711,87 @@ void stress(bool repulsion = true) {
     }
 }
 
+// Chief request 11-06: one stock map, two forced stuck squads, run at workers 1 and 8 with the state hash compared every
+// tick. Squad 0 has a member that can never move (WLPA-93: the leader is held by the lag cap, then released and walks on).
+// Squad 2 is a hard body walking into an idle hard body that cannot be pushed, with its route lock refused (WLPA-92: the pair
+// becomes unresolvable, re-decides after the retry count and searches again). The test fails if either guard never fires.
+struct GuardOutcome {
+    std::vector<std::string> hashes;
+    bool released{}, advanced{}, unresolvable{};
+    std::size_t searches{};
+};
+GuardOutcome stock_guard_run(const std::shared_ptr<const LandTerrain>& terrain, const TacticalContent& tables,
+    const TacticalSetup& initial, const sim::PartitionExecutor& executor) {
+    GuardOutcome out;
+    auto session = take(TacticalSession::create(initial, tables));
+    auto edited = session.land_movement()->checkpoint();
+    expect(edited.squads.size() == 4, "stock guard case has four squads");
+    LandMovingMember* stuck = nullptr;
+    for (auto& member : edited.members) {
+        if (member.squad == 0) stuck = &member;
+    }
+    if (stuck) stuck->profile.maximum_speed = Fixed{};
+    for (const std::size_t index : {2U, 3U}) edited.squads[index].collision_class = units::LandCollisionGroup::vehicle;
+    edited.squads[3].maximum_speed = Fixed{}; // an immobile blocker cannot be pushed aside (WLPA-57)
+    *const_cast<LandMovement*>(session.land_movement()) = LandMovement::from_checkpoint(edited).value();
+    for (const std::size_t index : {0U, 2U}) {
+        const auto& unit = initial.units[index];
+        must(session.submit({{0, unit.owner, unit.entity_id}, {unit.entity_id},
+            MovePayload{{land_cell_centre(terrain->width() * 2 / 3, terrain->spacing()), unit.position.y, {}}}}));
+    }
+    Fixed release_x;
+    std::uint64_t charged_before = 0;
+    bool locked = false;
+    for (int tick = 0; tick < 240; ++tick) {
+        out.hashes.push_back(take(session.step(executor)).state_sha256);
+        const auto* movement = session.land_movement();
+        if (!locked && movement->squads()[2].order == LandMoveOrder::following) {
+            // The route lock of another peer (as the contact tests set it): every installation of a route is refused. It is
+            // set once the order has been installed, because a new order releases the locks of its squad.
+            auto locks = movement->checkpoint();
+            for (auto& member : locks.members) if (member.squad == 2 || member.squad == 3) member.collision_lock = 99;
+            *const_cast<LandMovement*>(session.land_movement()) = LandMovement::from_checkpoint(locks).value();
+            locked = true;
+        }
+        const auto& leader = movement->squads()[0];
+        if (!out.released && leader.straggler_wait_remaining == 0) { out.released = true; release_x = leader.position.x; }
+        if (out.released && leader.position.x.raw() > release_x.raw() + whole(40).raw()) out.advanced = true;
+        std::uint64_t charged = 0;
+        for (const auto& contact : movement->contacts()) {
+            charged += contact.charged_nodes;
+            out.unresolvable |= contact.state == LandContactState::unresolvable;
+        }
+        if (charged > charged_before) ++out.searches;
+        charged_before = charged;
+    }
+    expect(locked, "stock guard case: the pair's mover started its order");
+    return out;
+}
+
+void stock_guard_case(const std::shared_ptr<const LandTerrain>& terrain, const TacticalContent& base, const TacticalSetup& setup_in) {
+    auto tables = base;
+    tables.land.contacts.complexity_quota = 100000000; // the stock graph is larger than the fixture quota: admit the searches
+    auto initial = setup_in;
+    // Unit 4 stands 60 units east of unit 3 on its row: the idle blocker of the pair.
+    initial.units[3].position.y = initial.units[2].position.y;
+    initial.units[3].position.x = Fixed::from_raw(initial.units[2].position.x.raw() + whole(60).raw());
+    platform::ThreadWorkerAdapter one(1), eight(8);
+    const auto first = stock_guard_run(terrain, tables, initial, one);
+    const auto second = stock_guard_run(terrain, tables, initial, eight);
+    std::size_t mismatch = 0;
+    while (mismatch < first.hashes.size() && mismatch < second.hashes.size() && first.hashes[mismatch] == second.hashes[mismatch]) ++mismatch;
+    const bool equal = first.hashes.size() == second.hashes.size() && mismatch == first.hashes.size();
+    if (equal) std::cout << "stock guard case workers 1 vs 8: state hash matches on all " << first.hashes.size() << " ticks";
+    else std::cout << "stock guard case workers 1 vs 8: first mismatching tick=" << mismatch;
+    std::cout << " straggler_released=" << first.released << " leader_advanced=" << first.advanced
+        << " pair_unresolvable=" << first.unresolvable << " contact_searches=" << first.searches << '\n';
+    expect(equal, "stock guard case: the state hash is equal at workers 1 and 8 on every tick");
+    expect(first.released && first.advanced,
+        "stock guard case: the straggler guard (WLPA-93) released the held leader and the leader walked on");
+    expect(first.unresolvable && first.searches >= 2,
+        "stock guard case: the unresolvable pair (WLPA-92) re-decided and searched again after the retry count");
+}
+
 int installed() {
     const auto root = testing::environment("EAWR_EAW_GAME_ROOT");
     if (!root || root->empty()) { std::cout << "SKIPPED: no game data\n"; return 77; }
@@ -493,6 +839,7 @@ int installed() {
     auto playback = take(TacticalSession::from_replay(take(parse_replay(take(write_replay(reference.record())))), tables));
     for (int i = 0; i < 64; ++i) take(playback.step(serial));
     expect(playback.canonical_state_bytes() == baseline, "stock land terrain session replay round trips");
+    stock_guard_case(terrain, tables, initial);
     std::cout << "stock land session map=data/art/maps/_mp_land_naboo.ted width=" << terrain->width() << " height=" << terrain->height() << '\n';
     return checks.finish();
 }
@@ -501,6 +848,6 @@ int installed() {
 int main(int argc, char** argv) {
     try {
         if (argc == 2 && std::string_view(argv[1]) == "--installed") return installed();
-        contracts(); live_contracts(); corner_formation_contracts(); stress(false); stress(); return checks.finish();
+        contracts(); live_contracts(); corner_formation_contracts(); reorder_contracts(); maze_reorder_contracts(); victory_contracts(); stress(false); stress(); return checks.finish();
     } catch (const std::exception& error) { std::cerr << "FAIL: " << error.what() << '\n'; return 1; }
 }

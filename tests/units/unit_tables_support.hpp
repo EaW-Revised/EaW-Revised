@@ -48,7 +48,8 @@ eawr::assets::Model model(const std::string& path, std::vector<eawr::assets::Bon
 std::map<std::string, eawr::assets::Model> models(const float engine_x);
 Loaded load(const std::filesystem::path& root, const std::map<std::string, eawr::assets::Model>& assets,
     std::string_view difficulty = "Normal_Default",
-    eawr::sim::tactical::BattleDomain domain = eawr::sim::tactical::BattleDomain::space);
+    eawr::sim::tactical::BattleDomain domain = eawr::sim::tactical::BattleDomain::space,
+    const std::vector<std::string>& extra_types = {});
 bool has_row(const std::vector<eawr::units::Unresolved>& rows, const std::string_view owner,
              const std::string_view field, const std::string_view value = {});
 void object_weapon_defaults();
@@ -62,6 +63,7 @@ void presentation_admission();
 void print_rows(const std::string_view label, const std::vector<eawr::units::Unresolved>& rows);
 void mass_driver_type();
 void synthetic_tables();
+void community_structure_tables();
 void space_population();
 void object_script_inheritance();
 void priority_rules();

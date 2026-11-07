@@ -1,4 +1,5 @@
 #include "skirmish_start_support.hpp"
+#include "eawr/sim/tactical/fighters.hpp"
 #include "setup_map_reference.hpp"
 #include "setup_map_golden.hpp"
 
@@ -1106,7 +1107,12 @@ void foc_start(const std::filesystem::path& fixtures) {
         }
         for (const auto& map:maps.value()) {
             const auto row=golden.find(map.path);
-            expect(row!=golden.end() && setup_map_golden::row(map,filesystem.value(),catalog.value().catalog)==row->second,
+            const auto actual = setup_map_golden::row(map, filesystem.value(), catalog.value().catalog);
+            if (row == golden.end() || !(actual == row->second)) {
+                std::cerr << "SETUP_MAP_ACTUAL " << map.path << ' ' << actual.map << ' '
+                          << actual.fixture << ' ' << actual.inputs << '\n';
+            }
+            expect(row != golden.end() && actual == row->second,
                 "chosen fixture and complete start-input values match frozen pre-change hashes: "+map.path);
         }
         std::optional<eawr::units::UnitTables> underworld_tables;

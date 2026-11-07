@@ -12,6 +12,7 @@
 #include "eawr/vfs/vfs.hpp"
 
 #include <algorithm>
+#include <system_error>
 #include <array>
 #include <bit>
 #include <chrono>

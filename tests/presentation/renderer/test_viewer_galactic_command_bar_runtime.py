@@ -20,7 +20,9 @@ class GalacticCommandBarRuntime(unittest.TestCase):
         directory = pathlib.Path(tempfile.mkdtemp(prefix="eawr-gc-command-bar-"))
         report, capture = directory / "report.json", directory / "capture.png"
         args = [os.environ["EAWR_GODOT_EXECUTABLE"], "--resolution", "1280x720",
-                "--path", str(ROOT / "apps/viewer/project"), "--", "--eawr-galactic", campaign,
+                "--path", str(ROOT / "apps/viewer/project"),
+                *(["--render-thread", self.render_thread] if getattr(self, "render_thread", None) else []),
+                "--", "--eawr-galactic", campaign,
                 *verify_args, "--eawr-game-root", GAME_ROOT, "--eawr-galactic-seat", str(seat),
                 "--eawr-galactic-paused", "yes", "--eawr-report", str(report),
                 "--eawr-capture", str(capture)]

@@ -35,7 +35,7 @@ struct LandSession final {
     // Retained canonical-encoding scratch, never state: per-partition record bytes (worker phase) and the
     // previous tail size. Cleared and refilled every tick; capacity persists so the tick does not allocate.
     using EncodedParts = std::array<std::vector<std::uint8_t>, tick_partition_count>;
-    EncodedParts occupation_parts, squad_parts, member_parts;
+    EncodedParts occupation_parts, squad_parts, member_parts, contact_parts, unit_parts;
     // Pure-query scratch, one retained crossing buffer per projectile partition.
     std::array<std::vector<math::Fixed>, tick_partition_count> projectile_crossings;
     math::Fixed target_query_margin{}; // derived once from immutable combat geometry

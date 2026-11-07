@@ -52,6 +52,8 @@ enum class SectionId : std::uint16_t {
     campaign_scoring = 16, // coordinator-reserved, GHUD-S61 ledger bytes (empty when no counter exists)
     galactic_owner = 17, // complete direct owner/barrier state
     land_state = 18, // coordinator-reserved, optional tactical land services
+    multiplayer_resume = 19, // canonical roster, capture commitment and continuation
+    tactical_host = 20, // coordinator-reserved: a standalone battle's script host (skirmish saves)
     presentation_hints = 0x8000,
     // 0x8001: the live transport's queued input (platform-owned).
     campaign_identity = 0x8002, // #3035: authored campaign/faction a player save belongs to
@@ -61,8 +63,8 @@ enum class SectionId : std::uint16_t {
 [[nodiscard]] bool known_section(std::uint16_t id) noexcept;
 
 // What a build can load: a checkpoint loads only into a build whose every identity is equal
-// ("saved by another build" otherwise). A zero digest means "none" (no Lua state, no campaign,
-// no mods) and must be zero on both sides.
+// ("saved by another build" otherwise). A zero digest means "none" where applicable.
+// The mod-list identity is reserved and must be zero; descriptions are stored in section 12.
 struct Identities {
     std::uint32_t rules_version{};
     std::uint32_t state_encoding_version{};

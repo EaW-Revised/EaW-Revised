@@ -11,6 +11,70 @@
   command-bar XML (X), existing consumers in `hud_shell.cpp` and
   `tactical_hud_build.cpp`, and HCB-19/31/64's presentation scope.
 
+- **HCB-66:** A galactic command-bar button's artwork and hit rectangle both follow the
+  authored `Scale`, applied about the shell bone origin together with `Icon_Offset`. The
+  art is the normal texture size times `Scale`, centred on the origin plus the offset; the
+  hit rectangle is the shell mesh rectangle scaled about the same origin and moved by the
+  offset. A component without `Scale` uses 1.0, so the stock buttons keep their rectangles.
+  The two composite tabs (`b_space_tab`, `b_planet_tab`) are the exception: their art
+  overlaps and carries an offset, so their hit area stays the authored shell mesh
+  rectangle. Mods that author another `Scale` get it without a name list. The rectangles
+  are computed once per button in the HUD placement update. Evidence: effective
+  command-bar XML (X), synthetic scale and composite-tab contracts in
+  `galactic_planet_hud_contracts`.
+
+- **HCB-67:** The galactic command bar also builds mod-authored filter buttons: a
+  `Button` component in a `Filter_*` group other than `Filter_Tab_*`. The control is placed
+  from its shell anchor and takes its textures, tooltip, `Toggle`, `Disabled` and `Hidden`
+  from the component; stock `b_filters0/1/3` (in `Filter_Tab_N` groups) keep their own
+  paths and `b_filters2`, the map weather/ability filter, stays absent. **Unverified
+  convention:** FoC authors only `Filter_Tab_0..3`, so treating other `Filter_*` groups as
+  scripted production filters is inferred from mod data, not from FoC; the least-visible
+  choice applies (built and drawn, no action of its own beyond the story click below). A filter authored with another `Type`
+  (for example `TextButton`) is skipped. A click on any filter button is
+  submitted as a `GuiClick` session command carrying the component name, and reaches the clicking
+  seat's plots as a `STORY_CLICK_GUI` notice (WST-37), so a mod's filter events and their flag rewards work;
+  notes are still published once at build time for a missing anchor or an unresolved texture. A filter's
+  pressed state is not reset on planet change, as for the stock `b_filters` toggles.
+  Evidence: mod command-bar XML, synthetic contract in `galactic_planet_hud_contracts`.
+- **HCB-68 (legacy EAWR-5857):** Story clicks and forced clicks, generic over any authored control (WST-37/75). A click on
+  any command-bar control, stock or authored, is sent as a `GuiClick` when a `STORY_CLICK_GUI` event of the loaded plots
+  names the component (any sub-plot, owner or state; a campaign whose plots name no control sends no click command). A
+  `Button` the plots name that no other builder owns (not a production slot or queue) and that has a shell anchor is
+  built as a plain control, with its authored sounds. The space and planet tabs raise their click as well. A
+  `FORCE_CLICK_GUI` reward (parameter 1 the component name, case-insensitive) reaches the plot owner's seat as a
+  presentation request; the HUD runs the named control's ordinary press path, so its own action and press state
+  happen, but **a forced press does not raise a story click** (see the limit below). An absent, hidden or disabled
+  control has no effect (a project choice; WST-75 says only absent or invalid) and each such drop is warned about once
+  per control and reason. The active production tab that authors no selected art is not drawn but keeps its hit area,
+  so it can still be pressed by a human or a forced press. Press state of the authored controls: a `Toggle` control
+  flips on a press; a `Tab` control selects and clears the other `Tab` controls of any group it shares; a control that
+  is both clears again when pressed while selected. A press of the space or planet tab does **not** clear them by
+  default (rule `domain_change_clears`, off): the capture's restored full list is an offer list the script owns, and
+  the script clears its own filter button through a forced click, so a clear here would invert that button.
+  Retail capture (2026-11-05, Galactic Warfare, one pair of space categories, one ground category): a second
+  category replaced the first, a second click on the active category restored the full list, pressing the
+  already-active space tab restored it too, and clicks made while the game was paused changed the offers only after
+  resume (the tab change itself showed while paused). The state rules sit in one place, `ControlStateRules`.
+  **Forced-press limit (debug build):** the mouse handler of the command bar calls the component's click slot and then,
+  as a separate call, `Tutorial_Click_UI`, which raises `STORY_CLICK_GUI`; `Reward_Force_Click_GUI` calls only the click
+  slot, and no path from it to `Tutorial_Click_UI` appears in its cross-references. The slot's own body was not read,
+  so a direct story event raised inside it is not excluded. **Loop safety:** because a forced press raises no click,
+  forced presses cannot feed each other; the session still executes at most `max_gui_clicks_per_tick` (8) `GuiClick`
+  commands per seat per tick (a safety cap for human bursts and for a rule switched to raise) and reports the rest as a
+  diagnostic, and the HUD hands at most the same number of forced presses to a drain. Nothing aborts the match.
+  **Deviations (named):** (1) a click reaches only the plots of the seat that made it, where retail's
+  `Tutorial_Click_UI` dispatches without a player and so reaches every sub-plot (a named departure from WST-14, kept for
+  multiplayer); (2) a forced press goes to the plot owner's seat, where retail presses the local bar whoever owns the
+  plot, and a request from an AI-owned plot is ignored without a diagnostic. **Gaps:** the press state of the
+  authored controls is not saved (a loaded game shows no filter selected while the script state stays filtered), and a
+  forced request not yet drained at save time is lost; story progress itself, flags and Lua edits are saved and the
+  click listeners are rebuilt on load. A control that a later Lua edit names gets no button, because the controls are
+  built once after the session starts. **Unverified:** exclusion across other groups, other domain transitions,
+  button order, selected art apart from hover and response latency. The production filtering the scripts do with
+  these clicks is not part of this change. Evidence: synthetic contracts `galactic_story_engine_contracts` and
+  `galactic_planet_hud_contracts`.
+
 Audit dated 2026-10-09, against `f58f8f3d6b09f71f74de1c0a4305800f2f8a815c`.
 The effective `CommandBarComponents.xml` contains 846 named components. This is an
 inventory of controls and their consumers, not a claim that every authored field

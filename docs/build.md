@@ -165,3 +165,19 @@ python tools/verify_warnings_as_errors.py --root . --preset <preset> --config Re
 
 The command succeeds only when the compiler build fails specifically on
 `EAWR deliberate project warning probe`.
+
+## Include rules
+
+Compile time is the build bottleneck, and a header costs every file that includes it.
+`tools/ci/include_guard.py` (part of `tools/ci/main_guards.py`) fails on new findings in
+changed files; today's findings are accepted in `tools/ci/include_guard_baseline.json`.
+
+1. A header includes only what its own declarations need; everything else goes in the `.cpp`.
+2. Forward-declare (`class X;`) when the header only uses `X*`, `X&` or `std::unique_ptr<X>` in signatures.
+3. No `<filesystem>`, `<iostream>`, `<fstream>`, `<sstream>` or `<functional>` in a project header.
+4. Do not add header-to-header includes of the widest headers (100+ direct includers) without a reason.
+5. Include what the file uses; remove includes a change made unnecessary.
+6. A "fanout" finding is only a warning. An "unused" finding is a heuristic (operators, specialisations,
+   macros, ADL): when the include is needed, append `// include-guard: keep` to that `#include` line.
+7. Fixing an old finding is welcome: re-run `python tools/ci/include_guard.py --update` to shrink the baseline.
+8. The checker runs in seconds with no network: `python tools/ci/include_guard.py`.

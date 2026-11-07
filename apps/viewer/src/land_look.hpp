@@ -6,7 +6,7 @@
 #include "eawr/presentation/godot/renderer.hpp"
 #include "eawr/presentation/terrain/terrain.hpp"
 #include "eawr/sim/snapshot.hpp"
-#include "eawr/vfs/vfs.hpp"
+#include "eawr/vfs/vfs_fwd.hpp"
 
 #include <array>
 #include <cstdint>

@@ -1,4 +1,5 @@
 #include "eawr/scene/scene.hpp"
+#include "eawr/vfs/vfs.hpp"
 #include "space_environment.hpp"
 #include "space_environment_internal.hpp"
 #include "startup_trace.hpp"
@@ -470,12 +471,12 @@ std::optional<int> SpaceEnvironment::State::lifecycle_step() {
 
 bool SpaceEnvironment::ready(Node3D& host, const assets::Map& map, const vfs::Vfs& filesystem,
                              const assets::ObjectTypeCatalog& catalog, const bool catalog_loaded,
-                             const std::string& catalog_failure) {
+                             const std::string& catalog_failure, const EnqueueLoadStep& enqueue) {
     State& state = *state_;
     // Only an explicit evidence control or fog selects the primary-sky harness.
     if (state.options.control.empty() && !state.options.fog) {
         state.view = std::make_unique<EnvironmentView>(state.options);
-        return state.view->ready(host, map, filesystem, catalog, catalog_loaded, catalog_failure);
+        return state.view->ready(host, map, filesystem, catalog, catalog_loaded, catalog_failure, enqueue);
     }
     state.catalog_failure = catalog_failure;
     state.declared_placements = map.placements.size();
@@ -635,6 +636,7 @@ bool SpaceEnvironment::ready(Node3D& host, const assets::Map& map, const vfs::Vf
         return std::move(loaded.value());
     });
     startup_trace.renderer_probe(state.renderer->recipe_memory_probe());
+    startup_trace.texture_census_probe(state.renderer->texture_census_probe());
     if (state.options.map_camera && !state.activate_camera(host)) return false;
     state.renderer->set_camera(state.camera);
     if (state.options.fog) {

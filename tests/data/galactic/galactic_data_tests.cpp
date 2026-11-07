@@ -287,7 +287,7 @@ void story_name_contracts() {
       <Campaign Name="Story_Inherited"><Variant_Of_Existing_Type>Story_Base</Variant_Of_Existing_Type>
         <Story_Name>TBD</Story_Name><Story_Name> </Story_Name>
       </Campaign>
-      <Campaign Name="Story_Odd"><Locations>Alpha</Locations><Story_Name>Rebel, kept.xml, tail</Story_Name></Campaign>
+      <Campaign Name="Story_Odd"><Locations>Alpha</Locations><Story_Name>Rebel, kept.xml, tail</Story_Name><Autoresolve_Exclusion_Locations>Alpha, space, Alpha</Autoresolve_Exclusion_Locations></Campaign>
       <Campaign Name="Story_Default"><Locations>Alpha</Locations></Campaign>
     </Campaigns>)xml");
     const auto loaded = load_tree(tree.root);
@@ -308,6 +308,9 @@ void story_name_contracts() {
     expect(loaded->campaign("Story_Odd")->story_names.size() == 1
         && has_issue(*loaded, IssueKind::bad_value, "Story_Odd", "Story_Name", "tail"),
         "WST-86 an odd trailing token is diagnosed without losing complete pairs");
+    expect(has_issue(*loaded, IssueKind::bad_value, "Story_Odd", "Autoresolve_Exclusion_Locations", "Alpha")
+        && !has_issue(*loaded, IssueKind::dangling_reference, "Story_Odd", "Autoresolve_Exclusion_Locations", "space"),
+        "WAR-75 diagnoses an incomplete pair without treating the layer as a planet");
     expect(has_issue(*loaded, IssueKind::dangling_reference, "Story_Child", "Story_Name", "Renamed_Fourth"),
         "WST-88 unknown story factions are validated");
     const auto identity = galactic::content_identity(*loaded);

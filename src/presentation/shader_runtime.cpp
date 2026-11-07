@@ -37,6 +37,7 @@ ModuleTrust& module_trust() {
 struct Runtime::Impl {
     Status status{Status::disabled};
     std::string diagnostic;
+    bool pinned_identity{};
 #ifdef _WIN32
     std::vector<HANDLE> pinned_files;
     std::vector<HANDLE> pinned_directories;
@@ -68,6 +69,9 @@ const std::string& Runtime::diagnostic() const noexcept {
     static const std::string empty;
     return impl_ ? impl_->diagnostic : empty;
 }
+std::string_view Runtime::verified_lock_sha256() const noexcept {
+    return impl_ && impl_->status == Status::ready && impl_->pinned_identity ? pinned::lock_sha256 : std::string_view{};
+}
 Function Runtime::public_export(const Backend backend, const char* name) const noexcept {
 #ifdef _WIN32
     if (!impl_ || !name) return nullptr;
@@ -97,7 +101,16 @@ Status Runtime::open_checked(const std::filesystem::path& directory, const std::
         return result;
     };
     std::error_code error;
-    if (!std::filesystem::is_directory(directory, error)) return fail(Status::missing_package, "shader package unavailable");
+    const bool exists = std::filesystem::is_directory(directory, error);
+#ifdef _WIN32
+    // An untrusted junction can prevent the preliminary directory lookup. Let
+    // the component-by-component guard identify and refuse the reparse point.
+    if (!exists && error.value() != ERROR_UNTRUSTED_MOUNT_POINT)
+#else
+    if (!exists)
+#endif
+        return fail(Status::missing_package, "shader package unavailable");
+    error.clear();
 #ifdef _WIN32
     const auto absolute = std::filesystem::absolute(directory, error).lexically_normal();
     if (error || identity.empty()) return fail(Status::integrity_failure, "invalid shader package identity");
@@ -214,7 +227,7 @@ Status Runtime::open_checked(const std::filesystem::path& directory, const std::
                                            LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
         if (!module) {
             const auto windows_error = GetLastError();
-            return fail(Status::missing_export, "shader package DLL could not load (Windows error " +
+            return fail(Status::load_failure, "shader package DLL could not load (Windows error " +
                          std::to_string(windows_error) + ")");
         }
         struct PendingModule {
@@ -278,6 +291,10 @@ Status Runtime::open_checked(const std::filesystem::path& directory, const std::
     std::bit_cast<CrossVersion>(public_export(Backend::spirv_cross, "spvc_get_version"))(&major, &minor, &patch);
     if (major != 0 || minor != 61 || patch != 0) return fail(Status::abi_mismatch, "SPIRV-Cross C ABI mismatch");
     impl_->status = Status::ready;
+    impl_->pinned_identity = identity.size() == pinned::files.size() && std::equal(identity.begin(), identity.end(),
+        pinned::files.begin(), [](const RuntimeFile& a, const RuntimeFile& b) {
+            return a.path == b.path && a.sha256 == b.sha256 && a.size == b.size;
+        });
     return Status::ready;
 #else
     static_cast<void>(identity);

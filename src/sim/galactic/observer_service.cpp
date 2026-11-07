@@ -112,6 +112,12 @@ void GalacticSession::Impl::sync_observer_control(const std::size_t control_inde
 
 void GalacticSession::Impl::unpublish_surface_departures(const PlanetId planet,
     const std::span<const EntityId> departures) {
+    if (control && !departures.empty()) {
+        const auto row = std::find_if(control->planets.begin(), control->planets.end(), [planet](const auto& value) { return value.planet == planet; });
+        if (row != control->planets.end() && std::erase_if(row->ground_layout, [&](const auto& entry) {
+            return std::find(departures.begin(), departures.end(), entry.object) != departures.end();
+        })) { dirty[static_cast<std::size_t>(StateSection::control)] = true; invalidate_observer_projection(); }
+    }
     if (!observer || departures.empty()) return;
     const auto target = std::lower_bound(observer->planets.begin(), observer->planets.end(), planet,
         [](const auto& row, auto id) { return row.planet < id; });

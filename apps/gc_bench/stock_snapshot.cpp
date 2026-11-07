@@ -1,4 +1,5 @@
 #include "stock_snapshot.hpp"
+#include "eawr/vfs/vfs.hpp"
 #include "eawr/campaign/live_setup.hpp"
 #include "eawr/core/sha256.hpp"
 #include "eawr/platform/sim_workers.hpp"

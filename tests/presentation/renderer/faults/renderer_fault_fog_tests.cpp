@@ -1,4 +1,5 @@
 #include "renderer_fault_probe.hpp"
+#include <tuple>
 
 // A fog variant that fails at attach time, reached both ways. Declared while
 // fog is enabled, the declaration fails with the variant's diagnostic and the

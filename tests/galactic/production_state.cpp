@@ -1,6 +1,7 @@
 #include "../support/env.hpp"
 #include "../support/result.hpp"
 #include "production_private.hpp"
+#include "../../src/script/foc/galactic_ai_economic_replay.hpp"
 #include "galactic_support.hpp"
 #include "eawr/campaign/fleets.hpp"
 #include "eawr/core/sha256.hpp"
@@ -231,7 +232,13 @@ void content_and_placement() {
         auto config = setup(); config.production->planets.front().offers.front() = offer;
         config.production->technology_types = {{1000, -2, false, false, {1}}};
         auto game = take(campaign::GameSession::create(config));
-        eawr::sim::InlineExecutor executor; static_cast<void>(take(game.step(executor)));
+        eawr::sim::InlineExecutor executor;
+        const auto identity = cp::game_identities(config);
+        const auto saved = take(cp::save_game_checkpoint(game, identity));
+        auto restored = take(cp::load_game_checkpoint(saved, identity, {}, executor));
+        expect(restored.session.galaxy().setup().production->technology_types == config.production->technology_types,
+            "negative technology registry level survives checkpoint replay round trip");
+        static_cast<void>(take(game.step(executor)));
         const auto& producer = config.production->planets.front();
         const auto admission = galactic::production_admission({*config.production, producer,
             config.production->players.front(), config.player_economy->players.front(), config.fleets,
@@ -300,6 +307,44 @@ void shared_technology_writer() {
     config.production->technology_types = {{1001, 2, true, true, {1}}, {2000, 0, true, true, {1}},
         {2001, 4, true, true, {1}}, {2002, 0, true, true, {}}, {2003, 0, false, true, {1}},
         {2004, 0, true, false, {1}}};
+    for (const bool throws : {false, true}) {
+        auto failed = take(campaign::GameSession::create(config));
+        auto& failed_world = failed.galaxy(); std::size_t callbacks{};
+        std::unique_ptr<galactic::GalacticSession::NativeOutputPhase> output;
+        const auto bound = failed.configure_native_replay_owners([&](auto& parent) {
+            output = take(parent.begin_native_output_phase());
+            expect(!output->published() && !parent.begin_native_output_phase(), "native output phase starts clear and refuses nesting");
+            return eawr::core::Result<void>::success();
+        });
+        expect(bool(bound), "publication fixture borrows its mutable owned galaxy");
+        failed.set_technology_notice_handler([&](const auto&) -> eawr::core::Result<void> {
+            ++callbacks;
+            expect(output->published(), "publication latch is set before the opaque callback runs");
+            if (throws) throw std::runtime_error("injected post-publication callback failure");
+            eawr::core::Diagnostic diagnostic; diagnostic.code = "INJECTED"; diagnostic.message = "post-publication callback failure";
+            return eawr::core::Result<void>::failure(std::move(diagnostic));
+        });
+        bool refused{};
+        try { refused = !failed.set_technology({1, 2, true, true}); } catch (const std::runtime_error&) { refused = true; }
+        expect(refused && callbacks == 1 && output->published(), "post-callback fault preserves refusal and publishes once");
+        output->record_fault(); output->record_fault();
+        expect(failed_world.native_post_publication_faults() == 1, "post-publication diagnostic counts a faulted phase once");
+    }
+    {
+        auto live = take(galactic::GalacticSession::create(config));
+        const auto initial = live.state_sha256();
+        {
+            auto output = take(live.begin_native_output_phase());
+            output->record_fault();
+            expect(!output->published() && live.native_post_publication_faults() == 0 && live.state_sha256() == initial,
+                "quiet output latch and pre-publication fault are non-authoritative");
+            expect(!live.apply_production_lock({1, 9999, 0, false}) && !output->published(), "refused live reward does not publish");
+            (void)take(live.apply_production_lock({1, 2000, 0, false}));
+            expect(output->published(), "successful production lock marks its live write");
+        }
+        auto next = take(live.begin_native_output_phase());
+        expect(!next->published(), "publication latch is scoped to one phase");
+    }
     auto account = config.player_economy->players[0]; auto player = config.production->players[0];
     auto assigned = take(galactic::assign_technology(account, player, config.production->technology_types, 2, true,
         [&](auto id, auto tech) {
@@ -507,7 +552,7 @@ void native_action_production_barrier() {
         config.income->types.push_back(mine);
         for (auto& planet : config.production->planets) {
             config.income->planets.push_back({planet.planet, false, false, false});
-            for (auto& offer : planet.offers) {
+            for (auto& offer : planet.offers.mutable_rows()) {
                 offer.seconds = f(10); config.income->offers.push_back({planet.planet, offer.type, offer.price, offer.seconds});
             }
         }
@@ -553,7 +598,136 @@ void native_action_production_barrier() {
         const auto private_builder = [&](const gc::GalacticSession::NativeForceView& view, eawr::sim::EntityId frontier) {
             return eawr::core::Result<gc::GalacticSession::NativeForcePlacement>::success(placement(frontier, view.presence.special_control));
         };
+        // These world primitives return receipts; the economic caller owns
+        // their replay entries, just as NativeActions does in production.
+        namespace economic = eawr::script::foc::galactic_ai;
+        const auto journal_cash = [&](gc::GalacticSession& world, Fixed amount) {
+            const auto actual = take(world.add_credits(1, amount, f(1)));
+            require(world.append_native_effect(gc::NativeEffectKind::cash,
+                economic::economic_replay::cash(1, amount, f(1), actual)));
+        };
+        const auto force = [&](gc::GalacticSession& world) {
+            const auto actors = take(world.create_native_force({1, planet, 1000, {}}, full_builder));
+            economic::ActionRequest request; request.kind = economic::ActionKind::magic;
+            request.player = 1; request.target = planet; request.type = 1000;
+            require(world.append_native_effect(gc::NativeEffectKind::magic,
+                economic::economic_replay::magic(request, actors)));
+            return actors;
+        };
+        const auto replay_owners = [&](gc::GalacticSession& world) {
+            economic::NativeActions::bind_economic_replay_owners(world,
+                [&](const auto&, const auto& snapshot, auto frontier) { return full_builder(snapshot, frontier); });
+        };
         const std::array<gc::PlayerId, 1> players{1};
+        for (const bool throws : {false, true}) for (const bool mutate : {false, true}) {
+            auto phase_world = take(gc::GalacticSession::create(config));
+            auto phase_oracle = take(gc::GalacticSession::create(config));
+            const auto before = phase_world.canonical_state_bytes();
+            const auto record_before = phase_world.record(); const auto frontier_before = phase_world.next_entity_id();
+            auto phase = take(phase_world.begin_native_barrier(players, 64));
+            bool caught{};
+            try {
+                const auto result = [&]() -> eawr::core::Result<void> {
+                    require(phase->select_player(1));
+                    if (mutate) {
+                        journal_cash(phase_world, f(9));
+                        expect(!force(phase_world).empty(),
+                            "whole-phase fault fixture stages real actor and identity mutations");
+                    }
+                    require(phase->begin_tail());
+                    if (mutate) journal_cash(phase_world, f(2));
+                    if (throws) throw std::runtime_error("whole world phase fixture");
+                    eawr::core::Diagnostic error; error.code = "whole-world-phase-fixture";
+                    return eawr::core::Result<void>::failure(std::move(error));
+                }();
+                expect(!result, "whole world phase preserves Result refusal");
+            } catch (const std::runtime_error& error) { caught = std::string_view(error.what()) == "whole world phase fixture"; }
+            expect(caught == throws, "whole world phase preserves deterministic exception identity");
+            require(phase->discard()); expect(!phase->discard() && !phase->commit(), "discarded world phase settles once");
+            phase.reset();
+            expect(phase_world.canonical_state_bytes() == before && phase_world.record() == record_before
+                && phase_world.next_entity_id() == frontier_before, "whole phase discard restores exact world, identity frontier and native replay journal");
+            auto retry = take(phase_world.begin_native_barrier(players, 64));
+            require(retry->select_player(1)); journal_cash(phase_world, f(3));
+            require(retry->begin_tail()); require(retry->commit()); retry.reset();
+            journal_cash(phase_oracle, f(3));
+            expect(phase_world.canonical_state_bytes() == phase_oracle.canonical_state_bytes() && phase_world.record() == phase_oracle.record(),
+                "healthy retry publishes only final world writes on 1/2/4/8 workers");
+            auto replayed = take(gc::GalacticSession::from_replay(phase_world.record())); replay_owners(replayed);
+            require(replayed.replay_native_barrier(executor)); require(replayed.finish_native_replay());
+            expect(replayed.state_sha256() == phase_world.state_sha256(), "discarded phase leaves no replay effects to reconstruct");
+        }
+        {
+            auto broken = take(gc::GalacticSession::create(config));
+            auto phase = take(broken.begin_native_barrier(players, 64));
+            expect(!broken.append_native_effect(static_cast<gc::NativeEffectKind>(65535), {}),
+                "malformed native effect refuses its infrastructure boundary");
+            expect(!phase->discard(), "explicit phase discard never clears a pre-existing infrastructure failure");
+            phase.reset(); expect(!broken.step(executor), "broken native journal remains a session refusal");
+        }
+        {
+            // Exercise the actual world/journal transaction participant. Native
+            // service owners are separate participants, so no callback here
+            // writes to an external owner before the complete B integration.
+            auto isolated = take(gc::GalacticSession::create(config));
+            auto expected = take(gc::GalacticSession::create(config));
+            auto pending = take(isolated.begin_native_barrier(players, 64));
+            require(pending->select_player(1));
+            const auto initial_view = isolated.snapshot();
+            const auto initial_bytes = initial_view->canonical_bytes();
+            const auto initial_id = isolated.next_entity_id();
+            const auto initial_layers = pending->work().layers;
+            for (const bool throws : {false, true}) for (const bool mutate : {false, true}) {
+                bool caught{};
+                try {
+                    auto failed_chain = [&]() -> eawr::core::Result<void> {
+                        auto savepoint = take(pending->begin_provider(1));
+                        expect(!pending->begin_provider(1) && !pending->begin_tail() && !pending->commit(),
+                            "world savepoint must settle before nesting or canonical publication");
+                        if (mutate) {
+                            journal_cash(isolated, f(9));
+                            auto created = force(isolated);
+                            expect(!created.empty(), "faulting provider actually stages actor creation and journal effects");
+                            expect(isolated.snapshot()->canonical_bytes() != initial_bytes,
+                                "failed provider sees its own private world mutation");
+                        }
+                        if (throws) throw std::runtime_error("provider world fixture");
+                        eawr::core::Diagnostic error;
+                        error.code = "provider-world-fixture";
+                        return eawr::core::Result<void>::failure(std::move(error));
+                    }();
+                    expect(!failed_chain, "provider Result failure unwinds its savepoint");
+                } catch (const std::runtime_error& error) {
+                    caught = std::string_view(error.what()) == "provider world fixture";
+                }
+                expect(caught == throws, "world savepoint preserves deterministic exception identity");
+                expect(isolated.snapshot()->canonical_bytes() == initial_bytes && isolated.next_entity_id() == initial_id
+                    && pending->work().layers == initial_layers,
+                    "failed world chain discards actors, credits, identity frontier and extra layers");
+                expect(initial_view->canonical_bytes() == initial_bytes, "earlier world publication remains immutable");
+            }
+            expect(pending->work().provider_savepoints == 4 && pending->work().provider_rollbacks == 4,
+                "world rollback work counts provider boundaries, never a whole archive capture");
+            {
+                auto sibling = take(pending->begin_provider(1));
+                journal_cash(isolated, f(3));
+                journal_cash(expected, f(3));
+                const auto actual_birth = force(isolated);
+                const auto expected_birth = force(expected);
+                expect(actual_birth == expected_birth, "successful sibling starts at the rolled-back identity frontier");
+                require(sibling->commit());
+                expect(!sibling->rollback(), "settled world savepoint cannot roll back a successful sibling");
+            }
+            require(pending->begin_tail());
+            require(pending->commit());
+            pending.reset();
+            expect(isolated.canonical_state_bytes() == expected.canonical_state_bytes() && isolated.record() == expected.record(),
+                "only successful sibling world state and native journal reach canonical publication");
+            auto replayed = take(gc::GalacticSession::from_replay(isolated.record())); replay_owners(replayed);
+            require(replayed.replay_native_barrier(executor));
+            require(replayed.finish_native_replay());
+            expect(replayed.state_sha256() == isolated.state_sha256(), "committed native world journal reconstructs identically");
+        }
         const auto check = [&] {
             expect(staged.snapshot()->canonical_bytes() == direct.snapshot()->canonical_bytes(), "native producer publication matches the live oracle");
             expect(staged.snapshot()->economy_input_generation()->income == direct.snapshot()->economy_input_generation()->income,

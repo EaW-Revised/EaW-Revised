@@ -1,6 +1,6 @@
 #pragma once
 
-#include "eawr/data/xml.hpp"
+#include "eawr/data/xml_fwd.hpp"
 
 #include <atomic>
 #include <compare>

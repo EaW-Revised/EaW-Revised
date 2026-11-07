@@ -166,14 +166,39 @@ FoC loads a game with a bad object in it. Ours follows suit where it can: `comba
 `ContentErrors` policy. `strict` (the default, used by our CI, `unit_scan` and the tests) refuses the whole table on
 the first unit type that fails. `skip_object` (the viewer's live and replay sessions) leaves that type out of the
 table, appends a diagnostic to the caller's `skipped` list (`skipped unit type '<id>': <reason>`; the viewer prints
-each to the log as `EAWR live session content: ...`) and builds the rest, so only a battle that places the type fails.
+each to the log as `EAWR live session content: ...`) and builds the rest.
 A value FoC accepts is never an error in either mode (ion stun reductions: IS-10 in
 [space damage](behaviour/space-damage.md)); a magnitude beyond the saturation limit (+-1024) is clamped there, with a warning in a
-`skip_object` load and silently in a `strict` one. A start or recording that places a skipped type fails with a diagnostic naming
-the type, the build menus drop skipped types, and the skip set joins the match identity (`skipped-types` domain), so peers and
+`skip_object` load and silently in a `strict` one.
+
+**AG-11 (project policy, retail handling of these invalid profiles is unknown):** a live or recorded start omits
+placements of rejected types and emits a class C `EAWR-LOAD-0450` note carrying the former diagnostic.
+A rejected squadron container or craft omits the whole squadron placement. Surviving entity IDs and the allocator
+boundary stay intact; garrison registrations and templates lose the removed placements. A carried placement
+with a rejected nested rider is omitted as a whole. Garrison template and arrival omissions emit placement notes;
+empty garrison bindings and registrations are derived references repaired after the noted placement removals. Actual spawner entries
+(including reserves and owner-specific selections) and the start's launch metadata omit rejected types and teams
+whose craft was rejected. Rejected types retain their original diagnostics in `EAWR-LOAD-0451` skipped-object notes.
+The viewer publishes these through the session load-note sink; the headless runner prints them. This is a load-time
+policy and adds no tick work. Build menus drop skipped types, and the skip set, including dependent teams, joins
+the match identity (`skipped-types` domain), so peers and
 replays with another skip set refuse each other. `ability_table` follows the same rule per type (legacy EAWR-4666): each type is checked with
 `validate_ability_profile`, so one bad ability entry skips that type and not the whole table. The other tables (durability, motion) and
 the whole-table `validate_combat` are still all-or-nothing; the Republic at War scan (legacy EAWR-4589) lists what they refuse.
+
+
+**AG-12 (project policy, retail handling of these representation failures is unknown):** power sums and launch
+products saturate at fixed storage bounds (`EAWR-LOAD-0250`); the final ability and weapon ratings clamp to their
+consumer's supported nonnegative range (`EAWR-LOAD-0252`). Arithmetic notes retain the former diagnostic;
+aggregate authored/effective values are represented as Q24 raw expressions and values. Starting totals and launch
+metadata use the same saturating arithmetic and carry diagnostic notes outside replay bytes.
+
+When distinct loaded unit definitions share a name CRC, the earliest registry/file definition wins, with input
+order breaking equal source ordinals. `EAWR-LOAD-0251` identifies the omitted name and retained name. Combat
+profiles, footprints, retaliation teams, AI types and priority rows, ability profiles/ratings, motion, durability,
+sensors and starting unit lookups all use that same winner across unit kinds. Losing rows cannot supply a
+profile just because the winning definition does not have that kind of profile. These are load-time choices;
+the simulation retains its partitioned execution and its validators.
 
 ## Damage rules
 
@@ -296,6 +321,10 @@ avoidance rules and one footprint per ship, station and pinned map object with a
 - The pinned map objects (`pinned_m2_obstacles`: `Skirmish_Merchant_Dock`,
   `N_Gravity_Well_Station`, `Defense_Satellite_Laser_Pad`, `Mineral_Extractor_Pad`,
   `Orbital_Resource_Container`) load only these fields, in `UnitTables::obstacles`.
+
+When footprint type CRCs collide, the earliest global definition wins; map-only
+obstacles sort after global definitions, with map order breaking ties. The losing
+definition produces a load note and consumers use the same winner.
 
 On the FoC data (half extents X by Y, then the radius): Corellian corvette 17.76 Ã— 41.82
 (41.82), Tartan cruiser 23.75 Ã— 49.93 (49.93), Nebulon-B 23.48 Ã— 109.95 (109.95), Acclamator
@@ -440,7 +469,8 @@ hardpoints, turret poses, abilities or production are read for land. The land ta
 tables. `LandContentInputs::content_errors` defaults to `skip_object`: a type with a bad combat row is left
 out and named in the binding notes. The land step reads the tables: Attack orders, target choice, weapon fire,
 projectiles, damage and death run from them (docs/behaviour/land-combat-slice.md), so this is a behaviour
-change; the `land-content` identity domain is version 3, the adapter fingerprint `land-content-adapter-v5` and
-the land checkpoint section 18 is v6.
+change; the `land-content` identity domain is version 3, the adapter fingerprint `land-content-adapter-v6` (the
+stopped-pair overlap coefficient and the container's collision class and jiggle distance bind into it, the company
+record is `land-companies-v4`) and the land checkpoint section 18 is v9 (a formation squad is one collision body).
 A caller that wants the map's statics in the combat tables passes their names in `LoadInput::obstacles`
 (`read_land_start_inputs` returns them in `static_tables`).

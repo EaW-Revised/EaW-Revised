@@ -15,7 +15,7 @@
 
 #include "eawr/data/ui/movie.hpp"
 #include "eawr/presentation/ui/credits.hpp"
-#include "eawr/vfs/vfs.hpp"
+#include "eawr/vfs/vfs_fwd.hpp"
 
 #include <godot_cpp/classes/canvas_layer.hpp>
 #include <godot_cpp/classes/color_rect.hpp>

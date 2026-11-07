@@ -51,7 +51,11 @@ core::Result<std::vector<std::uint8_t>> TacticalSession::save_checkpoint_state()
         out.fire_range_bonuses = std::any_of(live.begin(), live.end(), [](const auto& unit) {
             return unit.upgrade_bonuses[6].raw() != 0;
         });
-        out(std::uint32_t{out.fire_range_bonuses ? 10U : 9U});
+        out.script_invulnerable = std::any_of(live.begin(), live.end(), [](const auto& unit) {
+            return unit.script_invulnerable;
+        });
+        // Domain 9 base; +1 nonzero fire range (WFR-01); +2 any Lua Make_Invulnerable flag (TL-03).
+        out(std::uint32_t{9U + (out.fire_range_bonuses ? 1U : 0U) + (out.script_invulnerable ? 2U : 0U)});
         checkpoint_detail::Access::state(out, std::as_const(*impl_));
         out(live);
         out(checkpoint_detail::Access::visibility(*impl_));
@@ -99,11 +103,25 @@ core::Result<void> TacticalSession::load_checkpoint_state(const std::span<const 
         checkpoint_detail::Reader in(bytes);
         std::uint32_t version{};
         in(version);
-        if (version != 9U && version != 10U) throw checkpoint_detail::Invalid("unsupported child state domain");
-        in.fire_range_bonuses = version == 10U;
+        if (version < 9U || version > 12U) throw checkpoint_detail::Invalid("unsupported child state domain");
+        in.fire_range_bonuses = (version - 9U) % 2U == 1U;
+        in.script_invulnerable = version >= 11U;
         const auto cursors = impl_->last_submitted;
         checkpoint_detail::Access::state(in, *impl_);
-        if (impl_->last_submitted != cursors) throw checkpoint_detail::Invalid("command cursors disagree with sealed log");
+        // SAE-10: a reinforcement whose search failed advanced its issuer's cursor but is never recorded, so the
+        // saved cursor may lead the sealed log's, and only to a command keyed to a tick that has already executed.
+        for (const auto& [player, key] : cursors) {
+            const auto saved = impl_->last_submitted.find(player);
+            if (saved == impl_->last_submitted.end() || saved->second < key)
+                throw checkpoint_detail::Invalid("command cursors disagree with sealed log");
+        }
+        for (const auto& [player, key] : impl_->last_submitted) {
+            const auto sealed = cursors.find(player);
+            if ((sealed == cursors.end() || sealed->second != key)
+                && (key.first >= impl_->completed_tick || std::none_of(impl_->setup.players.begin(), impl_->setup.players.end(),
+                    [id = player](const auto& row) { return row.player_id == id; })))
+                throw checkpoint_detail::Invalid("command cursors disagree with sealed log");
+        }
         if (impl_->committed_bonus_profiles.size() != impl_->ownership_keys.size())
             throw checkpoint_detail::Invalid("bonus profile census disagrees with content");
         for (const auto& source : impl_->command_ledger.sources)
@@ -118,6 +136,9 @@ core::Result<void> TacticalSession::load_checkpoint_state(const std::span<const 
         if (in.fire_range_bonuses && std::none_of(live.begin(), live.end(), [](const auto& unit) {
                 return unit.upgrade_bonuses[6].raw() != 0;
             })) throw checkpoint_detail::Invalid("noncanonical empty fire-range domain");
+        if (in.script_invulnerable && std::none_of(live.begin(), live.end(), [](const auto& unit) {
+                return unit.script_invulnerable;
+            })) throw checkpoint_detail::Invalid("noncanonical empty script-invulnerable domain");
         checkpoint_detail::Access::PublishedVisibility visibility;
         in(visibility);
         if (impl_->completed_tick > max_ticks || live.size() > max_units) throw checkpoint_detail::Invalid("state exceeds tactical limits");
@@ -615,7 +636,9 @@ std::vector<std::uint8_t> TacticalSession::Impl::canonical_bytes(const Partition
         order.assign(handles.begin(), handles.end());
         units.resize(order.size());
     }
-    std::array<std::vector<std::uint8_t>, tick_partition_count> encoded_units;
+    std::array<std::vector<std::uint8_t>, tick_partition_count> local_units;
+    // Land sessions retain the per-partition unit buffers so a tick does not reallocate them.
+    auto& encoded_units = land ? land->unit_parts : local_units;
     std::array<CanonicalCounts, tick_partition_count> sparse_counts;
     CanonicalEncoding encoding;
     auto& craft_parts = encoding.crafts;
@@ -633,9 +656,12 @@ std::vector<std::uint8_t> TacticalSession::Impl::canonical_bytes(const Partition
     const auto prepared = executor.execute_phase("canonical-records", tick_partition_count,
         [&](const std::size_t partition) {
             const auto range = partition_range(partition, units.size());
-            std::vector<std::uint8_t> bytes;
+            auto& bytes = encoded_units[partition];
+            bytes.clear();
             bytes.reserve((range.end - range.begin) * (detail::unit_record_size + detail::order_record_size));
             for (auto index = range.begin; index < range.end; ++index) {
+                const auto profile_begin = core::tick_profile::active_jobs
+                    ? core::tick_profile::Clock::now() : core::tick_profile::Clock::time_point{};
                 units[index] = live_at(order[index].first, order[index].second);
                 append_canonical_unit(bytes, units[index]);
                 sparse_counts[partition].add(units[index]);
@@ -643,8 +669,13 @@ std::vector<std::uint8_t> TacticalSession::Impl::canonical_bytes(const Partition
                     sim::detail::append_u64(ability_parts[partition], units[index].state.entity_id);
                     append_abilities(ability_parts[partition], *units[index].abilities);
                 }
+                if (core::tick_profile::active_jobs) {
+                    // Includes component copying and encoding; never a simulation input.
+                    const auto elapsed = std::chrono::duration<double, std::milli>(core::tick_profile::Clock::now() - profile_begin).count();
+                    core::tick_profile::active_jobs->costs.push_back({"job.canonical-unit", elapsed,
+                        units[index].state.entity_id, {}, units[index].state.type_id});
+                }
             }
-            encoded_units[partition] = std::move(bytes);
             if (land) encode_land_partition(partition);
             for (auto it = craft_ranges[partition]; it != craft_ranges[partition + 1]; ++it)
                 append_craft(craft_parts[partition], it->first, it->second);
@@ -714,80 +745,83 @@ std::vector<std::uint8_t> TacticalSession::Impl::canonical_bytes(const std::span
         for (const auto& player : setup.players) {
             detail::append_player(bytes, player);
         }
-        append_canonical_units_state(bytes, units, encoded_units);
+        { core::tick_profile::Scope section_scope("serial.tactical.finish.section.units"); append_canonical_units_state(bytes, units, encoded_units); }
         const auto* counts = encoding ? &encoding->counts : nullptr;
         const auto parts = [encoding](auto member) -> std::span<const std::vector<std::uint8_t>> {
             if (!encoding) return {};
             return encoding->*member;
         };
-        append_canonical_garrison_enabled_state(bytes, units, counts);
-        append_canonical_named_locks_state(bytes);
-        append_canonical_special_weapons_state(bytes);
-        append_canonical_garrisons_state(bytes);
-        append_canonical_manual_weapons_state(bytes, units, counts);
-        append_canonical_turrets_state(bytes, units, counts);
-        append_canonical_squadrons_state(bytes);
-        append_canonical_fog_state(bytes);
-        append_canonical_tracking_state(bytes);
-        append_canonical_roll_state(bytes, units, counts);
-        append_canonical_projectiles_state(bytes, parts(&CanonicalEncoding::projectiles));
-        append_canonical_blast_damage_state(bytes);
-        append_canonical_formation_state(bytes, units, counts);
-        append_canonical_approach_state(bytes, units, counts);
-        append_canonical_sightings_state(bytes, units, counts);
-        append_canonical_garrison_marks_state(bytes, units, counts);
-        append_canonical_craft_state(bytes, parts(&CanonicalEncoding::crafts));
-        append_canonical_squadron_orders_state(bytes, parts(&CanonicalEncoding::minds));
-        append_canonical_attack_paths_state(bytes);
-        append_canonical_hangars_state(bytes);
-        append_canonical_collection_state(bytes, parts(&CanonicalEncoding::trees));
-        append_canonical_projectile_collection_state(bytes, parts(&CanonicalEncoding::projectile_trees));
-        append_canonical_economy_state(bytes);
-        append_canonical_arrivals_state(bytes);
-        append_canonical_pads_state(bytes);
-        append_canonical_population_state(bytes);
-        append_canonical_arrival_defence_state(bytes, units, counts);
-        append_canonical_upgrades_state(bytes, units, counts);
-        append_canonical_level_up_state(bytes);
-        append_canonical_income_state(bytes);
-        append_canonical_outcome_state(bytes);
-        append_canonical_abilities_state(bytes, units, counts, parts(&CanonicalEncoding::abilities));
-        append_canonical_stealth_state(bytes, units, counts);
-        append_canonical_stealth_end_state(bytes, units, counts);
-        append_canonical_self_destruct_state(bytes, units, counts);
-        append_canonical_mc30_state(bytes, units, counts);
-        append_canonical_ion_stuns_state(bytes, units, counts);
-        append_canonical_hazard_moves_state(bytes, units, counts);
-        append_canonical_asteroids_state(bytes, units, counts);
-        append_canonical_engine_disable_state(bytes, units, counts);
-        append_canonical_nebula_state(bytes, units, counts);
-        append_canonical_storms_state(bytes, units, counts);
-        append_canonical_damage_tracking_state(bytes, units, counts);
-        append_canonical_command_bonuses_state(bytes);
-        append_canonical_heroes_state(bytes, units, counts);
-        append_canonical_projectile_defence_state(bytes);
-        append_canonical_special_abilities_state(bytes, units, counts);
-        append_canonical_concentrate_state(bytes, units, counts);
-        append_canonical_ability_spawns_state(bytes);
-        append_canonical_buzz_requests_state(bytes, units, counts);
-        append_canonical_buzz_droids_state(bytes);
-        append_canonical_spins_state(bytes);
-        append_canonical_departure_state(bytes);
-        append_canonical_quits_state(bytes);
-        append_canonical_pool_tokens_state(bytes, units, counts);
-        append_canonical_queue_identities_state(bytes);
-        append_canonical_cinematic_seats_state(bytes);
-        append_canonical_campaign_state(bytes);
-        append_canonical_corruption_state(bytes, units, counts);
-        append_canonical_charged_blast_state(bytes, units, counts);
-        append_canonical_waypoints_state(bytes, units, counts);
-        append_canonical_beacons_state(bytes);
-        append_canonical_order_history_state(bytes, units, counts);
+        { core::tick_profile::Scope section_scope("serial.tactical.finish.section.garrison_enabled"); append_canonical_garrison_enabled_state(bytes, units, counts); }
+        { core::tick_profile::Scope section_scope("serial.tactical.finish.section.named_locks"); append_canonical_named_locks_state(bytes); }
+        { core::tick_profile::Scope section_scope("serial.tactical.finish.section.special_weapons"); append_canonical_special_weapons_state(bytes); }
+        { core::tick_profile::Scope section_scope("serial.tactical.finish.section.garrisons"); append_canonical_garrisons_state(bytes); }
+        { core::tick_profile::Scope section_scope("serial.tactical.finish.section.manual_weapons"); append_canonical_manual_weapons_state(bytes, units, counts); }
+        { core::tick_profile::Scope section_scope("serial.tactical.finish.section.turrets"); append_canonical_turrets_state(bytes, units, counts); }
+        { core::tick_profile::Scope section_scope("serial.tactical.finish.section.squadrons"); append_canonical_squadrons_state(bytes); }
+        { core::tick_profile::Scope section_scope("serial.tactical.finish.section.fog"); append_canonical_fog_state(bytes); }
+        { core::tick_profile::Scope section_scope("serial.tactical.finish.section.tracking"); append_canonical_tracking_state(bytes); }
+        { core::tick_profile::Scope section_scope("serial.tactical.finish.section.roll"); append_canonical_roll_state(bytes, units, counts); }
+        { core::tick_profile::Scope section_scope("serial.tactical.finish.section.projectiles"); append_canonical_projectiles_state(bytes, parts(&CanonicalEncoding::projectiles)); }
+        { core::tick_profile::Scope section_scope("serial.tactical.finish.section.blast_damage"); append_canonical_blast_damage_state(bytes); }
+        { core::tick_profile::Scope section_scope("serial.tactical.finish.section.formation"); append_canonical_formation_state(bytes, units, counts); }
+        { core::tick_profile::Scope section_scope("serial.tactical.finish.section.approach"); append_canonical_approach_state(bytes, units, counts); }
+        { core::tick_profile::Scope section_scope("serial.tactical.finish.section.sightings"); append_canonical_sightings_state(bytes, units, counts); }
+        { core::tick_profile::Scope section_scope("serial.tactical.finish.section.garrison_marks"); append_canonical_garrison_marks_state(bytes, units, counts); }
+        { core::tick_profile::Scope section_scope("serial.tactical.finish.section.script_invulnerable"); append_canonical_script_invulnerable_state(bytes, units, counts); }
+        { core::tick_profile::Scope section_scope("serial.tactical.finish.section.craft"); append_canonical_craft_state(bytes, parts(&CanonicalEncoding::crafts)); }
+        { core::tick_profile::Scope section_scope("serial.tactical.finish.section.squadron_orders"); append_canonical_squadron_orders_state(bytes, parts(&CanonicalEncoding::minds)); }
+        { core::tick_profile::Scope section_scope("serial.tactical.finish.section.attack_paths"); append_canonical_attack_paths_state(bytes); }
+        { core::tick_profile::Scope section_scope("serial.tactical.finish.section.hangars"); append_canonical_hangars_state(bytes); }
+        { core::tick_profile::Scope section_scope("serial.tactical.finish.section.collection"); append_canonical_collection_state(bytes, parts(&CanonicalEncoding::trees)); }
+        { core::tick_profile::Scope section_scope("serial.tactical.finish.section.projectile_collection"); append_canonical_projectile_collection_state(bytes, parts(&CanonicalEncoding::projectile_trees)); }
+        { core::tick_profile::Scope section_scope("serial.tactical.finish.section.economy"); append_canonical_economy_state(bytes); }
+        { core::tick_profile::Scope section_scope("serial.tactical.finish.section.arrivals"); append_canonical_arrivals_state(bytes); }
+        { core::tick_profile::Scope section_scope("serial.tactical.finish.section.pads"); append_canonical_pads_state(bytes); }
+        { core::tick_profile::Scope section_scope("serial.tactical.finish.section.population"); append_canonical_population_state(bytes); }
+        { core::tick_profile::Scope section_scope("serial.tactical.finish.section.arrival_defence"); append_canonical_arrival_defence_state(bytes, units, counts); }
+        { core::tick_profile::Scope section_scope("serial.tactical.finish.section.upgrades"); append_canonical_upgrades_state(bytes, units, counts); }
+        { core::tick_profile::Scope section_scope("serial.tactical.finish.section.level_up"); append_canonical_level_up_state(bytes); }
+        { core::tick_profile::Scope section_scope("serial.tactical.finish.section.income"); append_canonical_income_state(bytes); }
+        { core::tick_profile::Scope section_scope("serial.tactical.finish.section.outcome"); append_canonical_outcome_state(bytes); }
+        { core::tick_profile::Scope section_scope("serial.tactical.finish.section.abilities"); append_canonical_abilities_state(bytes, units, counts, parts(&CanonicalEncoding::abilities)); }
+        { core::tick_profile::Scope section_scope("serial.tactical.finish.section.stealth"); append_canonical_stealth_state(bytes, units, counts); }
+        { core::tick_profile::Scope section_scope("serial.tactical.finish.section.stealth_end"); append_canonical_stealth_end_state(bytes, units, counts); }
+        { core::tick_profile::Scope section_scope("serial.tactical.finish.section.self_destruct"); append_canonical_self_destruct_state(bytes, units, counts); }
+        { core::tick_profile::Scope section_scope("serial.tactical.finish.section.mc30"); append_canonical_mc30_state(bytes, units, counts); }
+        { core::tick_profile::Scope section_scope("serial.tactical.finish.section.ion_stuns"); append_canonical_ion_stuns_state(bytes, units, counts); }
+        { core::tick_profile::Scope section_scope("serial.tactical.finish.section.hazard_moves"); append_canonical_hazard_moves_state(bytes, units, counts); }
+        { core::tick_profile::Scope section_scope("serial.tactical.finish.section.asteroids"); append_canonical_asteroids_state(bytes, units, counts); }
+        { core::tick_profile::Scope section_scope("serial.tactical.finish.section.engine_disable"); append_canonical_engine_disable_state(bytes, units, counts); }
+        { core::tick_profile::Scope section_scope("serial.tactical.finish.section.nebula"); append_canonical_nebula_state(bytes, units, counts); }
+        { core::tick_profile::Scope section_scope("serial.tactical.finish.section.storms"); append_canonical_storms_state(bytes, units, counts); }
+        { core::tick_profile::Scope section_scope("serial.tactical.finish.section.damage_tracking"); append_canonical_damage_tracking_state(bytes, units, counts); }
+        { core::tick_profile::Scope section_scope("serial.tactical.finish.section.command_bonuses"); append_canonical_command_bonuses_state(bytes); }
+        { core::tick_profile::Scope section_scope("serial.tactical.finish.section.heroes"); append_canonical_heroes_state(bytes, units, counts); }
+        { core::tick_profile::Scope section_scope("serial.tactical.finish.section.projectile_defence"); append_canonical_projectile_defence_state(bytes); }
+        { core::tick_profile::Scope section_scope("serial.tactical.finish.section.special_abilities"); append_canonical_special_abilities_state(bytes, units, counts); }
+        { core::tick_profile::Scope section_scope("serial.tactical.finish.section.concentrate"); append_canonical_concentrate_state(bytes, units, counts); }
+        { core::tick_profile::Scope section_scope("serial.tactical.finish.section.ability_spawns"); append_canonical_ability_spawns_state(bytes); }
+        { core::tick_profile::Scope section_scope("serial.tactical.finish.section.buzz_requests"); append_canonical_buzz_requests_state(bytes, units, counts); }
+        { core::tick_profile::Scope section_scope("serial.tactical.finish.section.buzz_droids"); append_canonical_buzz_droids_state(bytes); }
+        { core::tick_profile::Scope section_scope("serial.tactical.finish.section.spins"); append_canonical_spins_state(bytes); }
+        { core::tick_profile::Scope section_scope("serial.tactical.finish.section.departure"); append_canonical_departure_state(bytes); }
+        { core::tick_profile::Scope section_scope("serial.tactical.finish.section.quits"); append_canonical_quits_state(bytes); }
+        { core::tick_profile::Scope section_scope("serial.tactical.finish.section.pool_tokens"); append_canonical_pool_tokens_state(bytes, units, counts); }
+        { core::tick_profile::Scope section_scope("serial.tactical.finish.section.queue_identities"); append_canonical_queue_identities_state(bytes); }
+        { core::tick_profile::Scope section_scope("serial.tactical.finish.section.cinematic_seats"); append_canonical_cinematic_seats_state(bytes); }
+        { core::tick_profile::Scope section_scope("serial.tactical.finish.section.campaign"); append_canonical_campaign_state(bytes); }
+        { core::tick_profile::Scope section_scope("serial.tactical.finish.section.corruption"); append_canonical_corruption_state(bytes, units, counts); }
+        { core::tick_profile::Scope section_scope("serial.tactical.finish.section.charged_blast"); append_canonical_charged_blast_state(bytes, units, counts); }
+        { core::tick_profile::Scope section_scope("serial.tactical.finish.section.waypoints"); append_canonical_waypoints_state(bytes, units, counts); }
+        { core::tick_profile::Scope section_scope("serial.tactical.finish.section.beacons"); append_canonical_beacons_state(bytes); }
+        { core::tick_profile::Scope section_scope("serial.tactical.finish.section.order_history"); append_canonical_order_history_state(bytes, units, counts); }
         if (land) {
+            core::tick_profile::Scope section_scope("serial.tactical.finish.section.land");
             const auto state = land_bytes(encoding != nullptr);
             bytes.insert(bytes.end(), state.begin(), state.end());
         }
         if (setup.controllers) {
+            core::tick_profile::Scope section_scope("serial.tactical.finish.section.controllers");
             sim::detail::append_u32(bytes, 0x4c525443U); // CTRL optional state domain
             detail::append_controller_policy(bytes, *setup.controllers, 4);
             sim::detail::append_u64(bytes, ledgers.size());

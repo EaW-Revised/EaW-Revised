@@ -11,6 +11,25 @@ namespace eawr::script::foc::galactic_ai {
 class NativeActions final : public Actions, public TrackedStateContributor {
     struct BoundState;
 public:
+    // Serial root phase: per-key purchase/movement undo, moved result scratch,
+    // scalar cursors and the qualified freestore's sparse savepoint. World and
+    // funding have separate participants; restore them before native goals.
+    class PhaseSavepoint {
+    public:
+        struct Work { std::size_t purchases{}, movements{}, created_players{}; };
+        ~PhaseSavepoint();
+        PhaseSavepoint(const PhaseSavepoint&) = delete;
+        PhaseSavepoint& operator=(const PhaseSavepoint&) = delete;
+        [[nodiscard]] Work work() const noexcept;
+        [[nodiscard]] core::Result<void> commit();
+        [[nodiscard]] core::Result<void> rollback();
+    private:
+        struct Saved;
+        explicit PhaseSavepoint(std::unique_ptr<Saved>);
+        std::unique_ptr<Saved> saved_;
+        friend class NativeActions;
+    };
+    [[nodiscard]] core::Result<std::unique_ptr<PhaseSavepoint>> begin_phase();
     [[nodiscard]] core::Result<void> prepare_player_frontiers(const sim::PartitionExecutor&,
         std::span<const gc::PlayerId>);
     class PlayerFrontier {
@@ -170,6 +189,16 @@ public:
     [[nodiscard]] core::Result<sim::EntityId> build_actor(gc::PlayerId, sim::EntityId build) const;
     [[nodiscard]] core::Result<sim::math::Fixed> generic_build_cost(gc::TypeId type) const;
     [[nodiscard]] std::shared_ptr<const gc::GalacticSnapshot> snapshot() const { return world_.snapshot(); }
+    // Runtime diagnostics are a sidecar, outside native state and replay bytes.
+    void note_battle_delivery(std::uint64_t request, const core::Diagnostic& diagnostic) {
+        core::LoadNote note;
+        note.code = "EAWR-LOAD-1236"; note.object = std::to_string(request);
+        note.tag = "battle_delivery"; note.phase = core::LoadPhase::runtime;
+        note.action = core::LoadAction::runtime_degraded;
+        note.effective_value = "unavailable AI battle notification skipped; battle continues";
+        note.diagnostic_code = diagnostic.code; note.message = diagnostic.message;
+        world_.add_runtime_load_notes(std::span<const core::LoadNote>(&note, 1));
+    }
     // Direct native actions can allocate after the AI perception view was bound.
     [[nodiscard]] sim::EntityId next_entity_id() const noexcept { return world_.next_entity_id(); }
     struct BuildHead {
@@ -185,7 +214,10 @@ public:
     [[nodiscard]] core::Result<void> restore(const NativeState&) override;
     [[nodiscard]] core::Result<std::string> state_hash() const override;
     [[nodiscard]] core::Result<std::string> record_sync_hash(bool cold = false) const override;
-    [[nodiscard]] std::size_t record_byte_upper_bound() const noexcept override { return bound().records_.byte_size() + bound().freestore_->record_byte_upper_bound() + 1024; }
+    [[nodiscard]] std::size_t record_byte_upper_bound() const noexcept override {
+        const auto store = bound().freestore_->record_byte_upper_bound();
+        return records_dirty_ || store == 0 ? 0 : bound().records_.byte_size() + store + 1024;
+    }
     [[nodiscard]] std::uint64_t build_state_revision() const noexcept { return bound().build_revision_; }
     [[nodiscard]] const std::map<sim::EntityId, Purchase>& purchases() const noexcept { return bound().purchases_; }
     [[nodiscard]] QualifiedFreestore& qualified_freestore() noexcept { return *bound().freestore_; }
@@ -201,8 +233,13 @@ private:
     [[nodiscard]] core::RecordDigest rebuild_records() const;
     struct RecordWrite {
         NativeActions& owner; std::uint32_t kind{}; std::uint64_t id{};
+        RecordWrite(NativeActions& target, std::uint32_t type, std::uint64_t key) : owner(target), kind(type), id(key) { owner.retain_record(type, key); }
         ~RecordWrite() { owner.update_record(kind, id); }
     };
+    void retain_record(std::uint32_t, std::uint64_t);
+    void clear_created(gc::PlayerId);
+    PhaseSavepoint::Saved* phase_{};
+    bool phase_abandoned_{}, records_dirty_{};
     void mark_build_state_changed() const noexcept {
         if (++bound().build_revision_ == 0) std::terminate();
         mark_state_changed();

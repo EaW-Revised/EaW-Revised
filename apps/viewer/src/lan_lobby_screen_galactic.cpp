@@ -1,8 +1,12 @@
 #include "lan_lobby_screen_internal.hpp"
+#include "viewer_mounted_mods.hpp"
 
 #include "galactic_lobby_backend.hpp"
+#include "coop_campaign_tab.hpp"
+#include "galactic/faction_choices.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <cstdlib>
 #include <random>
 
@@ -13,7 +17,7 @@
 // galactic lockstep driver's (GCMP-03): Start stays off, with a reason, until a build installs its adapter.
 namespace eawr::presentation::godot_backend {
 namespace {
-// SK-42/WGEP-16 default difficulty. The lobby has no difficulty control yet; the codec carries any XML difficulty name.
+// SK-42/WGEP-16 default difficulty; the editor accepts an authored XML difficulty name.
 constexpr const char* galactic_difficulty = "Normal_Default";
 
 // Item ids of the host's Open / AI choice on a playable, unheld row (kick entries use 10000 + peer).
@@ -42,11 +46,32 @@ eawr::campaign::MpLobbyCampaignLabels campaign_labels(std::optional<data::TextLo
 }
 } // namespace
 
+// The room has ONE AI difficulty (the options dialog's choice, the value every AI seat is played and agreed at), so an AI
+// seat names that level: Easy/Normal/Hard entries use the stock AI captions; a mod's own difficulty shows its authored name.
+std::string ai_seat_caption(std::string_view difficulty) {
+    using Caption = net::GalacticAiCaption;
+    const auto level = net::galactic_ai_caption(difficulty);
+    if (!level) return std::string(difficulty);
+    return *level == Caption::easy ? "TEXT_EASY_AI_PLAYER" : *level == Caption::hard ? "TEXT_HARD_AI_PLAYER" : "TEXT_MEDIUM_AI_PLAYER";
+}
+
+std::string EawrLanLobby::campaign_display_name(const std::string& campaign) {
+    Impl& impl = *impl_;
+    if (!impl.galactic_backend || !impl.galactic_backend->content_ready() || !resources_) return campaign;
+    for (const auto& candidate : impl.galactic_backend->campaigns()) {
+        if (candidate.name != campaign) continue;
+        auto title = campaign_labels(resources_->text, candidate, impl.campaign_text_logged).title;
+        return title.empty() ? campaign : title;
+    }
+    return campaign;
+}
+
 void EawrLanLobby::configure_galactic_content() {
     Impl& impl = *impl_;
+    prime_mounted_mods(options_.game_root);
     if (!impl.galactic_backend) {
         const auto content = resources_->content;
-        // Loaded on first use: a skirmish-only session never reads the campaign data.
+        // Loaded off the UI thread, and only when a Campaign room is in sight (host options, a listed or joined campaign).
         impl.galactic_backend = std::make_shared<GalacticLobbyBackend>(GalacticLobbyLoader([content] {
             return load_galactic_lobby_content(*content->filesystem, *content->catalog, content);
         }));
@@ -54,15 +79,59 @@ void EawrLanLobby::configure_galactic_content() {
     match_->configure_galactic(impl.galactic_backend);
 }
 
+bool EawrLanLobby::prefetch_galactic_content() {
+    Impl& impl = *impl_;
+    prime_mounted_mods(options_.game_root);
+    if (!impl.galactic_backend && !(resources_ && resources_->content)) return false;
+    if (!impl.galactic_backend) {
+        const auto content = resources_->content;
+        impl.galactic_backend = std::make_shared<GalacticLobbyBackend>(GalacticLobbyLoader([content] {
+            return load_galactic_lobby_content(*content->filesystem, *content->catalog, content);
+        }));
+    }
+    GalacticLobbyBackend::prefetch_content(impl.galactic_backend);
+    return impl.galactic_backend->content_ready() && mounted_mods_ready();
+}
+
+// Host and Load Game both need the campaign list. While the load runs they show it and return; this finishes them.
+void EawrLanLobby::finish_pending_galactic() {
+    Impl& impl = *impl_;
+    if (!impl.host_pending && !impl.load_pending) return;
+    // A prefetch thread that could not start is retried here; the buttons never wait on a load nobody runs.
+    if (!prefetch_galactic_content()) return;
+    const bool host = std::exchange(impl.host_pending, false);
+    const bool load = std::exchange(impl.load_pending, false);
+    if (load) { impl.checkpoint_problem.clear(); impl.checkpoint_signature.clear(); }
+    if (host && page_ == Page::host_options) {
+        if (auto* button = EAWR_CONTROL(EawrUiButton, "IDC_INTERNET_CREATE_GAME_BUTTON")) {
+            button->set_disabled(false);
+            button->set_text(text(impl.host_button_caption));
+        }
+        begin_hosting();
+    }
+    if (load && page_ == Page::staging) open_checkpoint_list();
+}
+
 std::optional<std::string> EawrLanLobby::host_galactic_game() {
     Impl& impl = *impl_;
     if (!impl.galactic_backend) return std::string("No campaign content is loaded.");
+    const auto description = mounted_mod_description();
+    const auto encoded = description ? mods::encode_description(*description) : std::nullopt;
+    // The mod list is display only. When it cannot be encoded or the room codec would refuse it, the room still opens and the guest
+    // is told the host's list could not be checked (empty bytes mean "not known").
+    if (encoded && encoded->size() <= net::max_lobby_mod_description_bytes && net::valid_lobby_mod_description(*encoded))
+        impl.galactic_backend->set_mounted_mods(*encoded);
+    else impl.galactic_backend->set_mounted_mods({});
+    if (!impl.galactic_backend->content_ready()) return std::string("Campaign content is still loading.");
     if (const auto error = impl.galactic_backend->load_error()) return core::format_diagnostic(*error);
     const auto& campaigns = impl.galactic_backend->campaigns();
-    if (campaigns.empty()) return std::string("No multiplayer campaign is installed.");
+    if (campaigns.empty()) return std::string("No campaign is installed.");
+    // The room opens on the first row a player can hold; a mod may have no multiplayer campaign at all.
+    const auto* hostable = eawr::campaign::first_hostable_lobby_campaign(campaigns);
+    if (hostable == nullptr) return std::string("No installed campaign has a playable faction, so no campaign room can be hosted.");
     // The seed is the host's choice and travels with the options, so every peer derives the same galaxy from it.
     const std::uint64_t seed = net::draw_galactic_session_seed();
-    auto options = net::default_galactic_lobby_options(campaigns.front(), galactic_difficulty, seed, options_.input_delay);
+    auto options = net::default_galactic_lobby_options(*hostable, galactic_difficulty, seed, options_.input_delay);
     if (!options) return options.error().message;
     if (!match_->set_galactic_game(std::move(options).value())) return std::string("The campaign room could not be opened.");
     return std::nullopt;
@@ -75,6 +144,7 @@ void EawrLanLobby::refresh_galactic_staging() {
     const std::size_t dialog_rows = state.dialog_rows;
     // The galactic room is not built from a skirmish selection: the host's options opened it, edits go through the list.
     match_->pump_setup(skirmish::FixtureOptions{});
+    review_host_mods();
     const LanView view = match_->view();
     const bool online = impl.join_selection.source() == model::LobbySourceKind::online;
     refresh_staging_connections(impl, view, online);
@@ -89,10 +159,38 @@ void EawrLanLobby::refresh_galactic_staging() {
     refresh_galactic_roster(impl, state, resources, view, room, rows, dialog_rows);
     refresh_staging_start(impl, resources, view, room, rows, online);
     finish_staging_refresh(impl, view, room);
+    refresh_checkpoint_staging();
     if (!impl.galactic_seam_noted && match_->galactic_start()) {
         impl.galactic_seam_noted = true;
         note_chat(model::ChatKind::notice, "The campaign room is frozen for Start; the galactic game driver finishes the launch.");
     }
+}
+
+void EawrLanLobby::review_host_mods() {
+    const auto view = match_->view();
+    if (!view.mod_review_pending || impl_->box || !mounted_mods_ready()) return;
+    const auto host = mods::decode_description(view.host_mod_description);
+    const auto local = mounted_mod_description();
+    auto message = host && local ? viewer::mod_mismatch_message(*host, *local)
+        : std::string("The host's mod list could not be checked. Both players need the same mods.");
+    if (message.empty() && host && local && viewer::mod_comparison_incomplete(*host, *local))
+        message = "The mod lists could not be fully checked. Both players need the same mods.";
+    if (message.empty()) { match_->accept_mod_review(); return; }
+    message += "\nContinue joining?";
+    model::MessageBoxRequest request;
+    request.caption = "Mods differ";
+    request.lines[0] = message; request.literal_lines[0] = true;
+    request.buttons.push_back({"TEXT_BUTTON_YES", 1, false});
+    request.buttons.push_back({"TEXT_BUTTON_NO", 0, true});
+    Resources& resources = *resources_;
+    const MessageBoxContext context{&*resources.dialogs, &*resources.theme_model,
+        resources.text ? &*resources.text : nullptr, resources.theme, resources.theme_size};
+    auto* box = memnew(EawrMessageBox);
+    if (!box->open(*this, context, request)) { memdelete(box); return; }
+    box->set_scrollable_text(message);
+    impl_->box = box; impl_->mod_review_box = true;
+    layout_page();
+    box->connect("result_chosen", callable_mp(this, &EawrLanLobby::on_box_result));
 }
 
 // Retail's campaign staging draws the galaxy backdrop with a dot at each planet of the selected campaign where a
@@ -155,7 +253,7 @@ void EawrLanLobby::refresh_galactic_roster(Impl& impl, PageState& state, Resourc
                                            const std::optional<LanLobbyState>& room, std::vector<model::StagingRow>& rows,
                                            const std::size_t dialog_rows) {
     // Controls that only mean something for a skirmish map.
-    for (const char* hidden : {"IDC_SELECT_OFFICIAL_MAPS", "IDC_SELECT_CUSTOM_MAPS", "IDC_SELECT_OPTIONS"})
+    for (const char* hidden : {"IDC_SELECT_OFFICIAL_MAPS", "IDC_SELECT_CUSTOM_MAPS"})
         if (auto* control = EAWR_CONTROL(Control, hidden)) control->set_visible(false);
 
     std::optional<net::GalacticLobbyOptions> options;
@@ -165,24 +263,58 @@ void EawrLanLobby::refresh_galactic_roster(Impl& impl, PageState& state, Resourc
     impl.galactic_options = options;
     impl.galactic_campaign = options ? options->campaign : std::string{};
     const sim::galactic::MpLobbyCampaign* campaign = nullptr;
-    if (options && impl.galactic_backend) {
+    if (options && impl.galactic_backend && impl.galactic_backend->content_ready()) {
         for (const auto& candidate : impl.galactic_backend->campaigns())
             if (candidate.name == options->campaign) campaign = &candidate;
     }
+    const bool checkpoint = impl.checkpoint_candidate.has_value() || (impl.galactic_backend && impl.galactic_backend->checkpoint_view().has_value());
+    if (campaign) {
+        impl.coop_campaign_tab = viewer::room_campaign_tab(campaign->name, impl.tab_room_campaign,
+            campaign->single_player_rules, impl.coop_campaign_tab, checkpoint != impl.tab_room_checkpoint);
+        impl.tab_room_campaign = campaign->name;
+        impl.tab_room_checkpoint = checkpoint;
+    }
+    if (impl.host && impl.galactic_backend && impl.galactic_backend->content_ready()) {
+        bool has_multiplayer = false, has_coop = false;
+        for (const auto& entry : impl.galactic_backend->campaigns()) (entry.single_player_rules ? has_coop : has_multiplayer) = true;
+        const auto tabs = viewer::campaign_tabs(has_multiplayer, has_coop, impl.coop_campaign_tab);
+        impl.coop_campaign_tab = tabs.coop_selected;
+        impl.tab_multiplayer_shown = tabs.multiplayer_shown;
+        impl.tab_coop_shown = tabs.coop_shown;
+    }
     refresh_galactic_preview(impl, state, resources, campaign);
     const bool staging = room && room->snapshot.phase == net::LobbyPhase::staging;
-    const std::size_t shown_rows = options ? std::min(dialog_rows, options->rows.size()) : 0U;
-    for (std::size_t index = 0; index < shown_rows; ++index) {
+    if (auto* button = EAWR_CONTROL(EawrUiButton, "IDC_SELECT_OPTIONS")) {
+        button->set_visible(impl.host);
+        button->set_disabled(!impl.host || !staging || checkpoint || !options || state.options_panel == nullptr);
+    }
+    if (state.galactic_editing && (!staging || !options || state.galactic_editing->campaign != options->campaign))
+        close_galactic_options(false);
+    // The dialog may draw fewer rows than the campaign has factions: a player's row goes first, so it is never the one cut.
+    std::vector<model::GalacticRowFacts> facts;
+    if (options) {
+        for (std::size_t index = 0; index < options->rows.size(); ++index) {
+            const bool known = campaign != nullptr && index < campaign->factions.size();
+            facts.push_back({options->rows[index].human, known && campaign->factions[index].playable, known && campaign->factions[index].neutral});
+        }
+    }
+    impl.galactic_row_order = model::galactic_row_order(facts, dialog_rows);
+    const auto& order = impl.galactic_row_order;
+    const std::size_t shown_rows = order.size();
+    for (std::size_t slot = 0; slot < shown_rows; ++slot) {
+        const std::size_t index = order[slot]; // the campaign row drawn on dialog row `slot`
         const auto& source = options->rows[index];
-        model::StagingRow& row = rows[index];
+        model::StagingRow& row = rows[slot];
         const bool neutral = campaign != nullptr && index < campaign->factions.size() && campaign->factions[index].neutral;
         row.faction = source.faction;
         if (const auto side = net::galactic_lobby_side(*options, source.player)) row.team = *side - 1U;
         row.kind = neutral ? model::RowKind::none : source.human ? model::RowKind::open : model::RowKind::ai;
         row.accepted = row.kind == model::RowKind::ai;
+        if (row.kind == model::RowKind::ai) row.name = ai_seat_caption(options->difficulty);
         bool first = true;
         for (const auto& seat : room->snapshot.seats) {
             if (seat.selection.slot != source.player) continue;
+            if (first) row.name.clear();
             row.kind = model::RowKind::human;
             row.name += (first ? "" : ", ") + seat.selection.name;
             row.local = row.local || seat.peer == view.seat;
@@ -192,14 +324,14 @@ void EawrLanLobby::refresh_galactic_roster(Impl& impl, PageState& state, Resourc
     }
 
     // Refill the combos only when what they show changed: a refill closes an open drop-down.
-    std::string signature = std::string(impl.host ? "GH" : "GJ") + std::to_string(shown_rows) + (staging ? "s" : "-")
-        + (options ? options->campaign : std::string{}) + "|" + std::to_string(view.seat);
+    std::string signature = std::string(impl.host ? "GH" : "GJ") + (checkpoint ? "saved" : "new") + std::to_string(shown_rows) + (staging ? "s" : "-")
+        + (options ? options->campaign : std::string{}) + (impl.coop_campaign_tab ? "|coop" : "|mp") + "|" + std::to_string(view.seat);
     for (const model::StagingRow& row : rows)
         signature += "|" + std::to_string(static_cast<int>(row.kind)) + "," + row.name + "," + row.faction + ","
             + (row.team ? std::to_string(*row.team) : std::string("-")) + "," + (row.accepted ? "a" : "p") + (row.local ? "l" : "r");
     if (options) {
         signature += "#" + std::to_string(options->custom) + "," + std::to_string(options->credits) + "," + std::to_string(options->starting_tech)
-            + "," + std::to_string(options->maximum_tech) + "," + std::to_string(options->allow_heroes) + "," + std::to_string(options->auto_resolve);
+            + "," + std::to_string(options->maximum_tech) + "," + std::to_string(options->allow_heroes) + "," + std::to_string(options->auto_resolve) + "," + options->difficulty;
     }
     impl.rows = rows;
     impl.visible_rows = shown_rows;
@@ -207,11 +339,13 @@ void EawrLanLobby::refresh_galactic_roster(Impl& impl, PageState& state, Resourc
     impl.rows_signature = signature;
     state.loading = true;
     impl.row_states.clear();
-    for (std::size_t index = 0; index < dialog_rows; ++index) {
-        const model::StagingRow& row = rows[index];
-        const std::string suffix = std::to_string(index);
-        const bool shown = index < shown_rows && row.kind != model::RowKind::none;
-        const bool mine = shown && row.local && staging;
+    for (std::size_t slot = 0; slot < dialog_rows; ++slot) {
+        const model::StagingRow& row = rows[slot];
+        const std::string suffix = std::to_string(slot);
+        const bool shown = slot < shown_rows && row.kind != model::RowKind::none;
+        const std::size_t index = slot < shown_rows ? order[slot] : options ? options->rows.size() : 0U; // the campaign row on this slot
+        const bool has_row = slot < shown_rows;
+        const bool mine = shown && row.local && staging && !checkpoint;
         auto* name = EAWR_CONTROL(EawrUiCombo, "IDC_PLAYER_NAME_" + suffix);
         auto* faction = EAWR_CONTROL(EawrUiCombo, "IDC_PLAYER_FACTION_" + suffix);
         auto* colour = EAWR_CONTROL(EawrUiCombo, "IDC_PLAYER_COLOR_" + suffix);
@@ -226,21 +360,21 @@ void EawrLanLobby::refresh_galactic_roster(Impl& impl, PageState& state, Resourc
                 const std::string open_label = utf8(resolved(resources.text, "TEXT_OPEN_PLAYER")) + " - AI if empty";
                 name->add_item(open_row ? text(open_label) : resolved(resources.text, row_label(row)), 0);
                 name->select(0);
-                name->set_tooltip_text(text(row.name));
+                name->set_tooltip_text(text(row.kind == model::RowKind::ai ? std::string() : row.name));
                 name->set_disabled(true);
                 // The host switches a playable, unheld row between Open (a human may take it) and AI (the campaign difficulty).
-                if (impl.host && staging && (open_row || row.kind == model::RowKind::ai) && campaign && index < campaign->factions.size()
+                if (impl.host && staging && !checkpoint && (open_row || row.kind == model::RowKind::ai) && campaign && has_row && index < campaign->factions.size()
                     && campaign->factions[index].playable) {
                     name->clear();
                     name->add_item(text(open_label), galactic_row_open_id);
-                    name->add_item(resolved(resources.text, "TEXT_MEDIUM_AI_PLAYER"), galactic_row_ai_id);
+                    name->add_item(resolved(resources.text, ai_seat_caption(options->difficulty)), galactic_row_ai_id);
                     name->select(open_row ? 0 : 1);
                     name->set_disabled(false);
                 }
                 // The host removes a guest from a row with its kick entry, as in a skirmish room.
                 if (impl.host && room && row.kind == model::RowKind::human) {
                     for (const auto& seat : room->snapshot.seats) {
-                        if (index >= options->rows.size() || seat.selection.slot != options->rows[index].player || seat.peer == room->snapshot.host) continue;
+                        if (!has_row || seat.selection.slot != options->rows[index].player || seat.peer == room->snapshot.host) continue;
                         name->add_item(resolved(resources.text, "TEXT_KICK") + " " + text(seat.selection.name), static_cast<int>(10000 + seat.peer));
                         name->set_disabled(!staging);
                     }
@@ -253,12 +387,15 @@ void EawrLanLobby::refresh_galactic_roster(Impl& impl, PageState& state, Resourc
             if (shown) {
                 // A player's own row lists every faction a player may hold: picking one moves the seat to that row.
                 if (mine) {
-                    for (const auto& choice : options->rows) if (choice.human) faction->add_item(text(choice.faction));
+                    for (const auto& choice : viewer::galactic::faction_choices(*options, *resources.content->catalog,
+                            resources.text ? &*resources.text : nullptr))
+                        faction->add_item(text(choice.caption), static_cast<int>(choice.row));
                 } else {
-                    faction->add_item(text(row.faction));
+                    faction->add_item(text(resources.text ? model::faction_display_name(*resources.content->catalog,
+                        &*resources.text, row.faction) : row.faction), static_cast<int>(index));
                 }
                 for (int item = 0; item < faction->get_item_count(); ++item)
-                    if (utf8(faction->get_item_text(item)) == row.faction) faction->select(item);
+                    if (faction->get_item_id(item) == static_cast<int>(index)) faction->select(item);
                 faction->set_disabled(!mine);
             }
         }
@@ -273,7 +410,7 @@ void EawrLanLobby::refresh_galactic_roster(Impl& impl, PageState& state, Resourc
             team->set_disabled(true);
         }
         if (auto* kick = EAWR_CONTROL(EawrUiButton, "IDC_BUTTON_KICK_PLAYER" + suffix)) {
-            const bool remote = room && options && index < options->rows.size() && std::any_of(room->snapshot.seats.begin(), room->snapshot.seats.end(),
+            const bool remote = room && options && has_row && std::any_of(room->snapshot.seats.begin(), room->snapshot.seats.end(),
                 [&](const auto& seat) { return seat.selection.slot == options->rows[index].player && seat.peer != room->snapshot.host; });
             kick->set_visible(shown && impl.host && remote);
             kick->set_disabled(!staging);
@@ -299,21 +436,31 @@ void EawrLanLobby::refresh_galactic_roster(Impl& impl, PageState& state, Resourc
     if (auto* list = EAWR_CONTROL(EawrUiList, "IDC_STAGING_MAP_LIST")) {
         list->clear();
         impl.campaign_list.clear();
-        if (impl.host && impl.galactic_backend) {
-            int selected = 0;
+        if (impl.host && impl.galactic_backend && impl.galactic_backend->content_ready()) {
+            int selected = -1;
+            bool tab_has_campaigns = false;
             for (const auto& entry : impl.galactic_backend->campaigns()) {
+                const bool in_tab = viewer::campaign_in_tab(entry.single_player_rules, impl.coop_campaign_tab);
+                tab_has_campaigns = tab_has_campaigns || in_tab;
+                if (!in_tab && entry.name != impl.galactic_campaign) continue;
                 if (entry.name == impl.galactic_campaign) selected = static_cast<int>(impl.campaign_list.size());
                 impl.campaign_list.push_back(entry.name);
-                const String title = text(campaign_labels(resources.text, entry, impl.campaign_text_logged).title);
+                const String title = text(eawr::campaign::lobby_campaign_row_title(
+                    entry, campaign_labels(resources.text, entry, impl.campaign_text_logged).title));
                 list->add_item(title);
                 list->set_item_tooltip(list->get_item_count() - 1, title);
             }
-            if (!impl.campaign_list.empty()) list->select(selected);
-            for (int item = 0; item < list->get_item_count(); ++item) list->set_item_disabled(item, !staging);
+            if (selected >= 0) list->select(selected);
+            for (int item = 0; item < list->get_item_count(); ++item) list->set_item_disabled(item, !staging || checkpoint);
+            if (!tab_has_campaigns) {
+                list->add_item(text(impl.coop_campaign_tab ? "No co-op campaigns available." : "No multiplayer campaigns available."));
+                list->set_item_disabled(list->get_item_count() - 1, true);
+            }
         } else if (options) {
             std::vector<String> lines;
             lines.push_back(String("Campaign: ") + (campaign != nullptr
-                ? text(campaign_labels(resources.text, *campaign, impl.campaign_text_logged).title) : text(options->campaign)));
+                ? text(eawr::campaign::lobby_campaign_row_title(*campaign, campaign_labels(resources.text, *campaign, impl.campaign_text_logged).title))
+                : text(options->campaign)));
             lines.push_back(text("Difficulty: " + options->difficulty));
             if (options->custom) {
                 lines.push_back(resolved(resources.text, "TEXT_SKIRMISH_CREDITS") + ": " + text(std::to_string(options->credits)));
@@ -343,13 +490,14 @@ void EawrLanLobby::refresh_galactic_roster(Impl& impl, PageState& state, Resourc
 bool EawrLanLobby::galactic_item_selected(const int64_t index, const std::string& gadget) {
     Impl& impl = *impl_;
     if (state_->loading || !impl.galactic_options) return true;
+    if (impl.checkpoint_candidate || (impl.galactic_backend && impl.galactic_backend->checkpoint_view())) return true;
     const auto room = match_->lobby_state();
     if (!room || room->snapshot.phase != net::LobbyPhase::staging) return true;
     const auto local = std::find_if(room->snapshot.seats.begin(), room->snapshot.seats.end(),
         [&](const auto& seat) { return seat.peer == match_->view().seat; });
     if (gadget == "IDC_STAGING_MAP_LIST") {
         // The host picks a campaign: a fresh set of options, the room's seed and delay kept.
-        if (!impl.host || !impl.galactic_backend || index < 0 || static_cast<std::size_t>(index) >= impl.campaign_list.size()) return true;
+        if (!impl.host || !impl.galactic_backend || !impl.galactic_backend->content_ready() || index < 0 || static_cast<std::size_t>(index) >= impl.campaign_list.size()) return true;
         const auto& name = impl.campaign_list[static_cast<std::size_t>(index)];
         if (name == impl.galactic_options->campaign) return true;
         for (const auto& campaign : impl.galactic_backend->campaigns()) {
@@ -374,7 +522,9 @@ bool EawrLanLobby::galactic_item_selected(const int64_t index, const std::string
         const int id_value = combo->get_item_id(static_cast<int>(index));
         if (id_value == galactic_row_open_id || id_value == galactic_row_ai_id) {
             // Host-only: re-publish the options with this row's human flag toggled; every peer sees the same row.
-            const std::size_t row = static_cast<std::size_t>(std::strtoul(gadget.c_str() + split + 1, nullptr, 10));
+            const std::size_t slot = static_cast<std::size_t>(std::strtoul(gadget.c_str() + split + 1, nullptr, 10));
+            // The gadget is a dialog row; the campaign row on it is the one the roster drew there.
+            const std::size_t row = model::galactic_row_at(impl.galactic_row_order, slot).value_or(impl.galactic_options->rows.size());
             if (impl.host && row < impl.galactic_options->rows.size()
                 && impl.galactic_options->rows[row].human != (id_value == galactic_row_open_id)) {
                 auto edited = *impl.galactic_options;
@@ -390,12 +540,12 @@ bool EawrLanLobby::galactic_item_selected(const int64_t index, const std::string
         return true;
     }
     if (field == "IDC_PLAYER_FACTION" && local != room->snapshot.seats.end()) {
-        const std::string wanted = utf8(combo->get_item_text(static_cast<int>(index)));
-        const auto row = std::find_if(impl.galactic_options->rows.begin(), impl.galactic_options->rows.end(),
-            [&](const auto& value) { return value.human && value.faction == wanted; });
-        if (row != impl.galactic_options->rows.end() && row->player != local->selection.slot) {
+        const auto wanted = combo->get_item_id(static_cast<int>(index));
+        const auto player = wanted < 0 ? std::nullopt : viewer::galactic::faction_choice_player(
+            *impl.galactic_options, static_cast<std::size_t>(wanted));
+        if (player && *player != local->selection.slot) {
             auto choice = local->selection;
-            choice.slot = row->player; // the lobby maps the faction and the side from the row
+            choice.slot = *player; // the lobby maps the faction and the side from the row
             if (!match_->lobby_select(std::move(choice))) {
                 if (const auto lobby = match_->lobby_state(); lobby && lobby->notice) note_chat(model::ChatKind::error, lobby->notice->message);
             }

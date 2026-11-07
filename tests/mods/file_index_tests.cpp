@@ -1,4 +1,5 @@
 #include "eawr/mods/file_index.hpp"
+#include "eawr/core/sha256.hpp"
 #include "eawr/mods/steam/text_formats.hpp"
 #include "eawr/vfs/vfs.hpp"
 #include <algorithm>
@@ -7,6 +8,7 @@
 #include <fstream>
 #include <iostream>
 #include <iterator>
+#include <string_view>
 #include <sstream>
 #include <stdexcept>
 
@@ -33,20 +35,99 @@ struct Fixture {
 void integer(std::string& bytes, std::uint32_t value, unsigned count) {
     for (unsigned i = 0; i < count; ++i) bytes.push_back(static_cast<char>((value >> (8 * i)) & 255u));
 }
-std::string archive(const std::string& path, const std::string& payload) {
+std::string archive_header(const std::string& path, const std::uint32_t size) {
     std::string bytes;
     integer(bytes, 1, 4); integer(bytes, 1, 4);
     integer(bytes, static_cast<std::uint32_t>(path.size()), 2); bytes += path;
     integer(bytes, 0x12345678u, 4); integer(bytes, 0, 4);
-    integer(bytes, static_cast<std::uint32_t>(payload.size()), 4);
+    integer(bytes, size, 4);
     integer(bytes, static_cast<std::uint32_t>(8 + 2 + path.size() + 20), 4);
     integer(bytes, 0, 4);
-    return bytes + payload;
+    return bytes;
 }
-const FileRow& row(const FileIndex& index, const std::string& path) {
+std::string archive(const std::string& path, const std::string& payload) {
+    return archive_header(path, static_cast<std::uint32_t>(payload.size())) + payload;
+}
+const FileRow& row(const FileIndex& index, const std::string_view path) {
     const auto found = std::find_if(index.rows.begin(), index.rows.end(), [&](const auto& value) { return value.path == path; });
     REQUIRE(found != index.rows.end());
     return *found;
+}
+
+// Build large fixtures a small piece at a time, so neither fixture construction
+// nor the VFS chunk seam needs storage proportional to the candidate size.
+void streaming_contract() {
+    Fixture fixture;
+    constexpr std::uint32_t size = 8 * 1024 * 1024 + 123;
+    constexpr std::size_t chunk_size = 16381; // Deliberately unaligned to SHA blocks.
+    const std::string piece(chunk_size, 'a');
+    fs::create_directories(fixture.root / "leaf/art");
+    fs::create_directories(fixture.root / "parent");
+    const auto write_large = [&](const fs::path& path, const std::string& header) {
+        std::ofstream output(path, std::ios::binary);
+        output << header;
+        for (std::uint32_t at = 0; at < size;) {
+            const auto count = std::min<std::size_t>(piece.size(), size - at);
+            output.write(piece.data(), static_cast<std::streamsize>(count));
+            at += static_cast<std::uint32_t>(count);
+        }
+        REQUIRE(output.good());
+    };
+    write_large(fixture.root / "leaf/art/large.bin", "");
+    write_large(fixture.root / "large.meg", archive_header("Data/Art/large.bin", size));
+    fixture.write("leaf/empty.bin", "");
+    fixture.write("parent/empty.bin", "");
+    const std::vector<eawr::vfs::MountSpec> mounts{
+        {"leaf", fixture.root / "leaf", "data", {}},
+        {"parent", fixture.root / "parent", "data", {{fixture.root / "large.meg", "large.meg", ""}}}};
+    auto filesystem = eawr::vfs::Vfs::mount(mounts);
+    REQUIRE(filesystem);
+    const std::vector<std::string> order{"leaf", "parent"};
+    const auto built = build_file_index(filesystem.value(), order, "streamed");
+    REQUIRE(built);
+    const auto& large = row(built.value(), "data/art/large.bin");
+    // Independent Python hashlib SHA-256 of exactly size repetitions of ASCII a.
+    constexpr std::string_view expected = "2d0a98bdb6952e9a9584d64b61e45569c96af91dd8512bc87d4f5959ac0eed8c";
+    REQUIRE(large.candidates.size() == 2 && large.identical());
+    REQUIRE(large.candidates[0].origin == "loose" && large.candidates[1].origin == "archive");
+    REQUIRE(*large.candidates[0].sha256 == expected && *large.candidates[1].sha256 == expected);
+    REQUIRE(built.value().stats.candidates_hashed == 4 && built.value().stats.bytes_hashed == 2ULL * size);
+    auto candidates = filesystem.value().candidates("data/art/large.bin");
+    REQUIRE(candidates);
+    std::vector<std::byte> buffer(chunk_size);
+    for (const auto& candidate : candidates.value()) {
+        const auto whole = filesystem.value().open(candidate);
+        REQUIRE(whole);
+        const auto old_hash = eawr::core::sha256_hex(std::span(
+            reinterpret_cast<const std::uint8_t*>(whole.value().data()), whole.value().size()));
+        std::uint64_t total = 0;
+        std::size_t callbacks = 0;
+        eawr::core::Sha256Hasher hash;
+        const auto read = filesystem.value().read_chunks(candidate, buffer, [&](std::span<const std::byte> bytes) {
+            REQUIRE(!bytes.empty() && bytes.size() <= buffer.size() && bytes.data() == buffer.data());
+            total += bytes.size();
+            ++callbacks;
+            hash.update(std::span(reinterpret_cast<const std::uint8_t*>(bytes.data()), bytes.size()));
+        });
+        REQUIRE(read && total == size && callbacks == (size + chunk_size - 1) / chunk_size);
+        REQUIRE(hash.hex_digest() == expected && hash.hex_digest() == old_hash);
+    }
+    const auto& empty_row = row(built.value(), "data/empty.bin");
+    REQUIRE(empty_row.candidates.size() == 2 && empty_row.identical());
+    REQUIRE(*empty_row.candidates[0].sha256 == eawr::core::sha256_hex({}));
+    bool called = false;
+    const auto consume = [&](std::span<const std::byte>) { called = true; };
+    const auto empty = filesystem.value().stat("data/empty.bin");
+    REQUIRE(empty && filesystem.value().read_chunks(empty.value(), buffer, consume) && !called);
+    REQUIRE(!filesystem.value().read_chunks(candidates.value()[0], {}, consume));
+    REQUIRE(!filesystem.value().read_chunks(candidates.value()[0], buffer, {}));
+    auto forged = candidates.value()[0];
+    ++forged.size;
+    REQUIRE(!filesystem.value().read_chunks(forged, buffer, consume) && !called);
+    // A source truncated after mounting must fail, including after partial delivery.
+    fs::resize_file(fixture.root / "large.meg", size / 2);
+    REQUIRE(!filesystem.value().read_chunks(candidates.value()[1], buffer, consume) && called);
+    REQUIRE(!build_file_index(filesystem.value(), order, "truncated"));
 }
 
 void model_contract() {
@@ -143,7 +224,7 @@ void model_contract() {
 }
 
 int main() {
-    try { model_contract(); }
+    try { model_contract(); streaming_contract(); }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
     return 0;
 }

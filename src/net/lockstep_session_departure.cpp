@@ -112,7 +112,7 @@ core::Result<void> LockstepSession::receive_departure(const Received& received, 
                 auto batch = decode_batch(bytes);
                 if (batch && batch.value().sender == target) {
                     const auto tick = batch.value().tick;
-                    if (tick < accepted_[target].size() ? accepted_[target][static_cast<std::size_t>(tick)] == core::sha256(bytes)
+                    if (tick >= initial_tick_ && tick - initial_tick_ < accepted_[target].size() ? accepted_[target][static_cast<std::size_t>(tick - initial_tick_)] == core::sha256(bytes)
                         : tick >= agreed_departures_.at(target).key.tick) return core::Result<void>::success();
                 }
             }
@@ -256,6 +256,7 @@ core::Result<void> LockstepSession::advance_departure() {
     if (!sealed_quit && !state.pair_loss && !continue_alone
         && (reason == DepartureReason::timeout || !received_survivor_vote))
         return core::Result<void>::failure(connection_loss(state.target, "Peer departure was not confirmed"));
+    if (continue_alone && !sealed_quit) recovery_split_ = true;
     const auto cursor = command_cursors_[state.target];
     if (cursor && *cursor == std::numeric_limits<std::uint64_t>::max())
         return refused<void>(departure_errors::agreement, "departure sequence exhausted");

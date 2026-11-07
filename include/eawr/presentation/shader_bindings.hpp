@@ -99,6 +99,14 @@ struct BindingLimits final {
     const assets::EffectView& effect, const assets::EffectProgram& program,
     BindingLimits limits = {});
 
+// S-14/S-21: the same numeric semantic/shape policy for parameter aliases and
+// parameters used only by states (which need not occur in a stage CTAB).
+// Caller has validated the numeric operand shape. Empty/material semantics
+// return no engine identity; unknown/incompatible
+// semantics refuse. This does not resolve aliases or qualify a skin input route.
+[[nodiscard]] core::Result<std::optional<EngineInput>> parameter_engine_input(
+    const assets::EffectView& effect, std::size_t parameter);
+
 enum class VertexInputPolicy { rigid, godot_pre_skinned, source_palette };
 enum class Interpolation { vertex_only, perspective, flat };
 enum class InterfaceValue { position, normal, color, texcoord, tangent, binormal, fog, point_size };

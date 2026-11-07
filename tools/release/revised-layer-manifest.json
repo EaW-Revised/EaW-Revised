@@ -1,0 +1,153 @@
+{
+  "schema": 1,
+  "files": {
+    "Data/Audio/SFX/Revised/empire/allunits_237411054_f0_fx.wav": {
+      "size": 57432,
+      "sha256": "b2ba07640b04db5bfdf0677d681165699b914cd71c422c055d5ba982848b6033"
+    },
+    "Data/Audio/SFX/Revised/empire/allunits_335092625_f0_fx.wav": {
+      "size": 58968,
+      "sha256": "611ed71da4207cfa174f07186bb2a1d104415210e14b22bb14c2722cac6898c8"
+    },
+    "Data/Audio/SFX/Revised/empire/allunits_485691825_f0_fx.wav": {
+      "size": 53848,
+      "sha256": "449511cd8351b8ca1fe248ee7293ed4e92585624051664fa750f3056c6b6941c"
+    },
+    "Data/Audio/SFX/Revised/empire/allunits_773276897_f0_fx.wav": {
+      "size": 56920,
+      "sha256": "6e744f7bc565d6e1680ce2aafea5134240a08d85170ecc46a6fc6894c4c7c7d6"
+    },
+    "Data/Audio/SFX/Revised/empire/allunits_789902493_f0_fx.wav": {
+      "size": 57432,
+      "sha256": "486ad6f819c79aa3e6eca03c872aaaf03378dc68a2776650938c61fd8962faaf"
+    },
+    "Data/Audio/SFX/Revised/empire/allunits_887746686_f0_fx.wav": {
+      "size": 59992,
+      "sha256": "f2a58446566e71d0ec0505636622579aa90b58f6f96fbd8f2637c1a0f665c837"
+    },
+    "Data/Audio/SFX/Revised/empire/allunits_991663997_f0_fx.wav": {
+      "size": 57944,
+      "sha256": "8c509fcba1a2d3d2262706ba3b69e6d4fe6dd065bdcc92fd420715b0c91d6e88"
+    },
+    "Data/Audio/SFX/Revised/empire/localunits_1004360290_f0_fx.wav": {
+      "size": 63576,
+      "sha256": "b9eb88b09f45b2e674b71d4f89fd457e6780f54a57586c980f6e8d49a8405c94"
+    },
+    "Data/Audio/SFX/Revised/empire/localunits_563099526_f0_fx.wav": {
+      "size": 63576,
+      "sha256": "0d89d21cef70d03771f031e81f94f5078872c9868a0143a09013fedaa11d9ab9"
+    },
+    "Data/Audio/SFX/Revised/empire/localunits_761212135_f0_fx.wav": {
+      "size": 52312,
+      "sha256": "d42f7c2dd21ffa833cd3f110671504ba6561f9cf80d041a03f6dd42b8e2ccedb"
+    },
+    "Data/Audio/SFX/Revised/empire/localunits_93330686_f0_fx.wav": {
+      "size": 62552,
+      "sha256": "405c07e13970986e1d01de7eae4eedc870339b4749b5431bff5b115e8a345621"
+    },
+    "Data/Audio/SFX/Revised/rebel/allunits_237411054_plain.wav": {
+      "size": 48172,
+      "sha256": "d31d4e45f5ed21d8e61587cbe9813ee0b1fe10825919d3df74d0e31c5cb709bb"
+    },
+    "Data/Audio/SFX/Revised/rebel/allunits_335092625_plain.wav": {
+      "size": 49708,
+      "sha256": "18143afe303a498440e3b8295dee28e0132f275b9b22b830aa839cc742c5efd5"
+    },
+    "Data/Audio/SFX/Revised/rebel/allunits_485691825_plain.wav": {
+      "size": 44588,
+      "sha256": "83e96ee3b338ee599e4edb8400db794995b0636eaecc2bb4e2fd97f0fc1db52b"
+    },
+    "Data/Audio/SFX/Revised/rebel/allunits_773276897_plain.wav": {
+      "size": 47660,
+      "sha256": "b85ad21315136d495139ea97a7e5c206ffa131a17b833bb7465666b82e39a400"
+    },
+    "Data/Audio/SFX/Revised/rebel/allunits_789902493_plain.wav": {
+      "size": 48172,
+      "sha256": "1f099988ca6a7aab7942821226c735e06716d56d333a0bd7fe9656b3a5597721"
+    },
+    "Data/Audio/SFX/Revised/rebel/allunits_887746686_plain.wav": {
+      "size": 50732,
+      "sha256": "eef1459a621d68988d24939d4f7834e65ab03e4ead83a08bda386935c7599ca7"
+    },
+    "Data/Audio/SFX/Revised/rebel/allunits_991663997_plain.wav": {
+      "size": 48684,
+      "sha256": "a29f90fc2c1aef5ca67c2ffc539c325965da158cc875ee0e954496fad17676ce"
+    },
+    "Data/Audio/SFX/Revised/rebel/localunits_1004360290_plain.wav": {
+      "size": 54316,
+      "sha256": "38617a10d2049289f79a1ff3c012a03684147a78298252984f661a42772282e5"
+    },
+    "Data/Audio/SFX/Revised/rebel/localunits_563099526_plain.wav": {
+      "size": 54316,
+      "sha256": "304d7baad40d8b19264c5362d4d7dfe44b1a38581953cdd27b863869eebdb30b"
+    },
+    "Data/Audio/SFX/Revised/rebel/localunits_761212135_plain.wav": {
+      "size": 43052,
+      "sha256": "bbe47d51c207655279e7fc7de429e64cf7cc2c914db0842c045dd28d94745687"
+    },
+    "Data/Audio/SFX/Revised/rebel/localunits_93330686_plain.wav": {
+      "size": 53292,
+      "sha256": "907fb6868e376494a95eee37c6dcde2c77ae58852be5c2023dafdb0156fae8ac"
+    },
+    "Data/Audio/SFX/Revised/underworld/allunits_237411054_f0_fx.wav": {
+      "size": 50924,
+      "sha256": "f883c62fdf4ecd2951af6a606d0cc3f0e5d96dedd0ebc1b4985f76665569d70e"
+    },
+    "Data/Audio/SFX/Revised/underworld/allunits_335092625_f0_fx.wav": {
+      "size": 52460,
+      "sha256": "143d3c7e2188869543b7c469a0542b8543f53213c538763a26efa209a51cb3dc"
+    },
+    "Data/Audio/SFX/Revised/underworld/allunits_485691825_f0_fx.wav": {
+      "size": 47340,
+      "sha256": "ad555d14b911d3b178359101e2c8587967e7b066e37c39457e2e717a2a57df5c"
+    },
+    "Data/Audio/SFX/Revised/underworld/allunits_773276897_f0_fx.wav": {
+      "size": 50412,
+      "sha256": "f6cd6da15dd52ae98d667a105b6912ac0f9bf5cccde3a650363c2877dbd7709e"
+    },
+    "Data/Audio/SFX/Revised/underworld/allunits_789902493_f0_fx.wav": {
+      "size": 50924,
+      "sha256": "08ac11f3ea88354294b130988dacad982dc3b124990b4e8babe9fdab2b915e92"
+    },
+    "Data/Audio/SFX/Revised/underworld/allunits_887746686_f0_fx.wav": {
+      "size": 53484,
+      "sha256": "8261c2637a3166fa328a5f2d97cb072aee0a297031d2528f77c3c423a8744f18"
+    },
+    "Data/Audio/SFX/Revised/underworld/allunits_991663997_f0_fx.wav": {
+      "size": 51436,
+      "sha256": "fcf27615f4e8223b7a7e5f1cd70d7a8f203111ea36fdd92938d8cf73882aff60"
+    },
+    "Data/Audio/SFX/Revised/underworld/localunits_1004360290_f0_fx.wav": {
+      "size": 57068,
+      "sha256": "8ff57fd2fd6c7d978b80cb020c6ee79e01fde82a5ba44fd2b6304b7733476ac5"
+    },
+    "Data/Audio/SFX/Revised/underworld/localunits_563099526_f0_fx.wav": {
+      "size": 57068,
+      "sha256": "410a42c6898186f199147d99121c047c0b1bc16813b3be639f11795bde0b405f"
+    },
+    "Data/Audio/SFX/Revised/underworld/localunits_761212135_f0_fx.wav": {
+      "size": 45804,
+      "sha256": "d46769b7780c0ef03581847cb5e3383f89fe20bbd7679935215cac9f4678380e"
+    },
+    "Data/Audio/SFX/Revised/underworld/localunits_93330686_f0_fx.wav": {
+      "size": 56044,
+      "sha256": "147a0be49f666bf1f0c4602fb6aefc8f48a5befecc7f0aeea50274a7d6b5eb86"
+    },
+    "Data/XML/RevisedSelectionSFX.xml": {
+      "size": 3476,
+      "sha256": "adcb7e3bc82647a4c7e825bd96398e252bc1aa5727e1aedecd79d3b9727990f1"
+    },
+    "Data/XML/SelectionControls.xml": {
+      "size": 1602,
+      "sha256": "ae295f67ad7dca3b96216e4c7722761886bf3b984c66e8acdda92fb752476306"
+    },
+    "Data/XML/SFXEventFilesAdditions.xml": {
+      "size": 115,
+      "sha256": "559517e304b8c1bf0969d690fb224ea423e7a245d8d85c64f573a4ef399ddef1"
+    },
+    "README.md": {
+      "size": 503,
+      "sha256": "af51c550309a5cdaad5e8aeb0fa65711846e442724dd22f4571809d08c269ab6"
+    }
+  }
+}

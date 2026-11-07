@@ -183,7 +183,7 @@ agree, including squadron craft, or the runner rejects the scenario.
 
 | Rule | Behaviour | Source |
 |---|---|---|
-| DG-40 | Script invulnerability blocks ordinary damage before shield absorption, energy drain, hull loss or hardpoint loss. Hardpoints retain their destroyability, health, collision meshes and targeting eligibility. Privileged Lua `Take_Damage` bypasses protection, as does the vehicle-thief category (outside this scenario runner). On a squadron, Lua applies protection to each member. | debug build; recorder staging; WR-33; S-40 |
+| DG-40 | Script invulnerability blocks ordinary damage before shield absorption, energy drain, hull loss or hardpoint loss. Hardpoints retain their destroyability, health, collision meshes and targeting eligibility. Privileged Lua `Take_Damage` bypasses protection, as does the vehicle-thief category (outside this scenario runner). On a squadron, Lua applies protection to each member. In a live tactical session the same effect comes from the per-unit flag that Lua `Make_Invulnerable` sets (TL-03 in foc-tactical-ai.md): the flag is checked next to the type flag, and a flagged unit also raises no retaliation. | debug build; recorder staging; WR-33; S-40 |
 
 | Rule | Behaviour | Source |
 |---|---|---|

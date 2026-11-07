@@ -1,4 +1,5 @@
 #include "foc_ai_fixtures.hpp"
+#include "eawr/sim/tactical/fighters.hpp"
 #include "eawr/skirmish/start.hpp"
 #include "eawr/platform/sim_workers.hpp"
 #include "eawr/script/numeric/q24_boundary.hpp"

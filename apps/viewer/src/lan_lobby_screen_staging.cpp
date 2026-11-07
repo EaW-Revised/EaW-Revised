@@ -35,7 +35,8 @@ void EawrLanLobby::fill_host_seats(const std::uint32_t requested_count) {
         for (std::uint32_t humans = 2; humans <= seat_limit; ++humans)
             seats->add_item(text(std::to_string(humans)), static_cast<int>(humans));
         if (seat_limit >= 2) {
-            const auto count = std::clamp(requested_count == 0 ? static_cast<std::uint32_t>(impl_->human_owners.size()) : requested_count, 2U, seat_limit);
+            const auto count = std::clamp(requested_count == 0 ? impl_->galactic_humans : requested_count, 2U, seat_limit);
+            impl_->galactic_humans = count;
             seats->select(static_cast<int>(count) - 2);
             impl_->human_owners.resize(count);
             std::iota(impl_->human_owners.begin(), impl_->human_owners.end(), 1U);
@@ -72,6 +73,21 @@ void EawrLanLobby::begin_hosting() {
         show_failure(std::string(model::online_join_notice(model::OnlineJoinStatus::not_configured)));
         return;
     }
+    // #5512: the campaign content loads on a worker thread. The Create button waits for it, so the UI thread keeps running.
+    if (impl.host_options.game_type == galactic_game_type && !impl.galactic_backend && !(resources_ && resources_->content)) {
+        show_failure("No campaign content is loaded.");
+        return;
+    }
+    if (impl.host_options.game_type == galactic_game_type && !prefetch_galactic_content()) {
+        impl.host_pending = true;
+        if (auto* create = EAWR_CONTROL(EawrUiButton, "IDC_INTERNET_CREATE_GAME_BUTTON")) {
+            if (impl.host_button_caption.empty()) impl.host_button_caption = utf8(create->get_text());
+            create->set_disabled(true);
+            create->set_text("Loading campaign content...");
+        }
+        return;
+    }
+    impl.host_pending = false;
     impl.host_options.game_name = *cleaned;
     // The room password is read here, handed to the source and kept only as long as the room is listed.
     const auto* password = EAWR_CONTROL(EawrUiEdit, "IDC_INTERNET_GAME_PASSWORD_EDIT");
@@ -135,11 +151,14 @@ void EawrLanLobby::open_staging(const bool host, const std::string& game, const 
     impl.offered.reset();
     impl.preview_path.clear();
     impl.rows_signature.clear();
+    impl.tab_room_campaign.clear();
+    impl.tab_room_checkpoint = false;
     impl.last_message.clear();
     impl.staging_chat = model::ChatLog();
     impl.room_chat_sequence = impl.room_revision = 0; impl.room_notice.clear();
     impl.online_connections.clear();
     impl.refused = false;
+    impl.mod_review_box = false;
     page_ = Page::staging;
     build_page(staging_dialog);
     PageState& state = *state_;
@@ -381,6 +400,14 @@ void EawrLanLobby::fill_map_list() {
 }
 
 void EawrLanLobby::leave_staging() {
+    ++impl_->checkpoint_request;
+    impl_->checkpoint_store.reset();
+    close_checkpoint_list();
+    impl_->checkpoint_list_note.clear();
+    if (impl_->galactic_backend) impl_->galactic_backend->clear_checkpoint();
+    impl_->checkpoint_candidate.reset(); impl_->checkpoint_bytes.reset();
+    impl_->checkpoint_bindings.clear(); impl_->checkpoint_problem.clear(); impl_->checkpoint_applied = false;
+    impl_->checkpoint_signature.clear();
     cancel_join();
     impl_->host_password.clear();
     if (match_) { match_->lobby_leave(); match_->cancel(); }

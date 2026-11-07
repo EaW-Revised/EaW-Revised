@@ -18,6 +18,9 @@ struct CampaignPlayerBinding {
     bool active{true};
 };
 enum class CampaignSetupMode { single_player, multiplayer };
+// Transport and campaign balance are independent: a networked campaign can use
+// authored single-player story, AI, heroes and victory rules.
+enum class CampaignRulesFlavour { single_player, multiplayer };
 struct CampaignCustomOptions {
     // Runtime gameplay values, after any UI display conversion. WGS-13 applies only the
     // faction's nonzero test here, not the magnitude used by the staging display.
@@ -35,6 +38,8 @@ struct CampaignSetupOptions {
     std::vector<sim::galactic::Seat> seats;
     std::vector<FleetTypeBinding> types; // explicit original-type identities, not catalog indices
     CampaignSetupMode mode{CampaignSetupMode::single_player}; // actual mode, not Is_Multiplayer menu metadata
+    // Omission follows transport for existing callers. The plan always resolves it.
+    std::optional<CampaignRulesFlavour> rules_flavour{};
     // Explicit base-income admission/difficulty policy. Missing means no fiscal
     // service, preserving setups until their faction/controller providers exist.
     // WGEP-03/16: caller sources eligibility and AI Credit_Multiplier; no default.
@@ -47,6 +52,10 @@ struct CampaignSetupOptions {
     // player and co-op admit them, a versus lobby keeps retail's refusal. The lobby host's choice (a later
     // wire field) arrives here.
     std::optional<sim::galactic::PausePolicy> pause_policy;
+    [[nodiscard]] CampaignRulesFlavour resolved_rules_flavour() const noexcept {
+        return rules_flavour.value_or(mode == CampaignSetupMode::multiplayer
+            ? CampaignRulesFlavour::multiplayer : CampaignRulesFlavour::single_player);
+    }
 };
 struct CampaignLocation {
     std::string original_type;
@@ -92,6 +101,7 @@ class CampaignSetupPlan final {
 public:
     [[nodiscard]] const sim::galactic::GalacticSetup& galaxy() const noexcept { return galaxy_; }
     [[nodiscard]] CampaignSetupMode mode() const noexcept { return mode_; }
+    [[nodiscard]] CampaignRulesFlavour rules_flavour() const noexcept { return rules_flavour_; }
     [[nodiscard]] std::span<const CampaignPlayerBinding> player_bindings() const noexcept { return player_bindings_; }
     [[nodiscard]] std::optional<sim::galactic::PlayerId> solo_reference_human() const noexcept { return solo_reference_human_; }
     [[nodiscard]] std::span<const sim::galactic::PlayerId> human_observers() const noexcept { return human_observers_; }
@@ -124,6 +134,7 @@ private:
         std::string_view, CampaignSetupOptions, std::string_view);
     sim::galactic::GalacticSetup galaxy_;
     CampaignSetupMode mode_{CampaignSetupMode::single_player};
+    CampaignRulesFlavour rules_flavour_{CampaignRulesFlavour::single_player};
     std::vector<CampaignPlayerBinding> player_bindings_;
     std::optional<sim::galactic::PlayerId> solo_reference_human_;
     std::vector<sim::galactic::PlayerId> human_observers_;

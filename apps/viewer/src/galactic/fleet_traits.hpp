@@ -2,6 +2,7 @@
 
 #include "eawr/sim/galactic/fleet_intelligence.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <map>
 #include <string>
@@ -30,6 +31,35 @@ template <class Art>
         traits.push_back(trait);
     }
     return traits;
+}
+
+// GPD-14: the published fleet-control traits classify live transport members.
+inline void apply_fleet_transport_traits(std::vector<sim::galactic::FleetDisplayType>& display,
+    const std::vector<sim::galactic::FleetTypeTraits>& types) {
+    for (auto& row : display) {
+        const auto found = std::lower_bound(types.begin(), types.end(), row.type,
+            [](const auto& type, const auto id) { return type.type < id; });
+        if (found != types.end() && found->type == row.type) row.transport = found->transport;
+    }
+}
+
+// The projection can disclose a local member without a display row. Resolve only
+// those already disclosed local representatives against the authoritative fleet type.
+inline void apply_local_transport_traits(std::vector<sim::galactic::ObservedFleet>& cards,
+    std::span<const sim::galactic::Fleet> fleets, const std::vector<sim::galactic::FleetTypeTraits>& types) {
+    std::map<sim::EntityId, sim::galactic::TypeId> local_members;
+    const auto local = std::find_if(cards.begin(), cards.end(), [](const auto& card) { return card.local; });
+    if (local == cards.end()) return;
+    for (const auto& fleet : fleets) if (fleet.owner == local->owner)
+        for (const auto& member : fleet.members) local_members.emplace(member.id, member.type);
+    for (auto& card : cards) if (card.local) for (auto& group : card.groups) {
+        if (!group.representative) continue;
+        const auto member = local_members.find(*group.representative);
+        if (member == local_members.end()) continue;
+        const auto type = std::lower_bound(types.begin(), types.end(), member->second,
+            [](const auto& row, const auto id) { return row.type < id; });
+        if (type != types.end() && type->type == member->second) group.transport = type->transport;
+    }
 }
 
 } // namespace eawr::viewer::galactic

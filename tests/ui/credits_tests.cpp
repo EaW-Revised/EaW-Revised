@@ -2,6 +2,7 @@
 // GameConstants.xml values, the CreditsText lines, the scroll positions, the fade bands and the end.
 
 #include "eawr/presentation/ui/credits.hpp"
+#include "eawr/data/xml.hpp"
 #include "ui_test_support.hpp"
 
 #include <array>

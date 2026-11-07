@@ -38,6 +38,26 @@ implemented names are explicitly excluded and registered by their adapters.
 Missing object methods use `register_missing_galactic_method` with the adapter's
 reserved handle kind. Faults stop and roll back the failing Lua transaction;
 they cannot silently substitute tactical-world results.
+
+## Runtime recovery coverage
+
+The static inventory remains an upper bound. The following galactic adapters
+have narrower, observable runtime coverage:
+
+| API | Runtime behavior | Remaining gap |
+|---|---|---|
+| `GlobalValue.Get` / `GlobalValue.Set` | Shared scalar registry across AI and story; unsupported table writes diagnose and preserve the prior value. | Cross-instance graph identity. |
+| `Budget.Flush_Category` | A per-plan budget wrapper, installed after `Base_Definitions`, stages the owning player's native category flush. WGA-24 zeros available category cash without a credit grant; a registered category with no ledger account is a no-op, while unknown names remain script errors. | Other budget methods remain separate work. |
+| `GiveDesireBonus` | Valid typed requests currently return nil and emit a runtime degradation LoadNote once per plan type. `BlockOnCommand(nil)` declines the unavailable operation, preserving the calling plan. No bonus is applied; invalid arguments remain script errors. | Timed goal bonus and blocking-result semantics (legacy EAWR-5494). This is an explicit capability stub, not a completed AI behavior binding. |
+| `Player.Enable_Advisor_Hints` | The story host accepts a registered player, mode string and boolean, warns that the presentation preference is unavailable, and returns no values. It preserves the story script. | Advisor preference presentation and invalid-mode vocabulary are unimplemented. |
+| `Get_Story_Plot` | In AI plan scripts: returns a plot object for a loaded sub-plot of the campaign's story (name as written, case-sensitive), or a warning and nil. Plot: `Activate`, `Suspend`, `Reset`, `Get_Event(name)` (script error when absent). Event: `Set_Event_Parameter`, `Set_Reward_Parameter` (0-based index, rounded), `Set_Reward_Type`, `Set_Dialog`, `Add_Dialog_Text`, `Clear_Dialog_Text`, `Is_Valid`. Requests are ordered plain-data commands (`foc.story_plot`) committed by the AI engine to the plot engine in command order (WST-56, WST-26); edits are checkpointed in an optional tail of the campaign owner state (absent when nothing was edited). | Story-scheduler scripts (sub-plot Lua) still fault by name. Extra dialog text is stored on the triggered record but not yet shown by the dialog presentation (legacy EAWR-5495).
+
+Retail evidence for the budget flush is WGA-24; story plot semantics are WST-56.
+Read-only debug-build inspection establishes that the desire API takes five
+arguments and returns a timed bonus block, and that advisor-hint control changes
+a per-player presentation toggle and returns no values. Neither the stub nor a
+retired plan proves why a simulation frame is slow: retirement prevents that
+plan's authored execution, while a timing claim requires a phase measurement.
 GC-only infrastructure member extensions retain the protected built-in call
 and existing members, so missing members such as `ThreadValue.Get` can fault by
 name. Existing infrastructure calls/members and tactical namespace protection
@@ -158,3 +178,9 @@ GC scheduler save/load, script-barrier restore-and-continue and 1/2/4/8 worker
 combined-hash equality. Inventory tests
 check pinned bytes, helper scope, dynamic calls and ambiguous dependencies
 without requiring installed game data.
+
+The story host binds `FindPlanet(name)` to the current campaign planet identities. An absent name returns no values; additional arguments are ignored. A missing or non-string first argument reports an error and ends the script. The host uses ASCII case-insensitive matching and chooses the lowest ID for duplicate names; both choices remain unverified. The story host also binds `Find_First_Object(name)` to a live object of the named type or a named planet. The lookup reads the current completed publication, filters dead and pending-deletion actors, matches their current representation type and chooses the lowest identity. It returns nil when no match exists and interns the ordinary game-object handle when one exists. Mounted type names supply the lookup registry; there is no fixed list of heroes or mod objects. This is a conservative implementation from the story corpus call sites (WST-57): case folding, duplicate ordering, invalid-argument handling and the treatment of transformed/company objects remain unverified gaps. A query scans the published actor list only when Lua asks, with no added per-tick entity pass.
+
+Story player handles expose `Get_Difficulty()` per WTA-47. The current campaign AI selection supplies each AI player's level; other registered players answer `Normal`. Standard levels are returned as `Easy`, `Normal`, or `Hard`, including when setup stores uppercase keys. Rebuilt schedulers bind the same setup and include difficulty and the type-name registry in their content identity, so saved player handles retain their meaning.
+
+The plan catalog's own pacing query loads the mounted `PGTaskForce` library if the plan has not already provided `DifficultyBasedMinPause`. Existing plan-specific functions remain authoritative and library dependencies resolve through the mounted manifest. No native pause table is substituted. This repairs host-generated faults in unrelated intervention definitions (WGA-25/38/42); the precise retail initialization order remains an open gap. `_CustomScriptMessage` is a harmless debug sink in plan-definition VMs, as in the story host. Missing or faulty libraries still produce per-plan load diagnostics and do not abort the campaign.

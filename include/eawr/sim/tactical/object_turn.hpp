@@ -3,7 +3,7 @@
 #include "eawr/core/result.hpp"
 #include "eawr/sim/tactical/abilities.hpp"
 #include "eawr/sim/tactical/types.hpp"
-#include "eawr/sim/tactical/snapshot.hpp"
+#include "eawr/sim/tactical/instance.hpp"
 
 #include <array>
 #include "eawr/sim/world.hpp"

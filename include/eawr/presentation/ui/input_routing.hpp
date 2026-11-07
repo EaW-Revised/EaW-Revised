@@ -75,4 +75,17 @@ private:
 //   moved; handlers ignore releases they did not press.
 [[nodiscard]] bool world_accepts(InputClass input, InputFocus focus) noexcept;
 
+// #4571: what the map mode may do with the pointer position the host feeds ahead of the GUI
+// (position only, zero relative motion, so edge scrolling sees a pointer over the HUD). It
+// must not reach the camera in any state where the unhandled world path would not have
+// delivered the same motion: a modal dialog (world_accepts), the demo battle (attract), the
+// ready phase, or the live camera movie.
+struct PointerFeedState {
+    InputFocus focus;
+    bool attract{};       // the demo battle: the front end owns the input
+    bool ready_phase{};   // the ready phase (loading screen) owns presentation
+    bool camera_movie{};  // the live camera movie runs
+};
+[[nodiscard]] bool world_feeds_pointer_position(const PointerFeedState& state) noexcept;
+
 } // namespace eawr::presentation::ui

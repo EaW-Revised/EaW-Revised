@@ -4,6 +4,7 @@
 #include "eawr/units/galactic_types.hpp"
 
 #include <array>
+#include <memory>
 #include <cstdint>
 #include <functional>
 

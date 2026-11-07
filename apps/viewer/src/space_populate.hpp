@@ -2,9 +2,11 @@
 
 #include "idle_clips.hpp"
 #include "battle_scene.hpp"
+#include "compose_texture_cache.hpp"
+#include "load_job.hpp"
 
 #include "eawr/assets/map.hpp"
-#include "eawr/data/xml.hpp"
+#include "eawr/data/xml_fwd.hpp"
 #include "eawr/presentation/animation/animation.hpp"
 #include "eawr/presentation/animation/player_share.hpp"
 #include "eawr/presentation/godot/renderer.hpp"
@@ -14,7 +16,7 @@
 #include "eawr/scene/scene.hpp"
 #include "eawr/scene/space_population.hpp"
 #include "eawr/sim/snapshot.hpp"
-#include "eawr/vfs/vfs.hpp"
+#include "eawr/vfs/vfs_fwd.hpp"
 
 #include <array>
 #include <cstdint>
@@ -94,6 +96,20 @@ public:
         // BLD-10: the placements compose has uploaded, of all it decided on (done, total), for the
         // battle loading screen's bar. Called before each placement and once at the end.
         std::function<void(std::size_t, std::size_t)> progress;
+        // Bytes of decoded textures the initial compose keeps between surfaces (compose_texture_cache.hpp).
+        // Unbounded keeps every decoded texture until the compose returns.
+        std::uint64_t compose_texture_budget_bytes{ComposeTextureCache::unbounded_bytes};
+        // Initial compose only: drop the compose cache's model pins after the scene build and after each placement
+        // decision (VfsAssetCache::release_raw_pins), so the load's model budget can bound them. Off keeps every
+        // model pinned until the compose returns.
+        bool release_compose_pins{};
+        // Initial compose only: decode the hull base textures of the drawn ships ahead of the compose steps on reader
+        // threads (scene::TexturePrefetch); the steps take them in their own order and upload on this thread. Off = every
+        // texture is decoded by the step that asks for it. `texture_prefetch_solid_state`: the texture volumes reported
+        // no seek penalty (reader count rule); `texture_prefetch_readers` nonzero fixes the count (A/B, tests).
+        bool texture_prefetch{};
+        bool texture_prefetch_solid_state{};
+        unsigned texture_prefetch_readers{};
     };
 
     explicit SpacePopulation(Options options);
@@ -110,7 +126,8 @@ public:
     // to upload); failure() says why and everything uploaded is released.
     [[nodiscard]] bool compose(GodotRenderer& renderer, const assets::Map& map, const vfs::Vfs& filesystem,
                                const FixedCamera& camera, std::span<const std::uint32_t> environment_records,
-                               sim::AssetId first_asset, sim::EntityId first_entity);
+                               sim::AssetId first_asset, sim::EntityId first_entity,
+                               const EnqueueLoadStep& enqueue = {});
     // Append newly demanded slots without replacing any existing ship, piece or playback state.
     [[nodiscard]] bool append_live_ships(GodotRenderer& renderer, const vfs::Vfs& filesystem,
                                         std::span<const Options::PlacedShip> ships) override;
@@ -211,11 +228,16 @@ public:
     }
     // Composed asset references, including unshown reinforcement/death/projectile
     // slots. Loading consumers may prepare immutable data without posing owners.
+    [[nodiscard]] bool diagnostic_fighter(std::size_t ship) const noexcept {
+        return ship < diagnostic_fighters_.size() && diagnostic_fighters_[ship] != 0;
+    }
     [[nodiscard]] std::optional<LiveShipEmitterView> live_ship_emitter_assets(std::size_t ship) const;
     [[nodiscard]] std::optional<LiveShipEmitterView> live_ship_emitter_view(std::size_t ship) const;
     struct LiveBoneFrame final { sim::math::Mat3x4 transform; bool visible{}; };
     // PS-02: the same posed bone and model transform as the drawn hull.
-    [[nodiscard]] std::optional<LiveBoneFrame> live_bone_frame(sim::EntityId entity, std::uint32_t bone) const;
+    // `retiring` lists ships whose retirement is still owed this frame: they answer nullopt like retired ones.
+    [[nodiscard]] std::optional<LiveBoneFrame> live_bone_frame(sim::EntityId entity, std::uint32_t bone,
+        std::span<const std::size_t> retiring = {}) const;
     // #427: the entities of a live ship's own model surfaces (hull, engine and damage-decal
     // surfaces), without its hardpoints' attached models and its shield shell: what its
     // light scale reaches (BP-21).
@@ -295,10 +317,18 @@ public:
 
 private:
     struct ComposeContext;
+    struct ComposeOwner;
     struct ComposeBatch;
+    // Starts the batch's texture read-ahead and hints it the hull base textures of the drawn decisions, in decision order.
+    void start_texture_prefetch(ComposeContext& context, ComposeBatch& batch);
+    bool enqueue_compose_range(std::shared_ptr<ComposeOwner> owner, sim::AssetId first_asset_id,
+                               sim::EntityId first_entity_id, const EnqueueLoadStep& enqueue);
     struct SurfaceUpload;
     void prepare_compose_slots(bool appending);
     bool classify_arrivals(ComposeContext& context, std::size_t first_ship, std::size_t first_decision);
+    // classify_arrivals one ship at a time, then its closing pass (the attract load runs them as separate steps).
+    bool classify_arrival(ComposeContext& context, std::size_t ship_index);
+    bool finish_classify(ComposeContext& context, std::size_t first_decision);
     std::optional<std::size_t> bind_composed_idle(ComposeContext& context, ComposeBatch& batch,
         const scene::Placement& placement, const assets::Model& model);
     std::optional<std::size_t> bind_composed_clip(ComposeContext& context, const scene::Placement& placement,
@@ -306,11 +336,16 @@ private:
     const SurfaceUpload* upload_composed_surface(ComposeContext& context, ComposeBatch& batch, const std::string& path,
         std::uint32_t mesh_index, std::uint32_t submesh_index,
         const scene::LegacySelector& selector, const std::string& texture_path);
+    // Decodes the base texture the upload of this surface will ask for into the batch's texture cache, as its own load
+    // step ahead of the upload (the upload then finds it held). A no-op where the upload would not decode it.
+    void prewarm_composed_texture(ComposeContext& context, ComposeBatch& batch, const std::string& path,
+        std::uint32_t mesh_index, std::uint32_t submesh_index,
+        const scene::LegacySelector& selector, const std::string& texture_path);
     IdlePlacement composed_idle_placement(ComposeContext& context, const scene::Placement& placement, std::size_t clip);
     void compose_hull_pieces(ComposeContext& context, ComposeBatch& batch, scene::SpacePlacementDecision& decision,
         std::size_t decision_index, const scene::Placement& placement, const assets::Model* model,
         const std::optional<std::size_t>& live_ship, const std::optional<std::array<std::uint8_t, 3>>& colour,
-        bool cloak_ship);
+        bool cloak_ship, const EnqueueLoadStep* split = nullptr, std::shared_ptr<void> keepalive = {});
     void compose_shell_pieces(ComposeContext& context, ComposeBatch& batch, scene::SpacePlacementDecision& decision,
         const scene::Placement& placement, const assets::Model* model, const std::optional<std::size_t>& live_ship,
         bool cloak_ship);
@@ -334,7 +369,7 @@ private:
     sim::EntityId next_arrival_piece_{std::numeric_limits<sim::EntityId>::max() / 32U};
     [[nodiscard]] std::optional<SurfaceUpload> upload_surface(
         GodotRenderer& renderer, const vfs::Vfs& filesystem, scene::VfsAssetCache& cache,
-        std::map<std::string, assets::Texture>& textures, sim::AssetId& next_asset,
+        ComposeTextureCache& textures, sim::AssetId& next_asset,
         std::string_view model_path, std::uint32_t mesh_index, std::uint32_t submesh_index,
         const scene::LegacySelector& selector, const std::string& texture_path,
         const std::optional<std::array<std::uint8_t, 3>>& colour, const std::string& identity);
@@ -367,6 +402,7 @@ private:
         std::optional<std::array<std::uint8_t, 3>> colour; // immutable compose tint, restored on slot reuse
     };
     void rebuild_piece_index();
+    void append_piece_index(std::size_t first_piece, std::size_t first_clip);
     void refresh_instances(const particles::StepExecutor* workers = nullptr);
     [[nodiscard]] std::size_t hidden_decals(std::size_t decision) const;
 
@@ -422,7 +458,9 @@ private:
     std::vector<std::shared_ptr<const animation::Player>> clips_;
     std::vector<IdlePlacement> idle_placements_;
     // Caller-owned scratch; workers write disjoint rows and publication stays ordered.
+    std::vector<std::uint8_t> diagnostic_fighters_;
     struct PreparedIdle {
+        double fighter_sample_ms{}, fighter_palette_ms{};
         std::optional<animation::Pose> pose;
         GodotRenderer::PreparedSkinPose palette;
         SkinPoseWork work;
@@ -520,6 +558,7 @@ private:
     };
     std::map<std::size_t, HeldClip> held_clips_;
     struct PreparedLiveClip {
+        double fighter_sample_ms{}, fighter_palette_ms{};
         const animation::Player* player{};
         bool terminal{}, cached{}, hidden{}, consumed{};
         std::vector<std::span<const std::uint8_t>> geometry;

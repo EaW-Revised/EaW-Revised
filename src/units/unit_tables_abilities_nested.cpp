@@ -1,5 +1,7 @@
 #include "unit_tables_decode.hpp"
 
+#include <algorithm>
+
 namespace eawr::units::unit_tables_detail {
 
 std::string AbilityFields::operator()(const std::string_view tag) const {
@@ -291,6 +293,7 @@ bool Loader::load_special_ability(UnitType& unit, const std::string& name, const
         load_special_blast(unit, special, child_text);
         load_special_stealth(unit, special, child_text);
         load_special_leech(unit, special, child_text);
+        load_special_super_laser(unit, special, child_text);
         load_special_corrupt(unit, special, child_text);
         load_special_laser_defense(unit, special, child_text);
         load_special_redirect(unit, special, child_text);

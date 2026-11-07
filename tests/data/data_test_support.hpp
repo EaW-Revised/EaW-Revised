@@ -4,6 +4,7 @@
 // counter and the contract groups that run_contracts runs in order.
 
 #include "eawr/data/xml.hpp"
+#include "eawr/vfs/vfs.hpp"
 
 #include <string_view>
 

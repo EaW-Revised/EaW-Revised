@@ -23,10 +23,19 @@ map_mode_detail::MapParticleProvider::MapParticleProvider(Node3D& host, const vf
 MapMode::State::State(Options value) : options(std::move(value)) {}
 
 MapMode::State::~State() {
+        // L1.3: first of all, before any owner a particle lane job reads (units, effects, audio, the population)
+        // dies: join a job in flight, then stop and join the lane thread. Never a static: this is the only place the
+        // thread is joined on the normal path, while the engine and the extension are fully alive.
+        if (particle_lane) particle_lane->shutdown();
+        else if (particle_workers) particle_workers->shutdown();
+        shutdown_trace::mark("particle lane joined");
+        ready_load.reset();
         free_game_menu();
         shutdown_trace::mark("map mode teardown begins");
+        land_overlay.reset();
         if (land_population && renderer) {
             if (live_session) live_session->finish();
+            if (battle_effects) battle_effects->release();
             land_population->release(*renderer);
             land_population.reset();
         }

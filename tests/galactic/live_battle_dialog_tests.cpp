@@ -1,4 +1,5 @@
 #include "../support/result.hpp"
+#include "eawr/vfs/vfs.hpp"
 #include "galactic_support.hpp"
 #include "galactic/live_battle_dialog_view.hpp"
 #include "galactic/galactic_save_hints.hpp"
@@ -392,6 +393,13 @@ void publication() {
     pending->conflict.forces = {{30, 1000, 1, 10}, {31, 1001, 2, 11}};
     pending->arbitration.route = cp::ConflictRoute::pending_tactical;
     frame.pending_conflict = pending;
+    // #5508: the radar blip flash follows the pending alert's audience (involved local player, or multiplayer).
+    expect(view::pending_battle_radar_planet(frame, 1) == 2 && view::pending_battle_radar_planet(frame, 2) == 2,
+        "pending battle flashes its planet's radar blip for an involved local player");
+    expect(view::pending_battle_radar_planet(frame, 3) == 0, "a solo uninvolved player gets no radar flash");
+    frame.pending_conflict.reset();
+    expect(view::pending_battle_radar_planet(frame, 1) == 0, "no pending battle, no radar flash");
+    frame.pending_conflict = pending;
     view::LiveBattleDialogNames names;
     names.planet = [](auto) { return std::string("Kamino"); };
     names.side = [](auto owner) { view::BattleDialogSide side; side.name = std::to_string(owner); return side; };
@@ -472,6 +480,12 @@ void publication() {
     expect(timeout && std::get<gc::BattleChoice>(timeout->payload).tactical
         && !eawr::platform::pending_battle_timeout_order(frame, {2}),
         "timeout injects Begin preference for only the owner-admitted local seat");
+    alert.untimed = true; alert.elapsed_wall_ms = 10 * 60 * 1000;
+    pending->alert = cp::pending_battle_alert_view(pending->conflict, alert, true);
+    expect(pending->alert->untimed && !pending->alert->timeout_due && !eawr::platform::pending_battle_timeout_order(frame, {1}),
+        "co-op owner deviation: an untimed prompt never reports a due timeout, however long it waits");
+    alert.untimed = false; alert.elapsed_wall_ms = 15001;
+    pending->alert = cp::pending_battle_alert_view(pending->conflict, alert, true);
     frame.auto_resolve_progress.reset();
     alert.tutorial_forced = true;
     pending->alert = cp::pending_battle_alert_view(pending->conflict, alert, true);
@@ -544,6 +558,23 @@ void publication() {
         && progress_observer.sides[0].combatants.empty() && progress_observer.sides[1].combatants.empty()
         && observer_names == 0 && progress_observer.elapsed_seconds == 2 && progress_observer.display_seconds == 10,
         "WAR-66/67 multiplayer observer progress retains identical clocks without name lookup, body/list or withdraw permission");
+    // Owner deviation 2026-10-30: the multiplayer prompt counts down only when it has a deadline (humans against each
+    // other); a co-op prompt shows no countdown.
+    const auto saved_alert = pending->alert;
+    const auto saved_progress = frame.auto_resolve_progress;
+    pending->conflict.layer = cp::BattleLayer::space; frame.auto_resolve_progress.reset();
+    cp::PendingBattleAlertInputs countdown;
+    countdown.local = 1; countdown.active_mode = countdown.queue_tactical = countdown.multiplayer = countdown.authorized_issuer = true;
+    countdown.timeout_ms = 15000; countdown.elapsed_wall_ms = 5000;
+    pending->alert = cp::pending_battle_alert_view(pending->conflict, countdown, true);
+    const auto timed_prompt = view::live_battle_dialog_view(frame, {1}, 1, {}, names);
+    expect(timed_prompt.pending_multiplayer && timed_prompt.pending_countdown && *timed_prompt.pending_countdown == 10,
+        "a versus multiplayer prompt shows the retail countdown");
+    countdown.untimed = true;
+    pending->alert = cp::pending_battle_alert_view(pending->conflict, countdown, true);
+    const auto untimed_prompt = view::live_battle_dialog_view(frame, {1}, 1, {}, names);
+    expect(untimed_prompt.pending_multiplayer && !untimed_prompt.pending_countdown, "a co-op prompt shows no countdown");
+    pending->alert = saved_alert; frame.auto_resolve_progress = saved_progress;
     pending->conflict.layer = cp::BattleLayer::space; frame.latest = solo_snapshot;
     frame.pending_conflict.reset(); frame.auto_resolve_progress.reset();
     auto outcome = std::make_shared<eawr::platform::LiveAutoResolveOutcome>();

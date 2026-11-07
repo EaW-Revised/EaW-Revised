@@ -25,6 +25,19 @@ class GalacticHeroActionsRuntime(unittest.TestCase):
             self.assertEqual(menu["source"], "controlled-observer-snapshot")
             self.assertEqual((menu["actor"], menu["planet"]), (10, 101))
             self.assertTrue(capture.is_file())
+            # WGCH-188: the title and prices are shell bones without a mesh: their text must still show on screen.
+            labels = {row["name"]: row for row in menu["labels"]}
+            self.assertIn("h_title", labels)
+            self.assertIn("text_hero", labels)
+            for index in range(min(len(menu["options"]), menu["window"])):
+                self.assertTrue(labels["h_price_%02d" % index]["text"].startswith("$ "), labels)
+            for row in labels.values():
+                x, y, width, height = row["rect"]
+                self.assertGreater(width, 0, row)
+                self.assertGreaterEqual(x, 0, row)
+                self.assertGreaterEqual(y, 0, row)
+                self.assertLessEqual(x + width, 1280, row)
+                self.assertLessEqual(y + height, 720, row)
             for control in menu["controls"]:
                 x, y, width, height = control["hit_rect"]
                 self.assertGreater(width, 0, control)
@@ -92,27 +105,37 @@ func _process(_delta):
         self.assertEqual(result.returncode, 0, data.get("failure") or result.stdout + result.stderr)
         self.assertEqual(data["map_input"]["selected"], initial["map_input"]["selected"])
         self.assertEqual(data["map_input"]["selection_invalidations"], 0)
-        self.assertEqual(data["live_session"]["submitted_orders"], 1)
+        # TM-05: the setup's pause first resets fast forward to 1x; both clock orders count, as in the command bar case.
+        self.assertEqual(data["live_session"]["submitted_orders"], 2)
         self.assertLessEqual(data["hero_action_hud"]["rebuilds"], 2)
         return data["hero_action_hud"]
 
     def test_theft_prepared_choices_and_native_acceptance(self):
         menu = self.initial("theft")["hero_action_hud"]
         controls = {row["name"]: row for row in menu["controls"]}
-        self.assertTrue(controls["bm_0000"]["enabled"])
-        self.assertFalse(controls["bm_0001"]["enabled"])
+        self.assertTrue(controls["h_0000"]["enabled"])
+        self.assertFalse(controls["h_0001"]["enabled"])
         self.assertEqual([row["advance"] for row in menu["options"]], [False, False])
         self.assertEqual([row["affordable"] for row in menu["options"]], [True, False])
-        accepted = self.native("theft", ["world", "bm_0001", "bm_0000"])
+        accepted = self.native("theft", ["world", "h_0001", "h_0000"])
         self.assertEqual(accepted["choices_accepted"], 1)
         self.assertEqual(accepted["accepted_index"], 0)
         self.assertFalse(accepted["active"])
+
+    def test_long_theft_list_still_opens_on_the_twelve_buttons(self):
+        # WGCH-188: 13 offered entries against 12 buttons: the menu opens and shows what fits.
+        menu = self.initial("theft-many")["hero_action_hud"]
+        self.assertTrue(menu["active"])
+        self.assertEqual((menu["offered"], menu["window"]), (13, 12))
+        self.assertEqual(len(menu["options"]), 13)
+        shown = [row["name"] for row in menu["controls"] if row["name"].startswith("h_0")]
+        self.assertEqual(len(shown), 12)
 
     def test_single_theft_advance_and_native_close(self):
         menu = self.initial("theft-single")["hero_action_hud"]
         self.assertEqual(len(menu["options"]), 1)
         self.assertTrue(menu["options"][0]["advance"])
-        closed = self.native("theft-single", ["bm_close"])
+        closed = self.native("theft-single", ["h_close"])
         self.assertEqual(closed["closes"], 1)
         self.assertEqual(closed["choices_accepted"], 0)
         self.assertFalse(closed["active"])

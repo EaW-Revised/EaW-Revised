@@ -1,6 +1,7 @@
 // EAWR.exe: the quiet first-run launcher. A GUI-subsystem program (no console window, ever):
 // finds the player's Forces of Corruption install, starts the bundled Godot
 // runtime with no console window and reports problems in readable dialogs. See launcher_flow.cpp.
+#include "instance.hpp"
 #include "launcher_flow.hpp"
 #include "launcher_state.hpp"
 #include "win_platform.hpp"
@@ -57,6 +58,8 @@ const char* const kUsage =
     "  --allow-unknown-build   let the game start on a Forces of Corruption build EAWR has not verified\n"
     "  --render-thread MODE    safe or separate; overrides the saved Performance setting\n"
     "  --mods                  open EAWR Mods\n"
+    "  --instance <n|auto>     run as game instance n (1-8); auto takes the lowest free one from 2. Instance 1 is the normal layout\n"
+    "  --profile <id>          start this mod profile directly (no manager)\n"
     "  --safe-render-thread    start the game with the Safe render thread instead of the default Separate one\n"
     "  --no-dialogs            never open a window; errors go to stderr and the log\n"
     "  --godot-quit-after <n>  close the game after n frames (smoke tests)\n"
@@ -78,11 +81,26 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     if (options.help) {
         MessageBoxW(nullptr, wide_from_utf8(kUsage).c_str(), L"Empire at War Revised", MB_OK | MB_ICONINFORMATION | MB_TASKMODAL);
     } else {
-        Log log(options.user_data.empty() ? fs::path() : options.user_data / "launcher" / "launcher.log");
         const std::unique_ptr<RegistryReader> registry = make_windows_registry();
         const std::unique_ptr<ProcessRunner> runner = make_windows_process_runner();
         const std::unique_ptr<Ui> ui = options.no_dialogs ? make_headless_ui() : make_windows_ui();
-        code = run_launcher(options, *registry, *ui, *runner, log);
+        ClaimResult auto_claim;
+        if (options.instance_auto && options.error.empty() && !options.user_data.empty()) {
+            // The lowest free slot; run_launcher sees the claim as its own. Released when run_launcher returns.
+            options.instance = claim_next_free(options.user_data, current_process_identity(), kMaxInstanceId, &auto_claim);
+            if (!options.instance) {
+                ui->show_error("Empire at War Revised", "All " + std::to_string(kMaxInstanceId) + " game instances are already running.");
+                code = kExitError;
+            }
+        }
+        if (code == kExitOk) {
+            Log log(options.user_data.empty() ? fs::path()
+                                              : instance_launcher_dir(options.user_data, options.instance.value_or(1)) / "launcher.log");
+            if (options.instance_auto && auto_claim.status == ClaimStatus::claimed_after_stale) {
+                log.line("instance " + std::to_string(*options.instance) + ": reused a stale slot claim");
+            }
+            code = run_launcher(options, *registry, *ui, *runner, log);
+        }
     }
 
     if (SUCCEEDED(com)) CoUninitialize();

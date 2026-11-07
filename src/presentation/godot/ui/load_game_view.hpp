@@ -22,6 +22,7 @@
 #include <godot_cpp/classes/base_button.hpp>
 #include <godot_cpp/classes/canvas_layer.hpp>
 #include <godot_cpp/classes/input_event.hpp>
+#include <godot_cpp/classes/rich_text_label.hpp>
 
 #include <functional>
 #include <memory>
@@ -43,6 +44,8 @@ struct LoadGameContext final {
     std::shared_ptr<presentation::ui::SavedGameStore> saves;
     // Null keeps Load on a saved game off, with its stated reason.
     SavedGameLauncher launcher;
+    // Optional co-op save details, shown for the selected row.
+    std::function<std::string(std::string_view)> save_details;
 };
 
 class EawrLoadGameScreen final : public godot::CanvasLayer {
@@ -98,6 +101,8 @@ private:
     LoadGameContext context_;
     BuiltDialog built_;
     EawrUiModalLayer* modal_{};
+    godot::RichTextLabel* details_{};
+    double details_elapsed_{};
     EawrMessageBox* box_{};
     int64_t box_id_{};
     std::string failure_;

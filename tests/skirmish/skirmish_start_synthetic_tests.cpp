@@ -517,6 +517,62 @@ void synthetic_start() {
             return files ? skirmish::read_data_identity(files.value())
                 : eawr::core::Result<skirmish::DataIdentity>::failure(files.error());
         };
+        // A presentation-only built-in layer must not alter the effective identity;
+        // ordinary Revised XML and user-mod winners still do.
+        const auto revised = directory / "revised";
+        const auto mod = directory / "mod";
+        std::filesystem::create_directories(revised / "xml");
+        std::filesystem::create_directories(mod / "xml");
+        std::ofstream(directory / "xml/SelectionControls.xml") << "stock";
+        std::ofstream(revised / "xml/SelectionControls.xml") << "presentation";
+        const eawr::vfs::MountSpec revised_mount{.layer_id = std::string(eawr::vfs::revised_layer_id),
+            .data_root = revised, .loose_logical_prefix = "data", .active_archives = {}};
+        const eawr::vfs::MountSpec mod_mount{.layer_id = "mod", .data_root = mod,
+            .loose_logical_prefix = "data", .active_archives = {}};
+        const auto read_layers = [&](const std::vector<eawr::vfs::MountSpec>& specs) {
+            auto files = eawr::vfs::Vfs::mount(specs);
+            return files ? skirmish::read_data_identity(files.value())
+                : eawr::core::Result<skirmish::DataIdentity>::failure(files.error());
+        };
+        const auto without = read_layers({mount});
+        const auto with = read_layers({revised_mount, mount});
+        expect(without && with && without.value().ai_data_digest == with.value().ai_data_digest,
+            "presentation layer falls back to stock identity");
+        if (without && with) {
+            auto host = inputs;
+            host.script_manifest_digest = with.value().script_manifest_digest;
+            host.ai_data_digest = with.value().ai_data_digest;
+            auto joiner = inputs;
+            joiner.script_manifest_digest = without.value().script_manifest_digest;
+            joiner.ai_data_digest = without.value().ai_data_digest;
+            const auto host_identity = skirmish::match_identity(host);
+            const auto joiner_identity = skirmish::match_identity(joiner);
+            expect(!eawr::sim::describe_mismatch(eawr::sim::MatchAgreement{"same-build", host_identity},
+                eawr::sim::MatchAgreement{"same-build", joiner_identity}), "layer on and off agree at join");
+            expect(host_identity.sha256 == joiner_identity.sha256, "simulation identity remains equal");
+            auto host_setup = recorded_setup;
+            auto joiner_setup = recorded_setup;
+            host_setup.match_identity = host_identity;
+            joiner_setup.match_identity = joiner_identity;
+            auto host_session = tactical::TacticalSession::create(host_setup);
+            auto joiner_session = tactical::TacticalSession::create(joiner_setup);
+            expect(host_session && joiner_session, "layer on and off sessions start");
+            if (host_session && joiner_session) for (int tick = 0; tick < 8; ++tick) {
+                const auto a = host_session.value().step(eawr::sim::InlineExecutor{});
+                const auto b = joiner_session.value().step(eawr::sim::InlineExecutor{});
+                expect(a && b && a.value().state_sha256 == b.value().state_sha256,
+                    "layer on and off sessions have equal simulation digests");
+            }
+        }
+        std::ofstream(revised / "xml/other.xml") << "simulation";
+        const auto extra = read_layers({revised_mount, mount});
+        expect(without && extra && without.value().ai_data_digest != extra.value().ai_data_digest,
+            "other Revised XML remains in identity");
+        std::filesystem::remove(revised / "xml/other.xml");
+        std::ofstream(mod / "xml/SelectionControls.xml") << "mod";
+        const auto override_result = read_layers({mod_mount, revised_mount, mount});
+        expect(without && override_result && without.value().ai_data_digest != override_result.value().ai_data_digest,
+            "user mod winner remains in identity");
         const auto base = read();
         write("scripts/test.lua", "return 2");
         const auto script = read();
@@ -818,6 +874,23 @@ void synthetic_start() {
         && dense_rules.value()->dense_circles.front().centre == Vec3{whole(400), whole(200), Fixed{}}
         && dense_rules.value()->dense_circles.front().radius == whole(400),
         "V-22/WHZ-09: dense map circle uses raw offset/radius, ignoring scale and soft radius");
+    auto& collision_unit = fog_tables.units.front();
+    collision_unit.id = "SYNTH_QLU1MOI5PTT3";
+    collision_unit.table_order = 10;
+    collision_unit.footprint = fog_obstacle.footprint;
+    collision_unit.footprint.obstacle_radius = whole(100);
+    fog_tables.obstacles.back().id = "SYNTH_OIVRHNPFF4K4";
+    fog_tables.obstacles.back().table_order = 1;
+    dense_inputs.placements.front().type = collision_unit.id;
+    auto collision_fog = skirmish::fog_rules(dense_inputs);
+    expect(collision_fog && collision_fog.value() && collision_fog.value()->dense_circles.size() == 1
+        && collision_fog.value()->dense_circles.front().radius == whole(400),
+        "fog uses the earlier obstacle on a unit-obstacle CRC collision");
+    fog_tables.obstacles.back().table_order = 20;
+    collision_fog = skirmish::fog_rules(dense_inputs);
+    expect(collision_fog && collision_fog.value() && collision_fog.value()->dense_circles.size() == 1
+        && collision_fog.value()->dense_circles.front().radius == whole(100),
+        "fog uses the earlier unit on a unit-obstacle CRC collision");
     for (const auto* id : {"Station_A", "Cruiser", "Fighter_Squadron"}) {
         expect(std::any_of(sensors.begin(), sensors.end(),
                    [&](const tactical::SensorProfile& profile) { return profile.type_id == skirmish::type_id(id); }),

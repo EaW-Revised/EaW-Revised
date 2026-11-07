@@ -143,9 +143,13 @@ template <> struct Fields<::eawr::sim::galactic::ControlCap> {
     }
 };
 
+template <> struct Fields<::eawr::sim::galactic::GroundLayoutEntry> {
+    template <class A, class T> static void apply(A& a, T& v) { a(v.object, v.marker); }
+};
+
 template <> struct Fields<::eawr::sim::galactic::ControlPlanet> {
     template <class A, class T> static void apply(A& a, T& v) {
-        a(v.planet, v.type, v.surface_accessible, v.retains_residual, v.destroyed, v.ground_base, v.starbase, v.landed, v.production_owner, v.leaning_player, v.leaning, v.special_control, v.caps, v.transition_modifiers, v.capture_reward, v.built_structures);
+        a(v.planet, v.type, v.surface_accessible, v.retains_residual, v.destroyed, v.ground_base, v.starbase, v.landed, v.production_owner, v.leaning_player, v.leaning, v.special_control, v.caps, v.transition_modifiers, v.capture_reward, v.built_structures, v.ground_layout);
     }
 };
 
@@ -771,6 +775,12 @@ template <> struct Fields<::eawr::sim::math::Vec3> {
 template <> struct Fields<::eawr::sim::galactic::story::EventState> {
     template <class A, class T> static void apply(A& a, T& v) {
         a(v.name, v.triggered, v.active, v.disabled, v.start, v.clock, v.clock_last, v.tech_primed, v.tech_last, v.idle_stamped, v.idle_stamp);
+    }
+};
+
+template <> struct Fields<::eawr::sim::galactic::story::EventEdit> {
+    template <class A, class T> static void apply(A& a, T& v) {
+        a(v.subplot, v.event, v.event_params, v.reward_params, v.reward_type, v.dialog, v.dialog_text);
     }
 };
 

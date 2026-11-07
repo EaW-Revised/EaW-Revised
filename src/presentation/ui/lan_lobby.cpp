@@ -150,6 +150,11 @@ std::string_view online_hosting_notice(const OnlineHostingPhase phase) noexcept 
     return {};
 }
 
+std::string_view lobby_failure_caption(const bool online, const bool host) noexcept {
+    if (!online) return "TEXT_LAN_LOBBY_TITLE";
+    return host ? "TEXT_INTERNET_HOST_GAME_TITLE" : "TEXT_INTERNET_JOIN_GAME_TITLE";
+}
+
 std::string_view online_hosting_name(const OnlineHostingPhase phase) noexcept {
     switch (phase) {
     case OnlineHostingPhase::idle: return "idle";
@@ -332,9 +337,8 @@ LobbyRowText lobby_row_text(const LobbyGame& game) {
 }
 
 LobbyRowText online_row_text(const LobbyGame& game) {
-    LobbyRowText row = lobby_row_text(game);
-    row.type = game.player_names.empty() ? std::string{} : game.player_names.front();
-    return row;
+    // An online room shows its game type like a LAN row.
+    return lobby_row_text(game);
 }
 
 JoinVerdict check_join(const LobbyGame* selected, const std::string_view local_name, const bool password_supported) {
@@ -404,6 +408,35 @@ std::size_t staging_row_count(const std::span<const std::string> gadget_ids) {
     std::size_t count = 0;
     while (found.contains(count)) ++count;
     return count;
+}
+
+std::optional<std::size_t> galactic_row_at(const std::span<const std::size_t> order, const std::size_t slot) noexcept {
+    if (slot >= order.size()) return std::nullopt;
+    return order[slot];
+}
+
+std::optional<std::uint32_t> galactic_slot_player(const std::span<const std::size_t> order, const std::span<const std::uint32_t> players,
+                                                   const std::size_t slot) noexcept {
+    const auto row = galactic_row_at(order, slot);
+    if (!row || *row >= players.size()) return std::nullopt;
+    return players[*row];
+}
+
+std::vector<std::size_t> galactic_row_order(const std::span<const GalacticRowFacts> rows, const std::size_t capacity) {
+    std::vector<std::size_t> order;
+    if (rows.size() <= capacity) {
+        order.resize(rows.size());
+        for (std::size_t index = 0; index < order.size(); ++index) order[index] = index;
+        return order;
+    }
+    for (const auto group : {0, 1, 2}) {
+        for (std::size_t index = 0; index < rows.size() && order.size() < capacity; ++index) {
+            const GalacticRowFacts& row = rows[index];
+            if (row.neutral) continue;
+            if ((row.human ? 0 : row.playable ? 1 : 2) == group) order.push_back(index);
+        }
+    }
+    return order;
 }
 
 namespace {

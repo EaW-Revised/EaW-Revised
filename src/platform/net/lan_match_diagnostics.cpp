@@ -54,7 +54,17 @@ void TcpLanMatch::discard_recovery_commands() {
     }
 
 void TcpLanMatch::capture_diagnostic(const net::DesyncReport& report) {
-        if (diagnostic_bundle_ && diagnostic_bundle_->id == report.bundle.id) return;
+        if (diagnostic_bundle_ && diagnostic_bundle_->id == report.bundle.id) {
+            // The monitor rebuilds the bundle when a peer's evidence arrives; show the newest, complete folder.
+            if (report.bundle_location != view_.bundle_path || report.bundle.size_bytes != diagnostic_bundle_->size_bytes) {
+                diagnostic_bundle_ = report.bundle;
+                diagnostic_saved_ = !report.bundle_location.empty() && !report.bundle_error;
+                view_.bundle_path = report.bundle_location;
+                view_.diagnostic_saved = diagnostic_saved_;
+                if (report.bundle_error) view_.diagnostic_save_notice = "Diagnostic details could not be saved locally.";
+            }
+            return;
+        }
         diagnostics_->emit("desync", "hash-mismatch", diagnostics_->seat,
             "divergent_tick=" + std::to_string(report.first_divergent_tick));
         view_.desync_tick = report.first_divergent_tick;
@@ -135,7 +145,7 @@ void TcpLanMatch::input_progress(std::string_view reason) {
 void TcpLanMatch::set_failure(const core::Diagnostic& diagnostic, bool terminal) {
         if (last_logged_failure_ != diagnostic.code) {
             if (diagnostic.code == net::session_errors::stalled) input_progress(diagnostic.code);
-            diagnostics_->emit("failure", diagnostic.code, diagnostics_->seat);
+            diagnostics_->emit("failure", diagnostic.code, diagnostics_->seat, failure_log_detail(diagnostic));
             last_logged_failure_ = diagnostic.code;
         }
         const bool lost = lan_connection_loss(diagnostic.code);
@@ -186,6 +196,7 @@ void TcpLanMatch::set_failure(const core::Diagnostic& diagnostic, bool terminal)
                     || diagnostic.code == online_match_errors::no_room_code) view_.message = diagnostic.message;
                 else if (diagnostic.code == net::mesh_errors::left && !mesh_left_text_.empty()) view_.message = mesh_left_text_;
                 else if (const auto text = online_mesh_failure_text(diagnostic.code); !text.empty()) view_.message = text;
+                else if (const auto start_text = online_start_failure_text(diagnostic, reason, galactic_room()); !start_text.empty()) view_.message = start_text;
                 else if (diagnostic.code == "EAWR-NET-1730") view_.message = "The online service session reached its maximum length.";
                 else if (diagnostic.code == "EAWR-NET-1731") view_.message = "The online service session was not renewed in time.";
                 else if (const auto endpoint = online_endpoint_.lock(); endpoint && online_relay_allocation_ended(reason, endpoint->turn_credentials(), online_paired_at_, std::chrono::steady_clock::now())) {

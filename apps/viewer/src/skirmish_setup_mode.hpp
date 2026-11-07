@@ -29,6 +29,8 @@ public:
         std::filesystem::path game_root, mod_root, report_path, capture_path;
         std::string profile;
         bool cache_shaders{true};
+        bool live_front_end{};
+        bool front_end_fixture{};
     };
     explicit SkirmishSetupMode(Options options);
     ~SkirmishSetupMode();

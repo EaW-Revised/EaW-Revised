@@ -1,5 +1,7 @@
 #include "benchmark_internal.hpp"
 
+#include <algorithm>
+
 namespace sim_bench {
 namespace {
 

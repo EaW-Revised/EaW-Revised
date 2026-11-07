@@ -5,6 +5,8 @@
 // Environment: EAWR_FAKE_GODOT_RECORD  file that receives {"argv":[...],"cwd":...,"console_window":bool}
 //              EAWR_FAKE_GODOT_EXIT    exit code (default 0)
 //              EAWR_FAKE_GODOT_FAILURE text written as the viewer's {"status":"failed","failure":...} report
+//              EAWR_FAKE_GODOT_SLEEP_MS keep running this long before exiting (instance tests)
+// The record also holds the APPDATA and PATH it was started with (the per-instance environment block).
 #include "text_formats.hpp"
 #include "win_platform.hpp"
 
@@ -39,6 +41,8 @@ int wmain(int argc, wchar_t** argv) {
             json += json_quote(utf8_from_wide(argv[index]));
         }
         json += "],\"cwd\":" + json_quote(utf8_from_wide(cwd));
+        json += ",\"appdata\":" + json_quote(utf8_from_wide(environment(L"APPDATA")));
+        json += ",\"path\":" + json_quote(utf8_from_wide(environment(L"PATH")));
         json += std::string(",\"console_window\":") + (GetConsoleWindow() != nullptr ? "true" : "false") + "}\n";
         std::ofstream(fs::path(record), std::ios::binary | std::ios::trunc) << json;
     }
@@ -52,6 +56,8 @@ int wmain(int argc, wchar_t** argv) {
             }
         }
     }
+    const std::wstring sleep = environment(L"EAWR_FAKE_GODOT_SLEEP_MS");
+    if (!sleep.empty()) Sleep(static_cast<DWORD>(_wtoi(sleep.c_str())));
     const std::wstring code = environment(L"EAWR_FAKE_GODOT_EXIT");
     return code.empty() ? 0 : _wtoi(code.c_str());
 }

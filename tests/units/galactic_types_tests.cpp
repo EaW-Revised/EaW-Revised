@@ -1,4 +1,5 @@
 #include "../support/env.hpp"
+#include "eawr/data/xml.hpp"
 #include "../support/temp_dir.hpp"
 #include "../support/check.hpp"
 #include "eawr/units/galactic_types.hpp"
@@ -151,8 +152,8 @@ void member_timeline() {
     check("Base", true, true); // override does not mutate the shared load
 
     // RGC-180..187: a duplicate game-object name does not abort the member pass; the duplicate keeps its own slot. Roster
-    // references resolve to the same entry catalog lookups answer (the strongest layer's, then the last registered one;
-    // the debug build's first-registered rule is the follow-up #3741).
+    // references resolve to the same entry catalog lookups answer (the first registered one, as the debug
+    // build keeps it).
     write(root / "XML/GameObjectFiles.xml", "<Game_Object_Files><File>A.xml</File><File>Dup.xml</File></Game_Object_Files>");
     write(root / "XML/Dup.xml", R"xml(<Types>
       <GroundUnit Name="Twin"/>
@@ -168,7 +169,7 @@ void member_timeline() {
             && duplicated.value().catalog.member_flags("Twin") && duplicated.value().catalog.member_flags("Holder")
             && duplicated.value().catalog.member_flags("Selfie"),
             "a duplicate name and a variant naming itself as base keep the member timeline available for every type");
-        // Pinned (#3741): the roster reference marks the entry that lookups answer, here the last registered duplicate.
+        // Pinned (#3741): the roster reference marks the entry that lookups answer, here the first registered duplicate.
         expect(duplicated && duplicated.value().catalog.member_flags("Twin")
             && duplicated.value().catalog.member_flags("Twin").value().ground_company_member,
             "a roster reference marks the duplicate that catalog lookups answer");
@@ -202,8 +203,8 @@ void member_timeline() {
     expect(long_chain && !long_chain.value().catalog.member_flags("Type0"), "ten-pass limit refuses incomplete chains");
 }
 
-// A normal cross-layer override: the base layer defines Shared, a stronger layer redefines it in another file. The stronger
-// layer's roster must drive the member flags, never the base layer's (the duplicate rule is not a first-layer-wins rule).
+// A cross-layer override: the base layer defines Shared, a stronger layer redefines it in another file that its registry
+// lists after the base file. The stronger layer's roster drives the member flags, never the base layer's.
 void member_timeline_cross_layer() {
     const auto stamp = std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
     const auto base_root = std::filesystem::temp_directory_path() / ("eawr-member-base-" + stamp);

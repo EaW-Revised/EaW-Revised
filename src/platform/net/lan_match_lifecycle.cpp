@@ -1,4 +1,5 @@
 #include "lan_match_internal.hpp"
+#include <filesystem>
 #include "eawr/core/build_identity.hpp"
 
 namespace eawr::presentation::godot_backend::lan_detail {
@@ -77,6 +78,7 @@ void TcpLanMatch::configure_seats(std::vector<tactical::PlayerId> owners)  {
     }
 
 TcpLanMatch::~TcpLanMatch()  {
+        (void)stop_load_pump();
         release_gns_log();
         if (online_admission_) online_admission_->cancelled = true;
         retire_room(std::exchange(online_pending_, {}));
@@ -99,9 +101,19 @@ void TcpLanMatch::host(std::uint16_t port)  {
             options.staging_capacity = capacity_staging_;
         }
         // Loading is synchronous in Godot. Preserve the stream through a bounded load.
-        options.timeout = std::chrono::milliseconds(180'000);
+        options.timeout = link_timeout_; options.keepalive = std::min(options.keepalive, link_timeout_ / 10);
         auto opened = net::TcpTransport::host("0.0.0.0", port, options);
-        if (!opened) { set_failure(opened.error()); return; }
+        if (!opened) {
+            const bool listen_failed = opened.error().code == "EAWR-NET-0206";
+            set_failure(opened.error());
+            if (listen_failed) {
+                const std::lock_guard lock(mutex_);
+                view_.port = port;
+                view_.message = "Cannot host on port " + std::to_string(port)
+                    + ". Another game on this PC may already be hosting on it.";
+            }
+            return;
+        }
         io_->transport.tcp = std::make_unique<MatchTransport>(std::move(opened).value());
         if (map_port_) mapping_ = std::make_unique<net::PortMapping>(io_->transport.tcp->port());
         const std::lock_guard lock(mutex_);
@@ -127,7 +139,8 @@ void TcpLanMatch::join(std::string endpoint)  {
         const auto port = parsed.value().port;
         const auto remote_endpoint = parsed.value().host + ":" + std::to_string(port);
         endpoint = std::move(parsed).value().host;
-        net::TcpOptions options; options.build_identity = core::build_identity(); options.timeout = std::chrono::milliseconds(180'000);
+        net::TcpOptions options; options.build_identity = core::build_identity(); options.timeout = link_timeout_;
+        options.keepalive = std::min(options.keepalive, link_timeout_ / 10);
         options.peers = static_cast<std::uint32_t>(owners_.size());
         if (lobby_builder_) {
             options.max_frame_size = static_cast<std::uint32_t>(net::max_lobby_frame_bytes);
@@ -170,6 +183,7 @@ void TcpLanMatch::release_gns_log() {
     }
 
 void TcpLanMatch::cancel()  {
+        (void)stop_load_pump();
         release_gns_log();
         diagnostics_->view(view());
         if (view().phase != LanPhase::idle && view().phase != LanPhase::ended)
@@ -217,6 +231,7 @@ bool TcpLanMatch::request_abort()  {
     }
 
 void TcpLanMatch::complete_abort()  {
+        (void)stop_load_pump();
         auto terminal = view();
         if (terminal.phase == LanPhase::ended) {
             pump_close();

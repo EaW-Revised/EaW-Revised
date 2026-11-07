@@ -15,6 +15,7 @@
 #include "eawr/presentation/ui/time_controls.hpp"
 
 #include <algorithm>
+#include <filesystem> // include-guard: keep
 #include <atomic>
 #include <chrono>
 #include <deque>
@@ -165,13 +166,74 @@ public:
         credential_error = diagnostic("EAWR-NET-1026", "Reconnect credential receive frame limit exceeded.");
         return {};
     }
-    net::LinkState link(net::PeerIndex peer) const override { return tcp->link(peer); }
+    net::LinkState link(net::PeerIndex peer) const override {
+        const auto state = tcp->link(peer);
+        // Let the protocol consume already-received notices before observing
+        // the subsequent close on that same ordered stream.
+        if (state == net::LinkState::closed
+            && std::any_of(pending.begin(), pending.end(), [peer](const auto& frame) { return frame.from == peer; }))
+            return net::LinkState::open;
+        return state;
+    }
     net::PeerIndex self() const override { return tcp->self(); }
     std::uint32_t peer_count() const override { return tcp->peer_count(); }
     std::optional<net::LinkStats> link_stats(net::PeerIndex peer) const override { return tcp->link_stats(peer); }
     std::uint64_t edge_identity(net::PeerIndex peer) const override { return tcp ? tcp->edge_identity(peer) : 0; }
     void fail_repair(net::PeerIndex peer, unsigned code) override { if (tcp) tcp->fail_repair(peer, code); }
 };
+
+// Sole transport owner between the setup UI and the live driver. Application
+// frames stay in their original order for the next owner; no protocol is run here.
+class LoadTransportPump final {
+public:
+    explicit LoadTransportPump(BufferedTransport& transport) : transport_(transport) {
+        worker_ = std::jthread([this](std::stop_token stop) {
+        // A steady mesh peer sends one 63-byte report per second to the host.
+        // Eight peers over 30 minutes use 907,200 payload bytes; allow 64 MiB
+        // for incident bursts, queued setup and per-frame allocation overhead.
+        constexpr std::size_t byte_limit = 64U * 1024U * 1024U;
+        std::size_t budget_used{};
+        for (const auto& queued : transport_.pending) budget_used += sizeof(net::Received) + queued.frame.capacity();
+        while (!stop.stop_requested()) {
+            auto frame = transport_.tcp->poll();
+            if (frame) {
+                transport_.pending_bytes += frame->frame.size();
+                budget_used += sizeof(net::Received) + frame->frame.capacity();
+                transport_.pending.push_back(std::move(*frame));
+                // Keep the frame that crossed the limit, then fail the handoff.
+                if (budget_used > byte_limit) {
+                    failure_ = diagnostic("EAWR-NET-0600", "Too much network data arrived while the battle was loading.");
+                    return;
+                }
+                continue;
+            }
+            // A closed edge belongs to the next protocol owner: galactic
+            // sessions can continue after a departure. Keep the other edges
+            // serviced, and retain ordered notices for that owner.
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        });
+    }
+    ~LoadTransportPump() { stop(); }
+    void stop() { if (worker_.joinable()) { worker_.request_stop(); worker_.join(); } }
+    const std::optional<core::Diagnostic>& failure() const { return failure_; }
+private:
+    BufferedTransport& transport_;
+    std::optional<core::Diagnostic> failure_;
+    std::jthread worker_;
+};
+// Runs one blocking local derivation (a campaign session build) with the stream serviced, so the peers' keepalives
+// and acks keep flowing for as long as the build takes. The caller's thread must not touch the transport meanwhile;
+// the pump is joined before this returns. Frames that arrive stay queued, in order, for the lobby and setup owner.
+// A build failure wins over a pump failure; the pump's failure otherwise replaces a good result.
+template<class T, class Load> core::Result<T> while_pumping(BufferedTransport& transport, Load&& load) {
+    if (!transport.tcp) return load();
+    LoadTransportPump pump(transport);
+    auto result = load();
+    pump.stop();
+    if (result && pump.failure()) return core::Result<T>::failure(*pump.failure());
+    return result;
+}
 // This stable owner keeps the monitor's transport reference valid when a stopped
 // match hands its remaining I/O to a drain thread. No live-world callbacks escape.
 struct TerminalIo {
@@ -188,7 +250,8 @@ struct TerminalIo {
             auto frame = application_stream ? application_stream->poll() : transport.poll();
             if (!frame) break;
             if (monitor && !frame->frame.empty() &&
-                (frame->frame.front() == net::desync_combined_kind || frame->frame.front() == net::desync_rows_kind)) {
+                (frame->frame.front() == net::desync_combined_kind || frame->frame.front() == net::desync_rows_kind
+                    || frame->frame.front() == net::desync_evidence_kind)) {
                 auto received = monitor->receive(*frame);
                 if (!received) return received;
             }
@@ -196,7 +259,7 @@ struct TerminalIo {
         // The final summary can trigger a row exchange. Queue close only after
         // that exchange finishes, so every response precedes the close frame.
         const bool expired = deadline && now >= *deadline;
-        if (!closing && (!monitor || monitor->waiting_for_peers().empty() || expired)) {
+        if (!closing && (!monitor || (monitor->waiting_for_peers().empty() && !monitor->waiting_for_evidence()) || expired)) {
             transport.tcp->close(); closing = true;
         }
         // close() only queues the ordered marker. Flush it even on the final
@@ -580,9 +643,11 @@ public:
     bool lobby_kick(net::PeerIndex peer) override;
     void lobby_leave() override;
     std::optional<LanLobbyState> lobby_state() const override;
+    void accept_mod_review() override;
     void configure_galactic(std::shared_ptr<GalacticLobbyBackend> backend) override;
     bool set_galactic_game(net::GalacticLobbyOptions options) override;
     bool lobby_galactic_game(const net::GalacticLobbyOptions& options) override;
+    bool lobby_galactic_checkpoint(const net::GalacticLobbyOptions&, const std::vector<net::SetupSeat>&) override;
     bool galactic_room() const override;
     std::optional<GalacticLobbyStart> galactic_start() const override;
     std::shared_ptr<GalacticLaunch> take_galactic_launch() override;
@@ -611,10 +676,12 @@ private:
     std::optional<tactical::TacticalSetup> prepared_setup_;
     std::future<core::Result<tactical::TacticalSetup>> preparing_;
     std::uint64_t preparing_revision_{}, prepared_revision_{}, lobby_clock_{};
+    std::chrono::milliseconds link_timeout_{180'000}, setup_timeout_{180'000};
     bool ready_pending_{}, lobby_setup_accepted_{}, lobby_room_committed_{};
     std::uint64_t identity_retry_at_ms_{};
     std::set<net::PeerIndex> removed_peers_, closing_peers_;
     std::map<net::PeerIndex, std::uint64_t> known_edges_;
+    std::map<net::PeerIndex, std::uint64_t> mod_review_edges_;
     std::optional<net::LobbyNotice> lobby_notice_;
     std::optional<LanLobbyState> last_lobby_state_;
     // GCMP-07: the Galactic Conquest mode of the room (the host's first options; the Start seam once the room froze).
@@ -622,6 +689,7 @@ private:
     std::optional<net::GalacticLobbyOptions> galactic_host_game_;
     std::optional<GalacticLobbyStart> galactic_start_;
     std::optional<std::uint64_t> galactic_flush_started_;
+    std::uint64_t galactic_selection_epoch_{};
     core::Result<void> validate_galactic_lobby(const net::LobbySnapshot& state, bool starting) const;
     void start_galactic_lobby();
     void pump_galactic_start();
@@ -673,6 +741,7 @@ public:
     void configure_staging_capacity(bool enabled) override { if (!handed_over_) capacity_staging_ = enabled; }
     ~TcpLanMatch() override;
     void set_port_mapping(bool enabled) override;
+    void set_timeouts_for_test(std::chrono::milliseconds link, std::chrono::milliseconds setup) override { link_timeout_ = link; setup_timeout_ = setup; }
     void host(std::uint16_t port) override;
     void join_admitted(net::OnlineRoomAdmission admission) override;
     void join(std::string endpoint) override;
@@ -762,6 +831,9 @@ private:
     bool map_port_{};
     std::unique_ptr<net::PortMapping> mapping_;
     std::unique_ptr<TerminalIo> io_{std::make_unique<TerminalIo>()};
+    std::unique_ptr<LoadTransportPump> load_pump_;
+    void start_load_pump();
+    std::optional<core::Diagnostic> stop_load_pump();
     bool handed_over_{}, accepted_{}, abort_requested_{};
     net::SetupProviders deferred_providers_;
     std::optional<skirmish::FixtureOptions> pending_, offered_;

@@ -6,6 +6,7 @@
 #include "ui_test_support.hpp"
 #include "online_lobby_fixture.hpp"
 #include "../../apps/viewer/src/lobby_retry.hpp"
+#include "../../apps/viewer/src/coop_campaign_tab.hpp"
 
 #include <algorithm>
 #include <set>
@@ -247,6 +248,40 @@ void staging_rows() {
            "a map shows its capacity, at most the dialog's rows");
 }
 
+// A campaign with more factions than the dialog has rows (a mod's dialog draws four): the player's row must be drawn.
+void galactic_row_order() {
+    using Facts = ui::GalacticRowFacts;
+    // `count` factions in campaign order; `neutral` is a hidden row; `starter` is the one planned player.
+    const auto campaign = [](const std::size_t count, const std::size_t starter, const std::size_t neutral) {
+        std::vector<Facts> rows(count);
+        for (std::size_t index = 0; index < count; ++index) rows[index] = {index == starter, index == starter, index == neutral};
+        return rows;
+    };
+    using Order = std::vector<std::size_t>;
+    expect(ui::galactic_row_order(campaign(4, 0, 3), 4) == (Order{0, 1, 2, 3}),
+           "four factions on a four-row dialog keep the campaign order, the neutral row in its slot");
+    expect(ui::galactic_row_order(campaign(4, 2, 3), 9) == (Order{0, 1, 2, 3}), "a roomy dialog never reorders");
+    expect(ui::galactic_row_order(campaign(13, 0, 3), 4) == (Order{0, 1, 2, 4}),
+           "thirteen factions, starter first: the starter stays on top and the neutral row is skipped");
+    const auto late = ui::galactic_row_order(campaign(13, 7, 3), 4);
+    expect(late == (Order{7, 0, 1, 2}), "a starter at index 7 is drawn first, then the campaign's first AI rows");
+    expect(ui::galactic_row_order(campaign(13, 7, 3), 9) == (Order{7, 0, 1, 2, 4, 5, 6, 8, 9}),
+           "thirteen factions on a nine-row dialog: the player first, the neutral row never");
+    expect(ui::galactic_row_order(campaign(13, 12, 3), 1) == (Order{12}), "a one-row dialog draws the player");
+    auto two = campaign(13, 9, 3);
+    two[5].human = true; two[5].playable = true; two[8].playable = true;
+    expect(ui::galactic_row_order(two, 4) == (Order{5, 9, 8, 0}), "players, then rows a player could take, then AI rows");
+    // A dialog row's buttons act on the campaign row drawn there: slot 0 holds campaign row 7, whose player ID is 8.
+    std::vector<std::uint32_t> players;
+    for (std::uint32_t player = 1; player <= 13; ++player) players.push_back(player);
+    expect(ui::galactic_slot_player(late, players, 0) == 8U && ui::galactic_slot_player(late, players, 1) == 1U
+            && ui::galactic_slot_player(late, players, 3) == 3U,
+           "the kick button of a dialog row names the player of the campaign row drawn there, not row + 1");
+    expect(!ui::galactic_slot_player(late, players, 4) && !ui::galactic_row_at(late, 4) && ui::galactic_row_at(late, 0) == 7U,
+           "a dialog row past the drawn ones names no row");
+    expect(ui::galactic_row_order({}, 4).empty() && ui::galactic_row_order(campaign(13, 7, 3), 0).empty(), "no rows or no capacity draws nothing");
+}
+
 void start_checks() {
     using Check = ui::StartCheck;
     const auto two_teams = rows({human(0, "A", true, true), human(1, "B", false, true)});
@@ -450,11 +485,11 @@ void online_rows_and_paging() {
     using Failure = ui::OnlineFailure;
     const ui::LobbyGame locked = room("Night", "Rex", 3, 9, true);
     const ui::LobbyRowText row = ui::online_row_text(locked);
-    expect(row.name == "Night" && row.type == "Rex" && row.players == "3/9" && row.map == "Kessel" && row.ping == "?",
-           "an online row shows name, host, occupancy over capacity, map and an unknown ping");
+    expect(row.name == "Night" && row.type == "TEXT_TYPE_A" && row.players == "3/9" && row.map == "Kessel" && row.ping == "?",
+           "an online row shows name, game type, occupancy over capacity, map and an unknown ping");
     const ui::LobbyGame measured = game("A", "M", "T", 1, 2, 40);
-    expect(ui::online_row_text(measured).type.empty() && ui::online_row_text(measured).ping == "40ms",
-           "a room without a host name leaves the host cell empty and a measured ping still shows");
+    expect(ui::online_row_text(measured).type == "T" && ui::online_row_text(measured).ping == "40ms",
+           "a room without a host name still shows its game type and a measured ping");
 
     std::vector<ui::LobbyGame> rooms{room("Zulu", "bravo", 1, 2, false), room("Alpha", "Charlie", 1, 2, false),
                                      room("Mike", "alpha", 1, 2, false)};
@@ -521,6 +556,10 @@ void online_rows_and_paging() {
                && !ui::online_hosting_notice(ui::OnlineHostingPhase::retrying).empty()
                && ui::online_hosting_name(ui::OnlineHostingPhase::retrying) == "retrying",
            "the hosting states have their own lines and names");
+    expect(ui::lobby_failure_caption(false, true) == "TEXT_LAN_LOBBY_TITLE" && ui::lobby_failure_caption(false, false) == "TEXT_LAN_LOBBY_TITLE"
+               && ui::lobby_failure_caption(true, true) == "TEXT_INTERNET_HOST_GAME_TITLE"
+               && ui::lobby_failure_caption(true, false) == "TEXT_INTERNET_JOIN_GAME_TITLE",
+           "a failure dialog of an online game carries the host or join title, never the LAN lobby's");
 }
 
 void online_password_and_codes() {
@@ -579,6 +618,42 @@ void online_chat_state() {
 } // namespace
 
 int main() {
+    expect(eawr::viewer::campaign_in_tab(false, false) && !eawr::viewer::campaign_in_tab(true, false)
+        && eawr::viewer::campaign_in_tab(true, true) && !eawr::viewer::campaign_in_tab(false, true),
+        "campaign tabs separate multiplayer and single-player rules");
+    expect(eawr::viewer::room_campaign_tab("coop", "mp", true, false)
+        && !eawr::viewer::room_campaign_tab("mp", "coop", false, true)
+        && eawr::viewer::room_campaign_tab("mp", "mp", false, true)
+        && !eawr::viewer::room_campaign_tab("mp", "mp", false, true, true)
+        && !eawr::viewer::room_campaign_tab("mp", "", false, true),
+        "campaign changes and staging re-entry choose the room tab while browsing preserves the chosen tab");
+    {
+        using eawr::viewer::campaign_tabs;
+        const auto both = campaign_tabs(true, true, true);
+        expect(both.multiplayer_shown && both.coop_shown && both.coop_selected && !campaign_tabs(true, true, false).coop_selected,
+            "with both kinds of campaign both tabs show and the chosen one stays selected");
+        const auto no_multiplayer = campaign_tabs(false, true, false);
+        expect(!no_multiplayer.multiplayer_shown && no_multiplayer.coop_shown && no_multiplayer.coop_selected,
+            "a catalog with no multiplayer campaign leaves out the empty MULTIPLAYER tab and selects the co-op one");
+        const auto no_coop = campaign_tabs(true, false, true);
+        expect(no_coop.multiplayer_shown && !no_coop.coop_shown && !no_coop.coop_selected, "and the other way round");
+        const auto nothing = campaign_tabs(false, false, true);
+        expect(nothing.multiplayer_shown && nothing.coop_shown && nothing.coop_selected, "with nothing to list both tabs stay");
+    }
+    {
+        using eawr::viewer::campaign_tab_widths;
+        const auto even = campaign_tab_widths(400.0F, 120.0F, 80.0F);
+        expect(even.multiplayer == 200.0F && even.coop == 200.0F, "tabs that fit their half share the list width evenly");
+        const auto wide = campaign_tab_widths(200.0F, 130.0F, 40.0F);
+        expect(wide.multiplayer == 130.0F && wide.coop == 70.0F && wide.multiplayer + wide.coop == 200.0F,
+            "a caption wider than its half takes the width it needs from the other tab (not clipped)");
+        const auto wide_coop = campaign_tab_widths(200.0F, 40.0F, 130.0F);
+        expect(wide_coop.coop == 130.0F && wide_coop.multiplayer == 70.0F, "the same holds for the co-op caption");
+        const auto crowded = campaign_tab_widths(100.0F, 150.0F, 50.0F);
+        expect(crowded.multiplayer == 75.0F && crowded.coop == 25.0F, "captions too wide for the list share it in proportion");
+        const auto none = campaign_tab_widths(0.0F, 10.0F, 10.0F);
+        expect(none.multiplayer == 0.0F && none.coop == 0.0F && eawr::viewer::campaign_tab_gap > 0.0F, "no list width, no tabs; a gap sits above the list");
+    }
     acceptance_lobby_retries();
     list_and_sort();
     filtering();
@@ -588,6 +663,7 @@ int main() {
     host_options();
     human_team_choices();
     staging_rows();
+    galactic_row_order();
     start_checks();
     start_enabled();
     fixed_source();

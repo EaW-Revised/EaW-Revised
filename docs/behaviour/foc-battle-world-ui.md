@@ -388,7 +388,10 @@ by this path: AO-02 sets the texture directly through the ability art lookup. Th
   64 x 64 reticle texture is stretched over the rectangle (texture coordinates 0..1); the art
   mostly leaves a transparent margin, so the visible ring is a little smaller. Every frame the
   rectangle is sized from the enemy share; the friendly share (also 0.03) only sizes a
-  friendly ship's reticles when they appear (debug build). Initialization aligns both corners
+  friendly ship's reticles when they appear (debug build). EAWR deviation (legacy EAWR-5599): retail takes
+  the width from the screen width, so the reticle stretches on wide windows (1.75 wide:high at
+  21:9, 2.67 at 32:9); EAWR sizes both axes from the screen height (width = share x H x 16/9,
+  height = share x 4/3 x H), identical to retail at 16:9 and aspect-stable elsewhere. Initialization aligns both corners
   of the rectangle for either team to the pixel grid with a half-pixel offset (debug build);
   it does not floor the width and height separately. That initialization does not establish
   that the first visible retail frame is snapped. Retail hover stills and a sampled appearance

@@ -31,6 +31,11 @@ the Windows offload client when retention and import must pass; release packagin
 always requires its private symbols.
 
 The store indexes PDBs by GUID and age and binaries by timestamp and image size.
+When retained Release or RelWithDebInfo targets emit PDBs (`EAWR_DEBUG_SYMBOLS=ON`),
+their CodeView records contain only the PDB basename. `/PDBALTPATH` does not change
+the PDB's GUID or age, so the symbol store and `tools/symbolize.py` can still find
+matching symbols. With clang-cl and lld-link, paths are prefix-mapped at compile
+time only; the PDB contents have not been measured for remaining build paths.
 Portable manifests under `builds/<build identity>/` record exact hashes; they carry
 no build-machine paths. The coordinator store has no automatic expiry. Release
 packaging requires matching Windows PDBs and writes a private symbols archive there,
@@ -50,7 +55,7 @@ they choose to share one; neither the viewer nor the symbol tools upload them.
 
 ## Release status
 
-The last published release is v0.3.0 (2026-10-27); the current candidate is v0.3.1.
+The last published release is v0.3.1 (2026-10-28); the next candidate is v0.3.2.
 The published release includes the portable player download with its double-click launcher,
 a debug download, playable space skirmish, LAN and online multiplayer and a partially working Galactic Conquest. The galactic AI is on by default
 in live campaigns; `--eawr-galactic-ai off` switches it off. Keep a candidate local until the
@@ -95,7 +100,19 @@ publication gate. The pool route requires all of these conditions:
   compiler/dependency identities, logs and archive SHA-256 hashes in the release
   receipt. Run publish scans and existing packaging/runtime-pin checks. Keep relay
   and networking enabled in Windows Release and Debug viewers; isolate their outputs.
-- Fresh-user harness passes **9/9 on the player and 9/9 on the Debug archive** actually
+- Full replay76 on the final candidate executable: 19 fixtures x 1/2/4/8 workers (76 runs), run with
+  the default `--workers` (see [worker-offload.md](worker-offload.md#worker-subsets---workers)). The
+  receipt must pass this gate, and a release is not cut if it exits non-zero. Pass the top-level
+  `receipt.json` in the replay76 run's `--out` directory (not a group receipt inside it):
+
+  ```text
+  python tools/offload/remote_replays.py --check-full <receipt.json>
+  ```
+
+  Exit 0 only for a full, ok, `subset: false` receipt. A per-PR subset receipt (for example workers
+  1+8), a failed, incomplete, inconsistent or old-format receipt exits 1; an unreadable file exits 3.
+  Record the receipt path and its SHA-256 in the release receipt.
+- Fresh-user harness passes **10/10 on the player and 10/10 on the Debug archive** actually
   uploaded. Use fresh folders including spaces/non-ASCII text; check hashes,
   first/repeated launch, fonts in user data, unchanged package files, setup, AI combat,
   unit purchase, mine income and the LAN/Online selector.
@@ -127,8 +144,8 @@ The maintainer tags and pushes the reviewed public commit explicitly (never thro
 NO-PUSH remote):
 
 ```text
-git -C <public-clone> tag -s v0.3.1 <reviewed-public-commit> -m "EaW Revised v0.3.1"
-git -C <public-clone> push https://github.com/EaW-Revised/EaW-Revised.git refs/tags/v0.3.1
+git -C <public-clone> tag -s v0.3.2 <reviewed-public-commit> -m "EaW Revised v0.3.2"
+git -C <public-clone> push https://github.com/EaW-Revised/EaW-Revised.git refs/tags/v0.3.2
 ```
 
 The Windows publish scan must see the reviewed LF bytes of pinned text fixtures after
@@ -152,12 +169,13 @@ modders and testers. Every game download needs your own Forces of Corruption ins
 
 | File | Who needs it |
 | --- | --- |
-| `eaw-revised-<version>-windows-x64-player.zip` | **Everyone who wants to play on Windows.** Extract into a writable folder and double-click `EAWR.exe`. Includes the bundled Godot 4.7.2 engine, game, mod launcher (`EAWR Mods.exe`), `eawr_loadcheck.exe` to check a mod chain, and `EAWR (Safe render thread).cmd` as a startup fallback. |
+| `eaw-revised-<version>-windows-x64-player.zip` | **Everyone who wants to play on Windows.** Extract into a writable folder and double-click `EAWR.exe`. Includes the bundled Godot 4.7.2 engine, game, mod launcher (`EAWR Mods.exe`), `eawr_loadcheck.exe` to check a mod chain. |
 | `eaw-revised-<version>-windows-x64-debug.zip` | **Crash and bug reports.** The game with Debug checks, symbols and debug menu entries, plus the command-line tools in Debug mode. It is much slower: use the player zip to play or measure performance. Players in one match should use the same kind of build. See `DEBUG-BUILD.md` inside. |
 | `eaw-revised-<version>-windows-x64-tools.zip` | **Modders and testers.** Eleven command-line simulation, asset/XML/scene/unit/sky scan, script check, HUD movie preparation and benchmark programs. See the archive's `README.md` for each program. Windows may need the Microsoft Visual C++ runtime. |
-| `eaw-revised-<version>-windows-x64-viewer.zip` | **Testers with their own engine.** Bare game project for standard Godot 4.7.2 and Python 3.8+. Start with `play-demo.cmd`; Safe render thread only. The player zip already includes the game and engine. |
+| `eaw-revised-<version>-windows-x64-viewer.zip` | **Testers with their own engine.** Bare game project for standard Godot 4.7.2 and Python 3.8+. Developer/tester route on a stock Godot engine, Safe render thread (the stock engine cannot do Separate); not a supported way to play or to measure performance; use the player zip. Start with `play-demo.cmd`; Safe render thread only. The player zip already includes the game and engine. |
 | `eaw-revised-<version>-linux-x64-tools.zip` | **Linux modders and testers.** The same eleven command-line tools built for Linux x64. See `README.md` inside. |
-| `eaw-revised-<version>-linux-x64-viewer.zip` | **Linux testers with their own engine.** Bare game project for standard Godot 4.7.2 and Python 3.8+. Start with `sh ./play-demo.sh`; Safe render thread only. No bundled Linux player runtime. |
+| `eaw-revised-<version>-linux-x64-viewer.zip` | **Linux testers with their own engine.** Bare game project for standard Godot 4.7.2 and Python 3.8+. Developer/tester route on a stock Godot engine, Safe render thread (the stock engine cannot do Separate); not a supported way to play or to measure performance; use the player zip. Start with `sh ./play-demo.sh`; Safe render thread only. No bundled Linux player runtime. |
+| `update-manifest.json` | **Launcher updater.** Metadata and hashes for the Windows player download; keep it beside the other release assets. |
 | `SHA256SUMS.txt` | Checksums of the Windows player, tools and viewer zips. |
 | `SHA256SUMS-debug.txt` | Checksum of the Windows Debug zip. |
 | `SHA256SUMS-linux-x64.txt` | Checksums of the Linux x64 tools and viewer zips. |
@@ -180,8 +198,12 @@ macOS support remains experimental; these release archives do not provide a macO
 | `eaw-revised-<version>-windows-x64-debug.zip` | The same folder built in the Debug configuration, with PDBs, asserts and the debug tools (below) |
 | `eaw-revised-<version>-<platform>-viewer.zip` | The Godot viewer project with its built GDExtension, `play-demo.cmd` / `play-demo.sh`, and the Python launcher and font extractor (testers and developers with their own Godot) |
 | `SHA256SUMS.txt` | The SHA-256 of every archive |
+| `update-manifest.json` | Written beside the Windows player zip for the launcher's updater (schema 1): archive name, size and SHA-256, every file of the player folder with size, SHA-256 and component (`game`, `launcher`, `service`, `layers`), tag, version, channel (`stable`, or `preview` for a `-suffix` version; `--channel` overrides), build id (the packaged commit), `min_updater` 1 and `signature` fixed to the empty string (releases stay unsigned; integrity is HTTPS plus these hashes). Deterministic, validated against the client's rules before it is written. Its SHA-256 is listed in `SHA256SUMS.txt`. Upload it as a release asset like the zips; the packager never uploads. |
 
 ### The player folder
+
+Set `EAWR_REVISED_LAYER_DIR` or pass `--revised-layer <dir>` to provide the Revised layer source containing `Data/Audio` and `Data/XML`. It is copied to `Revised/Data` beside `EAWR.exe`; player and Debug packages require it; `--allow-missing-revised-layer` permits a preview without it and warns. `--public` requires the exact reviewed layer recorded in `tools/release/revised-layer-manifest.json`; missing, extra or changed files fail packaging. The advisor selection voices are included. The pool wrapper accepts `-RevisedLayer`, `-AllowMissingRevisedLayer`, and `-Public`. For a pool package produced with `-AllowMissingRevisedLayer`, run `python tools/release/add_revised_layer.py <extracted-player-folder> --revised-layer <dir> --zip <player.zip>` locally to add it and refresh the folder checksums and zip. Never commit layer content.
+
 
 `package_release.py --godot <Godot_v4.7.2-stable_win64.exe> --launcher <EAWR.exe>` also writes the player zip
 (Windows x64). These existing commands keep the normal layout and never fetch a manager pin.
@@ -203,9 +225,11 @@ with the project, Godot and godot-cpp licence texts, plus `LICENSE` and `THIRD_P
 and extension SHA-256); and `SHA256SUMS` (the SHA-256 of every other file in the folder). The release is
 not code-signed (owner decision) (legacy EAWR-3966): the player guide tells players about the SmartScreen warning and that
 Smart App Control or a managed-PC policy may block it. The packager refuses to write the zip if it would carry a font, `.meg`, `StarWarsG.exe`
-or other game file. The launcher starts `godot/Godot_v4.7.2-stable_win64.exe --path project -- <viewer args>`; the project selects the Separate render thread
-(`rendering/driver/threads/thread_model=2`). `EAWR (Safe render thread).cmd` at the root is the opt-out start file: it runs `EAWR.exe --safe-render-thread`,
-which adds Godot's `--render-thread safe`. The packager writes it (no other batch file ships in the player zip) and `SHA256SUMS` covers it.
+or other game file. `EAWR.exe` hashes that engine before starting it and compares the SHA-256 with `godot_sha256` in `runtime.json`; a
+mismatch or a missing hash logs `EAWR-ENGINE-UNPATCHED` and adds `--eawr-engine-unverified` to the viewer arguments
+(play is never blocked; see `apps/launcher/README.md`). The launcher starts `godot/Godot_v4.7.2-stable_win64.exe --path project -- <viewer args>`; the project selects the Separate render thread
+(`rendering/driver/threads/thread_model=2`). The Safe render thread is unsupported (owner decision 10-31): no start file for it ships and no batch file ships in the player zip.
+`EAWR.exe --safe-render-thread` remains only as an engine-level crash fallback.
 
 Nothing is written beside the program or the game (legacy EAWR-3963). The packager runs the pinned Godot once, headless,
 to generate the project's `.godot` metadata (`extension_list.cfg`, `global_script_class_cache.cfg`,
@@ -237,7 +261,7 @@ Debug configuration and their PDBs (`tools/`), plus `DEBUG-BUILD.md` ([the debug
 pool build uses: `cmake --preset windows-msvc -B out/build/windows-msvc-debug
 -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDebug -DEAWR_WARNINGS_AS_ERRORS=OFF -DBUILD_TESTING=OFF`, the tool targets in
 Debug, then `apps/viewer` with `--config Debug`. The static debug C runtime keeps the programs runnable on a PC without
-Visual Studio. The Debug archive is not performance-representative. Fresh-user 9/9 on BOTH the player
+Visual Studio. The Debug archive is not performance-representative. Fresh-user 10/10 on BOTH the player
 and Debug archives is a publication gate.
 
 Each archive carries `LICENSE`, `THIRD_PARTY_NOTICES.md` and `README.md`. Tools and viewer archives use
@@ -251,10 +275,10 @@ The fresh-user gate runs the extracted player or Debug archive the way a new pla
 APPDATA, a folder name with a space and a non-ASCII letter) on a GPU rig host, through the normal rig queue.
 `tools/release/fresh_user/Run-FreshUser.ps1 -Package <zip> -Kind player|debug -ExpectedSha256 <sha> -Machine <host>` stages
 the zip on the host, puts `fresh_user_player.py` into the worktree as the untracked suite
-`tests/presentation/renderer/test_release_player_fresh_user.py` and runs it with `Invoke-RigSuite.ps1`; nine cases must pass
+`tests/presentation/renderer/test_release_player_fresh_user.py` and runs it with `Invoke-RigSuite.ps1`; all collected cases must pass (currently ten)
 for each archive (hashes, first and repeated launch, fonts in user data, unchanged package folder, setup, AI combat, unit
 purchase, mine income, LAN/Online selector). `Run-FreshUser.ps1` builds a clean one-commit checkout of the release commit with
-the suite added (the rig suite preflight refuses a dirty tree), prints a PASS 9/9 verdict from the cases, the receipt and the
+the suite added (the rig suite preflight refuses a dirty tree), prints a PASS 10/10 verdict from the cases, the receipt and the
 host GPU evidence, and exits non-zero otherwise (`Invoke-RigSuite` itself reports "no GPU proof" for this suite because the
 packaged Godot is launched by the suite, not by the runner). The suite redirects the registered renderer helpers' `subprocess.run` and
 `subprocess.Popen` launches to the extracted archive's own Godot and project, and gives the Debug archive a longer
@@ -266,6 +290,28 @@ the pinned manager artifact, with `--expect-identity <the commit being packaged>
 binary that embeds another commit's build identity, so a warm pool tree cannot ship stale bytes; the staged copy has no `.git`, hence the explicit
 commit; `-ViewerTree` takes the viewer extension and its PDB from the slot that built the viewer, because a viewer zip carries no PDB); `Build-DebugOnHost.ps1` builds the Debug tools and the online-enabled Debug viewer on a
 different host in its own tree, holding one of the host's build slot locks. Both take every path as a parameter.
+
+## Owner test kits (not releases)
+
+An owner test kit is built like a release but is local, unsigned and never published. Two rules (owner, 2026-11-03/04):
+
+- **Engine:** the kit takes its engine only through `tools/release/kit_engine.py` (`stage_engine`: the pinned patched player and console exe from `tools/engine_pins.json`, fail closed on anything else). Run `python tools/release/kit_engine.py verify <kit folder or zip>` before handing the kit over. Never copy `godot/*` from an older kit.
+- **Layout:** the kit is the player layout, the same file list as a release player folder: `EAWR.exe`, `EAWR Mods.exe`, `eawr_loadcheck.exe`, `eawr_mods_service.exe`, `godot/`, `launcher/`, `launcher-pin.json`, `project/`, `Revised/`, `runtime.json`, `SHA256SUMS`, `README.md` (plus `LICENSE`, `THIRD_PARTY_NOTICES.md`, `licenses/`). It is built by `tools/release/package_release.py --with-mods-manager` through `tools/release/pool_host/Package-OnHost.ps1`, from a root-tools build of the same commit (EAWR, EAWR Mods, the mods service, the load check and the tools). The old dev layout (`start_test.py`, `demo.py`, `start-*.cmd`) is not an owner kit. Compare the finished folder's file list with the last accepted kit before reporting it ready.
+
+### Owner test kit (one job)
+
+One pool job builds and packages a kit; no hand re-run of `package_release.py`:
+
+```
+python tools/offload/windows_build.py --ref <sha> --viewer --viewer-relay-only --preset windows-msvc-ninja-relay --require-symbols --no-test --no-probe-build --no-werror-probe --host <host> --package-on-host cfg.json \
+  --target sim_headless --target sim_bench --target path_bench --target asset_scan --target asset_validate --target xml_scan --target scene_scan --target sky_scan --target unit_scan --target script_smoke --target hud_movie_prepare --target eawr_launcher --target eawr_mods_start --target eawr_mods_service --target eawr_loadcheck
+```
+
+`eawr_mods_service` and `eawr_loadcheck` are not in the default `ALL` target, so the explicit target list is part of the recipe (`--target` is accepted beside `--viewer` when a root preset is given). `--viewer-relay-only` skips the plain viewer build (the player ships only the relay viewer, which overwrites the plain one in `apps/viewer/project/bin` anyway; about an hour saved on a cold tree). The whole remote command must stay under 8000 characters (`tests/ci/test_windows_build.py` measures 7761 on build host).
+
+`cfg.json` (host paths): `version` (`<semver>[-<label>]`, label `[0-9A-Za-z.+-]`, e.g. `0.3.2m-f8bf25ed` or `0.1.0+4e2da633`), `godot` (the patched engine, checked by `tools/release/kit_engine.py`), `launcher_artifact` (the pinned manager zip), optional `viewer_tree`.
+
+When the job cannot link with symbols (no `--require-symbols`, or a viewer reused from a job without them), add `"symbols": false` to `cfg.json` (`-NoSymbols` on Package-OnHost, `--no-symbols` on `package_release.py`). The kit then keeps no private symbol archive and its `README.md` and `update-manifest.json` notes say `symbols: none (test kit)`. `"allow_missing_revised_layer": true` (`-AllowMissingRevisedLayer`) packages without the private Revised layer, which is not on the pool hosts; the owner-kit finish step adds it locally. `--public` refuses `--no-symbols`. Without it the packager checks every retained binary for a PDB identity first and lists all that lack one ("rebuild with `--require-symbols` (and `--viewer`)"). `Package-OnHost.ps1 -BuildDir` defaults to `out\build\windows-msvc-ninja-relay` and fails at once when that directory or an expected binary is missing.
 
 ## What a release does not contain
 

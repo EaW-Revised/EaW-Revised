@@ -58,6 +58,46 @@ void retained_campaign_root() {
     auto plan = cp::plan_campaign_setup(data, {}, authored.name, options);
     if (!plan) std::cerr << plan.error().message << '\n';
     expect(static_cast<bool>(plan), "retained live root plans"); if (!plan) return;
+    cp::ConflictRecord conflict; conflict.id = 77; conflict.planet = plan.value().locations().front().planet->id;
+    const auto solo_policy = eawr::platform::campaign_retreat_policy(plan.value(), data, conflict, {});
+    auto& rules = data.campaigns.front();
+    rules.autoresolve_exclusion_locations = {"aLpHa", "SpAcE"};
+    rules.is_story_campaign = true;
+    conflict.layer = cp::BattleLayer::space;
+    expect(eawr::platform::campaign_retreat_policy(plan.value(), data, conflict, {})->planet_excluded,
+        "story space exclusion matches without case sensitivity");
+    conflict.layer = cp::BattleLayer::land;
+    expect(!eawr::platform::campaign_retreat_policy(plan.value(), data, conflict, {})->planet_excluded,
+        "space exclusion does not exclude land");
+    rules.is_story_campaign = false;
+    conflict.layer = cp::BattleLayer::space;
+    expect(!eawr::platform::campaign_retreat_policy(plan.value(), data, conflict, {})->planet_excluded,
+        "non-story campaigns ignore the exclusion list");
+    rules.is_story_campaign = true; rules.autoresolve_exclusion_locations.clear();
+    expect(!eawr::platform::campaign_retreat_policy(plan.value(), data, conflict, {})->planet_excluded,
+        "an empty exclusion list permits both layers");
+    rules.autoresolve_exclusion_locations.clear(); rules.is_story_campaign = false; rules.is_autoresolve_allowed = false;
+    expect(eawr::platform::campaign_retreat_policy(plan.value(), data, conflict, {})->planet_excluded,
+        "Is_Autoresolve_Allowed=No still excludes the planet from the retreat solver");
+    rules.is_autoresolve_allowed.reset();
+    rules.is_story_campaign.reset();
+
+    auto network_options = options; network_options.mode = cp::CampaignSetupMode::multiplayer;
+    network_options.rules_flavour = cp::CampaignRulesFlavour::single_player;
+    const auto coop_plan = cp::plan_campaign_setup(data, {}, authored.name, network_options);
+    expect(bool(coop_plan), "networked SP-rules campaign plans");
+    if (coop_plan) {
+        const auto coop_policy = eawr::platform::campaign_retreat_policy(coop_plan.value(), data, conflict, {});
+        expect(solo_policy && coop_policy && *solo_policy == *coop_policy && !coop_policy->multiplayer,
+            "networked SP rules retain the solo retreat policy");
+    }
+    network_options.rules_flavour = cp::CampaignRulesFlavour::multiplayer;
+    const auto mp_plan = cp::plan_campaign_setup(data, {}, authored.name, network_options);
+    expect(bool(mp_plan), "multiplayer-rules campaign plans");
+    if (mp_plan) {
+        const auto mp_policy = eawr::platform::campaign_retreat_policy(mp_plan.value(), data, conflict, {});
+        expect(mp_policy && mp_policy->multiplayer, "multiplayer rules exclude the solver dialog");
+    }
     unsigned locations{}, assignments{};
     cp::CampaignSetupServices services;
     services.location = [&](const auto&) { ++locations; return eawr::core::Result<void>::success(); };
@@ -864,39 +904,56 @@ void tactical_summary_clock_hold() {
     }
 }
 
+// A queued pending-tactical conflict between seats 1 and 2 whose first two content requests are refused.
+// The service callbacks keep references to the members, so the fixture stays where it is constructed.
+struct PendingChoiceFixture {
+    galactic::GalacticSetup initial = setup();
+    std::shared_ptr<eawr::platform::CampaignServiceConfiguration> services =
+        std::make_shared<eawr::platform::CampaignServiceConfiguration>();
+    eawr::campaign::ConflictRecord entry;
+    unsigned content_attempts{};
+    explicit PendingChoiceFixture(const bool capability_refusal) {
+        namespace cp = eawr::campaign;
+        if (capability_refusal) services->tactical_capability = [](const auto&) {
+            eawr::core::Diagnostic refusal;
+            refusal.code = "fixture.space.capability";
+            refusal.message = "reachable ship has an unsupported rocket curve";
+            return eawr::core::Result<void>::failure(std::move(refusal));
+        };
+        services->configure = [this](auto& game) {
+            entry.id = game.galaxy().next_entity_id(); entry.planet = initial.planets.front().id;
+            entry.invader = 1; entry.defender = 2;
+            entry.tactical.content_identity = initial.content_identity;
+            entry.tactical.first_free_entity_id = entry.id + 1;
+            entry.tactical.players = {{1, 1, 1, 1}, {2, 2, 2, 1}};
+            entry.seats = {{{1}, 1}, {{2}, 2}};
+            game.set_conflict_service([](const auto&, const auto&, eawr::sim::EntityId) {
+                return eawr::core::Result<std::optional<cp::RecordedAdmission>>::success({});
+            }, [this](const auto&) {
+                if (++content_attempts <= 2) {
+                    eawr::core::Diagnostic refusal;
+                    refusal.message = "tactical content unavailable";
+                    return eawr::core::Result<eawr::sim::tactical::TacticalContent>::failure(refusal);
+                }
+                return eawr::core::Result<eawr::sim::tactical::TacticalContent>::success({});
+            }, {}, eawr::campaign::ScriptRequirement::none);
+            return game.queue_conflict(entry, {cp::ConflictRoute::pending_tactical, false, false});
+        };
+    }
+    PendingChoiceFixture(const PendingChoiceFixture&) = delete;
+    PendingChoiceFixture& operator=(const PendingChoiceFixture&) = delete;
+    [[nodiscard]] LiveGameSession::Options options() const {
+        LiveGameSession::Options value; value.workers = 2;
+        value.pacing = LiveGameSession::Pacing::driven; value.services = services;
+        return value;
+    }
+};
 void pending_choice_publication() {
     namespace cp = eawr::campaign;
-    const auto initial = setup();
-    auto services = std::make_shared<eawr::platform::CampaignServiceConfiguration>();
-    cp::ConflictRecord entry;
-    unsigned content_attempts{};
-    services->tactical_capability = [](const auto&) {
-        eawr::core::Diagnostic refusal;
-        refusal.code = "fixture.space.capability";
-        refusal.message = "reachable ship has an unsupported rocket curve";
-        return eawr::core::Result<void>::failure(std::move(refusal));
-    };
-    services->configure = [&](auto& game) {
-        entry.id = game.galaxy().next_entity_id(); entry.planet = initial.planets.front().id;
-        entry.invader = 1; entry.defender = 2;
-        entry.tactical.content_identity = initial.content_identity;
-        entry.tactical.first_free_entity_id = entry.id + 1;
-        entry.tactical.players = {{1, 1, 1, 1}, {2, 2, 2, 1}};
-        entry.seats = {{{1}, 1}, {{2}, 2}};
-        game.set_conflict_service([](const auto&, const auto&, eawr::sim::EntityId) {
-            return eawr::core::Result<std::optional<cp::RecordedAdmission>>::success({});
-        }, [&](const auto&) {
-            if (++content_attempts <= 2) {
-                eawr::core::Diagnostic refusal;
-                refusal.message = "tactical content unavailable";
-                return eawr::core::Result<eawr::sim::tactical::TacticalContent>::failure(refusal);
-            }
-            return eawr::core::Result<eawr::sim::tactical::TacticalContent>::success({});
-        }, {}, eawr::campaign::ScriptRequirement::none);
-        return game.queue_conflict(entry, {cp::ConflictRoute::pending_tactical, false, false});
-    };
-    LiveGameSession::Options options; options.workers = 2;
-    options.pacing = LiveGameSession::Pacing::driven; options.services = services;
+    PendingChoiceFixture fixture{true};
+    const auto& initial = fixture.initial;
+    auto& entry = fixture.entry;
+    LiveGameSession::Options options = fixture.options();
     auto created = LiveGameSession::start(initial, options);
     expect(bool(created), "pending view fixture starts"); if (!created) return;
     auto& live = *created.value();
@@ -981,6 +1038,36 @@ void pending_choice_publication() {
     expect(!announcement.pending_conflict->choice_ready && pending.pending_conflict->choice_ready,
         "retained dialog publications stay immutable across readiness and selection");
     live.stop(); expect(!live.failure(), "pending choice fixture stops cleanly");
+}
+
+// #5518: a driven session whose galaxy waits on a seat's answer never publishes the next tick. The wait is named,
+// so a headless driver reports it (or answers it) instead of timing out silently; the answer releases the tick.
+void awaited_input_names_the_wait() {
+    PendingChoiceFixture fixture{false};
+    auto options = fixture.options();
+    auto created = LiveGameSession::start(fixture.initial, options);
+    expect(bool(created), "awaited input fixture starts"); if (!created) return;
+    auto& live = *created.value();
+    const auto& entry = fixture.entry;
+    live.submit(LiveGameOrder{{1}, galactic::PauseGalaxy{}, {}});
+    live.advance_to(1); expect(live.wait_for(1, 5s), "announcement publication arrives");
+    live.submit(LiveGameOrder{{1}, galactic::SetSpeed{false, Fixed::from_raw(Fixed::scale)}, {}});
+    live.advance_to(2); expect(live.wait_for(2, 5s), "next eligible tail publishes pending choice");
+    const auto ready = live.frame();
+    expect(ready.pending_conflict && ready.pending_conflict->choice_ready, "the choice is ready");
+    live.advance_to(3);
+    expect(!live.wait_for(3, 300ms), "a paused galaxy with a ready choice and no answer publishes no tick");
+    const auto waiting = eawr::platform::awaited_input(live.frame());
+    expect(waiting && waiting->kind == eawr::platform::LiveAwaitedInput::Kind::conflict_choice
+        && waiting->conflict == entry.id && waiting->planet == entry.planet,
+        "the silent wait is named: pending conflict choice, its conflict and planet");
+    expect(waiting && waiting->describe() == "awaiting_input kind=conflict_choice conflict=" + std::to_string(entry.id)
+        + " planet=" + std::to_string(entry.planet), "the wait text is stable for harness logs");
+    const auto choice = eawr::platform::battle_choice_order(ready, {1}, entry.id, true);
+    expect(bool(choice), "the involved human can answer"); if (!choice) { live.stop(); return; }
+    live.submit(*choice);
+    expect(live.wait_for(3, 5s), "the answer releases the waiting tick");
+    live.stop(); expect(!live.failure(), "awaited input fixture stops cleanly");
 }
 
 void child_untimed_input_after_drain() {
@@ -1471,7 +1558,7 @@ void invasion_accept_command() {
     for (const auto& invalid : {short_accept, long_accept, std::vector<std::uint8_t>(8)})
         expect(!galactic::decode_payload(galactic::CommandLayer::session, galactic::session_opcodes::invasion_accept, invalid),
             "invasion accept rejects truncated, trailing and zero-conflict payloads");
-    expect(galactic::session_opcodes::invasion_accept == 16 && galactic::session_opcodes::first_reserved == 17,
+    expect(galactic::session_opcodes::invasion_accept == 16 && galactic::session_opcodes::gui_click == 17 && galactic::session_opcodes::first_reserved == 18,
         "the coordinator-assigned session opcode leaves the reserved walk range after it");
 
     auto started = LiveGameSession::start(setup(), {.pacing = LiveGameSession::Pacing::driven});
@@ -1516,6 +1603,7 @@ int case_galactic_live_game_session_tests() {
     pause_and_sequences(LiveGameSession::Pacing::driven);
     pause_and_sequences(LiveGameSession::Pacing::real_time);
     resume_and_failure();
+    awaited_input_names_the_wait();
     child_untimed_input_after_drain();
     child_health_warning_publication();
     child_readiness_and_return();

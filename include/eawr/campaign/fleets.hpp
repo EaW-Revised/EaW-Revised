@@ -1,5 +1,6 @@
 #pragma once
 
+#include "eawr/core/load_note.hpp"
 #include "eawr/sim/galactic/types.hpp"
 #include "eawr/units/galactic_types.hpp"
 #include "eawr/assets/assets.hpp"
@@ -34,7 +35,7 @@ struct MovementInputs {
 // Geometry/access/live contents are separate runtime-owner inputs to MovementSetup.
 [[nodiscard]] core::Result<MovementInputs> build_movement_inputs(const units::GalacticTypeTable& types,
     const data::galactic::GalacticData& data, std::span<const MovementTypeBinding> objects,
-    std::span<const MovementPlayerBinding> players);
+    std::span<const MovementPlayerBinding> players, core::LoadNoteBuffer* notes = nullptr);
 // WGM-28/115: fresh zero-facing planets use collision bounds in reference pose,
 // times their effective positive Scale_Factor. Corruption is fresh false.
 [[nodiscard]] core::Result<sim::galactic::MovementPlanet> prepare_initial_movement_planet(

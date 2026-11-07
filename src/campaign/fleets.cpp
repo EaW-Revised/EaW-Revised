@@ -1,4 +1,5 @@
 #include "eawr/campaign/fleets.hpp"
+#include "eawr/campaign/load_notes.hpp"
 #include "eawr/units/unit_tables.hpp"
 
 #include <algorithm>
@@ -133,7 +134,7 @@ core::Result<std::vector<sim::galactic::FleetTypeTraits>> build_fleet_type_trait
 }
 core::Result<MovementInputs> build_movement_inputs(const units::GalacticTypeTable& types,
     const data::galactic::GalacticData& data, std::span<const MovementTypeBinding> objects,
-    std::span<const MovementPlayerBinding> players) {
+    std::span<const MovementPlayerBinding> players, core::LoadNoteBuffer* notes) {
     MovementInputs out;
     const auto fail = [](const std::string& message, const std::string& file = {}, std::uint64_t line = 0) {
         core::Diagnostic d; d.code = std::string(sim::galactic::diagnostic_codes::invalid_setup);
@@ -172,8 +173,18 @@ core::Result<MovementInputs> build_movement_inputs(const units::GalacticTypeTabl
         if (!binding.squadron && !binding.fleet_container) {
             t.cheap_bribe = original->cheap_bribe_cost.value_or(sim::math::Fixed{});
             t.expensive_bribe = original->expensive_bribe_cost.value_or(sim::math::Fixed{});
-            if (t.cheap_bribe.raw() < 0 || t.expensive_bribe.raw() < 0)
-                return fail(binding.original_type + ": negative Cheap/Expensive_Bribe_Cost", original->file, original->line);
+            // GC-BRIBE-NEG: retail stores the authored signed value with no load-time range check, so a
+            // negative cost is kept as authored and noted, never refused.
+            const auto text = [](sim::math::Fixed v) {
+                return std::to_string(static_cast<double>(v.raw()) / static_cast<double>(sim::math::Fixed::scale));
+            };
+            const auto negative_note = [&](std::string_view tag, sim::math::Fixed value) {
+                if (value.raw() < 0) campaign_type_note(notes, "EAWR-LOAD-1037", *original, tag, text(value), text(value),
+                    "stored as authored, no load-time range check (debug build)", core::LoadCategory::retail_accepts,
+                    core::LoadAction::accepted);
+            };
+            negative_note("Cheap_Bribe_Cost", t.cheap_bribe);
+            negative_note("Expensive_Bribe_Cost", t.expensive_bribe);
         }
         if (binding.squadron) {
             // WGEP-92: authored absence consumes the shared zero default.

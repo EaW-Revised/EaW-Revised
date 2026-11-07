@@ -8,6 +8,7 @@
 
 #include <cstdint>
 #include <iostream>
+#include <span>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -205,6 +206,65 @@ void test_ray_collection() {
     expect(contacts.empty(), "DG-30 rejects a box in the segment's AABB that misses the segment");
 }
 
+
+// The planned update (workers classify, one ordered pass edits) leaves exactly the trees the serial update leaves:
+// same bytes, same candidate order, over randomized frames with entering, moving, owner-changing and leaving members.
+void test_planned_update_equals_serial() {
+    std::uint64_t state = 12345;
+    const auto next = [&state] {
+        state += 0x9E3779B97F4A7C15ULL;
+        auto z = state;
+        z = (z ^ (z >> 30U)) * 0xBF58476D1CE4E5B9ULL;
+        z = (z ^ (z >> 27U)) * 0x94D049BB133111EBULL;
+        return z ^ (z >> 31U);
+    };
+    CollectionTrees serial;
+    CollectionTrees planned;
+    CollectionTrees unpaired; // handed a change list of the wrong length: it must fall back to the serial update
+    std::vector<CollectionTrees::Member> members;
+    std::uint64_t counts[3] = {0, 0, 0};
+    for (std::uint64_t frame = 1; frame <= 40; ++frame) {
+        // Next frame's members: ascending IDs; some leave, some enter, some change owner, most move a little.
+        std::vector<CollectionTrees::Member> after;
+        auto before = members.begin();
+        for (EntityId id = 1; id <= 400; ++id) {
+            while (before != members.end() && before->id < id) ++before;
+            const bool known = before != members.end() && before->id == id;
+            const auto roll = next() % 100;
+            if (known && roll < 6) continue; // leaves
+            if (!known && roll < 70) continue; // not present yet
+            CollectionTrees::Member member = known ? *before : CollectionTrees::Member{id, static_cast<tactical::PlayerId>(1 + next() % 3),
+                cube(static_cast<std::int64_t>(next() % 400), static_cast<std::int64_t>(next() % 400), 0)};
+            if (known && roll < 10) member.owner = static_cast<tactical::PlayerId>(1 + next() % 3);
+            if (known && roll >= 10 && roll < 60) {
+                const auto shift = static_cast<std::int64_t>(next() % 9) - 4;
+                member.bounds = cube(shift + static_cast<std::int64_t>(id), shift * 2, 0);
+            }
+            after.push_back(member);
+        }
+        members = after;
+        serial.update(members, frame);
+        std::vector<CollectionTrees::Change> changes;
+        for (const auto& member : members) changes.push_back(planned.classify(member));
+        for (const auto change : changes) ++counts[static_cast<std::size_t>(change)];
+        planned.update(members, changes, frame);
+        unpaired.update(members, std::span<const CollectionTrees::Change>{}, frame);
+        std::vector<std::uint8_t> serial_bytes, planned_bytes;
+        serial.append_state(serial_bytes);
+        planned.append_state(planned_bytes);
+        std::vector<std::uint8_t> unpaired_bytes;
+        unpaired.append_state(unpaired_bytes);
+        expect(serial_bytes == unpaired_bytes, "an unpaired change list falls back to the serial update at frame " + std::to_string(frame));
+        expect(serial_bytes == planned_bytes, "planned update leaves the serial trees' bytes at frame " + std::to_string(frame));
+        for (tactical::PlayerId owner = 1; owner <= 3; ++owner) {
+            expect(serial.collect(owner, everywhere()) == planned.collect(owner, everywhere()),
+                "planned update keeps the candidate order of owner " + std::to_string(owner) + " at frame " + std::to_string(frame));
+        }
+    }
+    // The scenario exercises all three outcomes, and unchanged members dominate the classified work.
+    expect(counts[0] > 0 && counts[1] > 0 && counts[2] > 0, "the randomized frames hit none, enter and moved");
+}
+
 } // namespace
 
 int main() {
@@ -217,6 +277,7 @@ int main() {
     test_trees_by_owner();
     test_staged_trees_are_independent();
     test_ray_collection();
+    test_planned_update_equals_serial();
     if (failures != 0) {
         std::cerr << failures << " collection tree check(s) failed\n";
         return 1;

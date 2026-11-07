@@ -75,6 +75,9 @@ public:
         std::vector<std::string> players;
         std::vector<std::string> online_rooms, online_passwords;
         bool online_list_failed{};
+        // #5512 fault knobs: --eawr-lan-fault listing-hang, --eawr-lan-listing-timeout-ms N.
+        bool fault_listing_hang{};
+        int listing_timeout_ms{};
         std::optional<std::uint16_t> game_port;
         std::string fake;
         std::string rules{"aspect"};

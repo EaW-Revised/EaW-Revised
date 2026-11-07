@@ -1,9 +1,13 @@
 #include "viewer_host_internal.hpp"
+#include "lan_match.hpp"
 #include "loading_screen.hpp"
+#include "viewer_mounted_mods.hpp"
 #include "audio_output.hpp"
 #include "startup_trace.hpp"
 #include "settings_store.hpp"
 #include "gpu_memory_trace.hpp"
+#include "ui/input_routing.hpp"
+#include "polled_pointer.hpp"
 #include "galactic/galactic_launch_options.hpp"
 #include <godot_cpp/classes/rendering_server.hpp>
 #include <godot_cpp/classes/viewport.hpp>
@@ -94,23 +98,24 @@ void ViewerHost::start_skirmish_battle() {
     map_mode_ = std::make_unique<MapMode>(MapMode::Options{
         .game_root = options_->game_root, .mod_root = options_->mod_root,
         .profile = options_->profile, .map_path = map_path,
-        .report_path = options_->report_path,
+        .campaign_briefing_movie = {}, .report_path = options_->report_path,
         .capture_path = options_->skirmish_setup_test ? options_->capture_path.parent_path()
             / (options_->capture_path.stem().string() + ".battle.png") : std::filesystem::path{},
         .populate = true,
-        .lighting = "sh", .shadows = "on", .environment = "map",
-        .interactive = !options_->skirmish_setup_test, .setup = std::move(selected),
+        .effect_alt = {}, .effect_lod = {}, .lighting = "sh", .shadows = "on", .environment = "map",
+        .interactive = !options_->skirmish_setup_test, .camera_zoom = {}, .setup = std::move(selected),
         .content = options_->cache_content ? skirmish_setup_->content() : nullptr,
         .shaders = skirmish_setup_->shaders(),
         .loading = skirmish_loading_,
-        .observer_names = skirmish_setup_->lan_match()
+        .controller_names = {}, .observer_names = skirmish_setup_->lan_match()
             ? std::vector<std::pair<sim::tactical::PlayerId, std::string>>{}
             : std::vector<std::pair<sim::tactical::PlayerId, std::string>>{{1, skirmish_setup_->local_player_name()}},
-        .lan = skirmish_setup_->lan_match()});
+        .borrowed_battle = {}, .borrowed_feed = {}, .lan = skirmish_setup_->lan_match(), .replay_input = {}, .attract = {}});
     if (!map_mode_->ready(*skirmish_battle_host_)) {
         // A land battle names why it refused (for example a company or locomotion the authored tables lack).
         const std::string reason = land ? std::string(map_mode_->failure()) : std::string{};
         map_mode_.reset();
+        if (auto lan = skirmish_setup_->lan_match()) lan->cancel();
         remove_child(skirmish_battle_host_);
         memdelete(skirmish_battle_host_);
         skirmish_battle_host_ = nullptr;
@@ -136,13 +141,13 @@ void ViewerHost::start_replay_battle(const UiGalleryMode::ReplayRequest& request
     map_mode_ = std::make_unique<MapMode>(MapMode::Options{
         .game_root = options_->game_root, .mod_root = options_->mod_root,
         .profile = options_->profile, .map_path = map_path,
-        .report_path = beside(options_->report_path, ".replay.json"),
+        .campaign_briefing_movie = {}, .report_path = beside(options_->report_path, ".replay.json"),
         .capture_path = beside(options_->capture_path, ".replay.png"),
         .populate = true,
-        .lighting = "sh", .shadows = "on", .environment = "map",
+        .effect_alt = {}, .effect_lod = {}, .lighting = "sh", .shadows = "on", .environment = "map",
         .interactive = interactive,
-        .shaders = options_->cache_shaders ? std::make_shared<GodotShaderCache>() : nullptr,
-        .replay_input = request.path});
+        .camera_zoom = {}, .setup = {}, .content = {}, .shaders = options_->cache_shaders ? std::make_shared<GodotShaderCache>() : nullptr,
+        .controller_names = {}, .observer_names = {}, .borrowed_battle = {}, .borrowed_feed = {}, .lan = {}, .replay_input = request.path, .attract = {}});
     if (!map_mode_->ready(*battle_host)) {
         const std::string reason(map_mode_->failure());
         map_mode_.reset();
@@ -164,6 +169,16 @@ void ViewerHost::start_replay_battle(const UiGalleryMode::ReplayRequest& request
 
 void ViewerHost::_process(const double delta) {
     if (completed_) return;
+    auto* display = DisplayServer::get_singleton();
+    auto* input = Input::get_singleton();
+    const bool active_map = map_mode_ && map_mode_->pointer_confine_allowed();
+    const auto mode = display ? display->window_get_mode() : DisplayServer::WINDOW_MODE_WINDOWED;
+    const bool confine = pointer_confined(pointer_window_mode(mode), display && display->window_is_focused(),
+        mode == DisplayServer::WINDOW_MODE_MINIMIZED,
+        !active_map || options_mode_ || input_focus(*get_viewport()).modal_open);
+    const auto desired_mouse_mode = confine ? Input::MOUSE_MODE_CONFINED : Input::MOUSE_MODE_VISIBLE;
+    if ((!galactic_mode_ || options_mode_) && input && input->get_mouse_mode() != desired_mouse_mode)
+        input->set_mouse_mode(desired_mouse_mode);
     if (!options_mode_ && !map_mode_) {
         if (const auto* active = ActiveSettings::get()) {
             const bool menu = !map_mode_ && !galactic_mode_
@@ -353,6 +368,9 @@ void ViewerHost::process_battle_setup_frame() {
             viewer::galactic::apply_lobby_launch(campaign_options, std::move(launch));
             campaign_options.game_root = options_->game_root;
             campaign_options.mod_root = options_->mod_root;
+            campaign_options.save_directory = GalacticMode::from_command_line().save_directory;
+            prime_mounted_mods(options_->game_root);
+            campaign_options.mounted_mods = mounted_mod_description();
             if (!skirmish_setup_->gc_acceptance_directory().empty()) {
                 campaign_options.lan_acceptance_directory = skirmish_setup_->gc_acceptance_directory();
                 campaign_options.report_path = campaign_options.lan_acceptance_directory / "report.json";

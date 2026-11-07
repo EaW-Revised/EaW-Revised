@@ -255,6 +255,19 @@ core::Result<void> TacticalSession::Impl::launch(const LiveUnit& spawner, const 
             if (footprint != nullptr && footprint->box) for (const auto& unit : survivors) {
                 if (auto blocked = block_placement(unit.state, blockers); !blocked) return blocked;
             }
+            // #5527: a craft still in its arrival lane stands far behind the spot it was given; that spot
+            // blocks too, or the next craft of the same wave would take it (map order: stable entity ID).
+            // Only craft: vanilla hyperspace arrivals share lane_arrivals and must not move this launch.
+            if (footprint != nullptr && footprint->box && lane_arrivals != nullptr) {
+                for (const auto& [lane_id, lane] : *lane_arrivals) {
+                    const auto parked = std::find_if(survivors.begin(), survivors.end(),
+                        [&](const auto& unit) { return unit.state.entity_id == lane_id; });
+                    if (parked == survivors.end() || table.find_craft(parked->state.type_id) == nullptr) continue;
+                    auto at_spot = parked->state;
+                    at_spot.position = lane.exit;
+                    if (auto blocked = block_placement(at_spot, blockers); !blocked) return blocked;
+                }
+            }
             const auto free_at = [&](const math::Vec3& at) -> core::Result<bool> {
                 if (footprint == nullptr || !footprint->box) return core::Result<bool>::success(true);
                 auto bounds = blocker_bounds(*footprint->box, at, yaw.value());
@@ -301,7 +314,28 @@ core::Result<void> TacticalSession::Impl::launch(const LiveUnit& spawner, const 
                 start = placed.value();
                 lane_arrivals->emplace(id, arrival);
             }
-            if (auto added = add(UnitState{id, company_type, owner, start, facing.value(), {}}); !added) return added;
+            // #5527: a FIGHTER_LOCOMOTOR type that is no Squadron (a craft with its own flight profile)
+            // launches as this single ship too. It still needs its flight and order state to move, so
+            // it is created like a parentless craft (WHE-SQ-02): idle where the free-spot search put it.
+            auto rotation = facing.value();
+            if (const auto* solo = table.find_craft(company_type); solo != nullptr) {
+                auto flight = launch_state(along, solo->max_speed);
+                if (!flight) return Void::failure(flight.error());
+                auto craft_facing = craft_rotation(flight.value());
+                if (!craft_facing) return Void::failure(craft_facing.error());
+                rotation = craft_facing.value();
+                flights[id] = flight.value();
+                squadron_list.push_back({id, {id}});
+                SquadronState order;
+                order.container = id;
+                order.garrison_unit = true;
+                order.squadron_type = company_type;
+                order.roster = {id};
+                order.anchor = *found;
+                order.next_scan_frame = frame + logical_frames_per_second;
+                orders.emplace(id, std::move(order));
+            }
+            if (auto added = add(UnitState{id, company_type, owner, start, rotation, {}}); !added) return added;
             if (arriving && economy.vulnerability_frames != 0 && economy.vulnerability.raw() != 0) {
                 survivors.back().arrival_vulnerable_until = frame + 1 + economy.vulnerability_frames;
             }

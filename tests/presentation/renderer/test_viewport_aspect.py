@@ -67,9 +67,17 @@ class ViewportAspect(unittest.TestCase):
         listener_files = ("apps/viewer/src/battle_audio.cpp", "apps/viewer/src/battle_audio.hpp")
         camera_node_setters = re.compile(
             r"\b(set_perspective|set_orthogonal|set_frustum|set_projection|set_fov|set_keep_aspect_mode)\s*\(|->\s*(?:fov|keep_aspect)\b")
+        # Cached material activation warms a program in a private 16x16 viewport that is never the
+        # player's view; its fixed orthogonal camera is the only other projection setter allowed.
+        warmup_file = "src/presentation/godot/renderer_materials.cpp"
         perspective = []
         for name, text in source_texts().items():
             for token in forbidden:
+                if token == "camera_set_orthogonal" and name == warmup_file:
+                    self.assertEqual(text.count(token), 1, f"{name}: one warm-up camera only")
+                    self.assertIn("viewport_set_size(viewport, 16, 16)", text, f"{name}: warm-up viewport stays 16x16")
+                    self.assertNotIn("camera_set_perspective(", text, f"{name} must not project the player's view")
+                    continue
                 self.assertNotIn(token, text, f"{name} uses {token}")
             if name in listener_files:
                 self.assertNotRegex(text, r"camera_set_", f"{name} must not set a projection")

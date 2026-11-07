@@ -11,12 +11,14 @@ include("${PROJECT_SOURCE_DIR}/src/mods/sources.cmake")
 
 set(EAWR_LAUNCHER_CORE_SOURCES
     src/install_discovery.cpp
+    src/instance.cpp
     src/launch_plan.cpp
     src/launcher_flow.cpp
     src/launcher_state.cpp
     src/win_process.cpp
     src/win_registry.cpp
     src/win_ui.cpp
+    "${PROJECT_SOURCE_DIR}/src/core/sha256.cpp"
     ${EAWR_MODS_STEAM_SOURCES}
 )
 

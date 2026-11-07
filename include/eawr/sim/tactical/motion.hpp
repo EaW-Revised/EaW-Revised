@@ -1,7 +1,8 @@
 #pragma once
 
 #include "eawr/core/result.hpp"
-#include "eawr/sim/tactical/fighters.hpp"
+#include "eawr/core/load_note.hpp"
+#include "eawr/sim/tactical/squadron_table.hpp"
 #include "eawr/sim/tactical/types.hpp"
 
 #include <cstdint>
@@ -126,6 +127,16 @@ struct MotionTable {
 inline constexpr std::int64_t max_motion_rate = std::int64_t{1} << 10;
 // Positions and targets the planner accepts, in whole source units on each axis.
 inline constexpr std::int64_t max_motion_coordinate = std::int64_t{1} << 18;
+// Project support limits shared by loading, normalization and validation.
+inline constexpr std::int64_t max_motion_arc_degrees = 180;
+inline constexpr std::int64_t max_avoidance_rotations = 360;
+inline constexpr std::uint32_t max_motion_reevaluation_frames = 1U << 16;
+inline constexpr std::uint32_t max_avoidance_expansions = 1U << 20;
+inline constexpr std::uint32_t max_avoidance_tries = 16;
+inline constexpr std::uint32_t max_avoidance_tracking_interval = 1U << 16;
+inline constexpr std::uint32_t max_avoidance_tracking_windows = 1024;
+inline constexpr std::uint64_t max_avoidance_search_delay = 1024;
+
 
 // Fails with EAWR-SIM-0305 unless type IDs strictly increase, every speed, acceleration,
 // deceleration and rate of turn is in (0, max_motion_rate], every slowdown is in
@@ -137,6 +148,8 @@ inline constexpr std::int64_t max_motion_coordinate = std::int64_t{1} << 18;
 // frames and cost factors, 1 to 2^20 expansions, 1 to 16 tries, a window of 1 to 2^16 frames,
 // 1 to 1024 windows and a destination search increment in (0, max_motion_rate].
 [[nodiscard]] core::Result<void> validate_motion(const MotionTable& table);
+void normalize_motion(MotionTable& table, core::LoadNoteBuffer& notes);
+[[nodiscard]] core::Result<MotionTable> prepare_motion(const MotionTable& source, core::LoadNoteBuffer& notes);
 
 enum class MotionKind : std::uint8_t {
     none = 0, // at rest

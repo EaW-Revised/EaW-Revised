@@ -13,6 +13,9 @@ namespace eawr::skirmish::detail {
 
 [[nodiscard]] core::Diagnostic error(std::string_view code, std::string message);
 
+[[nodiscard]] core::Result<void> validate_legacy_setup(std::span<const LobbySlot> slots,
+    std::span<const std::string> factions, const std::string& path);
+
 [[nodiscard]] std::string trim(std::string_view value);
 [[nodiscard]] bool iequals(std::string_view left, std::string_view right) noexcept;
 // Split on commas and whitespace, empties dropped.

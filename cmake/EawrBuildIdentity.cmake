@@ -1,5 +1,15 @@
 set(EAWR_BUILD_IDENTITY "" CACHE STRING "Explicit portable build identity for package builds and tests")
 get_filename_component(EAWR_BUILD_ROOT "${CMAKE_CURRENT_LIST_DIR}/.." ABSOLUTE)
+# The kit a release is cut as (for example 0.3.2g): replaces PROJECT_VERSION in the git-derived identity. Only the
+# offload build scripts (windows_remote_build.ps1, windows_viewer_build.ps1) set it: they pass the first line of
+# tools/release/kit-label.txt, a file the release cut commits. Empty (no file) = a development build.
+# package_release.py builds nothing; it checks the packaged binaries against that file.
+set(EAWR_KIT_LABEL "" CACHE STRING "Kit label shown instead of the project version in the build identity")
+# One rule, the same text in the offload scripts and package_release.py.
+string(LENGTH "${EAWR_KIT_LABEL}" EAWR_KIT_LABEL_LENGTH)
+if(NOT EAWR_KIT_LABEL STREQUAL "" AND (NOT EAWR_KIT_LABEL MATCHES "^[A-Za-z0-9._-]+$" OR EAWR_KIT_LABEL_LENGTH GREATER 32))
+    message(FATAL_ERROR "EAWR_KIT_LABEL is invalid: the kit label must be 1-32 characters from A-Z a-z 0-9 . _ - (no spaces, paths or quotes)")
+endif()
 set(EAWR_BUILD_VALUE "${EAWR_BUILD_IDENTITY}")
 if(EAWR_BUILD_VALUE STREQUAL "")
     find_package(Git QUIET)
@@ -30,7 +40,11 @@ if(EAWR_BUILD_VALUE STREQUAL "")
     if(NOT EAWR_BUILD_RESULT EQUAL 0)
         message(FATAL_ERROR "Could not inspect build worktree status")
     endif()
-    set(EAWR_BUILD_VALUE "${PROJECT_VERSION}+${EAWR_BUILD_HEAD}")
+    set(EAWR_BUILD_LABEL "${PROJECT_VERSION}")
+    if(NOT EAWR_KIT_LABEL STREQUAL "")
+        set(EAWR_BUILD_LABEL "${EAWR_KIT_LABEL}")
+    endif()
+    set(EAWR_BUILD_VALUE "${EAWR_BUILD_LABEL}+${EAWR_BUILD_HEAD}")
     if(NOT EAWR_BUILD_DIRTY STREQUAL "")
         string(APPEND EAWR_BUILD_VALUE "+dirty")
     endif()

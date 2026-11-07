@@ -1,4 +1,5 @@
 #include "eawr/core/load_profile.hpp"
+#include "eawr/core/tick_profile.hpp"
 #include "eawr/sim/tactical/session.hpp"
 
 #include "eawr/sim/tactical/formation.hpp"
@@ -49,6 +50,7 @@ core::Result<void> session_detail::Tick::gather() {
     // The map walk gathers only stable handles. Workers gather each unit's component values,
     // initial position and optional craft view together into disjoint ascending-ID slots.
     mark("sorted_live", true);
+    std::optional<core::tick_profile::Scope> setup_scope("serial.tactical.gather.setup");
     auto& scratch = impl_->gather_scratch;
     auto& handles = scratch.handles;
     handles.assign(impl_->handles.begin(), impl_->handles.end());
@@ -58,6 +60,7 @@ core::Result<void> session_detail::Tick::gather() {
     starts.resize(handles.size());
     auto& gathered_crafts = gather_.value().gathered_crafts.emplace(std::move(scratch.crafts));
     gathered_crafts.assign(handles.size(), std::nullopt);
+    setup_scope.reset();
     const bool all_units = impl_->victory.condition == VictoryCondition::all_enemy_units_destroyed;
     if (all_units) gather_.value().victory_parts.emplace();
     // Below 256 units, the quiet melee sample's gather took more time on four workers than
@@ -726,6 +729,7 @@ core::Result<void> session_detail::Tick::movement() {
     const auto moved = executor.execute_phase("movement", tick_partition_count, [&](const std::size_t partition) {
         const auto range = partition_range(partition, moving.size());
         for (auto index = range.begin; index < range.end; ++index) {
+            core::tick_profile::JobScope owner_job("job.movement", moving[index].state.entity_id, nullptr, moving[index].state.type_id);
             auto& unit = moving[index];
             if (impl_->retreat_holds(unit.state.entity_id)) {
                 unit.state.order = {}; if (unit.motion) unit.motion->kind = MotionKind::none;

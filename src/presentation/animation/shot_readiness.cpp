@@ -1,4 +1,5 @@
 #include "eawr/presentation/animation/shot_readiness.hpp"
+#include "eawr/vfs/vfs.hpp"
 
 #include "eawr/core/sha256.hpp"
 

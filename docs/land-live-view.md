@@ -71,3 +71,30 @@ both screens list exactly what they listed before.
 - **LAN lobby:** the Land host game type is selectable and lists land maps; the setup carries the land domain. A
   land LAN start stops with "Land battles over the network are not supported yet."
   (the typed `land_unsupported` refusal of the setup codec covers a land offer that reaches a peer).
+
+## Land movement debug overlay (F4)
+
+Diagnosis aid for pathing reports; it changes no gameplay and is **off by default**. Press **F4** in a land battle (the key
+beside F3, the performance overlay) to toggle it. It draws, for every squad, over the terrain and through models:
+
+- a white cross at the order target (the last path node) and the path as a polyline (walked part dimmed), with a dot on the
+  node the squad is walking to and a line to it;
+- a cross at the squad root and, for each member, a dot at its slot target (`parent position + axis * slot`) with a line from
+  the member to it; a member on its own terrain detour (WLPA-69) draws that detour in blue;
+- colour per squad state: **yellow** turning in place, **orange** yielded, **magenta** lagging (a member trails the root by more
+  than rear extent + 2, the WLPA-30 slow-down), **blue** a member on a detour, **green** moving, **grey** idle.
+
+The overlay reads a read-only copy (`LiveSession::land_overlay`, built by `build_land_overlay` in
+`include/eawr/sim/tactical/land_debug_overlay.hpp`) under a try-lock; nothing flows back into the simulation.
+
+The same patch writes one stderr line (godot.log) per rows re-map and per turn-in-place change, with no effect on state, hash
+or replay (`set_land_move_trace_sink`; the commit only reads values and calls the sink):
+
+```
+EAWR land-move tick=120 squad=7 remap heading 0.2500 -> 0.3100
+EAWR land-move tick=96 squad=7 turn-enter reason=new-order-from-standing heading 0.0000 -> 0.0000
+EAWR land-move tick=97 squad=7 turn-retarget reason=re-order heading 0.0000 -> 0.0000
+EAWR land-move tick=101 squad=7 turn-exit reason=heading-reached heading 0.0100 -> 0.0450
+```
+
+Re-maps are limited to one line per squad per 5 ticks (the next line reports how many were suppressed).

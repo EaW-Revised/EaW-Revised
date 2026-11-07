@@ -80,6 +80,11 @@
 - The camera's smoothing snap while paused (TM-11): the remake's camera keeps easing its distance
   while paused.
 - Multiplayer pause deliberately extends TM-04 as described by TP-MP01..04 below; fast forward remains unavailable.
+- In a LAN match the galactic clock bar's authored pause button drives the shared clock (TP-MP02) while the match
+  is running and no battle child holds the clock; its fast-forward button stays disabled with several humans. The
+  bar is the only galactic clock control: the developer Pause / Resume, 0.5x, 1x and 2x buttons and their Ctrl+1/2/3
+  keys are gone, so multiplayer has no 0.5x/2x speeds until the speed-request design (legacy EAWR-5355) lands. The pause
+  button's tooltip carries the shared-clock debounce.
 
 ## Galactic fast forward
 

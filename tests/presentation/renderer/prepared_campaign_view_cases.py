@@ -47,6 +47,13 @@ namespace units {
 struct UnitType { std::string id; };
 struct UnitTables { std::vector<UnitType> units; std::string identity; };
 std::string content_identity(const UnitTables& tables) { return tables.identity; }
+class ContentTypeSelection {
+public:
+ explicit ContentTypeSelection(const UnitTables& tables) { for (const auto& unit : tables.units) winners_.try_emplace(unit.id, &unit); }
+ [[nodiscard]] bool keeps(const UnitType& unit) const { return winners_.at(unit.id) == &unit; }
+private:
+ std::map<std::string, const UnitType*> winners_;
+};
 }
 namespace skirmish {
 struct LobbySlot { unsigned slot; std::string faction; unsigned team; bool human; tactical::AiLevel difficulty{}; };
@@ -83,7 +90,6 @@ bool iequals(const std::string& a,const std::string& b) { return a==b; }
 namespace diagnostic_codes { constexpr const char* fixture="EAWR-SKIRMISH-0002"; }
 constexpr unsigned local_setup_rows=8;
 using skirmish::LobbySlot;
-__OWNERKEY__
 __VALIDATE__
 namespace live { int instance_yaw_degrees(int value) { return value; } }
 float to_float(int value) { return static_cast<float>(value); }
@@ -117,8 +123,6 @@ struct LiveSessionView {
 };
 __METHOD__
 int main() {
- if (loading_owner_text_key(" TEXT_FACTION_EMPIRE ") != "TEXT_FACTION_EMPIRE"
-  || !loading_owner_text_key(" \t\r\n").empty()) return 6;
  auto battle=std::make_shared<LiveSessionView::PreparedBattle>();
  battle->tables={{{"Ship"}},"prepared"};
  battle->replay.setup={"prepared",{{4,7,11},{9,8,12}},{{100,10,4,{25,30,0}},{101,20,9,{-25,-30,0}}}};
@@ -214,13 +218,11 @@ int main() {
         setup = (ROOT / 'src/skirmish/setup.cpp').read_text(encoding='utf-8')
         validator = extract_function(setup, 'core::Result<void> validate_setup_slots(')
         seats = (ROOT / 'include/eawr/sim/seat.hpp').read_text(encoding='utf-8').replace('#pragma once', '')
-        loading = (ROOT / 'apps/viewer/src/loading_screen.cpp').read_text(encoding='utf-8')
-        ownerkey = extract_function(loading, '[[nodiscard]] std::string_view loading_owner_text_key(')
         with tempfile.TemporaryDirectory(prefix='eawr-prepared-view-') as temp:
             directory = Path(temp)
             cpp = directory / 'contract.cpp'
             exe = directory / ('contract.exe' if os.name == 'nt' else 'contract')
-            cpp.write_text(seats + '\nnamespace sim { using eawr::sim::max_match_seats; }\n' + HARNESS.replace('__METHOD__', method).replace('__VALIDATE__', validator).replace('__DISPATCH__', dispatch).replace('__OWNERKEY__', ownerkey), encoding='utf-8')
+            cpp.write_text(seats + '\nnamespace sim { using eawr::sim::max_match_seats; }\n' + HARNESS.replace('__METHOD__', method).replace('__VALIDATE__', validator).replace('__DISPATCH__', dispatch), encoding='utf-8')
             compile_fixture(toolchain, cpp, exe)
             ran = subprocess.run([str(exe)], capture_output=True, text=True, timeout=10)
             self.assertEqual(ran.returncode, 0, ran.stdout + ran.stderr)

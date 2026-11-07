@@ -11,3 +11,7 @@ target_include_directories(
 target_link_libraries(eawr_sim_galactic PUBLIC eawr::sim eawr::core PRIVATE EnTT::EnTT)
 target_compile_features(eawr_sim_galactic PUBLIC cxx_std_20)
 eawr_target_project_warnings(eawr_sim_galactic)
+
+if(BUILD_TESTING)
+    target_compile_definitions(eawr_sim_galactic PUBLIC EAWR_GALACTIC_TEST_HOOKS)
+endif()

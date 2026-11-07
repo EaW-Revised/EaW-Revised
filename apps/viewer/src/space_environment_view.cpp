@@ -1,6 +1,7 @@
 #include "eawr/scene/scene.hpp"
 #include "space_environment_internal.hpp"
 #include "startup_trace.hpp"
+#include "menu_timeline.hpp"
 #include "settings_store.hpp"
 
 #include <cstring>
@@ -65,10 +66,88 @@ constexpr std::string_view effect_clock_rule =
 
 namespace space_environment_detail {
 
+// What the attract load's environment steps share: the sky models, the scene cache and the built placements.
+struct ReadyScratch final {
+    std::map<std::string, assets::Model> sky_models;
+    std::unique_ptr<scene::VfsAssetCache> cache;
+    scene::Scene built;
+};
+
 bool EnvironmentView::ready(Node3D& host, const assets::Map& map, const vfs::Vfs& filesystem,
+                            const assets::ObjectTypeCatalog& catalog, const bool catalog_loaded,
+                            const std::string& catalog_failure, const EnqueueLoadStep& enqueue) {
+    if (enqueue) {
+        // The same pieces prepare_ready runs back to back, one load step each, in the same order.
+        const auto scratch = std::make_shared<ReadyScratch>();
+        const auto timed = [](auto&& body) {
+            core::load_profile::Scope scope(core::load_profile::Phase::scene_environment);
+            return body();
+        };
+        enqueue([this, timed, node = &host, source = &map, fs = &filesystem, catalog_failure] {
+            MenuTimeline::detail("background head: cameras");
+            return timed([&] { return prepare_head(*node, *source, *fs, catalog_failure); });
+        });
+        enqueue([this, timed, node = &host, fs = &filesystem] {
+            MenuTimeline::detail("background renderer");
+            timed([&] { prepare_renderer(*node, *fs); return true; });
+            return true;
+        });
+        for (const bool secondary : {false, true}) {
+            enqueue([this, timed, secondary, source = &map, fs = &filesystem, types = &catalog, catalog_loaded,
+                     scratch] {
+                MenuTimeline::detail(secondary ? "background secondary sky" : "background primary sky");
+                timed([&] { prepare_sky(secondary, *source, *fs, *types, catalog_loaded, *scratch); return true; });
+                return true;
+            });
+        }
+        enqueue([this, timed, source = &map, fs = &filesystem, catalog_failure, scratch, enqueue] {
+            MenuTimeline::detail("background scene build");
+            timed([&] { prepare_scene(*source, *fs, catalog_failure, *scratch); return true; });
+            // One step per placement that names a model, in placement order (the others the loop skipped).
+            for (std::size_t index = 0; index < scratch->built.placements.size(); ++index) {
+                if (scratch->built.placements[index].model_path.empty()) continue;
+                enqueue([this, timed, source, fs, scratch, index] {
+                    const scene::Placement& placement = scratch->built.placements[index];
+                    if (MenuTimeline::enabled()) MenuTimeline::detail("background placement " + placement.model_path);
+                    return timed([&] { return prepare_placement(*source, *fs, placement, *scratch); });
+                });
+            }
+            enqueue([scratch] {
+                scratch->sky_models.clear();
+                scratch->cache.reset();
+                scratch->built = {};
+                MenuTimeline::mark("attract_load_background");
+                return true;
+            });
+            return true;
+        });
+        enqueue([this, source = &map, enqueue] { return populate_ready(*source, enqueue); });
+        enqueue([this] { return finish_ready(); });
+        return true;
+    }
+    if (!prepare_ready(host, map, filesystem, catalog, catalog_loaded, catalog_failure)) return false;
+    if (!populate_ready(map, {})) return false;
+    return finish_ready();
+}
+
+bool EnvironmentView::prepare_ready(Node3D& host, const assets::Map& map, const vfs::Vfs& filesystem,
                             const assets::ObjectTypeCatalog& catalog, const bool catalog_loaded,
                             const std::string& catalog_failure) {
     core::load_profile::Scope scope(core::load_profile::Phase::scene_environment);
+    ReadyScratch scratch;
+    if (!prepare_head(host, map, filesystem, catalog_failure)) return false;
+    prepare_renderer(host, filesystem);
+    for (const bool secondary : {false, true}) prepare_sky(secondary, map, filesystem, catalog, catalog_loaded, scratch);
+    prepare_scene(map, filesystem, catalog_failure, scratch);
+    for (const scene::Placement& placement : scratch.built.placements) {
+        if (placement.model_path.empty()) continue;
+        if (!prepare_placement(map, filesystem, placement, scratch)) return false;
+    }
+    return true;
+}
+
+bool EnvironmentView::prepare_head(Node3D& host, const assets::Map& map, const vfs::Vfs& filesystem,
+                                   const std::string& catalog_failure) {
     filesystem_ = &filesystem;
     host_ = &host;
     catalog_failure_ = catalog_failure;
@@ -186,6 +265,10 @@ bool EnvironmentView::ready(Node3D& host, const assets::Map& map, const vfs::Vfs
     target_source_ = space::source_from_render(camera_.target);
     up_source_ = space::source_from_render(camera_.up);
 
+    return true;
+}
+
+void EnvironmentView::prepare_renderer(Node3D& host, const vfs::Vfs& filesystem) {
     renderer_ = std::make_unique<GodotRenderer>(host, options_.shaders);
     renderer_->set_texture_loader([&filesystem](const assets::Source& source) -> std::optional<assets::Texture> {
         auto loaded = assets::load_texture(filesystem, source.logical_path);
@@ -198,6 +281,7 @@ bool EnvironmentView::ready(Node3D& host, const assets::Map& map, const vfs::Vfs
         return std::move(loaded.value());
     });
     startup_trace.renderer_probe(renderer_->recipe_memory_probe());
+    startup_trace.texture_census_probe(renderer_->texture_census_probe());
     renderer_->set_camera(camera_);
     renderer_->set_scene_bloom(options_.bloom);
     // Independent material ambient does not change the population's lighting
@@ -205,13 +289,19 @@ bool EnvironmentView::ready(Node3D& host, const assets::Map& map, const vfs::Vfs
     if (light_) renderer_->set_ambient_light({light_->ambient.x, light_->ambient.y, light_->ambient.z});
     else not_rendered_.push_back("independent material ambient unavailable: environment 0 has no complete finite light record");
 
+}
+
+void EnvironmentView::prepare_sky(const bool secondary, const assets::Map& map, const vfs::Vfs& filesystem,
+                                 const assets::ObjectTypeCatalog& catalog, const bool catalog_loaded,
+                                 ReadyScratch& scratch) {
     // Skies: camera-centred, scaled to the environment sky radius, oriented by
     // R-SKY-02 through the object rule.
-    std::map<std::string, assets::Model> sky_models;
-    for (const bool secondary : {false, true}) {
+    const assets::EnvironmentDescriptor& environment = map.environments.front();
+    std::map<std::string, assets::Model>& sky_models = scratch.sky_models;
+    {
         const std::string& name = secondary ? secondary_sky_ : primary_sky_;
         const std::string role = secondary ? "secondary_sky" : "primary_sky";
-        if (name.empty()) continue;
+        if (name.empty()) return;
         Item missing;
         missing.role = role;
         missing.object = name;
@@ -220,27 +310,27 @@ bool EnvironmentView::ready(Node3D& host, const assets::Map& map, const vfs::Vfs
         if (selection.status != space::PlanStatus::ready) {
             missing.cause = "sky object " + std::string(space::to_string(selection.status));
             items_.push_back(std::move(missing));
-            continue;
+            return;
         }
         const auto path = probe_reference(filesystem, "data/art/models/", selection.declared_name, model_suffixes);
         if (!path) {
             missing.cause = "no data/art/models/ record for " + selection.declared_name;
             items_.push_back(std::move(missing));
-            continue;
+            return;
         }
         auto model = scene::VfsAssetCache(filesystem).shared_model(*path);
         if (!model) {
             missing.model = *path;
             missing.cause = core::format_diagnostic(model.error());
             items_.push_back(std::move(missing));
-            continue;
+            return;
         }
         const auto [slot, inserted] = sky_models.emplace(role, *model.value());
         static_cast<void>(inserted);
         const std::vector<space::SceneSurface> surfaces = space::scene_surfaces(slot->second,
             [this](const std::string_view program) {
                 const scene::AssetAccess access{.exists = [this](const std::string_view path) {
-                    return static_cast<bool>(filesystem_->stat(path)); }};
+                    return static_cast<bool>(filesystem_->stat(path)); }, .model = {}, .sha256 = {}, .particle_system = {}};
                 return scene::missing_material_effect(access, program);
             });
         const float radius = space::surface_radius(surfaces);
@@ -254,30 +344,39 @@ bool EnvironmentView::ready(Node3D& host, const assets::Map& map, const vfs::Vfs
                                                    placed.scale);
         compose_object(placed, surfaces);
     }
+}
 
+void EnvironmentView::prepare_scene(const assets::Map& map, const vfs::Vfs& filesystem,
+                                    const std::string& catalog_failure, ReadyScratch& scratch) {
     // Planet and nebula placements (space::environment_family).
     if (options_.catalog == nullptr) {
         not_rendered_.push_back("planet and nebula placements: the XML catalog did not load (" + catalog_failure + ")");
     } else {
-        scene::VfsAssetCache cache(filesystem);
+        scratch.cache = std::make_unique<scene::VfsAssetCache>(filesystem);
+        scene::VfsAssetCache& cache = *scratch.cache;
         scene::BuildInput input;
         input.map = &map;
         input.map_sha256 = options_.map_sha256;
         input.catalog = options_.catalog;
         input.access = cache.access();
-        const scene::Scene built = scene::build(input);
-        for (const scene::Placement& placement : built.placements) {
-            if (placement.model_path.empty()) continue;
+        scratch.built = scene::build(input);
+    }
+}
+
+bool EnvironmentView::prepare_placement(const assets::Map& map, const vfs::Vfs& filesystem,
+                                        const scene::Placement& placement, ReadyScratch& scratch) {
+    scene::VfsAssetCache& cache = *scratch.cache;
+    {
             // #3077: a catalog marker is never drawn in game, whatever model it names
             // (Death_Star_Position authors a planet-shader Death Star for the editor).
             if (!placement.object_id.empty()) {
                 const auto object = options_.catalog->resolve(placement.object_id, data::Category::game_object);
-                if (object && scene::space_object_tags(object.value()).marker) continue;
+                if (object && scene::space_object_tags(object.value()).marker) return true;
             }
             const assets::Model* model = cache.model(placement.model_path);
-            if (model == nullptr) continue;
+            if (model == nullptr) return true;
             const space::EnvironmentFamily family = space::environment_family(*model);
-            if (family == space::EnvironmentFamily::none) continue;
+            if (family == space::EnvironmentFamily::none) return true;
             environment_records_.push_back(placement.record_ordinal);
             const assets::Placement* source = placement.record_ordinal < map.placements.size()
                 ? &map.placements[placement.record_ordinal] : nullptr;
@@ -297,7 +396,7 @@ bool EnvironmentView::ready(Node3D& host, const assets::Map& map, const vfs::Vfs
                 item.model = placed.model_path;
                 item.cause = "the placement has no position";
                 items_.push_back(std::move(item));
-                continue;
+                return true;
             }
             if (!placement.transform) {
                 Item item;
@@ -307,7 +406,7 @@ bool EnvironmentView::ready(Node3D& host, const assets::Map& map, const vfs::Vfs
                 item.model = placed.model_path;
                 item.cause = "the placement has no valid sourced transform";
                 items_.push_back(std::move(item));
-                continue;
+                return true;
             }
             // R-ROT-01..03 and LZ-01: reuse the same scene matrix as props,
             // particle owners and bounds. environment_records_ prevents a second draw.
@@ -321,26 +420,42 @@ bool EnvironmentView::ready(Node3D& host, const assets::Map& map, const vfs::Vfs
             const std::vector<space::SceneSurface> surfaces = space::scene_surfaces(*model,
                 [this](const std::string_view program) {
                     const scene::AssetAccess access{.exists = [this](const std::string_view path) {
-                        return static_cast<bool>(filesystem_->stat(path)); }};
+                        return static_cast<bool>(filesystem_->stat(path)); }, .model = {}, .sha256 = {}, .particle_system = {}};
                     return scene::missing_material_effect(access, program);
                 });
             placed.radius = space::surface_radius(surfaces) * placed.scale;
             if (!bind_idle(placement, *model, filesystem, placed)) return false;
             compose_object(placed, surfaces);
-        }
     }
 
+    return true;
+}
+
+bool EnvironmentView::populate_ready(const assets::Map& map, const EnqueueLoadStep& enqueue) {
     if (options_.populate) {
         SpacePopulateContext context{*renderer_, camera_, map, light_ ? &*light_ : nullptr, environment_records_,
-                                     next_asset_, static_cast<sim::EntityId>(next_asset_)};
+                                     next_asset_, static_cast<sim::EntityId>(next_asset_), enqueue};
         auto populated = options_.populate(context);
         if (!populated) return fail("populate: " + core::format_diagnostic(populated.error()));
         populate_result_ = std::move(populated.value());
-        populated_ = populate_result_->instances.size();
-        populate_first_ = instances_.size();
-        instances_.insert(instances_.end(), populate_result_->instances.begin(), populate_result_->instances.end());
+        auto publish = [this] {
+            if (populate_result_->ready_instances) {
+                populate_result_->instances = populate_result_->ready_instances();
+                populate_result_->ready_instances = {};
+            }
+            populated_ = populate_result_->instances.size();
+            populate_first_ = instances_.size();
+            instances_.insert(instances_.end(), populate_result_->instances.begin(), populate_result_->instances.end());
+            return true;
+        };
+        if (enqueue) enqueue(std::move(publish));
+        else if (!publish()) return false;
     }
 
+    return true;
+}
+
+bool EnvironmentView::finish_ready() {
     const bool sky_drawn = std::any_of(items_.begin(), items_.end(), [](const Item& item) {
         return item.role == "primary_sky" && item.status == "drawn";
     });
@@ -588,6 +703,14 @@ void EnvironmentView::camera_focus(const bool focused) {
     if (bridge_) bridge_->set_focus(focused);
 }
 
+void EnvironmentView::camera_sample_pointer(const float x, const float y) {
+    if (bridge_) bridge_->sample_pointer(x, y);
+}
+
+void EnvironmentView::camera_clear_pointer_sample() {
+    if (bridge_) bridge_->clear_pointer_sample();
+}
+
 void EnvironmentView::camera_pointer_left() {
     if (bridge_) bridge_->pointer_left();
 }
@@ -715,6 +838,20 @@ std::optional<int> EnvironmentView::process(const double delta) {
         if (populate_result_ && populate_result_->tick) populate_result_->tick(*renderer_, tick);
     }
     SpaceLiveUpdate live;
+    // N1: the live step may leave the unit emitters' last batch running on the particle workers; whatever way this step
+    // is left, the batch is finished first (on the normal path below, right after the submit).
+    struct LiveFinish final {
+        SpaceLiveUpdate& live;
+        ~LiveFinish() {
+            if (!live.finish) return;
+            auto owed = std::move(live.finish);
+            live.finish = nullptr;
+            try {
+                static_cast<void>(owed());
+            } catch (...) {
+            }
+        }
+    } live_finish{live};
     if (populate_result_ && populate_result_->live) {
         auto update = populate_result_->live(*renderer_, delta, camera_);
         if (!update) {
@@ -751,6 +888,16 @@ std::optional<int> EnvironmentView::process(const double delta) {
     renderer_->submit(snapshot_);
     submit_since(submit_start);
     submit_sent_ = renderer_->submit_work().transforms_sent - sent_before;
+    if (live.finish) {
+        // N1: the join of the unit emitters' last batch and the rest of the particle frame (the submit above did not need them).
+        auto owed = std::move(live.finish);
+        live.finish = nullptr;
+        if (auto finished = owed(); !finished) {
+            completed_ = true;
+            static_cast<void>(fail("live population: " + core::format_diagnostic(finished.error())));
+            return 2;
+        }
+    }
     if (live.capture_suffix && !options_.capture_path.empty()) {
         std::filesystem::path path = options_.capture_path;
         path.replace_filename(ViewerPath{ViewerPath::utf8(path.stem()) + *live.capture_suffix

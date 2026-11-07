@@ -1,5 +1,9 @@
 #include "scenario_internal.hpp"
+#include "eawr/vfs/vfs.hpp"
 #include "eawr/battle/start.hpp"
+
+#include <fstream>
+#include <iostream>
 
 namespace sim_headless::scenario_detail {
 
@@ -329,7 +333,8 @@ core::Result<ScenarioRun> build_scenario(const std::filesystem::path& scenario_p
         }
         sensors = eawr::skirmish::revealed_sensor_table(types);
     }
-    auto durability = eawr::units::durability_table(tables.value());
+    core::LoadNoteBuffer load_notes;
+    auto durability = eawr::units::durability_table(tables.value(), nullptr, &load_notes);
     if (!durability) return core::Result<ScenarioRun>::failure(durability.error());
     auto motion = eawr::units::motion_table(tables.value());
     if (!motion) return core::Result<ScenarioRun>::failure(motion.error());
@@ -386,7 +391,14 @@ core::Result<ScenarioRun> build_scenario(const std::filesystem::path& scenario_p
         map_box = box.value();
         break;
     }
-    return execute_scenario(scenario, path, bytes, tables, sensors, durability, motion, combat, map_box, workers, build_sha256);
+    auto result = execute_scenario(scenario, path, bytes, tables, sensors, durability, motion, combat, map_box, workers, build_sha256);
+    if (result) {
+        core::LoadNoteCollector collector;
+        collector.merge(load_notes);
+        for (const auto& note : collector.snapshot())
+            result.value().warnings.push_back(core::format_diagnostic(core::load_note_diagnostic(note)));
+    }
+    return result;
 }
 
 } // namespace sim_headless::scenario_detail

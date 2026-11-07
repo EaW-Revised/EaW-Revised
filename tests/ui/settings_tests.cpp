@@ -3,11 +3,20 @@
 // control does today. The screen and the GPU case are the viewer's (test_options_screen.py).
 
 #include "eawr/presentation/ui/settings.hpp"
+#include "eawr/vfs/vfs.hpp"
+#include "eawr/presentation/ui/selection_config.hpp"
+#include "eawr/presentation/ui/text_file.hpp"
+#include "eawr/core/sha256.hpp"
+#include "eawr/presentation/ui/ability_buttons.hpp"
 #include "eawr/presentation/ui/performance_deviations.hpp"
 #include "ui_test_support.hpp"
+#include "../../apps/viewer/src/battle_selection_settings.hpp"
 
 #include <algorithm>
+#include <chrono>
+#include <fstream>
 #include <iostream>
+#include <map>
 #include <set>
 #include <sstream>
 #include <string>
@@ -16,7 +25,291 @@ namespace {
 using namespace eawr;
 namespace ui = presentation::ui;
 
+struct TestActiveSettings {
+    static inline std::optional<ui::PlayerSettings> value;
+    static const ui::PlayerSettings* get() { return value ? &*value : nullptr; }
+    static void set(ui::PlayerSettings settings) { value = std::move(settings); }
+};
+
 void expect(const bool condition, const std::string& message) { test::ui::expect(condition, message.c_str()); }
+
+void test_default_sfx_catalog_unchanged() {
+    auto filesystem = test::ui::foc_corpus("SH-03 default SFX");
+    if (!filesystem) return;
+    data::LoadOptions options;
+    options.parse_unregistered_xml = false;
+    auto loaded = data::load_catalog(*filesystem, data::Profile::foc, options);
+    expect(static_cast<bool>(loaded), "SH-03 default installed catalog loads headlessly");
+    if (!loaded) return;
+    const auto& catalog = loaded.value().catalog;
+    expect(std::none_of(catalog.registry_roots().begin(), catalog.registry_roots().end(),
+        [](const auto& root) { return root.registry_path == "data/xml/sfxeventfilesadditions.xml"; }),
+        "SH-03 default game has no layer additions");
+    const auto signature = [](const data::XmlNode& node) {
+        std::string result;
+        for (const auto& field : node.children)
+            result += std::to_string(field.name.size()) + ":" + field.name
+                + std::to_string(field.raw_text.size()) + ":" + field.raw_text;
+        return result;
+    };
+    const auto name_of = [](const data::XmlNode& node) {
+        for (const auto& attribute : node.attributes)
+            if (core::to_lower(attribute.name) == "name") return core::to_lower(attribute.value);
+        return std::string{};
+    };
+    // Independently reproduce main's winning-primary-registry registration order,
+    // including repeats. Compare its complete event fields against the new catalog.
+    std::vector<std::pair<std::string, std::string>> primary_events;
+    auto registry = data::load_document(*filesystem, "data/xml/sfxeventfiles.xml");
+    expect(static_cast<bool>(registry), "SH-03 winning primary registry reads");
+    if (!registry) return;
+    for (const auto& file : registry.value().root.children) {
+        if (core::to_lower(file.name) != "file") continue;
+        std::string path = file.raw_text;
+        const auto first = path.find_first_not_of(" \t\r\n");
+        if (first == std::string::npos) continue;
+        path = path.substr(first, path.find_last_not_of(" \t\r\n") - first + 1);
+        std::replace(path.begin(), path.end(), '\\', '/');
+        if (!core::to_lower(path).starts_with("data/")) path = "data/xml/" + path;
+        auto document = data::load_document(*filesystem, path);
+        if (!document) continue;
+        for (const auto& event : document.value().root.children)
+            primary_events.emplace_back(name_of(event), signature(event));
+    }
+    std::vector<const data::Definition*> definitions;
+    for (const auto& definition : catalog.definitions())
+        if (definition.category == data::Category::sfx && definition.active) definitions.push_back(&definition);
+    std::stable_sort(definitions.begin(), definitions.end(), [](const auto* a, const auto* b) {
+        return std::pair(a->registry_order, a->definition_order) < std::pair(b->registry_order, b->definition_order);
+    });
+    std::vector<std::pair<std::string, std::string>> catalog_events;
+    for (const auto* definition : definitions)
+        catalog_events.emplace_back(core::to_lower(definition->id), signature(definition->root));
+    expect(primary_events == catalog_events, "SH-03 default SFX order, repeats, names and every event field match main");
+    std::map<std::string, std::string> unique_events;
+    for (const auto& entry : catalog_events) unique_events.insert_or_assign(entry.first, entry.second);
+    std::string bytes;
+    for (const auto& [name, fields] : unique_events) bytes += name + "\n" + fields + "\n";
+    const auto digest = core::sha256_hex(std::span(reinterpret_cast<const std::uint8_t*>(bytes.data()), bytes.size()));
+    std::cout << "SH-03 main-primary definitions=" << primary_events.size() << " head definitions=" << catalog_events.size()
+        << " registered events=" << unique_events.size() << " fields_sha256=" << digest << "\n";
+}
+
+void test_selection_layer_config() {
+    const auto root = std::filesystem::temp_directory_path() /
+        ("eawr-selection-config-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    std::filesystem::create_directories(root / "XML");
+    {
+        std::ofstream stream(root / "XML" / "SelectionControls.xml");
+        stream << R"xml(<Selection_Controls>
+<Selection_Advisor_Enabled>
+ Yes
+</Selection_Advisor_Enabled>
+<Selection_Action Name=" SELECT_OWN_ALL "><Default_Key>
+ Ctrl+Y
+</Default_Key>
+<Include_Heroes> No </Include_Heroes>
+<Faction_SFXEvent>
+ ReBeL, SyntheticCue
+</Faction_SFXEvent></Selection_Action>
+</Selection_Controls>)xml";
+    }
+    const auto builtin = root / "builtin";
+    std::filesystem::create_directories(builtin / "XML");
+    {
+        std::ofstream stream(builtin / "XML" / "SelectionControls.xml");
+        stream << R"xml(<Selection_Controls><Selection_Action Name="SELECT_OWN_ALL">
+<Default_Faction_SFXEvent>Empire, EmpireCue</Default_Faction_SFXEvent>
+<Default_Faction_SFXEvent>Rebel, RebelCue</Default_Faction_SFXEvent>
+<Advisor_SFXEvent>RHD_Choose_Reinforcements, RebelCue</Advisor_SFXEvent>
+<Advisor_SFXEvent>EHD_Choose_Reinforcements, EmpireCue</Advisor_SFXEvent>
+</Selection_Action></Selection_Controls>)xml";
+    }
+    const auto stock = root / "stock";
+    std::filesystem::create_directories(stock / "XML");
+    {
+        std::ofstream stream(stock / "XML" / "SelectionControls.xml");
+        stream << R"xml(<Selection_Controls><Selection_Action Name="SELECT_OWN_ALL">
+<Faction_SFXEvent>Empire, OldEmpireCue</Faction_SFXEvent>
+</Selection_Action></Selection_Controls>)xml";
+    }
+    {
+        const std::array layers{vfs::MountSpec{"mod", root, "data", {}},
+            vfs::MountSpec{"builtin:revised", builtin, "data", {}},
+            vfs::MountSpec{"base", stock, "data", {}}};
+        auto layered = vfs::Vfs::mount(layers);
+        expect(static_cast<bool>(layered), "selection layers mount");
+        if (layered) {
+            const auto config = ui::load_selection_config(layered.value());
+            const auto& action = config.actions[0];
+            expect(!action.include_heroes && config.actions[1].include_heroes,
+                "Include_Heroes is read per action and defaults to Yes");
+            data::EffectiveObject faction;
+            faction.object_id = "Empire";
+            data::EffectiveValue advisor;
+            advisor.value.name = "Reinforcements_Selection_SFXEvent";
+            advisor.value.raw_text = "RHD_Choose_Reinforcements";
+            faction.values.push_back(std::move(advisor));
+            const auto rebel_advisor = ui::selection_faction_advisors(faction);
+            const std::vector<std::string> empire_advisor{"EHD_Choose_Reinforcements"};
+            const std::vector<std::string> none;
+            expect(ui::selection_advisor_event(action, "Empire", rebel_advisor) == "RebelCue",
+                "Empire record with Rebel advisor selects Rebel cue");
+            expect(ui::selection_advisor_event(action, "Empire", empire_advisor) == "EmpireCue",
+                "FoC advisor mapping preserves Empire cue");
+            expect(ui::selection_advisor_event(action, "Rebel", rebel_advisor) == "SyntheticCue",
+                "upper faction override wins over advisor mapping");
+            expect(ui::selection_advisor_event(action, "Empire", none) == "EmpireCue",
+                "unmapped advisor falls back to faction default");
+            const std::vector<std::string> custom_advisor{"custom_voice", "RHD_Choose_Reinforcements"};
+            expect(ui::selection_advisor_event(action, "Empire", custom_advisor) == "EmpireCue",
+                "an unmapped primary advisor does not borrow a later unrelated voice");
+            expect(ui::selection_advisor_event(action, "Unknown", none).empty(), "unknown faction stays silent");
+        }
+    }
+    {
+        const auto empty_revised = root / "empty-revised";
+        const auto advisor_mod = root / "advisor-mod";
+        std::filesystem::create_directories(empty_revised / "XML");
+        std::filesystem::create_directories(advisor_mod / "XML");
+        {
+            std::ofstream stream(advisor_mod / "XML" / "SelectionControls.xml");
+            stream << R"xml(<Selection_Controls><Selection_Action Name="SELECT_OWN_ALL">
+<Advisor_SFXEvent>RHD_Choose_Reinforcements, RebelCue</Advisor_SFXEvent>
+</Selection_Action></Selection_Controls>)xml";
+        }
+        const std::array layers{vfs::MountSpec{"mod", advisor_mod, "data", {}},
+            vfs::MountSpec{"builtin:revised", empty_revised, "data", {}},
+            vfs::MountSpec{"base", stock, "data", {}}};
+        auto layered = vfs::Vfs::mount(layers);
+        expect(static_cast<bool>(layered), "selection layers mount with incomplete Revised");
+        if (layered) {
+            const std::vector<std::string> advisors{"RHD_Choose_Reinforcements"};
+            expect(ui::selection_advisor_event(ui::load_selection_config(layered.value()).actions[0], "Empire", advisors) == "RebelCue",
+                "missing Revised config still blocks lower faction override");
+        }
+    }
+    {
+        const std::array stock_only{vfs::MountSpec{"base", stock, "data", {}}};
+        auto stock_files = vfs::Vfs::mount(stock_only);
+        expect(static_cast<bool>(stock_files), "stock selection config mounts without Revised");
+        if (stock_files) {
+            const std::vector<std::string> advisors{"RHD_Choose_Reinforcements"};
+            expect(ui::selection_advisor_event(ui::load_selection_config(stock_files.value()).actions[0], "Empire", advisors) == "OldEmpireCue",
+                "faction override remains effective without Revised");
+        }
+    }
+    const std::array mounts{vfs::MountSpec{"mod", root, "data", {}}};
+    auto filesystem = vfs::Vfs::mount(mounts);
+    expect(static_cast<bool>(filesystem), "SH-03 config fixture mounts");
+    if (filesystem) {
+        ui::PlayerSettings settings;
+        ui::PlayerSettings fallback;
+        TestActiveSettings::value.reset();
+        presentation::godot_backend::prepare_battle_selection_settings<TestActiveSettings>(fallback, filesystem.value());
+        expect(!TestActiveSettings::get(), "evidence preparation leaves active settings absent");
+        expect(ui::selection_action(fallback, 'Y', false, true, false) == 0,
+            "evidence preparation resolves configured selection hotkey");
+        const auto settings_file = root / "player-settings.cfg";
+        for (const int cap : {0, 144}) {
+            {
+                std::ofstream stream(settings_file);
+                stream << "eawr-settings 1\nvideo.vsync=0\nvideo.frame_rate_limit=" << cap << "\n";
+            }
+            const auto text = ui::read_text_file(settings_file);
+            expect(text.has_value(), "player settings fixture is readable");
+            if (!text) continue;
+            auto player = ui::parse_settings(*text).settings;
+            expect(!player.video.vsync && player.video.frame_rate_limit == cap, "saved pacing fixture loads");
+            TestActiveSettings::set(player);
+            presentation::godot_backend::prepare_battle_selection_settings<TestActiveSettings>(fallback, filesystem.value());
+            expect(TestActiveSettings::get()->video == player.video, "player video settings survive preparation");
+        }
+        {
+            std::ofstream stream(settings_file);
+            stream << "damaged\n";
+        }
+        const auto damaged_text = ui::read_text_file(settings_file);
+        expect(damaged_text.has_value() && ui::parse_settings(*damaged_text).defaulted, "damaged file defaults");
+        TestActiveSettings::set(damaged_text ? ui::parse_settings(*damaged_text).settings : ui::PlayerSettings{});
+        const auto defaults_video = TestActiveSettings::get()->video;
+        presentation::godot_backend::prepare_battle_selection_settings<TestActiveSettings>(fallback, filesystem.value());
+        expect(TestActiveSettings::get()->video == defaults_video, "damaged settings defaults survive preparation");
+        std::filesystem::remove(settings_file);
+        expect(!ui::read_text_file(settings_file), "missing file uses defaults");
+        TestActiveSettings::set(ui::PlayerSettings{});
+        presentation::godot_backend::prepare_battle_selection_settings<TestActiveSettings>(fallback, filesystem.value());
+        expect(TestActiveSettings::get()->video == defaults_video, "missing settings defaults survive preparation");
+        TestActiveSettings::value.reset();
+        ui::apply_selection_config(settings, filesystem.value());
+        expect(settings.selection_hotkeys && ui::selection_key(settings, 0) == "Ctrl+Y"
+            && ui::selection_key(settings, 1) == "Q", "SH-03 partial action XML keeps optional defaults");
+        expect(settings.selection_config.actions[0].faction_events.at("rebel") == "SyntheticCue"
+            && settings.selection_config.actions[1].faction_events.empty(), "SH-03 faction mapping is optional");
+        const auto untouched = ui::serialize_settings(settings);
+        expect(untouched.find("keyboard.selection_hotkeys=") == std::string::npos,
+            "SH-03 an unrelated Options save must not freeze an XML default");
+        auto reloaded = ui::parse_settings(untouched).settings;
+        ui::apply_selection_config(reloaded, filesystem.value());
+        expect(reloaded.selection_hotkeys && !reloaded.selection_hotkeys_authored,
+            "SH-03 a new layer enable default survives an untouched settings save");
+        vfs::Vfs no_layer;
+        auto removed_layer = ui::parse_settings(ui::serialize_settings(reloaded)).settings;
+        ui::apply_selection_config(removed_layer, no_layer);
+        expect(!removed_layer.selection_hotkeys && !removed_layer.selection_hotkeys_authored,
+            "SH-03 removing the layer restores the project default after an unrelated save");
+        auto saved = ui::parse_settings("eawr-settings 1\nkeyboard.selection_hotkeys=0\nkey.SELECT_OWN_ALL=Ctrl+U\n").settings;
+        ui::apply_selection_config(saved, filesystem.value());
+        expect(!saved.selection_hotkeys && ui::selection_key(saved, 0) == "Ctrl+U", "SH-03 player overrides XML enable and key");
+        saved.keys.clear();
+        expect(ui::selection_key(saved, 0) == "Ctrl+Y", "SH-03 reset restores XML default");
+    }
+    testing::remove_temp_directory(root);
+    vfs::Vfs absent;
+    const auto defaults = ui::load_selection_config(absent);
+    expect(!defaults.enabled && defaults.actions[0].default_key == "Ctrl+Q"
+        && defaults.actions[1].default_key == "Q", "SH-03 absent config preserves merged defaults");
+}
+
+void test_revised_settings() {
+    const auto old = ui::parse_settings("eawr-settings 1\n").settings;
+    expect(old.revised_layer_enabled && !old.revised_layer_path, "Revised defaults on without an override");
+    auto edited = old;
+    edited.revised_layer_enabled = false;
+    edited.revised_layer_path = "C:/example/Revised";
+    const auto restored = ui::parse_settings(ui::serialize_settings(edited)).settings;
+    expect(!restored.revised_layer_enabled && restored.revised_layer_path == edited.revised_layer_path, "Revised settings round trip");
+}
+
+void test_selection_hotkeys() {
+    ui::PlayerSettings settings;
+    expect(!settings.selection_hotkeys && !ui::selection_action(settings, 'Q', false, false, false), "SH-01 defaults off");
+    settings.selection_hotkeys = true;
+    settings.selection_hotkeys_authored = true;
+    expect(!ui::selection_action(settings, 'Q', false, false, false, false, true)
+        && !ui::selection_action(settings, 'Q', false, true, false, false, true), "SH-01 free-camera chords remain camera-owned");
+    expect(ui::selection_action(settings, 'Q', false, false, false) == 1, "Q selects screen");
+    expect(ui::selection_action(settings, 'Q', false, true, false) == 0, "Ctrl+Q selects all");
+    expect(!ui::selection_action(settings, 'Q', true, false, false)
+        && !ui::selection_action(settings, 'Q', false, false, true)
+        && !ui::selection_action(settings, 'Q', false, false, false, true), "exact modifiers protect existing keys");
+    for (const auto chord : ui::selection_key_choices) {
+        const bool ctrl = chord.starts_with("Ctrl+");
+        expect(!ui::ability_hotkey(chord.back(), {false, ctrl, false}), "offered chords do not shadow abilities");
+    }
+    expect(!ui::set_selection_key(settings, 0, "E") && !ui::set_selection_key(settings, 0, "Ctrl+E")
+        && !ui::set_selection_key(settings, 0, "Shift+Q"), "reserved chords rejected");
+    expect(!ui::set_selection_key(settings, 0, "Q"), "duplicate binding rejected");
+    expect(ui::selection_key(settings, 0) == "Ctrl+Q", "failed edit preserves binding");
+    expect(ui::set_selection_key(settings, 0, "Ctrl+Y"), "all binding editable");
+    expect(ui::set_selection_key(settings, 1, "Ctrl+U"), "screen binding editable");
+    settings = ui::parse_settings(ui::serialize_settings(settings)).settings;
+    expect(settings.selection_hotkeys && ui::selection_action(settings, 'Y', false, true, false) == 0
+        && ui::selection_action(settings, 'U', false, true, false) == 1
+        && !ui::selection_action(settings, 'Q', false, false, false), "bindings persist and old keys stop firing");
+    settings.keys["SELECT_OWN_ALL"] = "Ctrl+U";
+    expect(!ui::selection_action(settings, 'U', false, true, false), "hand-edited duplicates fail closed");
+}
 
 void test_performance_deviations() {
     std::set<std::string_view> ids, keys;
@@ -99,6 +392,17 @@ void test_online_settings() {
     expect(ui::parse_settings(ui::serialize_settings(stored)).settings.network.allow_upnp, "service text cannot inject settings lines");
 }
 
+void test_animated_loading_background_settings() {
+    expect(!ui::PlayerSettings{}.gameplay.animated_loading_background, "loading animation defaults off");
+    expect(!ui::parse_settings("eawr-settings 1\n").settings.gameplay.animated_loading_background,
+           "older settings default loading animation off");
+    for (const bool enabled : {false, true}) {
+        ui::PlayerSettings value;
+        value.gameplay.animated_loading_background = enabled;
+        expect(ui::parse_settings(ui::serialize_settings(value)).settings == value, "loading animation preference round trips");
+    }
+}
+
 void test_reinforcement_area_settings() {
     const ui::GameplaySettings defaults;
     expect(defaults.reinforcement_areas_only_while_placing, "placement-only is the fresh default");
@@ -120,6 +424,42 @@ void test_reinforcement_area_settings() {
            "old settings files get the new default");
     expect(ui::parse_settings("eawr-settings 1\ngameplay.reinforcement_areas_only_while_placing=0\n")
                .settings.gameplay.reinforcement_areas_only_while_placing == false, "retail preference loads");
+}
+
+void test_performance_thread_settings() {
+    const ui::PlayerSettings defaults;
+    expect(defaults.video.particle_threads == 0 && defaults.video.simulation_threads == 0,
+           "thread settings default to automatic");
+    for (const int threads : {0, 1, 2, 4, 6, 8}) {
+        ui::PlayerSettings value; value.video.particle_threads = threads;
+        expect(ui::parse_settings(ui::serialize_settings(value)).settings.video.particle_threads == threads,
+               "particle thread settings round trip");
+    }
+    for (const int threads : {0, 2, 4, 6, 8, 12, 16}) {
+        ui::PlayerSettings value; value.video.simulation_threads = threads;
+        expect(ui::parse_settings(ui::serialize_settings(value)).settings.video.simulation_threads == threads,
+               "simulation thread settings round trip");
+    }
+    ui::PlayerSettings invalid; invalid.video.particle_threads = 64; invalid.video.simulation_threads = 7;
+    const auto repaired = ui::parse_settings(ui::serialize_settings(invalid)).settings;
+    expect(repaired.video.particle_threads == 0 && repaired.video.simulation_threads == 0,
+           "unsupported choices fall back to automatic");
+    expect(!ui::resolve_thread_override(std::nullopt, 0), "automatic preserves existing rule");
+    expect(ui::resolve_thread_override(std::nullopt, 4) == 4, "saved count overrides automatic");
+    expect(ui::resolve_thread_override(std::size_t{8}, 4) == 8, "launch or profile overrides saved count");
+
+    expect(defaults.video.depth_prepass, "depth pre-pass defaults on");
+    ui::PlayerSettings depth; depth.video.depth_prepass = false;
+    expect(!ui::parse_settings(ui::serialize_settings(depth)).settings.video.depth_prepass, "depth pre-pass round trips");
+
+    const auto extremes = ui::parse_settings("eawr-settings 1\nvideo.particle_threads=65\nvideo.simulation_threads=-1\n").settings;
+    expect(extremes.video.particle_threads == 0 && extremes.video.simulation_threads == 0,
+           "out-of-range settings clamp and resolve to offered values");
+
+    const auto old = ui::parse_settings("eawr-settings 1\n").settings;
+    expect(old.video.depth_prepass, "old settings preserve the enabled depth pre-pass default");
+    expect(old.video.particle_threads == 0 && old.video.simulation_threads == 0,
+           "old settings retain automatic thread rules");
 }
 
 void test_render_thread_settings() {
@@ -441,9 +781,15 @@ void test_session_values() {
 } // namespace
 
 int main() {
+    test_default_sfx_catalog_unchanged();
+    test_selection_layer_config();
+    test_revised_settings();
+    test_selection_hotkeys();
     test_performance_deviations();
     test_online_settings();
+    test_performance_thread_settings();
     test_render_thread_settings();
+    test_animated_loading_background_settings();
     test_reinforcement_area_settings();
     test_defaults();
     expect(ui::hover_owner_names_enabled(ui::GameplaySettings{}, true), "hover names default on in multiplayer");

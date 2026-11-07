@@ -532,6 +532,65 @@ void ordered_funding_and_native_intents() {
     expect(!journal.commit() && published == 1 && !journal.commit(),
         "a fatal canonical publication preserves preceding output and prevents both continuation and retry");
 }
+void funding_phase_rollback() {
+    using Result = eawr::core::Result<void>;
+    using Credit = galactic::GalacticSession::CreditNotification;
+    ai::GalacticFunding funding;
+    for (const auto player : {galactic::PlayerId{1}, galactic::PlayerId{2}})
+        take(funding.initialize(player, std::array{policy()}, f(100)));
+    const auto initial = funding.state();
+    const auto initial_hash = funding.record_sync_hash();
+    const auto initial_revision = funding.state_revision();
+    {
+        auto read_only = take(funding.begin_phase());
+        expect(read_only->work().retained_ledgers == 0 && read_only->work().initializations == 0,
+            "funding phase begin retains no ledgers and performs no archive capture");
+        take(read_only->commit());
+    }
+    expect(funding.state_revision() == initial_revision && funding.record_sync_hash() == initial_hash,
+        "read-only successful phase changes neither funding state nor derived revisions");
+    for (const bool throws : {false, true}) for (const bool mutate : {false, true}) {
+        bool caught{};
+        try {
+            auto failed = [&]() -> Result {
+                auto phase = take(funding.begin_phase());
+                expect(!funding.begin_phase() && !funding.restore(initial),
+                    "live funding phase forbids nesting and reconstruction");
+                if (mutate) {
+                    take(funding.reserve(1, {7, 1, f(20), f(1), {}, {}}));
+                    take(funding.mark_spending(1, 7, f(3)));
+                    take(funding.notify(Credit{Credit::Kind::windfall, 2, f(110), f(10), {}}));
+                    take(funding.notify(Credit{Credit::Kind::windfall, 2, f(120), f(10), {}}));
+                    take(funding.initialize(3, std::array{policy()}, f(80)));
+                    take(funding.set_timeline(2));
+                    expect(phase->work().retained_ledgers == 2 && phase->work().initializations == 1,
+                        "repeated funding writes retain only the first moved original per touched ledger");
+                    expect(funding.state() != initial, "fault fixture really mutates funding before rollback");
+                }
+                if (throws) throw std::runtime_error("funding phase fixture");
+                eawr::core::Diagnostic error;
+                error.code = "funding-phase-fixture";
+                return Result::failure(std::move(error));
+            }();
+            expect(!failed && failed.error().code == "funding-phase-fixture", "funding failure preserves Result diagnostic");
+        } catch (const std::runtime_error& error) { caught = std::string_view(error.what()) == "funding phase fixture"; }
+        expect(caught == throws, "funding rollback preserves exception identity");
+        expect(funding.state() == initial && !funding.ledger(3), "phase rollback restores old ledgers, initialization and timeline");
+        expect(funding.record_sync_hash() == initial_hash && funding.record_sync_hash() == funding.record_sync_hash(true),
+            "fault-only derived rebuild restores exact canonical funding digest");
+    }
+    {
+        auto retry = take(funding.begin_phase());
+        take(funding.notify(Credit{Credit::Kind::windfall, 2, f(107), f(7), {}}));
+        take(retry->commit());
+        expect(!retry->rollback(), "committed funding retry cannot be undone twice");
+    }
+    ai::GalacticFunding oracle;
+    take(oracle.restore(initial));
+    take(oracle.notify(Credit{Credit::Kind::windfall, 2, f(107), f(7), {}}));
+    expect(funding.state() == oracle.state() && funding.record_sync_hash() == oracle.record_sync_hash(),
+        "successful phase retry sees restored input and publishes only its final funding result");
+}
 void fresh_category_failed_initial_equation() {
     ai::AiData data;
     data.equations = take(ai::EquationSet::parse({{"funding.xml", "<Equations><Positive>3</Positive><Failed>Variable_Self.Unavailable_Field</Failed></Equations>"}}, {}));
@@ -566,7 +625,7 @@ void fresh_category_failed_initial_equation() {
 }
 }
 int main() {
-    try { live_fiscal(); windfalls_and_failure(); zero_income_and_refusal(); retained_transactions(); template_untrigger(); orphan_aggregate(); over_cost_mark(); failed_funding_equations(); fresh_category_failed_initial_equation(); funding_owner_partitions(); frozen_funding_frontiers(); private_native_funding_rows(); ordered_funding_and_native_intents(); }
+    try { live_fiscal(); windfalls_and_failure(); zero_income_and_refusal(); retained_transactions(); template_untrigger(); orphan_aggregate(); over_cost_mark(); failed_funding_equations(); fresh_category_failed_initial_equation(); funding_owner_partitions(); frozen_funding_frontiers(); private_native_funding_rows(); ordered_funding_and_native_intents(); funding_phase_rollback(); }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
     return failures ? 1 : 0;
 }

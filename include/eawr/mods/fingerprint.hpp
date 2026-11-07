@@ -5,6 +5,8 @@
 #include "eawr/mods/steam/paths.hpp"
 
 #include <cstdint>
+#include <string>
+#include <vector>
 
 namespace eawr::mods {
 struct Profile;
@@ -23,6 +25,23 @@ struct TreeFingerprint {
     bool capped = false;         // stopped at `entry_cap` (codes::tree_walk_capped)
     bool incomplete = false;     // an entry could not be listed or stat'ed (codes::tree_walk_incomplete)
 };
+
+// One regular file of a walk: '/' separated relative path (original case), size and last-write time ticks.
+struct TreeFile {
+    std::string relative;
+    std::uint64_t size = 0;
+    std::int64_t mtime = 0;
+};
+
+struct TreeListing {
+    std::vector<TreeFile> files;  // sorted by the relative path's UTF-8 bytes
+    bool capped = false;
+    bool incomplete = false;
+    bool root_exists = false;
+};
+
+// The walk behind tree_fingerprint (same rules, same cap), with the per-file rows kept. Reads no file bytes.
+[[nodiscard]] TreeListing list_tree(const steam::fs::path& root, std::uint64_t entry_cap = kDefaultTreeEntryCap);
 
 // SHA-256 of one line "<relative path>\t<size>\t<mtime>\n" per regular file, sorted by the relative path's
 // UTF-8 bytes; the path uses '/' and keeps its case, mtime is the file clock's tick count. Symbolic links and

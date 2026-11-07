@@ -28,6 +28,7 @@
 
 #include "battle_audio_internal.hpp"
 #include "eawr/presentation/audio/hardpoint_loss.hpp"
+#include "eawr/presentation/audio/last_seen_walk.hpp"
 
 namespace eawr::presentation::godot_backend {
 void BattleAudio::loading_complete() {
@@ -81,6 +82,8 @@ std::optional<audio::EventQueue::Handle> BattleAudio::play(const audio::SfxEvent
     const std::optional<audio::Vec3> position, const bool hidden, const std::string& reason,
     const sim::EntityId loop_child, const sim::EntityId attached, const bool engine_loop) {
     if (!sfx || released_) return std::nullopt;
+    FrameTimer play_timer(trace_ ? &trace_play_ms_ : nullptr, true);
+    tally(audio_trace::Count::play_calls);
     // MAT-18: every battle event is silent, including non-positional effects and stings.
     // Gate before admission, rather than muting buses shared with the front end's music and UI.
     if (!admits_battle_audio()) {
@@ -102,7 +105,20 @@ std::optional<audio::EventQueue::Handle> BattleAudio::play(const audio::SfxEvent
     const auto playback_position = spatial_audio_available_ ? position : std::nullopt;
     const auto accepted = events_.admit({{sfx, playback_position, attached ? false : hidden, false, false, clock_},
                                        attached, loop_child != sim::invalid_entity_id || reason == "ability_leech_loop"}, random_, admission);
-    if (accepted.handle) { ++allocation.admitted; ++events_admitted_; }
+    if (trace_) {
+        audio_trace::Digest& log = digest(audio_trace::Stream::play);
+        log.add_text(reason);
+        log.add_text(sfx->name);
+        log.add_u64(playback_position ? 1U : 0U);
+        if (playback_position) for (const double axis : *playback_position) log.add_f64(axis);
+        log.add_u64(hidden ? 1U : 0U);
+        log.add_u64(attached);
+        log.add_u64(loop_child);
+        log.add_u64(engine_loop ? 1U : 0U);
+        log.add_u64(static_cast<std::uint64_t>(accepted.result));
+        log.add_u64(accepted.handle.value_or(0U));
+    }
+    if (accepted.handle) { ++allocation.admitted; ++events_admitted_; tally(audio_trace::Count::play_admitted); }
     else ++allocation.refused;
     ++results_[reason][std::string(audio::to_string(accepted.result))];
     if (accepted.handle) {
@@ -116,23 +132,54 @@ audio::EventQueue::Backend BattleAudio::event_backend() {
     return {
         [this](const audio::EventQueue::Sample& cue) { return start_sample(cue); },
         [this](const std::size_t voice) {
+            lap(audio_trace::Lap::v_service);
+            tally(audio_trace::Count::playing_probes);
             const auto& state = voice_states_[voice];
-            return state.started && (state.paused || clock_ - state.started_at <= start_grace_seconds
+            const bool playing = state.started && (state.paused || clock_ - state.started_at <= start_grace_seconds
                 || (audio::Voices::is_3d_voice(voice) ? players_3d_[voice]->is_playing()
                     : players_2d_[voice - audio::Voices::voices_3d]->is_playing()));
+            lap(audio_trace::Lap::v_playing);
+            return playing;
         },
         [this](const std::size_t voice) {
+            if (trace_) {
+                audio_trace::Digest& log = digest(audio_trace::Stream::stop);
+                log.add_u64(voice);
+                log.add_u64(voice_states_[voice].event_handle);
+                log.add_u64(0U);
+            }
             if (audio::Voices::is_3d_voice(voice)) players_3d_[voice]->stop();
             else players_2d_[voice - audio::Voices::voices_3d]->stop();
             voices_.finished(voice);
             end_voice(voice);
         },
-        [this](const std::size_t voice) { voices_.set_fading(voice); },
+        [this](const std::size_t voice) {
+            if (trace_) {
+                audio_trace::Digest& log = digest(audio_trace::Stream::stop);
+                log.add_u64(voice);
+                log.add_u64(voice_states_[voice].event_handle);
+                log.add_u64(1U);
+            }
+            voices_.set_fading(voice);
+        },
         [this](const audio::EventQueue::Sample& cue) { return audio_ready({LoadKind::sfx, cue.values.sample}); }
     };
 }
 
+godot::Ref<godot::AudioStreamWAV> BattleAudio::loop_stream(const Sample& sample) {
+    if (sample.loop.is_valid()) return sample.loop;
+    godot::Ref<godot::AudioStreamWAV> loop = sample.stream->duplicate();
+    if (loop.is_valid()) {
+        loop->set_loop_mode(godot::AudioStreamWAV::LOOP_FORWARD);
+        loop->set_loop_begin(0);
+        loop->set_loop_end(static_cast<std::int32_t>(loop->get_data().size() / (loop->is_stereo() ? 4 : 2)));
+        sample.loop = loop;
+    }
+    return loop;
+}
+
 audio::Start BattleAudio::start_sample(const audio::EventQueue::Sample& cue) {
+    lap(audio_trace::Lap::v_service);
     const auto& metadata = event_states_.at(cue.handle);
     const auto* sfx = cue.request.voice.event;
     const auto position = cue.request.voice.position;
@@ -147,9 +194,23 @@ audio::Start BattleAudio::start_sample(const audio::EventQueue::Sample& cue) {
     request.started_at = clock_;
     ++allocation.samples_requested;
     auto start = voices_.allocate(request, listener, cue.values);
+    if (trace_) {
+        audio_trace::Digest& log = digest(audio_trace::Stream::voice);
+        log.add_u64(cue.handle);
+        log.add_u64(static_cast<std::uint64_t>(start.result));
+        if (start.result == audio::Start::Result::playing) {
+            log.add_u64(start.voice);
+            log.add_text(start.sample);
+            log.add_f64(start.pitch);
+            log.add_f64(start.volume);
+            log.add_f64(start.pan);
+            log.add_u64(start.stopped ? *start.stopped + 1U : 0U);
+        }
+    }
     if (start.result != audio::Start::Result::playing) {
         ++allocation.samples_failed;
         ++results_[reason]["allocation_" + std::string(audio::to_string(start.result))];
+        lap(audio_trace::Lap::v_start);
         return start;
     }
     ++allocation.allocated;
@@ -169,6 +230,7 @@ audio::Start BattleAudio::start_sample(const audio::EventQueue::Sample& cue) {
         ++results_[reason]["sample_missing"];
         voices_.finished(start.voice);
         start.result = audio::Start::Result::no_samples;
+        lap(audio_trace::Lap::v_start);
         return start;
     }
     ++played_samples_[start.sample];
@@ -180,7 +242,7 @@ audio::Start BattleAudio::start_sample(const audio::EventQueue::Sample& cue) {
     if ((reason == "authored_chain" || reason.starts_with("ability_") || reason.starts_with("battle_") || reason.starts_with("economy_")
          || reason == "hyperspace_arrival" || reason == "response_attack_hardpoint" || reason == "lifetime_detonation"
          || reason == "health_warning" || reason == "response_stop" || reason == "response_guard" || reason == "ambient_moving" || reason == "base_under_attack"
-         || reason.starts_with("reinforcement_") || reason.starts_with("engine_") || reason.starts_with("sighting_") || reason.starts_with("command_") || reason.starts_with("response_") || reason == "negative_feedback") && start_rows_.size() < log_limit) {
+         || reason.starts_with("selection_") || reason.starts_with("reinforcement_") || reason.starts_with("engine_") || reason.starts_with("sighting_") || reason.starts_with("command_") || reason.starts_with("response_") || reason == "negative_feedback") && start_rows_.size() < log_limit) {
         start_rows_.push_back({reason, sfx->name, start.sample, presented_tick_, gain, start.pitch, position, attached, sfx->localized});
     }
     VoiceState& state = voice_states_[start.voice];
@@ -191,20 +253,19 @@ audio::Start BattleAudio::start_sample(const audio::EventQueue::Sample& cue) {
     state.fade_seconds = engine_loop && cue.stage == audio::EventQueue::Stage::main ? sfx->loop_fade_in_seconds : 0.0;
     state.event_handle = cue.handle;
     state.paused = paused_ && audio::pauses_with_game(*sfx, audio::Voices::is_3d_voice(start.voice));
+    lap(audio_trace::Lap::v_start);
+    if (cue.continuous) tally(audio_trace::Count::continuous_starts);
     if (audio::Voices::is_3d_voice(start.voice)) {
         godot::AudioStreamPlayer3D* player = players_3d_[start.voice];
         player->set_bus(buses_[sfx->localized ? 1 : 0].name);
         player->set_stream(loaded.stream);
+        lap(audio_trace::Lap::v_start_godot);
         if (cue.continuous) {
-            // WBP-20: a private loop stream, stopped when this construction child leaves.
-            godot::Ref<godot::AudioStreamWAV> loop = loaded.stream->duplicate();
-            if (loop.is_valid()) {
-                loop->set_loop_mode(godot::AudioStreamWAV::LOOP_FORWARD);
-                loop->set_loop_begin(0);
-                loop->set_loop_end(static_cast<std::int32_t>(loop->get_data().size() / (loop->is_stereo() ? 4 : 2)));
-                player->set_stream(loop);
-            }
+            // WBP-20: a loop copy of the sample (built once per sample, apart from the one-shot stream).
+            const godot::Ref<godot::AudioStreamWAV> loop = loop_stream(loaded);
+            if (loop.is_valid()) player->set_stream(loop);
         }
+        lap(audio_trace::Lap::v_start_loop);
         player->set_position(render(state.position));
         player->set_pitch_scale(static_cast<float>(start.pitch));
         const double distance = std::sqrt(std::pow(state.position[0] - listener[0], 2.0)
@@ -223,20 +284,18 @@ audio::Start BattleAudio::start_sample(const audio::EventQueue::Sample& cue) {
         panners_[slot]->set_pan(static_cast<float>(start.pan * 2.0 - 1.0));
         godot::AudioServer::get_singleton()->set_bus_send(pan_buses_[slot], buses_[sfx->localized ? 1 : 0].name);
         player->set_stream(loaded.stream);
+        lap(audio_trace::Lap::v_start_godot);
         if (cue.continuous) {
-            godot::Ref<godot::AudioStreamWAV> loop = loaded.stream->duplicate();
-            if (loop.is_valid()) {
-                loop->set_loop_mode(godot::AudioStreamWAV::LOOP_FORWARD);
-                loop->set_loop_begin(0);
-                loop->set_loop_end(static_cast<std::int32_t>(loop->get_data().size() / (loop->is_stereo() ? 4 : 2)));
-                player->set_stream(loop);
-            }
+            const godot::Ref<godot::AudioStreamWAV> loop = loop_stream(loaded);
+            if (loop.is_valid()) player->set_stream(loop);
         }
+        lap(audio_trace::Lap::v_start_loop);
         player->set_pitch_scale(static_cast<float>(start.pitch));
         player->set_volume_db(decibels(gain));
         player->play();
         player->set_stream_paused(state.paused);
     }
+    lap(audio_trace::Lap::v_start_godot);
     max_voices_ = std::max<std::uint64_t>(max_voices_, voices_.playing_count());
     return start;
 }
@@ -266,6 +325,7 @@ void BattleAudio::update_pause(const bool paused, const double delta) {
         const bool spatial = audio::Voices::is_3d_voice(voice);
         const bool hold = paused && audio::pauses_with_game(*sfx, spatial);
         double position{};
+        tally(audio_trace::Count::pause_godot, 2U);
         if (spatial) {
             auto* player = players_3d_[voice];
             player->set_stream_paused(hold);
@@ -284,6 +344,11 @@ void BattleAudio::update_pause(const bool paused, const double delta) {
             // Preserve fade progress and the backend-start grace across a long pause.
             state.started_at += std::max(0.0, delta);
             state.fade_started += std::max(0.0, delta);
+        }
+        if (trace_) {
+            audio_trace::Digest& log = digest(audio_trace::Stream::voice);
+            log.add_u64(voice);
+            log.add_u64(hold ? 1U : 0U);
         }
         state.paused = hold;
     }
@@ -313,6 +378,7 @@ void BattleAudio::update_voices(const audio::Vec3& listener, const LiveSessionVi
             if (players[index].player_id == live.local_player()) local_bit = std::uint64_t{1} << index;
         }
     }
+    lap(audio_trace::Lap::v_chains);
     // SND-11/18: refresh queued attachments too; deletion cannot leave a delayed event behind.
     for (auto& [handle, state] : event_states_) {
         if (!events_.active(handle)) continue;
@@ -343,6 +409,7 @@ void BattleAudio::update_voices(const audio::Vec3& listener, const LiveSessionVi
         else if (instance) events_.set_position(handle, {to_double(instance->fixed_transform.rows[0][3]),
             to_double(instance->fixed_transform.rows[1][3]), to_double(instance->fixed_transform.rows[2][3])});
     }
+    lap(audio_trace::Lap::v_events);
     for (std::size_t voice = 0; voice < voice_states_.size(); ++voice) {
         VoiceState& state = voice_states_[voice];
         if (!state.started) continue;
@@ -358,7 +425,14 @@ void BattleAudio::update_voices(const audio::Vec3& listener, const LiveSessionVi
             // BA-13: degrading distance attenuation must not expose a hidden attached source.
             const bool hidden = !spatial_audio_available_ && sfx && sfx->is_3d
                 && state.attached != sim::invalid_entity_id && metadata != event_states_.end() && metadata->second.hidden;
-            players_2d_[voice - audio::Voices::voices_3d]->set_volume_db(decibels((hidden ? 0.0 : gain) * events_.fade(state.event_handle)));
+            const float level = decibels((hidden ? 0.0 : gain) * events_.fade(state.event_handle));
+            if (trace_) {
+                audio_trace::Digest& log = digest(audio_trace::Stream::voice);
+                log.add_u64(voice);
+                log.add_f64(static_cast<double>(level));
+            }
+            players_2d_[voice - audio::Voices::voices_3d]->set_volume_db(level);
+            tally(audio_trace::Count::voice_godot);
             continue;
         }
         const auto metadata = event_states_.find(state.event_handle);
@@ -374,8 +448,14 @@ void BattleAudio::update_voices(const audio::Vec3& listener, const LiveSessionVi
             if (const auto unit = live.unit_frame(state.attached)) {
                 if (state.position != unit->position) ++attached_moves_;
                 state.position = unit->position;
+                if (trace_) {
+                    audio_trace::Digest& log = digest(audio_trace::Stream::voice);
+                    log.add_u64(voice);
+                    for (const double axis : state.position) log.add_f64(axis);
+                }
                 players_3d_[voice]->set_position(render(state.position));
                 voices_.set_position(voice, state.position);
+                tally(audio_trace::Count::voice_godot);
             }
         }
         const audio::SfxEvent* sfx = voices_.playing(voice);
@@ -393,8 +473,16 @@ void BattleAudio::update_voices(const audio::Vec3& listener, const LiveSessionVi
         const double current_gain = hidden ? 0.0
             : state.attached == sim::invalid_entity_id ? state.positional_gain : gain;
         if (state.attached != sim::invalid_entity_id && gain < state.volume) ++ducked_updates_;
-        players_3d_[voice]->set_volume_db(decibels(current_gain * fade * events_.fade(state.event_handle) * audio::falloff_gain(distance, sfx->saturation_distance, space_)));
+        const float level = decibels(current_gain * fade * events_.fade(state.event_handle) * audio::falloff_gain(distance, sfx->saturation_distance, space_));
+        if (trace_) {
+            audio_trace::Digest& log = digest(audio_trace::Stream::voice);
+            log.add_u64(voice);
+            log.add_f64(static_cast<double>(level));
+        }
+        players_3d_[voice]->set_volume_db(level);
+        tally(audio_trace::Count::voice_godot);
     }
+    lap(audio_trace::Lap::v_voices);
     const auto chains = events_.service(event_delta_ms_, paused_, listener, random_, registry_, backend);
     std::erase_if(event_states_, [this](const auto& row) { return !events_.active(row.first); });
     for (const auto& chain : chains) {
@@ -402,6 +490,7 @@ void BattleAudio::update_voices(const audio::Vec3& listener, const LiveSessionVi
             chain.runtime ? (chain.attack ? "response_assist_attack" : "response_assist_move") : "authored_chain",
             sim::invalid_entity_id, chain.attachment);
     }
+    lap(audio_trace::Lap::v_service);
 }
 
 void BattleAudio::stop_engine_loop(const sim::EntityId source, const audio::SfxEvent* event) {
@@ -419,12 +508,12 @@ void BattleAudio::engine_loops(const tactical::TacticalSnapshot& snapshot, const
     const auto stamp = now + 1;
     for (const auto& instance : snapshot.instances()) {
         ++engine_visits_;
-        const auto type = types_.find(instance.type_id);
-        if (type == types_.end() || type->second.squadron || !instance.locomotor_speed_per_frame
-            || (!type->second.engine_idle && !type->second.engine_moving)) continue;
+        const TypeSounds* const type = type_of(instance.type_id);
+        if (type == nullptr || type->squadron || !instance.locomotor_speed_per_frame
+            || (!type->engine_idle && !type->engine_moving)) continue;
         auto& state = engine_states_[instance.entity_id];
         state.seen = stamp;
-        const auto& sounds = type->second;
+        const auto& sounds = *type;
         const bool online = !instance.durability || instance.durability->engines_online;
         const bool hidden = !std::binary_search(visible.begin(), visible.end(), instance.entity_id)
             || (instance.arrival && *instance.arrival < tactical::arrival_visible_frame);
@@ -471,8 +560,8 @@ void BattleAudio::ambient_moving(const tactical::TacticalSnapshot& snapshot, con
         for (const auto& squadron : roster) {
             if (squadron.members.empty()) continue;
             if (!space::find_instance(snapshot, squadron.container)) continue;
-            const auto cached = ambient_members_.find(squadron.members.front());
-            if (cached == ambient_members_.end() || !space::find_instance(snapshot, cached->second.leader)) {
+            const auto* cached = ambient_members_.find(squadron.members.front());
+            if (cached == nullptr || !space::find_instance(snapshot, cached->second.leader)) {
                 refresh_members = true;
                 break;
             }
@@ -489,30 +578,33 @@ void BattleAudio::ambient_moving(const tactical::TacticalSnapshot& snapshot, con
                 if (space::find_instance(snapshot, member)) { leader = member; break; }
             }
             for (const auto member : squadron.members) {
-                ambient_members_.emplace(member, AmbientMember{squadron.container, leader});
+                if (!ambient_members_.contains(member)) ambient_members_[member] = AmbientMember{squadron.container, leader};
             }
         }
     }
+    std::size_t touched = 0; // timers this pass kept alive; every ambient instance has exactly one
     for (const auto& instance : snapshot.instances()) {
         ++ambient_visits_;
-        const auto type = types_.find(instance.type_id);
-        if (type == types_.end() || type->second.squadron || !type->second.ambient_moving) continue;
-        const auto& sounds = type->second;
-        auto timer = ambient_timers_.find(instance.entity_id);
-        if (timer == ambient_timers_.end()) {
+        const TypeSounds* const type = type_of(instance.type_id);
+        if (type == nullptr || type->squadron || !type->ambient_moving) continue;
+        const auto& sounds = *type;
+        AmbientTimer* timer = nullptr;
+        if (auto* found = ambient_timers_.find(instance.entity_id)) timer = &found->second;
+        else {
             const auto delay = ambient_random_.between(sounds.ambient_min_delay, sounds.ambient_max_delay);
-            timer = ambient_timers_.emplace(instance.entity_id, AmbientTimer{now + static_cast<std::uint64_t>(delay), stamp}).first;
+            timer = &(ambient_timers_[instance.entity_id] = AmbientTimer{now + static_cast<std::uint64_t>(delay), stamp});
             ++ambient_initialized_;
         }
-        timer->second.seen = stamp;
-        const auto member = ambient_members_.find(instance.entity_id);
-        if (member != ambient_members_.end() && member->second.leader != instance.entity_id) {
+        ++touched;
+        timer->seen = stamp;
+        const auto* member = ambient_members_.find(instance.entity_id);
+        if (member != nullptr && member->second.leader != instance.entity_id) {
             ++ambient_follower_skips_;
             continue;
         }
-        if (timer->second.next > now) continue;
+        if (timer->next > now) continue;
         ++ambient_due_;
-        const auto* path = member == ambient_members_.end() ? &instance
+        const auto* path = member == nullptr ? &instance
             : space::find_instance(snapshot, member->second.container);
         const bool moving = path && path->has_movement_path;
         const bool hidden = !std::binary_search(visible.begin(), visible.end(), instance.entity_id);
@@ -525,13 +617,12 @@ void BattleAudio::ambient_moving(const tactical::TacticalSnapshot& snapshot, con
             play(sounds.ambient_moving, position, hidden, "ambient_moving", sim::invalid_entity_id, instance.entity_id);
         } else ++ambient_stationary_;
         // Reschedule even a stationary, hidden, missing-sample or voice-refused request.
-        timer->second.next = now + static_cast<std::uint64_t>(ambient_random_.between(
+        timer->next = now + static_cast<std::uint64_t>(ambient_random_.between(
             sounds.ambient_min_delay, sounds.ambient_max_delay));
     }
-    for (auto timer = ambient_timers_.begin(); timer != ambient_timers_.end();) {
-        if (timer->second.seen == stamp) { ++timer; continue; }
-        timer = ambient_timers_.erase(timer);
-        ++ambient_retired_;
+    // Only a timer whose unit left the snapshot is stale; when every timer was touched there is none to look for.
+    if (touched != ambient_timers_.size()) {
+        ambient_retired_ += ambient_timers_.erase_if([stamp](const std::uint64_t, const AmbientTimer& timer) { return timer.seen != stamp; });
     }
     ambient_peak_ = std::max<std::uint64_t>(ambient_peak_, ambient_timers_.size());
 }
@@ -599,7 +690,7 @@ void BattleAudio::update_speech(const bool paused) {
     speech_started_at_ = clock_;
     ++speech_class_starts_;
     if (start_rows_.size() < log_limit) {
-        start_rows_.push_back({"speech_" + std::string(front->reason), speech.name, speech.files[index], presented_tick_, speech.volume, 1.0});
+        start_rows_.push_back({"speech_" + std::string(front->reason), speech.name, speech.files[index], presented_tick_, speech.volume, 1.0, {}});
     }
 }
 
@@ -687,6 +778,15 @@ void BattleAudio::update_music(const double delta) {
 }
 
 void BattleAudio::respond(const BattleInput::Acknowledgement& acknowledgement, const LiveSessionView& live) {
+    const int selection_action = acknowledgement.kind == BattleInput::Acknowledgement::Kind::select_all ? 0
+        : acknowledgement.kind == BattleInput::Acknowledgement::Kind::select_screen ? 1 : -1;
+    if (selection_action >= 0) {
+        const auto index = static_cast<std::size_t>(selection_action);
+        if (const auto* event = selection_events_[index]) {
+            play(event, std::nullopt, false, index == 0 ? "selection_all" : "selection_screen");
+            return;
+        }
+    }
     if (acknowledgement.cue != audio::CommandCue::none) {
         constexpr std::array<const char*, static_cast<std::size_t>(audio::CommandCue::count)> reasons{
             "", "command_attack", "command_attack_move", "command_guard", "command_move", "command_stop", "negative_feedback", "command_waypoint"};
@@ -703,12 +803,12 @@ void BattleAudio::respond(const BattleInput::Acknowledgement& acknowledgement, c
     // `last_seen_` a tick or more later.
     const auto sounds_of = [&](const sim::EntityId entity) -> const TypeSounds* {
         const auto seen = last_seen_.find(entity);
-        if (seen == last_seen_.end() || seen->second.owner != live.local_player() || !live_entities_.contains(entity)) return nullptr;
+        if (seen == last_seen_.end() || seen->second.owner != live.local_player() || !live_entity(entity)) return nullptr;
         sim::tactical::TypeId type_id = seen->second.type;
         const auto members = live.squadron_members().find(entity);
         if (members != live.squadron_members().end()) {
             for (const sim::EntityId craft : members->second) {
-                if (!live_entities_.contains(craft)) continue;
+                if (!live_entity(craft)) continue;
                 const auto craft_type = entity_types_.find(craft);
                 if (craft_type != entity_types_.end()) {
                     type_id = craft_type->second;
@@ -759,6 +859,8 @@ void BattleAudio::respond(const BattleInput::Acknowledgement& acknowledgement, c
     const audio::SfxEvent* line = nullptr;
     const char* kind = "select";
     switch (acknowledgement.kind) {
+    case BattleInput::Acknowledgement::Kind::select_all:
+    case BattleInput::Acknowledgement::Kind::select_screen:
     case BattleInput::Acknowledgement::Kind::select:
         line = audio::ability_variant(ability_enabled, speaker.select_ability, speaker.select);
         break;
@@ -838,7 +940,7 @@ void BattleAudio::respond(const BattleInput::Acknowledgement& acknowledgement, c
     const auto candidate = last_seen_.find(other);
     const auto primary = last_seen_.find(chosen);
     if (candidate == last_seen_.end() || primary == last_seen_.end()
-        || candidate->second.owner != live.local_player() || !live_entities_.contains(other)) return;
+        || candidate->second.owner != live.local_player() || !live_entity(other)) return;
     const auto assist = types_.find(candidate->second.type);
     if (assist == types_.end() || !audio::assist_eligible(other == chosen,
         candidate->second.type == primary->second.type, assist->second.vehicle_thief)) return;
@@ -873,39 +975,50 @@ const std::map<tactical::AbilityKind, BattleAudio::Toggle>& BattleAudio::toggles
 
 void BattleAudio::toggle_abilities(const tactical::TacticalSnapshot& snapshot, const LiveSessionView& live) {
     const tactical::PlayerId local = live.local_player();
-    std::map<std::pair<sim::EntityId, tactical::AbilityKind>, AbilityMemory> next;
+    ability_history_.begin_tick();
     std::set<std::tuple<tactical::PlayerId, tactical::AbilityKind, bool>> switched;
+    // The previous tick's memory of each ability, found by a forward cursor over the ascending instances
+    // (audio::AbilityHistory, equal to the std::map it replaced).
     for (const tactical::TacticalInstance& instance : snapshot.instances()) {
+        ability_history_.begin_instance(instance.entity_id);
         for (const tactical::AbilityStatus& status : instance.abilities) {
-            const auto key = std::make_pair(instance.entity_id, status.kind);
-            const auto before = ability_memory_.find(key);
+            tally(audio_trace::Count::ability_rows);
+            if (status.active) tally(audio_trace::Count::ability_active);
+            const audio::AbilityMemory* before = ability_history_.before(status.kind);
             const bool timed = status.active && status.total_frames > 0U;
-            next[key] = {status.active, timed, status.active ? status.remaining_frames : 0U, status.started_tick, status.position.has_value()};
+            ability_history_.record(instance.entity_id, status.kind,
+                {status.active, timed, status.active ? status.remaining_frames : 0U, status.started_tick, status.position.has_value()});
             const bool first_corrupt_cast = status.kind == tactical::AbilityKind::corrupt_systems && status.position
-                && before != ability_memory_.end() && !before->second.positioned;
-            if (first_corrupt_cast || (before != ability_memory_.end() && status.started_tick != 0 && status.started_tick != before->second.started)) {
+                && before != nullptr && !before->positioned;
+            if (first_corrupt_cast || (before != nullptr && status.started_tick != 0 && status.started_tick != before->started)) {
                 if (status.kind == tactical::AbilityKind::harmonic_bomb || status.kind == tactical::AbilityKind::weaken_enemy
                     || status.kind == tactical::AbilityKind::buzz_droids || status.kind == tactical::AbilityKind::self_destruct
                     || status.kind == tactical::AbilityKind::corrupt_systems || status.kind == tactical::AbilityKind::blast
                     || status.kind == tactical::AbilityKind::cluster_bomb || status.kind == tactical::AbilityKind::fow_reveal_ping) {
+                    lap(audio_trace::Lap::t_toggle_main);
                     const auto visible = snapshot.visible_entities(local);
                     spawned_ability(instance, status, !std::binary_search(visible.begin(), visible.end(), instance.entity_id), live);
+                    tally(audio_trace::Count::ability_spawned);
+                    lap(audio_trace::Lap::t_toggle_spawn);
                 }
             }
-            if (!ability_memory_started_ || before == ability_memory_.end() || before->second.active == status.active) continue;
+            if (!ability_memory_started_ || before == nullptr || before->active == status.active) continue;
             // BA-51: a timed ability that ran out ends without a sound (its last read is 0 frames left); a
             // switch-off (or a lost engine or shield) plays the off sound, and so does an untimed one's end.
-            if (!status.active && before->second.timed && before->second.remaining <= natural_end_frames) {
+            if (!status.active && before->timed && before->remaining <= natural_end_frames) {
+                tally(audio_trace::Count::ability_expired);
                 if (ability_log_.size() < log_limit) {
                     ability_log_.push_back(std::string("expired ") + std::string(tactical::to_string(status.kind)));
                 }
                 continue;
             }
             switched.emplace(instance.owner, status.kind, status.active);
+            tally(audio_trace::Count::ability_switched);
         }
     }
-    ability_memory_ = std::move(next);
+    ability_history_.end_tick();
     ability_memory_started_ = true;
+    lap(audio_trace::Lap::t_toggle_main);
     // WSD-08: the countdown's start sound stops with the countdown (the disable path's 1 s argument is
     // taken as the fade-out; unverified).
     for (auto sound = self_destruct_sounds_.begin(); sound != self_destruct_sounds_.end();) {
@@ -923,10 +1036,12 @@ void BattleAudio::toggle_abilities(const tactical::TacticalSnapshot& snapshot, c
     // WLS-05: one attached loop at each endpoint while any shield-leech lock uses it.
     std::map<sim::EntityId, const audio::SfxEvent*> leeching;
     for (const auto& instance : snapshot.instances()) {
-        const auto type = types_.find(instance.type_id);
-        if (type == types_.end() || !type->second.leech_loop) continue;
         for (const auto& status : instance.abilities) {
             if (!status.active || status.kind != tactical::AbilityKind::leech_shields) continue;
+            // Only a unit with an active leech lock looks up its type; one whose type has no leech loop is skipped whole.
+            const auto type = types_.find(instance.type_id);
+            if (type == types_.end() || !type->second.leech_loop) break;
+            tally(audio_trace::Count::leech_active);
             leeching[instance.entity_id] = type->second.leech_loop;
             leeching[status.target] = type->second.leech_loop;
         }
@@ -943,6 +1058,7 @@ void BattleAudio::toggle_abilities(const tactical::TacticalSnapshot& snapshot, c
         const auto started = play(cue, frame->position, false, "ability_leech_loop", sim::invalid_entity_id, id);
         if (started) leech_loops_[id] = *started;
     }
+    lap(audio_trace::Lap::t_toggle_leech);
     arm_droids(snapshot, live);
     // BA-50: one sound per switch, whatever the number of units it carried (a squadron's craft, a group).
     for (const auto& [owner, kind, on] : switched) {
@@ -963,6 +1079,7 @@ void BattleAudio::toggle_abilities(const tactical::TacticalSnapshot& snapshot, c
         }
         play(sfx, std::nullopt, false, "ability_toggle");
     }
+    lap(audio_trace::Lap::t_toggle_rest);
 }
 
 void BattleAudio::target_ability(const LiveSessionView::AbilityClick& click, const LiveSessionView& live) {
@@ -1058,7 +1175,7 @@ void BattleAudio::voice_ability(const LiveSessionView::AbilityClick& click, cons
         const auto members = live.squadron_members().find(entity);
         if (members != live.squadron_members().end()) {
             for (const sim::EntityId craft : members->second) {
-                if (!live_entities_.contains(craft)) continue;
+                if (!live_entity(craft)) continue;
                 const auto craft_type = entity_types_.find(craft);
                 if (craft_type != entity_types_.end()) {
                     type_id = craft_type->second;
@@ -1221,6 +1338,7 @@ void BattleAudio::update_listener(const LiveSessionView& live, const FixedCamera
     std::snprintf(text, sizeof(text), "%.1f,%.1f,%.1f", listener.position[0], listener.position[1], listener.position[2]);
     listener_text_ = text;
     listener_position_ = listener.position;
+    lap(audio_trace::Lap::listener);
     update_voices(listener.position, live);
 }
 
@@ -1234,20 +1352,22 @@ void BattleAudio::remember_visible_units(const LiveSessionView& live, const Live
         }
         live_entities_.clear();
         for (const tactical::TacticalInstance& instance : battle.latest->instances()) {
-            live_entities_.insert(instance.entity_id);
+            live_entities_.push_back(instance.entity_id);
             owners_[instance.entity_id] = instance.owner;
             entity_types_[instance.entity_id] = instance.type_id;
         }
+        // live_entity() is a binary search: the snapshot orders its instances, but the answer must not depend on it.
+        if (!std::is_sorted(live_entities_.begin(), live_entities_.end())) std::sort(live_entities_.begin(), live_entities_.end());
         metadata_snapshot_ = battle.latest;
     }
-    // Positions still interpolate every frame; destruction events need the last visible pose.
-    for (const tactical::TacticalInstance& instance : battle.latest->instances()) {
-        if (const auto unit = live.unit_frame(instance.entity_id)) {
-            last_seen_[instance.entity_id] = {unit->position, unit->yaw_degrees, instance.type_id, instance.owner};
-        } else {
-            last_seen_.erase(instance.entity_id);
-        }
-    }
+    // Positions still interpolate every frame; destruction events need the last visible pose. One forward cursor
+    // over the live view's ascending poses replaces a keyed lookup and copy per instance (audio::walk_last_seen).
+    lap(audio_trace::Lap::r_meta);
+    audio::walk_last_seen(battle.latest->instances(), live.unit_frames(), last_seen_,
+        [](const tactical::TacticalInstance& instance, const BattleEffects::UnitFrame& unit) {
+            return Seen{unit.position, unit.yaw_degrees, instance.type_id, instance.owner};
+        });
+    lap(audio_trace::Lap::r_units);
     // SP-03/SP-08: keep the visible dead copy's metadata and final pose until its end event.
     for (const tactical::SpinningCraft& craft : battle.latest->spinning()) {
         if (const auto unit = live.unit_frame(craft.entity_id)) {
@@ -1278,7 +1398,9 @@ void BattleAudio::present_reached_audio(const LiveSessionView& live, const LiveS
     }
     // BA-13, BA-14 (shots) and BA-42 (the attack notification): a projectile ID not seen before is
     // a shot fired that tick. IDs are in creation order.
+    lap(audio_trace::Lap::t_init);
     for (std::uint64_t tick = fired_through_ + 1; tick <= reach; ++tick) {
+        tally(audio_trace::Count::reached_ticks);
         // SND-40: logical service precedes this frame's attack notifications.
         if (base_warning_countdown_ > 0) --base_warning_countdown_;
         // The bounded journal retains notification-time metadata across snapshot eviction.
@@ -1302,16 +1424,20 @@ void BattleAudio::present_reached_audio(const LiveSessionView& live, const LiveS
         std::shared_ptr<const tactical::TacticalSnapshot> snapshot = live.snapshot_at(tick);
         if (!snapshot && tick == latest) snapshot = battle.latest;
         bool attack = false;
+        lap(audio_trace::Lap::t_base);
         if (snapshot) {
             const std::vector<sim::EntityId> visible = snapshot->visible_entities(local);
+            tally(audio_trace::Count::unit_visits, snapshot->instances().size());
+            lap(audio_trace::Lap::t_visible);
             for (const tactical::TacticalInstance& instance : snapshot->instances()) {
                 entity_types_[instance.entity_id] = instance.type_id;
                 owners_[instance.entity_id] = instance.owner;
                 // WST-14: a cloak that hid its unit and no longer does while still on is a detection.
                 if (instance.stealth_invisible) stealth_hidden_.insert(instance.entity_id);
-                else if (stealth_hidden_.erase(instance.entity_id) != 0 && instance.stealth_on && stealth_reveal_)
+                else if (!stealth_hidden_.empty() && stealth_hidden_.erase(instance.entity_id) != 0 && instance.stealth_on && stealth_reveal_)
                     play(stealth_reveal_, std::nullopt, false, "stealth_reveal");
             }
+            lap(audio_trace::Lap::t_meta);
             // SND-42/64, SND-E54, WSU-03: use logical snapshot visibility, never the
             // model fade, ghost or camera/radar visibility. Each object runs its own fog
             // service: every 30 logical frames when settled, every frame while its fade
@@ -1325,32 +1451,42 @@ void BattleAudio::present_reached_audio(const LiveSessionView& live, const LiveS
                 sighting_pruned_at_ = tick;
                 sighting_service_.retain([&](std::uint64_t id) { return std::binary_search(alive.begin(), alive.end(), id); });
             }
+            lap(audio_trace::Lap::t_fade);
+            // Instances, `visible` and the fade entries all ascend by entity: walk them together.
+            std::size_t visible_at = 0, fade_at = 0;
             for (const auto& instance : snapshot->instances()) {
-                const bool seen = std::binary_search(visible.begin(), visible.end(), instance.entity_id);
+                if (visible_at > visible.size() || (visible_at > 0 && visible[visible_at - 1] >= instance.entity_id)) {
+                    visible_at = static_cast<std::size_t>(std::lower_bound(visible.begin(), visible.end(), instance.entity_id) - visible.begin());
+                }
+                while (visible_at < visible.size() && visible[visible_at] < instance.entity_id) ++visible_at;
+                const bool seen = visible_at < visible.size() && visible[visible_at] == instance.entity_id;
                 const bool tracked = !instance.arrival || *instance.arrival >= tactical::arrival_visible_frame;
                 if (!tracked) continue;
-                if (!sighting_service_.tick(instance.entity_id, seen, sighting_fade_.opacity(instance.entity_id).value_or(0.0F))) continue;
+                if (!sighting_service_.tick(instance.entity_id, seen, sighting_fade_.opacity_walk(instance.entity_id, fade_at).value_or(0.0F))) continue;
                 if (!seen) continue;
-                auto type = types_.find(instance.type_id);
-                if (type == types_.end() || type->second.squadron) continue;
+                TypeSounds* const type = type_of(instance.type_id);
+                if (type == nullptr || type->squadron) continue;
                 bool busy = false;
                 for (std::size_t voice = audio::Voices::voices_3d; voice < voice_states_.size(); ++voice) {
                     busy = busy || voices_.playing(voice) != nullptr;
                 }
                 // The retained setup distinguishes battle parties from map owners.
                 const bool participant = live.battle_participant(instance.owner);
-                auto& sounds = type->second;
+                auto& sounds = *type;
                 const auto cue = sightings_.observe(sounds.type_sighted, sounds.announce_sighting, busy,
                     sounds.spotted != nullptr, participant && !live.is_ally_of_local(instance.owner));
                 if (cue == audio::SightingAnnouncements::Cue::type) play(sounds.spotted, std::nullopt, false, "sighting_type");
                 else if (cue == audio::SightingAnnouncements::Cue::enemy) play(enemy_spotted_, std::nullopt, false, "sighting_enemy");
             }
+            lap(audio_trace::Lap::t_sight);
             // A lagging historical tick can overwrite metadata from the newest snapshot.
             // Restore the newest metadata next frame even if its snapshot pointer holds.
             if (snapshot != battle.latest) metadata_snapshot_.reset();
             toggle_abilities(*snapshot, live);
             ambient_moving(*snapshot, live, visible);
+            lap(audio_trace::Lap::t_ambient);
             engine_loops(*snapshot, visible);
+            lap(audio_trace::Lap::t_engine);
             // WPR-22/30/31: sparse snapshot notifications retain accepted type identity;
             // no queue-length inference, so duplicate buys and same-tick cancels remain distinct.
             const auto cues = snapshot->economy_cues();
@@ -1409,6 +1545,7 @@ void BattleAudio::present_reached_audio(const LiveSessionView& live, const LiveS
                 }
                 population_full_ = full;
             }
+            lap(audio_trace::Lap::t_econ);
             for (const tactical::Projectile& projectile : snapshot->projectiles()) {
                 if (!projectiles_seen_.insert(projectile.id).second) continue;
                 const auto* shooter = space::find_instance(*snapshot, projectile.shooter);
@@ -1446,12 +1583,14 @@ void BattleAudio::present_reached_audio(const LiveSessionView& live, const LiveS
                 const std::uint64_t oldest = snapshot->projectiles().front().id;
                 projectiles_seen_.erase(projectiles_seen_.begin(), projectiles_seen_.lower_bound(oldest));
             }
+            lap(audio_trace::Lap::t_proj);
         }
         if (attack) ++attacks_;
         music_tick_ = tick;
         if (music_ && !summary_event_) {
             if (const auto cue = music_->tick(attack, random_)) cue_music(*cue);
         }
+        lap(audio_trace::Lap::t_music);
     }
     fired_through_ = std::max(fired_through_, reach);
 }
@@ -1652,7 +1791,7 @@ void BattleAudio::present_combat_audio(const LiveSessionView& live, const LiveSe
                         play(type->second.sold, std::nullopt, false, "pad_sold");
                     }
                     play(build_sounds(live.player_faction(event.player)).sold, seen->second.position, false, "pad_spatial_sold");
-                    last_seen_.erase(seen);
+                    last_seen_.erase_slot(seen);
                 }
                 continue;
             }
@@ -1733,12 +1872,12 @@ void BattleAudio::present_combat_audio(const LiveSessionView& live, const LiveSe
                 }
                 play(type->second.death, seen->second.position, false, "death");
                 seen_deaths_[event.unit] = record.tick;
-                last_seen_.erase(seen);
+                last_seen_.erase_slot(seen);
                 continue;
             }
             if (event.kind == tactical::EventKind::spin_away_ended) {
                 play(type->second.death, seen->second.position, false, "death");
-                last_seen_.erase(seen);
+                last_seen_.erase_slot(seen);
                 continue;
             }
             hardpoint_death(event.hardpoint, "hardpoint");
@@ -1750,7 +1889,24 @@ void BattleAudio::frame(const LiveSessionView& live, std::vector<BattleInput::Ac
                         std::vector<LiveSessionView::AbilityClick> ability_clicks, const FixedCamera& camera, const double delta,
                         std::vector<LiveSessionView::ReinforcementFeedback> reinforcement_feedback,
                         std::vector<BattleEffects::TerminalSound> terminal_sounds) {
-    if (released_) return;
+    if (!frame_before_combat(live, std::move(acknowledgements), std::move(ability_clicks), camera, delta,
+            std::move(reinforcement_feedback))) return;
+    frame_combat(live, std::move(terminal_sounds));
+}
+
+// N1: everything of frame() up to and including present_reached_audio; none of it reads the effects' terminal sounds.
+bool BattleAudio::frame_before_combat(const LiveSessionView& live, std::vector<BattleInput::Acknowledgement> acknowledgements,
+                        std::vector<LiveSessionView::AbilityClick> ability_clicks, const FixedCamera& camera, const double delta,
+                        std::vector<LiveSessionView::ReinforcementFeedback> reinforcement_feedback) {
+    if (released_) return false;
+    lap_.restart();
+    struct TraceTail final {
+        BattleAudio& audio;
+        std::uint64_t starts;
+        const sim::tactical::TacticalSnapshot* latest;
+        bool armed{true}; // the combat half takes the trace tail over when it is owed
+        ~TraceTail() { if (armed) audio.trace_tail(starts, latest); }
+    } tail{*this, spatial_starts_ + two_d_starts_, live.battle_frame().latest.get()};
     const bool recovery_quiet = live.multiplayer() && lan_recovery_audio_suppressed(live.lan_view());
     ++frames_;
     presented_tick_ = live.battle_frame().presented_tick;
@@ -1758,12 +1914,15 @@ void BattleAudio::frame(const LiveSessionView& live, std::vector<BattleInput::Ac
     gui_dialog_ = live.time().paused(); // the viewer's pause banner is its modal dialog
     event_delta_ms_ = std::max(0.0, delta) * 1000.0;
     clock_ += delta;
+    lap(audio_trace::Lap::head);
     if (!recovery_quiet) update_pause(live.time().paused(), delta);
+    lap(audio_trace::Lap::pause);
     for (auto& warning : radar_warnings_) warning.age += std::max(0.0, delta);
     std::erase_if(radar_warnings_, [](const auto& warning) { return warning.age >= 4.0; });
     const LiveSessionView::BattleFrame& battle = live.battle_frame();
     present_outcome_cues(live, battle, recovery_quiet);
-    if (recovery_quiet) return; // Only the outcome and summary cues above bypass recovery silence.
+    lap(audio_trace::Lap::outcome);
+    if (recovery_quiet) return false; // Only the outcome and summary cues above bypass recovery silence.
     presented_tick_ = battle.presented_tick;
     update_listener(live, camera);
     for (const auto& cue : reinforcement_feedback) {
@@ -1777,20 +1936,73 @@ void BattleAudio::frame(const LiveSessionView& live, std::vector<BattleInput::Ac
         play(sound, std::nullopt, false, reasons[index]);
     }
     update_music(delta);
+    lap(audio_trace::Lap::music);
     meter_buses();
-    if (!battle.latest) { update_speech(live.time().paused()); return; }
+    lap(audio_trace::Lap::meter);
+    if (!battle.latest) { update_speech(live.time().paused()); lap(audio_trace::Lap::speech); return false; }
     const tactical::PlayerId local = live.local_player();
 
     remember_visible_units(live, battle);
+    lap(audio_trace::Lap::remember);
     // BA-53/54: the confirmation precedes spawn playback, so the active-event guard avoids doubling it.
     for (const auto& click : ability_clicks) target_ability(click, live);
+    lap(audio_trace::Lap::ability_click);
     present_reached_audio(live, battle, local);
+    split_acknowledgements_ = std::move(acknowledgements);
+    split_ability_clicks_ = std::move(ability_clicks);
+    split_trace_starts_ = tail.starts;
+    split_trace_latest_ = tail.latest;
+    tail.armed = false;
+    return true;
+}
+
+// N1: the rest of frame(): the combat sounds with the effects' terminal sounds, the unit responses, the ability voices, speech.
+void BattleAudio::frame_combat(const LiveSessionView& live, std::vector<BattleEffects::TerminalSound> terminal_sounds) {
+    struct TraceTail final {
+        BattleAudio& audio;
+        std::uint64_t starts;
+        const sim::tactical::TacticalSnapshot* latest;
+        ~TraceTail() { audio.trace_tail(starts, latest); }
+    } tail{*this, split_trace_starts_, split_trace_latest_};
+    const auto acknowledgements = std::move(split_acknowledgements_);
+    const auto ability_clicks = std::move(split_ability_clicks_);
+    split_acknowledgements_.clear();
+    split_ability_clicks_.clear();
+    // The first half ended in the frame's own time; the laps of this half start now.
+    lap_.restart();
+    const LiveSessionView::BattleFrame& battle = live.battle_frame();
+    const tactical::PlayerId local = live.local_player();
     present_combat_audio(live, battle, local, terminal_sounds);
+    lap(audio_trace::Lap::combat);
     // BA-20 to BA-22: the unit responses to this frame's gestures.
     for (const BattleInput::Acknowledgement& acknowledgement : acknowledgements) respond(acknowledgement, live);
+    lap(audio_trace::Lap::respond);
     // BA-52: the unit voices of this frame's ability presses.
     for (const LiveSessionView::AbilityClick& click : ability_clicks) voice_ability(click, live);
     update_speech(live.time().paused());
+    lap(audio_trace::Lap::speech);
+}
+
+void BattleAudio::trace_frames(const bool on) {
+    trace_ = on;
+    trace_laps_.fill(0.0);
+    trace_counts_.fill(0U);
+    trace_play_ms_ = 0.0;
+    lap_ = SumLapTimer(on ? trace_laps_.data() : nullptr);
+}
+
+void BattleAudio::trace_tail(const std::uint64_t starts_before, const sim::tactical::TacticalSnapshot* latest) {
+    if (!trace_) return;
+    const auto at = [this](const audio_trace::Count which) -> std::uint64_t& { return trace_counts_[static_cast<std::size_t>(which)]; };
+    at(audio_trace::Count::voices_started) = spatial_starts_ + two_d_starts_ - starts_before;
+    at(audio_trace::Count::voices_live) = static_cast<std::uint64_t>(std::count_if(voice_states_.begin(), voice_states_.end(),
+        [](const VoiceState& state) { return state.started; }));
+    at(audio_trace::Count::last_seen_size) = last_seen_.size();
+    at(audio_trace::Count::entity_types_size) = entity_types_.size();
+    at(audio_trace::Count::owners_size) = owners_.size();
+    at(audio_trace::Count::ambient_timers) = ambient_timers_.size();
+    at(audio_trace::Count::engine_states) = engine_states_.size();
+    at(audio_trace::Count::snapshot_units) = latest ? latest->instances().size() : 0U;
 }
 
 void BattleAudio::end_voice(const std::size_t voice) {

@@ -62,6 +62,12 @@ std::size_t GalacticSession::load_note_count() const noexcept { return impl_->lo
 std::vector<core::LoadNote> GalacticSession::load_notes() const {
     return impl_->load_note_collector.snapshot();
 }
+void GalacticSession::add_runtime_load_notes(std::span<const core::LoadNote> notes) {
+    if (notes.empty()) return;
+    core::LoadNoteBuffer buffer;
+    for (const auto& note : notes) buffer.runtime(note);
+    impl_->merge_load_notes(buffer);
+}
 
 core::Result<std::vector<std::uint8_t>> GalacticSession::save_checkpoint_state() const {
     using namespace checkpoint_detail;
@@ -116,6 +122,7 @@ core::Result<void> GalacticSession::load_checkpoint_state(std::span<const std::u
             if (!id || id >= impl_->next_id || !ids.insert(id).second) throw Invalid("invalid live object identity");
         };
         impl_->registry.clear(); impl_->planets.clear(); impl_->routes.clear(); impl_->fleets.clear();
+        impl_->incident_route_cache.reset();
         for (const auto& row : planets) { identity(row.id); impl_->insert(row); }
         for (const auto& row : routes) { identity(row.id); impl_->insert(row); }
         for (const auto& row : fleets) {
@@ -136,7 +143,7 @@ core::Result<void> GalacticSession::load_checkpoint_state(std::span<const std::u
         }
         impl_->rebuild_technology_price_expiry();
         impl_->published_actor_records.reset(); impl_->published_production_originals.reset();
-        impl_->production_offer_hashes.reset(); impl_->view_publications.clear();
+        impl_->production_offer_hashes.reset(); impl_->production_offer_rows.reset(); impl_->view_publications.clear();
         impl_->published_economy_input_generation.reset();
         impl_->income_forecast_cache.reset(); impl_->gathered_income_inputs.reset();
         impl_->movement_access_generation = std::numeric_limits<std::uint64_t>::max();
@@ -224,7 +231,8 @@ void GalacticSession::Impl::execute(const GameCommand& command, const std::uint6
     if (const auto* deployment = std::get_if<DeployGroundAbility>(&command.payload)) {
         const auto before = events.size();
         dispatch_ground_ability(deployment->actor, deployment->planet, command.key.seat, command.key.sequence, tick, events);
-        if (events.size() == before) { event.kind = GalacticEventKind::command_rejected; event.reason = GalacticRejectReason::unknown_value; events.push_back(event); }
+        // The subject names the supplied object, so the issuing seat can say which drop was refused.
+        if (events.size() == before) { event.kind = GalacticEventKind::command_rejected; event.reason = GalacticRejectReason::unknown_value; event.subject = deployment->actor; events.push_back(event); }
         return;
     }
     if (std::holds_alternative<ObserverCommand>(command.payload)) {
@@ -322,6 +330,10 @@ void GalacticSession::Impl::execute(const GameCommand& command, const std::uint6
         record_planet_change(order->planet, data.owner, order->owner); // WGP-101
         const auto previous_owner = data.owner;
         data.owner = order->owner;
+        if (control) for (auto& row : control->planets) if (row.planet == order->planet) {
+            row.ground_layout.clear(); dirty[static_cast<std::size_t>(StateSection::control)] = true;
+            invalidate_observer_projection(); break;
+        }
         if (auto refreshed = refresh_planet_technology_price(order->planet, true); !refreshed) { failed = true; return; }
         transfer_planet_spies(order->planet, previous_owner, data.owner);
         invalidate_income_inputs();
@@ -363,6 +375,12 @@ void GalacticSession::Impl::execute(const GameCommand& command, const std::uint6
         event.kind = GalacticEventKind::fleet_orbit_changed;
         events.push_back(event);
         return;
+    }
+    if (std::holds_alternative<SetGroundLayout>(command.payload)) {
+        execute_ground_layout(command, tick, events, pending_local_conflict); return;
+    }
+    if (std::holds_alternative<LandUnits>(command.payload)) {
+        execute_land_units(command, tick, events, pending_local_conflict); return;
     }
     if (std::holds_alternative<LandFleet>(command.payload)) {
         execute_landing(command, tick, events, pending_local_conflict); return;
@@ -1122,6 +1140,9 @@ core::Result<void> GalacticSession::apply_battle_losses(const std::span<const En
     }
     std::erase_if(impl_->detached_units, [&](const auto& row) { return dead(row.first); });
     for (auto id : destroyed) impl_->lose_actor(id);
+    if (impl_->control) for (auto& planet : impl_->control->planets)
+        if (std::erase_if(planet.ground_layout, [&](const auto& row) { return dead(row.object); }))
+            impl_->dirty[static_cast<std::size_t>(StateSection::control)] = true;
     for (auto id : removed_fleets) impl_->lose_actor(id);
     if (impl_->movement_inputs) {
         auto movement = std::make_shared<MovementSetup>(*impl_->movement_inputs);

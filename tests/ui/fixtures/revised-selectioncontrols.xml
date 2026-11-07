@@ -1,0 +1,9 @@
+<Selection_Controls>
+  <Selection_Advisor_Enabled>No</Selection_Advisor_Enabled>
+  <Selection_Action Name="SELECT_OWN_ALL">
+    <Default_Key>Ctrl+Q</Default_Key>
+    <Advisor_SFXEvent>RHD_Choose_Reinforcements, Synthetic_Rebel</Advisor_SFXEvent>
+    <Default_Faction_SFXEvent>Empire, Synthetic_Empire</Default_Faction_SFXEvent>
+    <Faction_SFXEvent>Rebel, Revised_Selection_Rebel_allunits</Faction_SFXEvent>
+  </Selection_Action>
+</Selection_Controls>

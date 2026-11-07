@@ -1168,8 +1168,8 @@ void test_human_seat_admission() {
             std::variant_alternative_t<Index, tactical::CommandPayload>{}}) == tactical::PayloadAuthority::engine_only), ...);
         return engine_count;
     };
-    expect(classify(std::make_index_sequence<std::variant_size_v<tactical::CommandPayload>>{}) == 6U,
-        "CP-1: every payload is classified; damage, credits, reveal, reservation debit, campaign releases and battle control are engine-only");
+    expect(classify(std::make_index_sequence<std::variant_size_v<tactical::CommandPayload>>{}) == 7U,
+        "CP-1: every payload is classified, including script invulnerability as engine-only");
     tactical::SeatBinding binding{{1}, 2};
     tactical::SeatCommand intent{{0, {1}, 0}, 2, {10}, tactical::StopPayload{}};
     tactical::SeatAdmission admission;
@@ -1195,7 +1195,8 @@ void test_human_seat_admission() {
     expect(!tactical::admit_human_command(observer, intent), "inactive seat cannot issue orders");
     for (const auto& payload : {tactical::CommandPayload{tactical::DamagePayload{}},
         tactical::CommandPayload{tactical::CreditGrantPayload{}}, tactical::CommandPayload{tactical::RevealAllPayload{}},
-        tactical::CommandPayload{tactical::AiReservationDebitPayload{}}, tactical::CommandPayload{tactical::BuyPayload{1, true}},
+        tactical::CommandPayload{tactical::AiReservationDebitPayload{}}, tactical::CommandPayload{tactical::ScriptInvulnerablePayload{}},
+        tactical::CommandPayload{tactical::BuyPayload{1, true}},
         tactical::CommandPayload{tactical::ReinforcePayload{1, {}, 99}},
         tactical::CommandPayload{tactical::SpecialFirePayload{10, tactical::SpecialFireAdmission::ai_object}},
         tactical::CommandPayload{tactical::SpecialFirePayload{10, tactical::SpecialFireAdmission::ai_taskforce}}}) {
@@ -2023,6 +2024,7 @@ void test_controller_foundation() {
     }
 }
 #include "canonical_encoder_oracle.hpp"
+#include "registry_commit_oracle.hpp"
 }
 
 int main(const int argc, const char* const argv[]) {
@@ -2063,6 +2065,7 @@ int main(const int argc, const char* const argv[]) {
     test_golden_across_workers(fixtures, golden);
     test_phase_map(fixtures);
     test_canonical_encoder_oracle(fixtures);
+    test_registry_commit_oracle(fixtures);
     test_live_submission_and_recording(fixtures, golden);
     test_submit_diagnostics(fixtures);
     test_atomicity_and_snapshots(fixtures);

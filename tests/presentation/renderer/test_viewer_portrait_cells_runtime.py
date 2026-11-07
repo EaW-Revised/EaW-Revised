@@ -99,7 +99,7 @@ func _process(delta):
                 self.compare("ground-contents", ["Pad_00", "Pad_01", "Pad_09", "Slot_00"], size)
 
     def test_hero_portraits_match_native_enabled_and_disabled(self):
-        for fixture, names in (("theft", ["bm_0000", "bm_0001"]),
+        for fixture, names in (("theft", ["h_0000", "h_0001"]),
                                ("neutralization", ["h_0000", "h_0001", "h_0100"])):
             with self.subTest(fixture=fixture):
                 self.compare(fixture, names, (1280, 720))

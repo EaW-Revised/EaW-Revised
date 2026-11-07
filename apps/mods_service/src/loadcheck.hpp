@@ -28,6 +28,7 @@ private:
     std::unique_ptr<State> state_;
     Service& service_;
 };
+Reply method_loadnotes_read(Service&, const mods::steam::JsonValue&);
 Reply method_loadcheck_start(Service&, const mods::steam::JsonValue&);
 Reply method_loadcheck_cancel(Service&, const mods::steam::JsonValue&);
 Reply method_loadcheck_result(Service&, const mods::steam::JsonValue&);

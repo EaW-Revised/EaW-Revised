@@ -1,4 +1,5 @@
 #include "eawr/core/gc_profile.hpp"
+#include "eawr/vfs/vfs.hpp"
 #include "ai_engine_internal.hpp"
 #include "galactic_ai_funding.hpp"
 #include "galactic_ai_actions.hpp"
@@ -10,6 +11,7 @@
 #include <algorithm>
 #include <stdexcept>
 #include <tuple>
+#include <unordered_set>
 
 namespace eawr::script::foc::ai {
 using namespace engine_internal;
@@ -206,21 +208,24 @@ bool Engine::select_galactic_units(PlayerAi& player, const Goal& goal, Potential
         const auto found = input->proposal_substitutions.find(type);
         return found == input->proposal_substitutions.end() ? type : found->second;
     };
+    std::unordered_set<gc::TypeId> proposed;
+    std::vector<std::unordered_set<gc::TypeId>> slot_type_sets;
     for (std::size_t f = 0; f < plan.taskforces.size(); ++f) for (std::size_t t = 0; t < plan.taskforces[f].teams.size(); ++t) {
         slots.push_back({f, t, 0});
         auto& types = slot_types.emplace_back();
+        auto& type_set = slot_type_sets.emplace_back();
         for (const auto authored : plan.taskforces[f].teams[t].types) {
             const auto type = proposal_type(authored);
             types.push_back(type);
-            if (input->types.contains(type) && std::find(proposals.begin(), proposals.end(), type) == proposals.end()) proposals.push_back(type);
+            type_set.insert(type);
+            if (input->types.contains(type) && proposed.insert(type).second) proposals.push_back(type);
         }
     }
     std::vector<std::vector<std::size_t>> teams(proposals.size());
     std::vector<std::size_t> starts(proposals.size());
     for (std::size_t i = 0; i < proposals.size(); ++i) {
         for (std::size_t s = 0; s < slots.size(); ++s) {
-            const auto& types = slot_types[s];
-            if (std::find(types.begin(), types.end(), proposals[i]) != types.end()) teams[i].push_back(s);
+            if (slot_type_sets[s].contains(proposals[i])) teams[i].push_back(s);
         }
         if (teams[i].size() > 1) starts[i] = static_cast<std::size_t>(stream(player).range(0, static_cast<std::int32_t>(teams[i].size()) - 1));
     }
@@ -299,7 +304,12 @@ bool Engine::select_galactic_units(PlayerAi& player, const Goal& goal, Potential
             return a->path_cost < b->path_cost;
         });
     }
-    std::vector<gg::ProductionRequest> production_requests;
+    // Producers are grouped once per input; every estimate below reads the same rows.
+    const gg::ProducerIndex producer_index(input->producers, player.player);
+    // The committed production requests as a running fold: a candidate is one more request on top of it.
+    gg::ProductionFold production_fold(producer_index);
+    // The mean build-plus-queue time of a type is fixed for this input.
+    std::map<std::pair<gc::TypeId, gc::ProductionDomain>, Real> single_type_means;
     std::map<gc::TypeId, std::uint32_t> selected_counts;
     const auto production_request = [&](gc::TypeId type) {
         const auto& facts = input->types.at(type);
@@ -384,15 +394,20 @@ bool Engine::select_galactic_units(PlayerAi& player, const Goal& goal, Potential
                 stage(gg::SelectionStage::production, gg::rejected_estimate(), true);
             else if (plan.magic) stage(gg::SelectionStage::production, stream(player).uniform(Real{}, real(1)));
             else {
-                production_requests.push_back(production_request(proposals[i]));
-                const auto production = required(gg::estimate_production(input->producers, player.player,
-                    production_requests, input->reachable, executor(perception_executor_)));
-                production_requests.pop_back();
+                const auto production = required(production_fold.probe(production_request(proposals[i]),
+                    executor(perception_executor_)));
                 if (!production.feasible) stage(gg::SelectionStage::production, gg::rejected_estimate(), true);
                 else {
-                    factories[i] = facts.structure || facts.base ? target(goal.target)->object : production.producers.back();
-                    const auto mean = facts.structure || facts.base ? facts.build_seconds
-                        : required(gg::estimate_single_type(input->producers, player.player, proposals[i], facts.channel, executor(nullptr)));
+                    factories[i] = facts.structure || facts.base ? target(goal.target)->object : production.producer;
+                    Real mean = facts.build_seconds;
+                    if (!(facts.structure || facts.base)) {
+                        const auto key = std::make_pair(proposals[i], facts.channel);
+                        auto found = single_type_means.find(key);
+                        if (found == single_type_means.end())
+                            found = single_type_means.emplace(key, required(gg::estimate_single_type(
+                                input->producers, player.player, proposals[i], facts.channel, executor(nullptr)))).first;
+                        mean = found->second;
+                    }
                     // WGA-482: admitted base production starts at zero excess,
                     // then subtracts the type's raw build time before normalization.
                     excess.push_back(facts.base ? -facts.build_seconds : facts.structure ? facts.build_seconds
@@ -489,7 +504,7 @@ bool Engine::select_galactic_units(PlayerAi& player, const Goal& goal, Potential
         auto& slot = slots[allocations[chosen]]; ++slot.count; slot.cost = to_single(slot.cost + facts.cost);
         current_cost = to_single(current_cost + facts.cost);
         ++selected_counts[type];
-        if (!objects[chosen] && !plan.magic) production_requests.push_back(production_request(type));
+        if (!objects[chosen] && !plan.magic) required(production_fold.commit(production_request(type), executor(perception_executor_)));
         potential.units.push_back(type); potential.freestore.push_back(objects[chosen]);
         potential.sources.push_back(objects[chosen] ? 0 : 2); potential.producers.push_back(factories[chosen]); potential.pool_tokens.push_back(0);
         potential.taskforce_of_unit.push_back(slot.force); potential.team_of_unit.push_back(slot.team);
@@ -503,10 +518,8 @@ bool Engine::select_galactic_units(PlayerAi& player, const Goal& goal, Potential
             ++selected_structures[type];
             --structure_slots[static_cast<std::size_t>(facts.channel)];
         }
-        const auto production = required(gg::estimate_production(input->producers, player.player,
-            production_requests, input->reachable, executor(perception_executor_)));
-        if (production.feasible) {
-            current_seconds = production.seconds;
+        if (production_fold.feasible()) {
+            current_seconds = production_fold.seconds();
             if (Real{} < current_seconds) current_budget = resources(current_seconds);
         }
         if (contrast_rows[chosen] < input->contrast.size()) {

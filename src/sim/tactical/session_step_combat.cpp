@@ -503,6 +503,7 @@ const LiveUnit* session_detail::Tick::redirect_unit(const EntityId target) const
 void session_detail::Tick::notify_retaliation(const LiveUnit& unit, const EntityId attacker,
     const math::Fixed amount) {
     if (attacker == invalid_entity_id || amount.raw() <= 0 || unit.take_damage_mode.raw() <= 0
+        || unit.script_invulnerable
         || (impl_->health_profile(unit) && impl_->health_profile(unit)->scenario_invulnerable)) return;
     const auto& parents = craft_prep_->craft_squadron.value();
     const auto parent = parents.find(unit.state.entity_id);
@@ -716,6 +717,7 @@ core::Result<void> session_detail::Tick::deliver_redirected_impact(const EntityI
         + (unit.arrival_vulnerable_until ? impl_->economy.vulnerability.raw() : 0)
         + impl_->concentrate_defense(unit, staged, staging_->ledgers.value()).raw());
     hit.take_damage_multiplier = unit.take_damage_mode;
+    hit.target_script_invulnerable = unit.script_invulnerable;
     const auto hull = unit.durability->hull, shields = unit.durability->shields;
     auto taken = apply_hit(*impl_->health_profile(unit), *damage_rules, *unit.durability, hit, tick);
     if (!taken) return core::Result<void>::failure(taken.error());
@@ -756,6 +758,7 @@ core::Result<void> session_detail::Tick::deliver_area_impact(const Projectile& p
     auto hit = detail::area_hit(projectile, recipient, modifier, factor);
     if (!hit) return core::Result<void>::failure(hit.error());
     hit.value().take_damage_multiplier = target->second.take_damage_mode;
+    hit.value().target_script_invulnerable = target->second.script_invulnerable;
     // WHE-51: modes are current at delivery; a removed shooter contributes identity. WTA-46: the
     // difficulty damage scale follows the projectile's owner, so it survives its shooter.
     const auto caused = impl_->caused_damage(
@@ -1086,6 +1089,7 @@ core::Result<void> session_detail::Tick::commit_projectile_flight(std::size_t& f
         projectile.hitpoint_damage, hardpoint, projectile.allow_diminishing_firepower,
         projectile.internal_damage_misc, modifier, projectile.energy_damage};
     hit.take_damage_multiplier = target->second.take_damage_mode;
+    hit.target_script_invulnerable = target->second.script_invulnerable;
     const auto caused = impl_->caused_damage(
         source != staged.end() ? source->second.cause_damage_mode : math::Fixed::from_raw(math::Fixed::scale), projectile.owner);
     if (!caused) return core::Result<void>::failure(caused.error());
@@ -1214,6 +1218,7 @@ core::Result<void> session_detail::Tick::late_impacts() {
             + (unit.arrival_vulnerable_until ? impl_->economy.vulnerability.raw() : 0)
             + impl_->concentrate_defense(unit, staged, staging_->ledgers.value()).raw());
         hit.take_damage_multiplier = unit.take_damage_mode;
+        hit.target_script_invulnerable = unit.script_invulnerable;
         const auto hull = unit.durability->hull, shields = unit.durability->shields;
         auto taken = apply_hit(*impl_->health_profile(unit), *damage_rules, *unit.durability, hit, tick);
         if (!taken) return core::Result<void>::failure(taken.error());
@@ -1230,8 +1235,10 @@ core::Result<void> session_detail::Tick::late_impacts() {
         return core::Result<void>::success();
     };
     // WHE-26: immutable beam checks in workers, then sparse direct-damage delivery in source order.
-    if (std::any_of(impl_->abilities.profiles.begin(), impl_->abilities.profiles.end(), [](const auto& profile) {
-        return ability_slot(profile, AbilityKind::energy_weapon).has_value();
+    // WSPL-05: the super laser delivers its per-frame damage through the same direct-damage route.
+    for (const auto beam_kind : {AbilityKind::energy_weapon, AbilityKind::super_laser}) {
+    if (std::any_of(impl_->abilities.profiles.begin(), impl_->abilities.profiles.end(), [beam_kind](const auto& profile) {
+        return ability_slot(profile, beam_kind).has_value();
     })) {
     struct BeamService { EntityId source{}, target{}; bool release{}, due{}; };
     std::vector<const LiveUnit*> beam_inputs;
@@ -1241,10 +1248,10 @@ core::Result<void> session_detail::Tick::late_impacts() {
         const auto range = partition_range(partition, beam_inputs.size());
         for (auto i = range.begin; i < range.end; ++i) {
             const auto& source = *beam_inputs[i];
-            const auto* nested = impl_->beam_profile(source, AbilityKind::energy_weapon);
+            const auto* nested = impl_->beam_profile(source, beam_kind);
             if (!nested || !source.abilities) continue;
             const auto& profile = *impl_->abilities.find(source.state.type_id);
-            const auto& state = source.abilities->slots[*ability_slot(profile, AbilityKind::energy_weapon)];
+            const auto& state = source.abilities->slots[*ability_slot(profile, beam_kind)];
             if (!state.active) continue;
             const auto& special = source.abilities->special.slots[static_cast<std::size_t>(nested - profile.special.data())];
             auto& service = beam_services[i];
@@ -1264,17 +1271,17 @@ core::Result<void> session_detail::Tick::late_impacts() {
         if (source == staged.end()) continue;
         const auto target = staged.find(service.target);
         const auto& source_profile = *impl_->abilities.find(source->second.state.type_id);
-        const auto& source_slot = source->second.abilities->slots[*ability_slot(source_profile, AbilityKind::energy_weapon)];
+        const auto& source_slot = source->second.abilities->slots[*ability_slot(source_profile, beam_kind)];
         if (service.release || target == staged.end()
             || (source_slot.target_hardpoint != no_hardpoint
                 && !impl_->target_hardpoint_standing(target->second, source_slot.target_hardpoint))) {
-            impl_->release_beam(source->second, AbilityKind::energy_weapon, tick);
+            impl_->release_beam(source->second, beam_kind, tick);
             continue;
         }
         if (!service.due || !damage_rules || !target->second.durability || damage_blocked()) continue;
-        const auto* nested = impl_->beam_profile(source->second, AbilityKind::energy_weapon);
+        const auto* nested = impl_->beam_profile(source->second, beam_kind);
         const auto& profile = *impl_->abilities.find(source->second.state.type_id);
-        const auto& state = source->second.abilities->slots[*ability_slot(profile, AbilityKind::energy_weapon)];
+        const auto& state = source->second.abilities->slots[*ability_slot(profile, beam_kind)];
         auto& special = source->second.abilities->special.slots[static_cast<std::size_t>(nested - profile.special.data())];
         special.next_service_frame = tick + nested->service_interval;
         const auto* combat = impl_->combat.find(target->second.state.type_id);
@@ -1290,6 +1297,7 @@ core::Result<void> session_detail::Tick::late_impacts() {
         if (!caused) return core::Result<void>::failure(caused.error());
         hit.cause_damage_multiplier = caused.value();
         hit.take_damage_multiplier = target->second.take_damage_mode;
+        hit.target_script_invulnerable = target->second.script_invulnerable;
         auto redirected = redirect_damage(service.target, hit, [&](const EntityId id, Hit share) {
             return deliver_redirected(id, share, source->second.state.owner, service.source);
         });
@@ -1310,8 +1318,9 @@ core::Result<void> session_detail::Tick::late_impacts() {
             killed.push_back(target->second.state);
             impl_->adjust_owned(target->second.state, false);
             staged.erase(target);
-            impl_->release_beam(source->second, AbilityKind::energy_weapon, tick);
+            impl_->release_beam(source->second, beam_kind, tick);
         }
+    }
     }
     }
     // WSH-09: a negative automatic Heal_Amount is passive damage. Victims are selected from immutable inputs in
@@ -1578,6 +1587,7 @@ core::Result<void> session_detail::Tick::service_buzz_droids(UnitStage& staged, 
         // WAB-72: miscellaneous damage through the ordinary damage interface, as the energy beam.
         Hit hit{amount, damage_type, false, true, true, hardpoint, false, true, {}};
         hit.take_damage_multiplier = target->second.take_damage_mode;
+        hit.target_script_invulnerable = target->second.script_invulnerable;
         const auto hull_before = target->second.durability->hull;
         const auto shields_before = target->second.durability->shields;
         const auto taken = apply_hit(*impl_->health_profile(target->second), *damage_rules, *target->second.durability, hit, tick);

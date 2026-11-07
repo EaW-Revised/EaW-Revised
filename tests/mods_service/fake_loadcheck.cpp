@@ -1,5 +1,6 @@
 // Synthetic process seam: the service starts and contains this exactly as the real engine helper.
 #include "eawr/mods/file_index.hpp"
+#include "../../apps/mods_loadcheck/records_io.hpp"
 #include <windows.h>
 #include <shellapi.h>
 #include <filesystem>
@@ -17,6 +18,32 @@ void emit(const std::string& text) {
 }
 int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     int argc{}; auto argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+    if (argc == 5 && std::wstring_view(argv[1]) == L"--records") {
+        const auto snapshot = std::filesystem::path(argv[2]);
+        const auto user = snapshot.parent_path().parent_path().parent_path().parent_path();
+        const auto key = std::filesystem::path(argv[4]).string();
+        std::ifstream file(snapshot); std::string profile((std::istreambuf_iterator<char>(file)), {});
+        LocalFree(argv);
+        std::ofstream(user / "records-helper.pid") << GetCurrentProcessId();
+        std::ofstream(user / "records-helper.starts", std::ios::app) << "start\n";
+        eawr::loadcheck::RecordsReader input; std::string line; bool built = false;
+        while (input.next(line)) {
+            if (!built) {
+                emit("{\"stage\":\"mount\",\"done\":0,\"total\":1}");
+                if (profile.find("slow") != std::string::npos) std::this_thread::sleep_for(std::chrono::seconds(60));
+                if (profile.find("crash") != std::string::npos) return 3;
+                if (profile.find("nonjson") != std::string::npos) { emit("not JSON"); return 0; }
+                if (profile.find("oversize") != std::string::npos) { emit(std::string(1024 * 1024 + 1, 'x')); return 0; }
+                if (profile.find("changed") != std::string::npos) {
+                    for (int i = 0; i < 1000 && !std::filesystem::exists(user / "continue"); ++i)
+                        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                }
+                emit("{\"stage\":\"complete\",\"done\":1,\"total\":1}"); built = true;
+            }
+            emit("{\"result\":{\"chain_fingerprint\":\"" + key + "\",\"rows\":[],\"layers\":[],\"counts\":{\"own\":0,\"overridden\":0,\"inherited\":0,\"merged\":0,\"added\":0,\"dropped\":0},\"total\":0,\"next_cursor\":null}}");
+        }
+        return 0;
+    }
     if (argc != 5 && argc != 7) { if (argv) LocalFree(argv); return 2; }
     std::ifstream input{std::filesystem::path(argv[1])};
     std::string profile((std::istreambuf_iterator<char>(input)), {});

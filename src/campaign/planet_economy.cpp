@@ -100,9 +100,9 @@ core::Result<gc::EconomyCorruptionState> prepare_corruption_economy(const data::
     result.factor_min = low.value(); result.factor_max = high.value();
     const auto campaign = layers(catalog, plan.campaign_name(), data::Category::campaign);
     if (const auto* n = data::retail::single(campaign, "Tutorial")) { auto value = flag(n); if (!value) campaign_load_note(notes, "EAWR-LOAD-1202", n, plan.campaign_name(), "Tutorial", "false"); result.tutorial = value ? value.value() : false; }
-    // The setup's multiplayer mode, the one flag every multiplayer rule branches on (GCMP-24). Neither the
-    // campaign's Is_Multiplayer menu tag nor the number of local human seats is a proxy for it.
-    result.multiplayer = plan.mode() == CampaignSetupMode::multiplayer;
+    // GCMP-24: black-market income uses campaign balance, independently of transport.
+    // The Is_Multiplayer menu tag and the number of local seats are not proxies.
+    result.multiplayer = plan.rules_flavour() == CampaignRulesFlavour::multiplayer;
     std::map<std::string, std::uint32_t> factions;
     for (const auto& d : catalog.definitions()) if (d.active && d.category == data::Category::faction) factions.emplace(key(d.id), 0);
     std::uint32_t next = 1; for (auto& [name, id] : factions) { (void)name; id = next++; }

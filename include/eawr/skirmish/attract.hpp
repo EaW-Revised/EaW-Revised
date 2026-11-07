@@ -2,8 +2,8 @@
 
 #include "eawr/assets/map.hpp"
 #include "eawr/core/result.hpp"
-#include "eawr/data/xml.hpp"
-#include "eawr/vfs/vfs.hpp"
+#include "eawr/data/xml_fwd.hpp"
+#include "eawr/vfs/vfs_fwd.hpp"
 
 #include <array>
 #include <cstddef>
@@ -93,7 +93,8 @@ struct AttractFrame final {
 // the actions it returns.
 class AttractManager final {
 public:
-    explicit AttractManager(AttractSettings settings) : settings_(std::move(settings)) {}
+    explicit AttractManager(AttractSettings settings, std::int64_t previous_index = -1)
+        : settings_(std::move(settings)), index_(previous_index) {}
 
     [[nodiscard]] const AttractSettings& settings() const noexcept { return settings_; }
     [[nodiscard]] bool initialized() const noexcept { return initialized_; }
@@ -148,6 +149,17 @@ private:
     std::uint64_t idle_ms_{};
     std::uint64_t map_ms_{};
     bool paused_{};
+};
+
+// Bounds one sequence of load attempts, including asynchronous failures.
+class AttractCandidates final {
+public:
+    explicit AttractCandidates(std::size_t count = 0) noexcept : remaining_(count) {}
+    void reset(std::size_t count) noexcept { remaining_ = count; }
+    [[nodiscard]] std::optional<std::size_t> next(AttractManager& manager, std::uint64_t now_ms) noexcept;
+
+private:
+    std::size_t remaining_{};
 };
 
 } // namespace eawr::skirmish

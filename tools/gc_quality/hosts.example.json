@@ -1,0 +1,7 @@
+{
+  "_comment": "Copy to config/gc-quality-hosts.local.json (ignored by git) and name the pool hosts exactly as config/build-hosts.json does. A profile lists only hosts that read its game data; stock and mod data are different pools.",
+  "pools": {
+    "stock": ["host-a", "host-b", "host-c"],
+    "raw": ["host-d"]
+  }
+}

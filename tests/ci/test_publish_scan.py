@@ -36,6 +36,10 @@ def tree(temporary: str) -> pathlib.Path:
 
 
 class PublishScanTests(unittest.TestCase):
+    def test_scanner_configuration_does_not_create_security_hits(self):
+        config_path = ROOT / 'tools/publish_scan/config.json'
+        self.assertEqual(publish_scan.security_scan(ROOT, CONFIG, [config_path]), [])
+
     def test_a_clean_tree_passes(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = tree(temporary)

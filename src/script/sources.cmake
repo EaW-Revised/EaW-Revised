@@ -115,6 +115,7 @@ set(EAWR_SCRIPT_FOC_SOURCES
     "${CMAKE_CURRENT_LIST_DIR}/foc/galactic_ai_markup.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/foc/galactic_ai_markup_state.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/foc/galactic_ai_markup_bindings.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/foc/story_plot_bindings.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/foc/galactic_ai_reach.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/foc/galactic_ai_context.cpp"
 )

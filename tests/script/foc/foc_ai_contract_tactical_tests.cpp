@@ -1,4 +1,5 @@
 #include "foc_ai_contract_fixtures.hpp"
+#include "eawr/sim/tactical/fighters.hpp"
 #include "tactical_ai_world.hpp"
 #include "tactical_ai_internal.hpp"
 #include "eawr/platform/sim_workers.hpp"

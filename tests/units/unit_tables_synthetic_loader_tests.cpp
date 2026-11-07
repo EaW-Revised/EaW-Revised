@@ -1,5 +1,6 @@
 #include "unit_tables_support.hpp"
 #include "eawr/skirmish/ai.hpp"
+#include "eawr/units/content_selection.hpp"
 #include "unit_tables_synthetic_fixtures.hpp"
 
 #include <algorithm>
@@ -17,8 +18,14 @@
 
 namespace unit_tables_test_support {
 void synthetic_tables() {
-    // HD-06: both omitted and explicit zero Health retain every authored hardpoint.
-    for (const std::string_view value : {"", "<Health>0</Health>", "<Health>-1</Health>", "<Health>1e99</Health>"}) {
+    // HD-06: omission, zero and malformed Health retain every authored hardpoint.
+    for (const std::string_view value : {"", "<Health></Health>", "<Health>   </Health>",
+            "<Health>0</Health>", "<Health>-1</Health>",
+            "<Health>1e99</Health>", "<Health>broken</Health>", "<Health>42junk</Health>",
+            // The Remake Viscount shield hardpoints: an invisible U+202C before ".0" (AU-82: leading number kept).
+            "<Health>14500\xE2\x80\xAC.0</Health>",
+            // A fractional leading number keeps its fraction (not truncated to "0" / "14500").
+            "<Health>0.5x</Health>", "<Health>14500.5x</Health>"}) {
         TempTree tree;
         write_fixture(tree.root, units_xml("3600", "Unit_Select_Test"));
         auto points = std::string(hardpoints_xml);
@@ -86,26 +93,114 @@ void synthetic_tables() {
 
         }
         std::vector<eawr::core::Diagnostic> notes;
-        const auto health = eawr::units::durability_table(*loaded.tables, &notes);
-        if (value == "<Health>1e99</Health>") {
-            expect(!health && health.error().code == "EAWR-UNITS-0003",
-                "negative and out-of-range hardpoint Health retain their error diagnostic");
-            continue;
+        eawr::core::LoadNoteBuffer load_notes;
+        const auto health = eawr::units::durability_table(*loaded.tables, &notes, &load_notes);
+        const bool malformed = value == "<Health>1e99</Health>" || value == "<Health>broken</Health>"
+            || value == "<Health>42junk</Health>" || value == "<Health>14500\xE2\x80\xAC.0</Health>"
+            || value == "<Health>0.5x</Health>" || value == "<Health>14500.5x</Health>";
+        // AU-82: trailing text after a leading number keeps the number; every other malformed value is zero.
+        const bool keeps_number = value == "<Health>42junk</Health>" || value == "<Health>14500\xE2\x80\xAC.0</Health>"
+            || value == "<Health>0.5x</Health>" || value == "<Health>14500.5x</Health>";
+        const std::string_view expected_effective = value == "<Health>0.5x</Health>" ? "0.5"
+            : value == "<Health>14500.5x</Health>" ? "14500.5" : value.starts_with("<Health>42") ? "42"
+            : keeps_number ? "14500" : "0";
+        eawr::core::LoadNoteCollector collector;
+        collector.merge(load_notes);
+        const auto captured = collector.snapshot();
+        const auto recovered = std::count_if(captured.begin(), captured.end(), [](const auto& note) {
+            return note.code == "EAWR-LOAD-0125";
+        });
+        expect(recovered == (malformed ? 2 : 0), "HD-06: only malformed authored Health emits a recovery LoadNote");
+        if (malformed) {
+            const auto authored = value.substr(std::string_view{"<Health>"}.size(),
+                value.size() - std::string_view{"<Health></Health>"}.size());
+            expect(std::all_of(captured.begin(), captured.end(), [&](const auto& note) {
+                return note.code != "EAWR-LOAD-0125" || (note.diagnostic_code == "EAWR-LOAD-0125"
+                    && note.tag == "Health" && note.authored_value == authored
+                    && note.action == eawr::core::LoadAction::default_used
+                    && note.effective_value == expected_effective
+                    && (note.message.find("trailing text") != std::string::npos) == keeps_number
+                    && note.classification == eawr::core::LoadCategory::unknown_degrade
+                    && note.file == "data/xml/eawr_hardpoints.xml" && note.line && *note.line > 1
+                    && note.layer.mod_id == "base" && note.object.starts_with("Test_Frigate/"));
+            }), "HD-06: recovery notes retain authored text, object and source provenance");
+            expect(!has_row(loaded.tables->unresolved, "HP_Test_Laser", "Health")
+                && !has_row(loaded.tables->unresolved, "HP_Test_Engine", "Health"),
+                "HD-06: accepted malformed Health is not an unresolved input");
+            auto diagnostics_cleared = *loaded.tables;
+            diagnostics_cleared.hardpoint_health_defaults.clear();
+            expect(eawr::units::content_identity(diagnostics_cleared) == eawr::units::content_identity(*loaded.tables),
+                "HD-06: recovery provenance is outside replay content identity");
         }
-        expect(static_cast<bool>(health), "HD-06: omitted, zero and negative Health bind durability");
+        expect(static_cast<bool>(health), "HD-06: omitted, zero, negative and malformed Health bind durability");
         if (!health) continue;
         const auto* ship = health.value().find(eawr::assets::object_type_crc("Test_Frigate"));
         expect(ship && ship->hardpoints.size() == 3 && ship->hardpoints[0].destroyable
             && ship->hardpoints[0].role == eawr::sim::tactical::HardpointRole::weapon
             && ship->hardpoints[1].destroyable
             && ship->hardpoints[1].role == eawr::sim::tactical::HardpointRole::engine
-            && ship->hardpoints[0].max_health.raw() == 0 && ship->hardpoints[1].max_health.raw() == 0,
+            && (ship->hardpoints[0].max_health.raw() == 0) == !keeps_number
+            && (ship->hardpoints[1].max_health.raw() == 0) == !keeps_number,
             "HD-06: zero-health rows retain their flags, roles and authored order");
+        if (keeps_number) {
+            expect(notes.empty(), "AU-82: a Health that keeps its leading number is not a zero-health type");
+            continue;
+        }
         if (value == "<Health>-1</Health>") continue;
         expect(notes.size() == 1 && notes[0].code == "EAWR-UNITS-0003"
             && notes[0].severity == eawr::core::Severity::warning
             && notes[0].message.find("Test_Frigate") != std::string::npos,
             "HD-06: two zero-health hardpoints produce one load note for their type");
+    }
+    {
+        TempTree tree;
+        auto xml = units_xml("3600", "Unit_Select_Test");
+        const std::string_view token = "HP_Test_Laser, HP_Test_Engine";
+        xml.replace(xml.find(token), token.size(), "HP_Test_Laser, HP_Test_Laser, HP_Test_Engine");
+        write_fixture(tree.root, xml);
+        auto points = std::string(hardpoints_xml);
+        const std::string_view health = "<Health>260.0</Health>";
+        points.replace(points.find(health), health.size(), "<Health>broken</Health>");
+        write(tree.root / "XML" / "eawr_hardpoints.xml", points);
+        const auto loaded = load(tree.root, models(-40.0F));
+        expect(loaded.tables && loaded.tables->hardpoint_health_defaults.size() == 1,
+            "HD-06: repeated hardpoint references retain one recovery provenance record");
+        if (loaded.tables) {
+            auto tables = *loaded.tables;
+            constexpr std::string_view loser = "SYNTH_OIVRHNPFF4K4";
+            constexpr std::string_view winner = "SYNTH_QLU1MOI5PTT3";
+            expect(eawr::assets::object_type_crc(loser) == eawr::assets::object_type_crc(winner),
+                "HD-06: dropped Health fixture uses colliding type IDs");
+            const auto source = std::find_if(tables.units.begin(), tables.units.end(), [](const auto& unit) {
+                return unit.id == "Test_Frigate";
+            });
+            expect(source != tables.units.end(), "HD-06: dropped Health fixture has its source unit");
+            if (source != tables.units.end()) {
+                source->id = loser;
+                source->table_order = 9;
+                auto selected = *source;
+                selected.id = winner;
+                selected.table_order = 2;
+                selected.hardpoints.clear();
+                tables.units.push_back(std::move(selected));
+                for (auto& recovery : tables.hardpoint_health_defaults) {
+                    if (recovery.object == "Test_Frigate") recovery.object = loser;
+                }
+                eawr::core::LoadNoteBuffer load_notes;
+                const auto selected_health = eawr::units::durability_table(tables, nullptr, &load_notes);
+                eawr::core::LoadNoteCollector collector;
+                collector.merge(load_notes);
+                const auto captured = collector.snapshot();
+                expect(selected_health && selected_health.value().find(eawr::assets::object_type_crc(winner)),
+                    "HD-06: the collision winner still binds durability");
+                expect(std::any_of(captured.begin(), captured.end(), [&](const auto& note) {
+                    return note.code == "EAWR-LOAD-0251" && note.object == loser;
+                }), "HD-06: the malformed Health unit is dropped by type selection");
+                expect(std::none_of(captured.begin(), captured.end(), [](const auto& note) {
+                    return note.code == "EAWR-LOAD-0125";
+                }), "HD-06: dropped malformed Health emits no recovery note");
+            }
+        }
     }
     {
         TempTree tree;
@@ -959,9 +1054,9 @@ void synthetic_tables() {
         }
         expect(got == capacity, std::string{"HCB-58: authored text '"} + text + "' loads as the retail unsigned queue capacity");
     }
-    // #4992: AaW authors 0 for the wait leg's frame time and cost; negatives stay refused.
+    // Zero wait legs remain valid; negative values degrade with a note.
     for (const auto& [frames, cost, valid] : {std::tuple{"0", "0.0", true}, std::tuple{"0", "0.8", true},
-             std::tuple{"-1", "0.8", false}, std::tuple{"100", "-0.5", false}}) {
+             std::tuple{"-1", "0.8", true}, std::tuple{"100", "-0.5", true}}) {
         auto changed = tables;
         for (auto& constant : changed.constants.scalars) {
             if (constant.tag == "WaitOperatorBaseFrameTime") constant.value = Fixed::from_decimal(frames).value();
@@ -969,6 +1064,200 @@ void synthetic_tables() {
         }
         expect(static_cast<bool>(eawr::units::motion_table(changed)) == valid,
             std::string{"PC-08: wait leg frame time "} + frames + " and cost " + cost + (valid ? " accepted" : " refused"));
+    }
+    const auto set_motion_constant = [](auto& changed, const std::string_view tag, const std::string_view text) {
+        for (auto& constant : changed.constants.scalars) {
+            if (constant.tag != tag) continue;
+            constant.value = Fixed::from_decimal(text).value();
+            constant.text = std::string(text);
+            return;
+        }
+        changed.constants.scalars.push_back({std::string(tag), Fixed::from_decimal(text).value(), std::string(text)});
+    };
+    const auto count_motion_notes = [](const auto& captured, const std::string_view code, const std::string_view tag) {
+        return std::count_if(captured.begin(), captured.end(), [&](const auto& note) {
+            return note.code == code && note.tag == tag;
+        });
+    };
+    for (const auto tag : {"MovementReevaluationFrameCount", "Space_Guard_Range", "Nebula_Ability_Disable_Time"}) {
+        auto changed = tables;
+        auto& constants = changed.constants.scalars;
+        constants.erase(std::remove_if(constants.begin(), constants.end(), [&](const auto& entry) {
+            return entry.tag == tag;
+        }), constants.end());
+        eawr::core::LoadNoteBuffer notes;
+        const auto recovered = eawr::units::motion_table(changed, {}, nullptr, &notes);
+        eawr::core::LoadNoteCollector collector;
+        collector.merge(notes);
+        const auto captured = collector.snapshot();
+        expect(recovered && recovered.value().rules.reevaluation_frames == 10
+            && recovered.value().rules.guard_range == Fixed::from_raw(raw(750))
+            && recovered.value().nebula_disable_seconds == Fixed::from_raw(raw(5)),
+            "omitted interval, guard and nebula globals use their stock values");
+        expect(count_motion_notes(captured, "EAWR-LOAD-0150", tag) == 1
+            && std::any_of(captured.begin(), captured.end(), [&](const auto& note) {
+                return note.tag == tag && note.classification == eawr::core::LoadCategory::retail_accepts
+                    && note.action == eawr::core::LoadAction::default_used && note.retail == "LSA-P5";
+            }), "each missing global emits exactly one class B stock-default note");
+        if (!recovered) continue;
+        eawr::sim::tactical::TacticalSetup setup;
+        setup.players = {{1, 1, 1, eawr::sim::tactical::player_flag_commandable},
+            {2, 2, 2, eawr::sim::tactical::player_flag_commandable}};
+        auto live = eawr::sim::tactical::TacticalSession::create(setup, {}, {}, recovered.value());
+        expect(static_cast<bool>(live), "missing-global motion session creates");
+        if (live) {
+            const eawr::sim::InlineExecutor executor;
+            expect(static_cast<bool>(live.value().step(executor)), "missing-global motion session steps");
+        }
+    }
+    for (const auto& [text, effective, changed_value] : {std::tuple{"-1", "2", true},
+             std::tuple{"400", "360", true}, std::tuple{"2", "2", false}, std::tuple{"360", "360", false}}) {
+        auto changed = tables;
+        set_motion_constant(changed, "MaxRotationsSpace", text);
+        eawr::core::LoadNoteBuffer notes;
+        const auto recovered = eawr::units::motion_table(changed, {}, nullptr, &notes);
+        eawr::core::LoadNoteCollector collector;
+        collector.merge(notes);
+        const auto captured = collector.snapshot();
+        const auto rotations = Fixed::from_decimal(effective).value();
+        expect(recovered && recovered.value().avoidance->max_rotations == rotations
+            && recovered.value().rules.arc_degrees == eawr::sim::math::divide(Fixed::from_raw(raw(360)), rotations).value(),
+            "0151: rotations clamp before division at their exact bounds");
+        expect(count_motion_notes(captured, "EAWR-LOAD-0151", "MaxRotationsSpace") == (changed_value ? 1 : 0),
+            "0151: rotations emit one note only when changed");
+    }
+    for (const auto& [text, effective, changed_value] : {std::tuple{"0", 2U, true}, std::tuple{"2.5", 2U, true},
+             std::tuple{"70000", 65536U, true}, std::tuple{"-3", 2U, true}, std::tuple{"65536", 65536U, false}}) {
+        auto changed = tables;
+        set_motion_constant(changed, "MovementReevaluationFrameCount", text);
+        eawr::core::LoadNoteBuffer notes;
+        const auto recovered = eawr::units::motion_table(changed, {}, nullptr, &notes);
+        eawr::core::LoadNoteCollector collector;
+        collector.merge(notes);
+        const auto captured = collector.snapshot();
+        expect(recovered && recovered.value().rules.reevaluation_frames == effective,
+            "0152: interval truncation and bounds have exact effective frame counts");
+        expect(count_motion_notes(captured, "EAWR-LOAD-0152", "MovementReevaluationFrameCount") == (changed_value ? 1 : 0),
+            "0152: interval conversion emits one note only when changed");
+        for (const auto& note : captured)
+            if (note.code == "EAWR-LOAD-0152") expect(note.authored_value == text
+                && note.effective_value == std::to_string(effective), "0152: record keeps authored spelling and final frames");
+    }
+    for (const auto& [text, effective, changed_value] : {std::tuple{"16", 16U, false}, std::tuple{"17", 16U, true},
+             std::tuple{"6.9", 6U, true}, std::tuple{"4294967297", 16U, true}}) {
+        auto changed = tables;
+        set_motion_constant(changed, "SpacePathingTries", text);
+        eawr::core::LoadNoteBuffer notes;
+        const auto recovered = eawr::units::motion_table(changed, {}, nullptr, &notes);
+        eawr::core::LoadNoteCollector collector;
+        collector.merge(notes);
+        const auto captured = collector.snapshot();
+        expect(recovered && recovered.value().avoidance->tries == effective, "0158: count truncation and saturation are bounded");
+        expect(count_motion_notes(captured, "EAWR-LOAD-0158", "SpacePathingTries") == (changed_value ? 1 : 0),
+            "0158: count conversion emits exactly one note on change");
+        for (const auto& note : captured)
+            if (note.tag == "SpacePathingTries") expect(note.effective_value == std::to_string(effective),
+                "0158: even a count above uint32 reports the final effective count");
+    }
+    for (const auto extent : {Fixed::from_raw(raw(262144)), Fixed::from_raw(raw(300000)), Fixed::from_raw(INT64_MAX)}) {
+        auto changed = tables;
+        for (auto& unit : changed.units) {
+            if (unit.id != "Test_Frigate") continue;
+            unit.scale_factor = Fixed::from_raw(raw(extent.raw() == INT64_MAX ? 2 : 1));
+            unit.footprint.custom_hard_x = extent;
+            unit.footprint.custom_hard_y = Fixed::from_raw(raw(40));
+        }
+        for (const bool combat_path : {false, true}) {
+            eawr::core::LoadNoteBuffer notes;
+            bool accepted = false;
+            Fixed effective;
+            if (combat_path) {
+                const auto recovered = eawr::units::combat_table(changed, eawr::units::ContentErrors::strict, nullptr, &notes);
+                accepted = static_cast<bool>(recovered);
+                if (recovered) for (const auto& footprint : recovered.value().footprints)
+                    if (footprint.type_id == eawr::assets::object_type_crc("Test_Frigate")) effective = footprint.x_extent;
+            } else {
+                const auto recovered = eawr::units::motion_table(changed, {}, nullptr, &notes);
+                accepted = static_cast<bool>(recovered);
+                if (recovered) effective = recovered.value().footprint(eawr::assets::object_type_crc("Test_Frigate"))->x_extent;
+            }
+            eawr::core::LoadNoteCollector collector;
+            collector.merge(notes);
+            const auto captured = collector.snapshot();
+            expect(accepted && effective == Fixed::from_raw(raw(262144)), "0157: combat and motion accept bounded target geometry");
+            expect(count_motion_notes(captured, "EAWR-LOAD-0157", "Custom_Hard_XExtent")
+                == (extent == Fixed::from_raw(raw(262144)) ? 0 : 1), "0157: combat and motion retain exactly one extent note");
+        }
+    }
+    // Missing globals are class B; unsupported authored motion is class C. Both bind and step.
+    for (const bool missing : {true, false}) {
+        auto changed = tables;
+        if (missing) {
+            auto& constants = changed.constants.scalars;
+            constants.erase(std::remove_if(constants.begin(), constants.end(), [](const auto& entry) {
+                return entry.tag == "Object_Max_Speed_Multiplier_Space" || entry.tag == "MaxRotationsSpace"
+                    || entry.tag == "XYExpansionDistanceSpace" || entry.tag.starts_with("TurnInPlaceSlowdown")
+                    || entry.tag == "WaitOperatorSpeedCoefficient";
+            }), constants.end());
+        } else {
+            for (auto& constant : changed.constants.scalars) {
+                if (constant.tag == "MaxRotationsSpace" || constant.tag == "XYExpansionDistanceSpace"
+                    || constant.tag == "Space_Guard_Range" || constant.tag == "WaitOperatorSpeedCoefficient"
+                    || constant.tag == "TurnInPlaceSlowdownFrigate" || constant.tag == "Nebula_Ability_Disable_Time") {
+                    constant.value = Fixed::from_decimal("-1").value();
+                    constant.text = "-1";
+                }
+                if (constant.tag == "MovementReevaluationFrameCount" || constant.tag == "SpacePathingTries") {
+                    constant.value = Fixed::from_decimal("2.5").value();
+                    constant.text = "2.5";
+                }
+            }
+            for (auto& unit : changed.units) {
+                if (unit.id != "Test_Frigate") continue;
+                unit.movement.max_speed = Fixed::from_raw(INT64_MAX);
+                unit.movement.acceleration = Fixed{};
+                unit.movement.deceleration = Fixed{};
+                unit.movement.max_rate_of_turn = Fixed{};
+                unit.movement.max_rate_of_roll = Fixed::from_raw(-Fixed::scale);
+                unit.footprint.custom_soft_radius = Fixed::from_raw(1);
+                unit.footprint.custom_hard_x = Fixed::from_raw(INT64_MAX);
+                unit.footprint.custom_hard_y = Fixed::from_raw(INT64_MAX);
+                unit.scale_factor = Fixed::from_raw(2 * Fixed::scale);
+            }
+        }
+        eawr::core::LoadNoteBuffer buffer;
+        const auto recovered = eawr::units::motion_table(changed, {}, nullptr, &buffer);
+        eawr::core::LoadNoteCollector collector;
+        collector.merge(buffer);
+        const auto captured = collector.snapshot();
+        expect(static_cast<bool>(recovered), "motion loader normalizes before its former abort paths");
+        expect(std::any_of(captured.begin(), captured.end(), [&](const auto& note) {
+            return note.code == (missing ? "EAWR-LOAD-0150" : "EAWR-LOAD-0155")
+                && note.classification == (missing ? eawr::core::LoadCategory::retail_accepts
+                                                  : eawr::core::LoadCategory::unknown_degrade)
+                && (missing ? note.retail == "LSA-P5" : note.object == "Test_Frigate");
+        }), "motion family notes carry classification and source object");
+        if (!recovered) continue;
+        if (missing) {
+            expect(recovered.value().rules.arc_degrees == Fixed::from_raw(15 * Fixed::scale),
+                "missing rotations use the stock default");
+        } else {
+            const auto* profile = recovered.value().find(eawr::assets::object_type_crc("Test_Frigate"));
+            expect(profile && profile->max_speed == Fixed::from_raw(1024 * Fixed::scale)
+                && profile->acceleration == Fixed::from_raw(Fixed::scale / 4096),
+                "overflow saturates and profile fields clamp to supported bounds");
+            expect(recovered.value().rules.guard_range == Fixed{} && recovered.value().rules.reevaluation_frames == 2,
+                "negative guard range clamps and fractional frame count truncates");
+        }
+        eawr::sim::tactical::TacticalSetup setup;
+        setup.players = {{1, 1, 1, eawr::sim::tactical::player_flag_commandable},
+            {2, 2, 2, eawr::sim::tactical::player_flag_commandable}};
+        auto session = eawr::sim::tactical::TacticalSession::create(setup, {}, {}, recovered.value());
+        expect(static_cast<bool>(session), "degraded motion session creates");
+        if (session) {
+            const eawr::sim::InlineExecutor executor;
+            expect(static_cast<bool>(session.value().step(executor)), "degraded motion session steps");
+        }
     }
     const auto with_constants = [&](const char* interval, const char* guard) {
         auto changed = tables;
@@ -986,9 +1275,9 @@ void synthetic_tables() {
                    + interval + ", " + guard + (rebound ? ")" : "): " + rebound.error().message));
     }
     for (const char* bad : {"0", "2.5", "70000", "-3"}) {
-        expect(!with_constants(bad, "750"), "OR-06: a non-whole, zero, negative or oversized interval is refused");
+        expect(static_cast<bool>(with_constants(bad, "750")), "OR-06: unsupported intervals degrade before validation");
     }
-    expect(!with_constants("10", "-1"), "OR-14: a negative guard range is refused");
+    expect(static_cast<bool>(with_constants("10", "-1")), "OR-14: a negative guard range degrades to zero");
     expect(motion.value().profiles.size() == 1, "only the ship moves by motion profile; craft and stations do not");
     const auto* moving = motion.value().find(eawr::assets::object_type_crc("Test_Frigate"));
     expect(moving != nullptr && moving->max_speed == times("2.2") && moving->acceleration == times(".04") &&
@@ -1020,6 +1309,66 @@ void synthetic_tables() {
     expect(!eawr::sim::tactical::validate_motion(delayed), "PC-08: late landing rejected");
     delayed.avoidance->search_delay = 9;
     expect(static_cast<bool>(eawr::sim::tactical::validate_motion(delayed)), "PC-08: landing before reevaluation accepted");
+    {
+        auto collision = tables;
+        auto unit = std::find_if(collision.units.begin(), collision.units.end(), [](const auto& item) {
+            return item.id == "Test_Frigate";
+        });
+        if (unit != collision.units.end()) {
+            unit->id = "SYNTH_QLU1MOI5PTT3";
+            unit->table_order = 10;
+            eawr::units::ObstacleType obstacle;
+            obstacle.id = "SYNTH_OIVRHNPFF4K4";
+            obstacle.table_order = 1;
+            obstacle.space_layer = "Capital";
+            collision.obstacles.push_back(obstacle);
+            eawr::core::LoadNoteBuffer notes;
+            const auto result = eawr::units::motion_table(collision, {}, nullptr, &notes);
+            eawr::core::LoadNoteCollector collector;
+            collector.merge(notes);
+            const auto captured = collector.snapshot();
+            const auto* shape = result ? result.value().footprint(eawr::assets::object_type_crc(unit->id)) : nullptr;
+            expect(shape && shape->layer == eawr::sim::tactical::SpaceLayer::capital,
+                "earlier obstacle definition wins a unit footprint CRC collision");
+            expect(std::any_of(captured.begin(), captured.end(), [&](const auto& note) {
+                return note.code == "EAWR-LOAD-0454" && note.object == unit->id && note.effective_value == obstacle.id;
+            }), "footprint collision reports the omitted definition and winner");
+            if (result) {
+                eawr::sim::tactical::TacticalSetup setup;
+                setup.players = {{1, 1, 1, eawr::sim::tactical::player_flag_commandable},
+                    {2, 2, 2, eawr::sim::tactical::player_flag_commandable}};
+                auto session = eawr::sim::tactical::TacticalSession::create(setup, {}, {}, result.value());
+                expect(static_cast<bool>(session), "collision-degraded motion session creates");
+                if (session) {
+                    const eawr::sim::InlineExecutor executor;
+                    expect(static_cast<bool>(session.value().step(executor)), "collision-degraded motion session steps");
+                }
+            }
+            auto second_obstacle = obstacle;
+            second_obstacle.id = unit->id;
+            second_obstacle.table_order = 2;
+            second_obstacle.space_layer = "Corvette";
+            collision.obstacles.push_back(second_obstacle);
+            const eawr::units::FootprintTypeSelection selection(collision);
+            expect(selection.find(unit->id) && selection.find(unit->id)->obstacle == &collision.obstacles.front(),
+                "shared consumer selection retains the same earliest definition");
+            const auto obstacle_pair = eawr::units::motion_table(collision);
+            shape = obstacle_pair ? obstacle_pair.value().footprint(eawr::assets::object_type_crc(unit->id)) : nullptr;
+            expect(shape && shape->layer == eawr::sim::tactical::SpaceLayer::capital,
+                "earlier obstacle wins an obstacle footprint CRC collision");
+            collision.obstacles.pop_back();
+            collision.obstacles.back().space_layer.clear();
+            const auto no_shape = eawr::units::motion_table(collision);
+            expect(no_shape && !no_shape.value().footprint(eawr::assets::object_type_crc(unit->id)),
+                "a winning definition without a space layer does not admit the losing footprint");
+            collision.obstacles.back().space_layer = "Capital";
+            collision.obstacles.back().table_order = 20;
+            const auto unit_first = eawr::units::motion_table(collision);
+            shape = unit_first ? unit_first.value().footprint(eawr::assets::object_type_crc(unit->id)) : nullptr;
+            expect(shape && shape->layer == eawr::sim::tactical::SpaceLayer::frigate,
+                "earlier unit definition wins a unit obstacle CRC collision");
+        }
+    }
     // #71: the path finder's constants and a footprint per type with a Space_Layer.
     const auto& avoidance = motion.value().avoidance;
     expect(avoidance && avoidance->max_expansions == 3500 && avoidance->tries == 6 && avoidance->tracking_interval == 90
@@ -1032,5 +1381,55 @@ void synthetic_tables() {
            "the frigate is tracked in the frigate layer, soft radius 40 x 0.7");
 }
 
+
+// #4985: community selection follows the object's behaviour, not its XML class. A mod's shipyard is a
+// SpaceBuildable; a mover or a capture point does not take the station flag.
+void community_structure_tables() {
+    auto xml = units_xml("3600", "Unit_Select_Test");
+    const std::string closing = "</Objects>";
+    xml.replace(xml.rfind(closing), closing.size(), R"xml(
+<SpaceBuildable Name="Test_Mod_Shipyard">
+  <Variant_Of_Existing_Type>Test_Base</Variant_Of_Existing_Type>
+  <Is_Community_Property>Yes</Is_Community_Property>
+</SpaceBuildable>
+<SpaceBuildable Name="Test_Mod_Shipyard_Variant">
+  <Variant_Of_Existing_Type>Test_Mod_Shipyard</Variant_Of_Existing_Type>
+</SpaceBuildable>
+<SpaceBuildable Name="Test_Mod_Private_Shipyard">
+  <Variant_Of_Existing_Type>Test_Base</Variant_Of_Existing_Type>
+</SpaceBuildable>
+<SpaceBuildable Name="Test_Mod_Capture_Shipyard">
+  <Variant_Of_Existing_Type>Test_Base</Variant_Of_Existing_Type>
+  <Behavior>CAPTURE_POINT</Behavior>
+  <Is_Community_Property>Yes</Is_Community_Property>
+</SpaceBuildable>
+<SpaceUnit Name="Test_Mod_Community_Mover">
+  <Variant_Of_Existing_Type>Test_Frigate</Variant_Of_Existing_Type>
+  <SpaceBehavior>SPACE_OBSTACLE, SIMPLE_SPACE_LOCOMOTOR</SpaceBehavior>
+  <Is_Community_Property>Yes</Is_Community_Property>
+</SpaceUnit>
+</Objects>)xml");
+    TempTree tree;
+    write_fixture(tree.root, xml);
+    const auto loaded = load(tree.root, models(-40.0F), "Normal_Default", eawr::sim::tactical::BattleDomain::space,
+        {"Test_Mod_Shipyard", "Test_Mod_Shipyard_Variant", "Test_Mod_Private_Shipyard", "Test_Mod_Capture_Shipyard",
+         "Test_Mod_Community_Mover"});
+    if (!loaded.tables) return;
+    const auto flag = [&](const std::string_view id) {
+        const auto* unit = loaded.tables->find(id);
+        expect(unit != nullptr, "community structure fixture type loads");
+        return unit != nullptr && unit->station_community_property;
+    };
+    const auto* shipyard = loaded.tables->find("Test_Mod_Shipyard");
+    expect(shipyard != nullptr && shipyard->kind != UnitKind::station && shipyard->xml_type == "SpaceBuildable",
+        "#4985: a mod shipyard is a SpaceBuildable, not a station");
+    expect(flag("Test_Mod_Shipyard"), "#4985: an immobile SpaceBuildable with Is_Community_Property is ally-selectable");
+    expect(flag("Test_Mod_Shipyard_Variant"), "#4985: the community flag survives a variant of the shipyard");
+    expect(!flag("Test_Mod_Private_Shipyard"), "#4985: an immobile structure without the tag stays private");
+    expect(!flag("Test_Mod_Community_Mover"), "#4985: a mover with the tag and SPACE_OBSTACLE is not an ally-selectable structure");
+    const auto* capture = loaded.tables->find("Test_Mod_Capture_Shipyard");
+    expect(capture != nullptr && capture->capture_point && capture->community_property && !capture->station_community_property,
+        "#4985: a capture point keeps its own community flag, not the station flag");
+}
 
 } // namespace unit_tables_test_support

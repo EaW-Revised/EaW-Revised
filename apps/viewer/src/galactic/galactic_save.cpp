@@ -42,7 +42,10 @@ std::filesystem::path save_directory(const GalacticMode::Options& options) {
 }
 void configure_save_repository(platform::LiveGameSession::Options& live, const GalacticMode::Options& options) {
     if (live.saves.directory.empty()) live.saves.directory = ViewerPath::utf8(save_directory(options));
-    if (!options.mod_root.empty()) live.saves.mod_list_identity[0] = 1;
+    // The CLI mount path does not convey launcher record identities. Do not
+    // derive a portable identity or a display string from the local path.
+    if (options.mounted_mods) live.saves.mounted_mods = *options.mounted_mods;
+    else live.saves.mounted_mods = {};
 }
 GalacticSaveControls::GalacticSaveControls(GalacticMode::State& state) : state_(state) {}
 GalacticSaveControls::~GalacticSaveControls() {
@@ -63,6 +66,7 @@ void GalacticSaveControls::open() {
     if (visible()) return;
     if (!state_.game || !state_.galaxy || (state_.loading && state_.loading->shown())) return;
     if (!build_widgets() || !admission().open) return;
+    centre_dialogs();
     state_.held.clear(); state_.orbiting = false;
     menu_selection_ = state_.map_input.selected;
     const auto frame = state_.game->frame(sim::SeatId{state_.galaxy->local.seat});
@@ -265,7 +269,7 @@ bool GalacticSaveControls::accept_loaded(std::unique_ptr<platform::PreparedLiveR
 }
 void GalacticSaveControls::service() {
     using namespace std::chrono_literals;
-    if (visible()) { observe_world_selection(); position_dates(); }
+    if (visible()) { centre_dialogs(); observe_world_selection(); position_dates(); }
     if (listing_.valid() && listing_.wait_for(0s) == std::future_status::ready) {
         auto loaded = listing_.get();
         if (!loaded) show_modal(Modal::acknowledgement, loaded.error().message);

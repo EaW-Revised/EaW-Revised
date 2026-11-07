@@ -94,6 +94,10 @@ void key_contracts() {
     const auto baseline = key(initial).sha256;
     check(baseline == key(initial).sha256, "same identity is stable");
     const std::vector<std::function<void(cache::Identity&)>> changes{
+        [](auto& i) { i.root_source = "new archive"; }, [](auto& i) { i.root_layer = "override"; },
+        [](auto& i) { i.root_origin = "archive"; }, [](auto& i) { ++i.parser_schema; },
+        [](auto& i) { i.includes[0].source_id = "new archive"; }, [](auto& i) { i.includes[0].layer_id = "override"; },
+        [](auto& i) { i.includes[0].origin = "archive"; },
         [](auto& i) { i.logical += "x"; }, [](auto& i) { i.root_sha256[0] = 'b'; },
         [](auto& i) { i.form = cache::Form::source; }, [](auto& i) { i.includes[0].parent += "x"; },
         [](auto& i) { i.includes[0].logical += "x"; }, [](auto& i) { i.includes[0].content_sha256[0] = 'e'; },

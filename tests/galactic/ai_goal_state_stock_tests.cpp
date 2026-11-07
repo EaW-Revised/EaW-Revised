@@ -15,6 +15,11 @@
 #include "galactic_ai_world.hpp"
 #include "galactic_ai.hpp"
 #include "galactic_ai_funding.hpp"
+#include "galactic_ai_battle_listener.hpp"
+#include "eawr/campaign/game_session.hpp"
+#include "tactical_ai_internal.hpp"
+#include "eawr/script/authoritative/galactic_bridge.hpp"
+#include "eawr/sim/galactic/synthetic.hpp"
 #include "eawr/campaign/live_setup.hpp"
 #include "eawr/core/sha256.hpp"
 #include "eawr/platform/sim_workers.hpp"
@@ -106,6 +111,13 @@ std::string fixture_identity() { return eawr::core::sha256_hex(std::span<const s
 namespace eawr::script::foc::ai {
 // Supporting synthetic continuation inventory, not installed AI behavior.
 struct EngineContractAccess {
+    static void phase_global(Engine& e, int value) {
+        const auto write = e.native_record_scope();
+        e.native_records_changed(0, {27, 31}); e.mark_native_state_changed();
+        e.globals_["PHASE"] = real(value);
+        e.host_->credit_changes[1] = math::Fixed::from_raw(value);
+        e.publish_record({0, 1, "phase", "GOAL", "target", "event", "report"});
+    }
     static void running(Engine& e, std::uint64_t goal) {
         const auto native_record_write = e.native_record_scope();
         e.native_records_replaced(); e.mark_native_state_changed();
@@ -148,12 +160,12 @@ struct EngineContractAccess {
 
         e.rebuild_runtime_index();
     }
-    static std::uint64_t movement_fixture(Engine& e, std::uint64_t goal) {
+    static std::uint64_t movement_fixture(Engine& e, std::uint64_t goal, std::uint64_t request = 77) {
         const auto native_record_write = e.native_record_scope();
         e.native_records_replaced(); e.mark_native_state_changed();
         running(e, goal);
         auto& block = e.players_.front().blocks.begin()->second;
-        block.kind = Block::Kind::move; block.galactic_request = 77; block.galactic_actor = 50;
+        block.kind = Block::Kind::move; block.galactic_request = request; block.galactic_actor = 50;
         auto& force = e.players_.front().taskforces.at(block.taskforce); force.thread = 0; force.galactic_fleet = 50;
         e.players_.front().tasks.clear(); e.events_.clear(); e.orders_.clear(); e.pending_attach_.clear(); e.pad_reservations_.clear();
         return block.id;
@@ -178,6 +190,221 @@ struct EngineContractAccess {
 }
 
 namespace {
+void galactic_budget_and_desire_stub_contracts() {
+    const std::vector<lifecycle::PlayerSelection> selected{{1, "FIXTURE", "NORMAL", {}, {}}};
+    std::string reference;
+    for (const auto workers : {1U, 2U, 4U, 8U}) {
+        eawr::platform::ThreadWorkerAdapter executor(workers);
+        auto data = fixture_data(); data.goal_categories["MAJORITEM"] = 1; data.goal_categories["UNFUNDED"] = 2;
+        Owner control(fixture_setup(), std::move(data), fixture_plans(), selected);
+        control.begin(fixture_snapshot(), executor, selected); policy(control, 1);
+        const auto goal = must(control.engine->allocate_galactic_goal(1, 0, control.engine->target_of_object(10)->id));
+        ai::EngineContractAccess::movement_fixture(*control.engine, goal->goal);
+        const auto plan_id = control.engine->galactic_goal(1, goal->goal)->running_plan;
+        const auto* plan = control.engine->plan(plan_id);
+        const auto instance = plan->instance;
+        const auto fixed = [](std::int64_t value) { return must(eawr::sim::math::Fixed::from_integer(value)); };
+        auto funding = std::make_shared<ai::GalacticFunding>();
+        ai::EvaluatedFundingTemplate allocation; allocation.equations = {{1, fixed(1)}};
+        must(funding->initialize(1, std::span<const ai::EvaluatedFundingTemplate>(&allocation, 1), fixed(100)));
+        control.engine->set_galactic_funding(funding);
+        const auto before = *funding->ledger(1);
+        expect(before.categories.at(1).available_cash != fixed(0), "budget binding fixture begins with available category cash");
+        auth::ModuleManifest modules;
+        const std::string source = R"LUA(
+function Base_Definitions() Budget = nil end
+function BadCategory() Budget.Flush_Category("Unregistered_Category") end
+function UnfundedOnly() Budget.Flush_Category("Unfunded") end
+Count = 0
+function Worker()
+    while Count < 2 do
+        Bonus = GiveDesireBonus(PlayerObject, "Goal", Target, 15, 5)
+        Budget.Flush_Category("MajorItem")
+        Count = Count + 1
+        coroutine.yield(true)
+    end
+end
+Create_Thread("Worker")
+)LUA";
+        must(modules.add("first.lua", source)); must(modules.add("second.lua", source));
+        auth::SessionConfig config; config.galactic_clock = true;
+        control.scripts = must(auth::ScriptScheduler::create(config, modules));
+        std::vector<eawr::core::Diagnostic> errors;
+        foc::detail::register_plan_bindings(control.scripts, control.host, errors);
+        expect(errors.empty(), "budget method and desire stub register without protecting the Budget variable");
+        must(control.scripts.create_instance(instance, control.engine->plans().at(plan->definition).module));
+        std::uint64_t sequence{};
+        const auto post = [&](auth::ScriptEvent::Kind kind, std::string name, std::optional<auth::Value> value = {}) {
+            auth::ScriptEvent event; event.key = {1, 16, instance, sequence++}; event.target = instance;
+            event.kind = kind; event.name = std::move(name); event.parameter = std::move(value);
+            must(control.scripts.submit_event(std::move(event)));
+        };
+        post(auth::ScriptEvent::Kind::call, "Base_Definitions");
+        post(auth::ScriptEvent::Kind::assign, "Budget", auth::Value{auth::Handle{ai::handle_galactic_budget, plan_id}});
+        post(auth::ScriptEvent::Kind::assign, "PlayerObject", auth::Value{auth::Handle{foc::handle_player, 1}});
+        post(auth::ScriptEvent::Kind::assign, "Target", auth::Value{auth::Handle{foc::handle_game_object, 10}});
+        post(auth::ScriptEvent::Kind::call, "UnfundedOnly");
+        auth::ServiceOptions callback_only; callback_only.host_paced = [](std::uint64_t) { return true; };
+        const auto unfunded_before = funding->record_sync_hash(true);
+        auto unfunded = must(control.scripts.service(executor, callback_only));
+        expect(unfunded.diagnostics.empty() && unfunded.commands.size() == 1 && control.scripts.retired_instances().empty(),
+            "a registered category without a ledger account stages an ordinary flush without retiring the plan");
+        must(control.engine->after_service(unfunded));
+        expect(funding->record_sync_hash(true) == unfunded_before && *funding->ledger(1) == before
+            && !funding->ledger(1)->categories.contains(2),
+            "flushing a registered unfunded category is a no-op on exact ledger state and hash, with no new account");
+        eawr::core::LoadNoteCollector notes;
+        for (unsigned tick = 0; tick < 2; ++tick) {
+            auto report = must(control.scripts.service(executor));
+            expect(report.diagnostics.empty() && control.scripts.retired_instances().empty(),
+                "shared TaskForce desire and flush calls continue without retiring the plan");
+            if (tick == 0) expect(*funding->ledger(1) == before, "Lua stages budget writes until the ordered native commit");
+            must(control.engine->after_service(report));
+            for (auto& note : report.load_notes) notes.append(std::move(note));
+        }
+        const auto value = must(control.scripts.read_global(instance, "Count"));
+        const auto bonus = must(control.scripts.read_global(instance, "Bonus"));
+        expect(value && std::get<ai::Real>(value->data) == ai::real(2) && bonus
+            && std::holds_alternative<std::monostate>(bonus->data), "warned nil bonus lets the plan continue past both calls");
+        const auto after = funding->ledger(1);
+        expect(after->categories.at(1).available_cash == fixed(0) && after->categories.at(1).cash == before.categories.at(1).cash,
+            "WGA-24 native flush zeros available category cash without a credit refund");
+        const auto emitted = notes.snapshot();
+        expect(emitted.size() == 1 && emitted.front().tag == "GiveDesireBonus"
+            && emitted.front().code == "EAWR-LOAD-1400", "unsupported timed bonus emits one LoadNote per plan type");
+        const auto hash = must(control.scripts.state_hash()) + funding->record_sync_hash(true);
+        if (workers == 1) reference = hash; else expect(hash == reference, "budget flush and warned bonus stub agree on 1/2/4/8");
+        const auto funding_hash = funding->record_sync_hash(true);
+        auth::ScriptEvent bad; bad.key = {4, 16, instance, sequence++}; bad.target = instance;
+        bad.kind = auth::ScriptEvent::Kind::call; bad.name = "BadCategory";
+        must(control.scripts.submit_event(std::move(bad)));
+        auto rejected = must(control.scripts.service(executor));
+        expect(!rejected.diagnostics.empty() && control.scripts.retired_instances() == std::vector<std::uint64_t>{instance},
+            "WGA-24 unknown category remains an authored script error, not a silent flush");
+        must(control.engine->after_service(rejected));
+        expect(funding->record_sync_hash(true) == funding_hash, "rejected budget input cannot change the native ledger");
+    }
+}
+void degraded_battle_entry_contracts() {
+    namespace ga = foc::galactic_ai;
+    std::vector<std::string> reference;
+    const std::vector<lifecycle::PlayerSelection> selected{{1, "FIXTURE", "NORMAL", {}, {}}, {2, "FIXTURE", "NORMAL", {}, {}}};
+    for (const auto workers : {1U, 2U, 4U, 8U}) {
+        eawr::platform::ThreadWorkerAdapter executor(workers);
+        std::vector<std::string> trace;
+        // Missing scheduler, retired Lua instance, missing engine, live control.
+        for (unsigned scenario = 0; scenario < 4; ++scenario) {
+            const auto run = [&](const cp::GameRecording* recorded) {
+                Owner control(fixture_setup(), fixture_data(), fixture_plans(), selected);
+                control.begin(fixture_snapshot(), executor, selected); policy(control, 1);
+                const auto goal = must(control.engine->allocate_galactic_goal(1, 0, control.engine->target_of_object(10)->id));
+                expect(bool(goal), "battle degradation fixture allocates its real native goal");
+                const auto block = ai::EngineContractAccess::movement_fixture(*control.engine, goal->goal, 1);
+                const auto plan_id = control.engine->galactic_goal(1, goal->goal)->running_plan;
+                const auto* plan = control.engine->plan(plan_id);
+                const auto taskforce = plan->taskforces.front(), instance = plan->instance;
+                auth::ModuleManifest modules;
+                const std::string source = scenario == 1
+                    ? "function Worker() error('injected provider retirement') end Create_Thread('Worker')"
+                    : "function Main_Space_Conflict_Begin(tf) end function Worker() coroutine.yield(true) end Create_Thread('Worker')";
+                must(modules.add("first.lua", source)); must(modules.add("second.lua", source));
+                auth::SessionConfig config; config.galactic_clock = true;
+                control.scripts = must(auth::ScriptScheduler::create(config, modules));
+                must(control.scripts.create_instance(instance, control.engine->plans().at(plan->definition).module));
+                if (scenario == 1) {
+                    must(control.scripts.service(executor));
+                    expect(control.scripts.retired_instances() == std::vector<std::uint64_t>{instance},
+                        "uncaught Lua failure retires the actual TaskForce instance before battle");
+                }
+                gc::GalacticSetup setup; setup.seed = 42; setup.players = {{1, 1, 0}, {2, 2, 0}};
+                const auto snapshot = fixture_snapshot();
+                setup.planets.assign(snapshot->planets().begin(), snapshot->planets().end());
+                setup.fleets.assign(snapshot->fleets().begin(), snapshot->fleets().end());
+                // Clock-only setups omit the native movement graph. Admission
+                // needs its explicit opt-in even when conflict defers travel.
+                if (!recorded) {
+                    auto graphless = must(gc::GalacticSession::create(setup));
+                    ga::NativeActions unavailable(graphless, std::make_shared<ai::GalacticFunding>(), {}, {});
+                    unavailable.bind_admission_gate([] { return false; });
+                    unavailable.bind_movement([](auto, const auto&) {
+                        return eawr::core::Result<ga::NativeActions::MovementInput>::success({});
+                    }, [] { return true; }, [](auto, auto) { return eawr::core::Result<void>::success(); });
+                    ga::ActionRequest invalid; invalid.kind = ga::ActionKind::move;
+                    invalid.player = 1; invalid.object = 50; invalid.target = 20;
+                    const auto rejected = unavailable.admit(invalid);
+                    expect(!graphless.graph() && !rejected && rejected.error().code == auth::codes::invalid_request
+                        && rejected.error().message == "movement destination, policy or request identity is invalid",
+                        "graph-less fixture rejects at movement admission before any battle callback");
+                }
+                setup.rules.maximum_fleet_movement_distance = eawr::sim::math::Fixed{};
+                cp::ConflictRecord conflict; conflict.id = 1000; conflict.planet = 10;
+                conflict.invader = 1; conflict.defender = 2;
+                conflict.forces = {{51, 100, 1, 50}, {61, 100, 2, 60}};
+                conflict.tactical.first_free_entity_id = 2000;
+                conflict.tactical.players = {{1, 1, 1, 1}, {2, 2, 2, 1}};
+                for (const auto& force : conflict.forces) {
+                    eawr::sim::tactical::UnitState unit;
+                    unit.entity_id = force.id; unit.type_id = force.type; unit.owner = force.owner;
+                    conflict.tactical.units.push_back(unit);
+                }
+                eawr::sim::tactical::TacticalContent content;
+                eawr::sim::tactical::DurabilityProfile profile; profile.type_id = 100;
+                profile.max_hull = must(eawr::sim::math::Fixed::from_integer(100));
+                content.durability.profiles.push_back(profile);
+                auto game = recorded ? must(cp::GameSession::from_recording(*recorded, [content](const auto&) {
+                    return eawr::core::Result<eawr::sim::tactical::TacticalContent>::success(content);
+                }, {}, cp::ScriptRequirement::none)) : must(cp::GameSession::create(setup));
+                std::shared_ptr<ga::NativeActions> actions;
+                must(game.configure_galactic_ai_services([&](gc::GalacticSession& world) {
+                    expect(world.graph() && world.graph()->node(20),
+                        "battle fixture enables its native movement graph and destination before request admission");
+                    actions = std::make_shared<ga::NativeActions>(world, std::make_shared<ai::GalacticFunding>(),
+                        ga::NativeActions::Placement{}, std::map<gc::PlayerId, eawr::sim::math::Fixed>{});
+                    actions->bind_admission_gate([] { return false; });
+                    actions->bind_movement([](auto, const auto&) {
+                        return eawr::core::Result<ga::NativeActions::MovementInput>::success({});
+                    }, [] { return true; }, [](auto, auto) { return eawr::core::Result<void>::success(); });
+                    ga::ActionRequest request; request.kind = ga::ActionKind::move;
+                    request.player = 1; request.object = 50; request.target = 20; request.members = {51};
+                    request.plan = plan_id; request.taskforce = taskforce; request.block = block;
+                    const auto admitted = must(actions->admit(request));
+                    expect(admitted.admitted && admitted.request == 1, "registered native TaskForce movement precedes battle entry");
+                    cp::GalacticAiServices services;
+                    services.state = std::make_shared<ai::GoalStateContributor>(control.engine, fixture_identity());
+                    services.battle = ga::retained_movement_battle_listener(actions,
+                        scenario == 2 ? std::shared_ptr<ai::Engine>{} : control.engine,
+                        std::function<auth::ScriptScheduler*()>{[&] { return scenario == 0 ? nullptr : &control.scripts; }});
+                    return eawr::core::Result<cp::GalacticAiServices>::success(std::move(services));
+                }));
+                if (!recorded) must(game.stage_battle(conflict, content, cp::ScriptRequirement::none));
+                std::vector<std::string> hashes;
+                for (unsigned tick = 0; tick < 3; ++tick) {
+                    hashes.push_back(must(game.step(executor)).state_hash.get() + must(actions->state_hash())
+                        + must(control.scripts.state_hash()));
+                    expect(game.mode() == cp::SessionMode::battle && game.battle(),
+                        "retired or missing callback owner never aborts campaign and the tactical child keeps running");
+                }
+                const auto notes = game.galaxy().load_notes();
+                expect(notes.size() == (scenario == 3 ? 0U : 1U), "only unavailable callback owners emit a degradation note");
+                if (!notes.empty()) expect(notes.front().code == "EAWR-LOAD-1236"
+                    && notes.front().phase == eawr::core::LoadPhase::runtime && notes.front().object == "1",
+                    "degraded battle notification has its reserved runtime LoadNote");
+                expect(actions->movements().at(1).conflict_location == 10,
+                    "skipping script delivery preserves native movement conflict bookkeeping");
+                expect(ai::EngineContractAccess::pending_events(*control.engine) == (scenario == 3 ? 1U : 0U),
+                    "only live owners receive an authored callback; degraded paths do not invent events");
+                return std::pair{game.recording(), hashes};
+            };
+            const auto [recording, hashes] = run(nullptr);
+            const auto [replayed, replay_hashes] = run(&recording);
+            expect(hashes == replay_hashes && must(gc::write_replay(recording.commands)) == must(gc::write_replay(replayed.commands)),
+                "degraded entry reconstructs identical game/native/script hashes and replay bytes");
+            trace.insert(trace.end(), hashes.begin(), hashes.end());
+        }
+        if (workers == 1) reference = trace;
+        else expect(trace == reference, "degraded battle entry and replay hashes agree on 1/2/4/8 workers");
+    }
+}
 void movement_delivery_contracts() {
     std::string reference;
     const std::vector<lifecycle::PlayerSelection> selected{{1, "FIXTURE", "NORMAL", {}, {}}, {2, "FIXTURE", "NORMAL", {}, {}}};
@@ -234,7 +461,312 @@ void movement_delivery_contracts() {
 }
 }
 
+namespace {
+void shared_global_value_contracts() {
+    std::string reference;
+    const std::vector<lifecycle::PlayerSelection> selected{{1, "FIXTURE", "NORMAL", {}, {}}, {2, "FIXTURE", "NORMAL", {}, {}}};
+    for (const auto workers : {1U, 2U, 4U, 8U}) {
+        eawr::platform::ThreadWorkerAdapter executor(workers);
+        Owner owner(fixture_setup(), fixture_data(), fixture_plans(), selected);
+        owner.begin(fixture_snapshot(), executor, selected);
+        ai::GoalStateContributor state(owner.engine, fixture_identity());
+        const auto empty = must(state.capture());
+        const auto empty_hash = must(state.record_sync_hash());
+        const auto reader = [engine = owner.engine](const std::string& key) { return engine->global_value(key); };
+        const auto make_scripts = [&](bool story) {
+            auth::SessionConfig config; config.galactic_clock = true;
+            auth::ModuleManifest manifest;
+            const std::string text = story ? R"LUA(
+Continued = false; Rejected = false
+function main()
+    while true do
+        GlobalValue.Set('shared', 'serialized\000payload')
+        GlobalValue.Set('flag', false)
+        GlobalValue.Set('number', 42.5)
+        GlobalValue.Set('empty', '')
+        GlobalValue.Set('collision', 'story')
+        coroutine.yield(true)
+    end
+end
+function Unsupported()
+    GlobalValue.Set('shared', {1, 2})
+    Continued = true
+end
+function Oversized()
+    GlobalValue.Set('shared', string.rep('x', 1048577))
+    Continued = true
+end
+function Reject(wrapper)
+    Rejected = not pcall(GlobalValue.Set, 'bad-wrapper', wrapper)
+end
+Create_Thread('main')
+)LUA" : R"LUA(
+Seen = nil; Flag = nil; Number = nil; Empty = nil
+function main()
+    while true do
+        Seen = GlobalValue.Get('shared')
+        Flag = GlobalValue.Get('flag')
+        Number = GlobalValue.Get('number')
+        Empty = GlobalValue.Get('empty')
+        GlobalValue.Set('collision', 'ai')
+        coroutine.yield(true)
+    end
+end
+Create_Thread('main')
+)LUA";
+            must(manifest.add("global.lua", text));
+            auto scripts = must(auth::ScriptScheduler::create(config, std::move(manifest)));
+            if (story) must(auth::register_shared_global_values(scripts, reader));
+            else {
+                std::vector<eawr::core::Diagnostic> errors;
+                foc::tactical_ai_detail::register_globals(scripts, owner.host, errors);
+                expect(errors.empty(), "AI/object GlobalValue bindings install without collision");
+            }
+            must(scripts.create_instance(story ? 2 : 1, "global.lua"));
+            if (!story) must(scripts.create_instance(foc::first_object_instance, "global.lua"));
+            return scripts;
+        };
+        auto setup = gc::synthetic_galaxy({});
+        auto session = must(auth::ScriptedGalacticSession::create(must(gc::GalacticSession::create(setup)),
+            make_scripts(false), make_scripts(true)));
+        // The bridge's story tail and the AI after-service tail share exactly one owner.
+        class AiTail final : public auth::GalacticScriptEngine {
+        public:
+            explicit AiTail(std::shared_ptr<ai::Engine> value) : engine(std::move(value)) {}
+            eawr::core::Result<auth::ServiceOptions> before_service(const eawr::sim::PartitionExecutor&,
+                const gc::GalacticSession&, const gc::GalacticTick&, auth::ScriptScheduler&) override {
+                return eawr::core::Result<auth::ServiceOptions>::success({});
+            }
+            eawr::core::Result<void> after_service(auth::ServiceReport& report) override { return engine->after_service(report); }
+            std::shared_ptr<ai::Engine> engine;
+        };
+        must(session.set_ai_engine(std::make_shared<AiTail>(owner.engine)));
+        session.set_global_value_committer([engine = owner.engine](auth::ServiceReport& report) { engine->commit_global_values(report); });
+        const auto first = must(session.step(executor));
+        expect(first.ai && first.ai->diagnostics.empty() && first.story.diagnostics.empty(), "story Set and AI/object Get service without a fault");
+        const auto missing = must(session.ai_scheduler().read_global(1, "Seen"));
+        expect(missing && std::holds_alternative<std::monostate>(missing->data), "AI reads missing key as nil before story commit");
+        const auto second = must(session.step(executor));
+        expect(second.ai && second.ai->commands.empty() && second.story.commands.empty(), "shared writes are consumed instead of routed as world orders");
+        for (const auto id : {std::uint64_t{1}, foc::first_object_instance}) {
+            const auto seen = must(session.ai_scheduler().read_global(id, "Seen"));
+            const auto flag = must(session.ai_scheduler().read_global(id, "Flag"));
+            const auto number = must(session.ai_scheduler().read_global(id, "Number"));
+            const auto blank = must(session.ai_scheduler().read_global(id, "Empty"));
+            expect(seen && std::get<std::string>(seen->data) == std::string("serialized\0payload", 18), "story string reaches AI and object instances with embedded NUL intact");
+            expect(flag && !std::get<bool>(flag->data), "stored false differs from missing key");
+            expect(number && std::get<ai::Real>(number->data) == ai::Real::from_repr(0x4045400000000000ULL), "story number reaches both host kinds");
+            expect(blank && std::get<std::string>(blank->data).empty(), "empty string differs from missing key");
+        }
+        expect(std::get<std::string>(owner.engine->global_value("collision")->data) == "story", "AI then story collision resolves in stable service order");
+        const auto capture = must(state.capture());
+        const auto hash = must(state.state_hash());
+        const auto sync = must(state.record_sync_hash());
+        expect(sync == must(state.record_sync_hash(true)) && sync != empty_hash, "typed globals enter both incremental and cold native hashes");
+        Owner restored(fixture_setup(), fixture_data(), fixture_plans(), selected);
+        must(restored.world->bind(fixture_snapshot(), {}, executor, 0, 1000));
+        ai::GoalStateContributor resumed(restored.engine, fixture_identity());
+        must(resumed.restore(capture));
+        expect(must(resumed.state_hash()) == hash && must(resumed.record_sync_hash()) == sync,
+            "optional scalar checkpoint tail restores exact state and sync hashes");
+        expect(std::get<std::string>(restored.engine->global_value("shared")->data) == std::string("serialized\0payload", 18), "load restores serialized string bytes");
+        for (const bool truncate : {false, true}) {
+            auto corrupt = capture;
+            auto& bytes = corrupt.components.at(std::string(ai::GoalStateContributor::component));
+            if (truncate) bytes.pop_back(); else bytes.push_back(0);
+            expect(!resumed.restore(corrupt) && must(resumed.state_hash()) == hash,
+                "truncated or trailing scalar tail refuses without mutating the live registry");
+        }
+        const auto write = [&](std::string key, auth::Value value) {
+            auth::ServiceReport report;
+            auth::ScriptCommand command;
+            command.issuer = 2; command.verb = std::string(auth::global_value_command);
+            command.arguments = {auth::Value::text(std::move(key)), std::move(value)};
+            report.commands.push_back(std::move(command));
+            owner.engine->commit_global_values(report);
+        };
+        auto phase = must(state.begin_phase());
+        write("shared", auth::Value{true}); write("number", auth::Value{}); write("new", auth::Value::text("new"));
+        expect(must(state.record_sync_hash()) != sync, "type changes and deletion change native hash");
+        must(phase->rollback());
+        expect(must(state.state_hash()) == hash && must(state.record_sync_hash(true)) == sync,
+            "native phase rollback restores strings booleans numbers and removed/added keys");
+        write("shared", auth::Value{}); write("flag", auth::Value{}); write("number", auth::Value{});
+        write("empty", auth::Value{}); write("collision", auth::Value{});
+        expect(!owner.engine->global_value("shared"), "nil deletes a registry key");
+        expect(must(state.record_sync_hash()) == must(state.record_sync_hash(true)), "deletion keeps incremental and cold hashes equal");
+        expect(must(state.capture()).components == empty.components, "empty optional tail emits exactly the original empty-registry checkpoint bytes");
+        const auto combined = hash + sync + must(session.script_state_hash());
+        if (workers == 1) reference = combined;
+        else expect(combined == reference, "story/AI/object shared globals are deterministic on 1/2/4/8 workers");
+        // A separate game gets an empty registry, independently of the first game.
+        Owner fresh(fixture_setup(), fixture_data(), fixture_plans(), selected);
+        expect(!fresh.engine->global_value("shared"), "GlobalValue has game scope");
+        auth::ScriptEvent event;
+        event.key = {session.story_scheduler().completed_tick() + 1, auth::first_simulation_producer, 2, 0};
+        event.target = 2; event.kind = auth::ScriptEvent::Kind::call; event.name = "Unsupported";
+        must(session.story_scheduler().submit_event(event));
+        event.key.sequence = 1; event.name = "Reject";
+        event.arguments = {auth::Value{auth::Handle{foc::handle_game_object, 51}}};
+        must(session.story_scheduler().submit_event(event));
+        const auto degraded = must(session.step(executor));
+        const auto continued = must(session.story_scheduler().read_global(2, "Continued"));
+        const auto rejected = must(session.story_scheduler().read_global(2, "Rejected"));
+        expect(continued && std::get<bool>(continued->data), "unsupported sequential table continues the invocation");
+        expect(rejected && std::get<bool>(rejected->data), "engine wrapper is rejected with a catchable script error");
+        expect(degraded.story.load_notes.size() == 1 && !owner.engine->global_value("bad-wrapper"),
+            "unsupported table gets one LoadNote and rejected wrapper never reaches the registry");
+        event.key.tick = session.story_scheduler().completed_tick() + 1;
+        event.key.sequence = 0; event.name = "Oversized"; event.arguments.clear();
+        must(session.story_scheduler().submit_event(event));
+        const auto oversized = must(session.step(executor));
+        expect(oversized.story.load_notes.size() == 1 && bool(state.record_sync_hash()),
+            "Lua oversized string safely refuses with a LoadNote and preserves healthy native hashing");
+        expect(std::get<std::string>(owner.engine->global_value("shared")->data) == std::string("serialized\0payload", 18)
+            && bool(session.step(executor)), "oversized Lua Set preserves the prior value and the game keeps ticking");
+
+    }
+}
+
+void global_value_admission_contracts() {
+    const eawr::sim::InlineExecutor executor;
+    const std::vector<lifecycle::PlayerSelection> selected{{1, "FIXTURE", "NORMAL", {}, {}}, {2, "FIXTURE", "NORMAL", {}, {}}};
+    const auto command = [](std::string key, auth::Value value) {
+        auth::ScriptCommand out;
+        out.issuer = 2; out.verb = std::string(auth::global_value_command);
+        out.arguments = {auth::Value::text(std::move(key)), std::move(value)};
+        return out;
+    };
+    const auto write = [&](Owner& owner, std::string key, auth::Value value) {
+        auth::ServiceReport report; report.commands.push_back(command(std::move(key), std::move(value)));
+        owner.engine->commit_global_values(report); return report;
+    };
+    constexpr auto text_limit = lifecycle::native_state_max_text_bytes;
+    {
+        Owner owner(fixture_setup(), fixture_data(), fixture_plans(), selected);
+        owner.begin(fixture_snapshot(), executor, selected);
+        ai::GoalStateContributor state(owner.engine, fixture_identity());
+        const auto initial = must(state.record_sync_hash());
+        const auto refused = write(owner, "large", auth::Value::text(std::string(text_limit + 1, 'x')));
+        expect(refused.load_notes.size() == 1 && !owner.engine->global_value("large")
+            && must(state.record_sync_hash()) == initial, "review repro: oversize value refuses before native mutation");
+        auto phase = must(state.begin_phase()); must(phase->commit());
+        expect(write(owner, "large", auth::Value::text(std::string(text_limit, 'x'))).load_notes.empty(),
+            "string value at the archive length limit is admitted");
+        const auto at_limit = must(state.record_sync_hash());
+        expect(write(owner, "large", auth::Value::text(std::string(text_limit + 1, 'y'))).load_notes.size() == 1
+            && must(state.record_sync_hash()) == at_limit,
+            "one-past string refusal retains the prior value and native hash");
+        const auto before_replace = state.record_byte_upper_bound();
+        expect(write(owner, "large", auth::Value::text("short")).load_notes.empty()
+            && state.record_byte_upper_bound() < before_replace, "replacement credits the displaced string's retained bytes");
+        const std::string boundary_key(text_limit, 'k');
+        expect(write(owner, boundary_key, auth::Value{false}).load_notes.empty(), "key at the archive length limit is admitted");
+        const auto key_hash = must(state.record_sync_hash());
+        expect(write(owner, std::string(text_limit + 1, 'k'), auth::Value{true}).load_notes.size() == 1
+            && must(state.record_sync_hash()) == key_hash, "one-past key is refused before publication");
+        write(owner, boundary_key, auth::Value{}); write(owner, "large", auth::Value{});
+        expect(must(state.record_sync_hash()) == initial, "deletion restores the registry's exact original native state");
+    }
+    {
+        Owner owner(fixture_setup(), fixture_data(), fixture_plans(), selected);
+        owner.begin(fixture_snapshot(), executor, selected);
+        ai::GoalStateContributor state(owner.engine, fixture_identity());
+        auth::ServiceReport batch;
+        constexpr auto limit = lifecycle::native_state_max_rows;
+        batch.commands.reserve(limit + 1);
+        for (std::size_t index = 0; index <= limit; ++index)
+            batch.commands.push_back(command(std::to_string(index), auth::Value::number(ai::real(1))));
+        owner.engine->commit_global_values(batch);
+        expect(batch.load_notes.size() == 1 && owner.engine->global_value(std::to_string(limit - 1))
+            && !owner.engine->global_value(std::to_string(limit)), "entry count admits the limit and refuses limit plus one");
+        expect(write(owner, "0", auth::Value{false}).load_notes.empty(), "replacement at the entry cap is admitted");
+        write(owner, "0", auth::Value{});
+        expect(write(owner, std::to_string(limit), auth::Value{true}).load_notes.empty(), "deletion frees one entry for a later write");
+        expect(bool(state.record_sync_hash()), "entry-cap refusals leave native hashing usable");
+        auto phase = must(state.begin_phase()); must(phase->commit());
+    }
+    {
+        Owner owner(fixture_setup(), fixture_data(), fixture_plans(), selected);
+        owner.begin(fixture_snapshot(), executor, selected);
+        ai::GoalStateContributor state(owner.engine, fixture_identity());
+        auth::ServiceReport batch;
+        // One bounded batch crosses the aggregate budget without quadratic rehashes.
+        const auto chunks = foc::galactic_ai::native_state_max_bytes / text_limit;
+        for (std::size_t index = 0; index < chunks; ++index)
+            batch.commands.push_back(command("chunk_" + std::to_string(index), auth::Value::text(std::string(text_limit, 'x'))));
+        owner.engine->commit_global_values(batch);
+        expect(!batch.load_notes.empty() && bool(state.record_sync_hash()), "aggregate retained-byte refusal is safe");
+        const auto remaining = foc::galactic_ai::native_state_max_bytes - state.record_byte_upper_bound();
+        const std::string key = "fill";
+        const auto framing = 2 * (8 + key.size()) + 9;
+        expect(remaining > framing + 4 && remaining - framing <= text_limit, "fixture leaves a bounded scalar-sized remainder");
+        if (remaining > framing + 4 && remaining - framing <= text_limit) {
+            const auto length = remaining - framing;
+            expect(write(owner, key, auth::Value::text(std::string(length, 'f'))).load_notes.empty()
+                && state.record_byte_upper_bound() == foc::galactic_ai::native_state_max_bytes,
+                "aggregate admission accepts exactly the native record budget");
+            const auto full = must(state.record_sync_hash());
+            expect(write(owner, key, auth::Value::text(std::string(length + 1, 'g'))).load_notes.size() == 1
+                && must(state.record_sync_hash()) == full, "one-past aggregate replacement preserves the prior bytes and hash");
+            expect(bool(state.capture()), "registry admitted at the aggregate bound still checkpoints");
+            write(owner, key, auth::Value{});
+            expect(write(owner, "refill", auth::Value::text(std::string(length - 4, 'r'))).load_notes.empty(),
+                "delete credits aggregate bytes before the next admission");
+        }
+        auto phase = must(state.begin_phase()); must(phase->commit());
+    }
+    {
+        Owner owner(fixture_setup(), fixture_data(), fixture_plans(), selected);
+        owner.begin(fixture_snapshot(), executor, selected);
+        ai::GoalStateContributor state(owner.engine, fixture_identity());
+        lifecycle::TemplatePolicy populated;
+        constexpr auto cap = lifecycle::native_state_max_rows;
+        for (std::size_t index = 0; index < cap; ++index) {
+            const auto key = std::to_string(index);
+            populated.goal_categories[key] = {true, 1};
+            populated.plan_categories[key] = {true, 1};
+            populated.plan_types[key] = {true, 1};
+        }
+        must(owner.engine->apply_galactic_policy(1, populated));
+        must(state.capture());
+        auth::ServiceReport batch;
+        batch.commands.reserve(cap);
+        for (std::size_t index = 0; index < cap; ++index)
+            batch.commands.push_back(command(std::to_string(index), auth::Value::number(ai::real(1))));
+        owner.engine->commit_global_values(batch);
+        expect(!batch.load_notes.empty() && batch.load_notes.size() < cap,
+            "shared archive node exhaustion refuses only writes beyond the remaining capacity");
+        bool checkpoint_ok{};
+        try { checkpoint_ok = bool(state.capture()); }
+        catch (const std::exception&) { }
+        expect(checkpoint_ok, "admitted globals preserve canonical checkpoint serialization");
+        bool cold_hash_ok{};
+        try { cold_hash_ok = bool(state.record_sync_hash(true)); }
+        catch (const std::exception&) { }
+        expect(cold_hash_ok, "admitted globals preserve the independent native hash");
+        const auto full = must(state.record_sync_hash());
+        const auto next_key = std::to_string(cap - batch.load_notes.size());
+        expect(write(owner, next_key, auth::Value{true}).load_notes.size() == 1
+            && must(state.record_sync_hash()) == full,
+            "one-past shared node quota retains the prior registry and hash");
+        expect(write(owner, "0", auth::Value::text("replacement")).load_notes.empty(),
+            "scalar replacement does not consume another shared archive node");
+        auto phase = must(state.begin_phase());
+        write(owner, "0", auth::Value{});
+        expect(write(owner, next_key, auth::Value{false}).load_notes.empty() && bool(state.capture()),
+            "deletion frees exactly one shared node for a later typed scalar");
+        must(phase->rollback());
+        expect(write(owner, next_key, auth::Value{false}).load_notes.size() == 1
+            && bool(state.capture()) && bool(state.record_sync_hash(true)),
+            "rollback restores shared node admission and canonical/cold serialization");
+    }
+}
+} // namespace
+
 void goal_state_contracts() {
+    shared_global_value_contracts();
+    global_value_admission_contracts();
     std::string reference;
     const std::vector<lifecycle::PlayerSelection> selections{{1, "FIXTURE", "NORMAL", {}, {}}, {2, "FIXTURE", "NORMAL", {}, {}}};
     for (const auto workers : {1U, 2U, 4U, 8U}) {
@@ -254,6 +786,50 @@ void goal_state_contracts() {
         ai::EngineContractAccess::running(*control.engine, first->goal);
         ai::GoalStateContributor saved(control.engine, fixture_identity());
         const auto bytes = must(saved.capture()); const auto hash = must(saved.state_hash());
+        const auto report_count = control.engine->records().size();
+        for (const bool throws : {false, true}) for (const bool after_mutation : {false, true}) {
+            auto phase = must(saved.begin_phase());
+            expect(phase->work().retained_records == 0 && phase->work().retained_bytes == 0,
+                "native goal phase begins without a retained-record scan, copy or archive");
+            expect(!saved.begin_phase(), "native goal phase rejects nesting");
+            bool caught{};
+            try {
+                const auto failed = [&]() -> eawr::core::Result<void> {
+                    if (after_mutation) {
+                        must(control.engine->release_galactic_goal(2, other->goal));
+                        expect(bool(must(control.engine->allocate_galactic_goal(2, 0, other->target))),
+                            "fault fixture changes actual goal identities and synchronized RNG");
+                        ai::EngineContractAccess::phase_global(*control.engine, 7);
+                        const auto retained = phase->work().retained_records;
+                        ai::EngineContractAccess::phase_global(*control.engine, 9);
+                        expect(phase->work().retained_records == retained && phase->work().retained_bytes > 0,
+                            "repeated native writes retain only the first displaced record");
+                        expect(control.engine->records().size() == report_count,
+                            "native reports stay private during a speculative phase");
+                        expect(must(saved.state_hash()) != hash, "native fault fixture really changes canonical fields");
+                    }
+                    if (throws) throw std::runtime_error("native phase fixture");
+                    eawr::core::Diagnostic error; error.code = "native-phase-fixture";
+                    return eawr::core::Result<void>::failure(std::move(error));
+                }();
+                expect(!failed && failed.error().code == "native-phase-fixture", "native Result failure keeps its diagnostic");
+            } catch (const std::runtime_error& error) { caught = std::string_view(error.what()) == "native phase fixture"; }
+            expect(caught == throws, "native deterministic exception identity preserved");
+            must(phase->rollback());
+            expect(must(saved.capture()).components == bytes.components && must(saved.state_hash()) == hash,
+                "native rollback restores exact goal/RNG/policy/history/runtime/event/order/credit archive on 1/2/4/8");
+            expect(control.engine->records().size() == report_count, "native rollback discards reports without truncating old history");
+            expect(!phase->rollback(), "native goal phase settles once");
+        }
+        {
+            auto phase = must(saved.begin_phase());
+            ai::EngineContractAccess::phase_global(*control.engine, 11);
+            must(phase->commit());
+            expect(control.engine->records().size() == report_count + 1, "native retry publishes its report once");
+            expect(!phase->commit(), "native retry cannot publish twice");
+            // Restore the fixture baseline for the pre-existing continuation checks.
+            must(saved.restore(bytes));
+        }
         const auto observations = control.engine->galactic_goal_observations(1);
         expect(observations.size() == 1 && observations.front().goal == first->goal
             && observations.front().target == first->target && observations.front().function == "GOAL"
@@ -335,6 +911,8 @@ void goal_state_contracts() {
         expect(must(completed_restore.state_hash()) == must(saved.state_hash()), "learned weighted draw continuation equals fresh restored owner");
     }
     movement_delivery_contracts();
+    degraded_battle_entry_contracts();
+    galactic_budget_and_desire_stub_contracts();
 }
 
 void installed_goal_state(const eawr::vfs::Vfs& filesystem, ai::AiData ai_data, std::vector<ai::PlanDef> plans, std::string identity) {

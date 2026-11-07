@@ -126,6 +126,7 @@ bool MapMode::State::write_report() const {
         for (std::size_t i = 0; i < land_pose_trace.size(); ++i) { if (i) output << ","; output << land_pose_trace[i]; }
         output << "]},\n";
         live_session->write_report(output);
+        if (battle_effects) battle_effects->write_report(output);
         if (battle) { LandBattleCamera view(camera, map_camera.get()); battle->write_report(output, view); }
     }
     startup_trace.write(output);

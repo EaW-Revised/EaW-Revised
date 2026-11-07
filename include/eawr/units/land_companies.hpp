@@ -18,6 +18,8 @@ namespace eawr::units {
 struct LandStaticObject final {
     std::string id, xml_type, proxy_type;
     bool land_obstacle{};
+    bool hq_victory_relevant{};
+    bool victory_relevant{}, land_victory_relevant{};
     std::optional<Fixed> width, height, x_offset, y_offset;
     std::optional<bool> fine_tune;
     std::string secondary_passability, override_passability;
@@ -86,6 +88,10 @@ struct LandCompany final {
     std::string team_locomotor;
     std::optional<Fixed> team_formation_spacing;
     std::optional<Fixed> team_max_speed;    // LC-06: the team type's Max_Speed, the team speed source
+    // WLPA-82/95: the container type's own collision class and MaxJiggleDistance. A formation team's body is read
+    // from the container, never from its members; class None means the team has no body.
+    LandCollisionGroup team_collision_class{LandCollisionGroup::none};
+    std::optional<Fixed> team_max_jiggle;
     std::optional<Fixed> formation_spacing; // first member spacing for landing; team spacing stays separate
     std::vector<LandLocomotionData> locomotion; // member order; separate from live member identity
     bool operator==(const LandCompany&) const = default;

@@ -1,4 +1,5 @@
 #include "galactic_support.hpp"
+#include "eawr/vfs/vfs.hpp"
 #include "eawr/campaign/conflict_entry.hpp"
 #include "eawr/campaign/standalone_replay.hpp"
 #include "eawr/campaign/space_entry.hpp"
@@ -579,6 +580,24 @@ void handoff_corpus(bool fiscal_enabled = false) {
         const auto saved = checkpoint::save_game_checkpoint(game, identities).value();
         checkpoint::GameLoadOptions options; options.script_requirement = eawr::campaign::ScriptRequirement::none; options.content = content;
         options.apply_result = [&](auto&, const auto&) { ++applied; return core::Result<void>::success(); };
+        auto genesis = campaign::GameSession::from_recording(game.recording(), content, {},
+            eawr::campaign::ScriptRequirement::none);
+        expect(bool(genesis), "handoff genesis recording constructs");
+        if (!genesis) return;
+        std::vector<std::string> genesis_hashes;
+        while (genesis.value().completed_tick() < game.completed_tick()) {
+            auto step = genesis.value().step(executor);
+            expect(bool(step), "handoff genesis replay succeeds");
+            if (!step) { std::cerr << step.error().message << '\n'; return; }
+            genesis_hashes.push_back(step.value().state_hash.get());
+        }
+        expect(genesis_hashes == hashes, "arrival and pending phase reproduce every pre-save hash from genesis");
+        auto oracle = checkpoint::replay_game_checkpoint_for_testing(saved, identities, options, executor);
+        expect(bool(oracle), "pending checkpoint replays from genesis with the unbounded oracle");
+        if (!oracle) { std::cerr << oracle.error().message << '\n'; return; }
+        expect(oracle.value().work.resimulated_ticks == game.completed_tick()
+            && oracle.value().session.state_sha256() == game.state_sha256(),
+            "genesis oracle reaches the saved pending state");
         auto loaded = checkpoint::load_game_checkpoint(saved, identities, options, executor);
         expect(bool(loaded), "pending conflict checkpoint restores");
         if (!loaded) { std::cerr << loaded.error().message << '\n'; return; }

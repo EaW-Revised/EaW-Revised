@@ -1,4 +1,5 @@
 #include "data_test_support.hpp"
+#include "eawr/vfs/vfs.hpp"
 #include "eawr/data/tag_trace.hpp"
 #include "eawr/data/xml.hpp"
 

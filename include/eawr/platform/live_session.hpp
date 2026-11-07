@@ -1,9 +1,12 @@
 #pragma once
 
+#include "eawr/sim/tactical/land_debug_overlay.hpp"
+
 #include "eawr/diagnostics/memory_capacity.hpp"
 
 #include "eawr/core/diagnostic.hpp"
 #include "eawr/core/result.hpp"
+#include "eawr/sim/state_hash.hpp"
 #include "eawr/sim/tactical/abilities.hpp"
 #include "eawr/sim/tactical/combat.hpp"
 #include "eawr/sim/tactical/content.hpp"
@@ -282,9 +285,25 @@ public:
         bool initially_paused{};
         // Development perf trace only: named executor wall times, never canonical state.
         bool measure_phases{};
+        // Extra callback timeline and typed jobs, only with the explicit diagnostic flag.
+        bool detailed_profile{};
+        // Cheap cadence samples only: no phase scopes, callbacks or per-entity timers.
+        bool cadence_profile{};
         // Load-time diagnostic side channel, called synchronously before the
         // simulation thread starts. Recovery never calls a presentation sink.
         std::function<void(std::span<const core::LoadNote>)> load_note_sink{};
+        // Whether each tick's state is encoded and hashed (sim::StateHashPolicy). on_demand is for a
+        // solo real-time session nobody compares per tick: steps skip the encode and the hash, and
+        // tick_hashes() holds an empty entry for every skipped tick except the last, which is hashed
+        // from the final state. A step driver (lockstep) always hashes, whatever is asked here;
+        // require_tick_hashes() switches a running session back to always.
+        sim::StateHashPolicy state_hash_policy{sim::StateHashPolicy::always};
+        // Skirmish battle saves (docs/checkpoint-format.md "Skirmish battle saves"): once tick `save_at`
+        // (1 or later) has completed, the simulation thread saves the battle (LiveScripts::save) before
+        // the next tick runs and hands the bytes, or why it could not, to `save_sink` on that thread.
+        // Solo sessions with scripts only: no step driver.
+        std::optional<std::uint64_t> save_at{};
+        std::function<void(std::uint64_t tick, core::Result<std::vector<std::uint8_t>> checkpoint)> save_sink{};
     };
 
     // The pool size of the game build: the hardware threads minus the Godot main and render
@@ -327,6 +346,12 @@ public:
     // As in the setup overload, content.retreat is not configured by this adapter.
     [[nodiscard]] static core::Result<std::unique_ptr<LiveSession>> start(
         const sim::tactical::TacticalReplay& replay, const sim::tactical::TacticalContent& content, Options options);
+    // Starts from a skirmish battle save of the battle `setup` describes (LiveScripts::restore, so
+    // Options::scripts must restore): the session begins at the saved tick with the saved world and AI,
+    // with no ticks re-run. Solo only: no step driver. tick_hashes() holds an empty entry for every
+    // tick before the saved one; record() is the whole battle from tick zero.
+    [[nodiscard]] static core::Result<std::unique_ptr<LiveSession>> start(std::span<const std::uint8_t> checkpoint,
+        const sim::tactical::TacticalSetup& setup, const sim::tactical::TacticalContent& content, Options options);
 
     ~LiveSession();
     LiveSession(const LiveSession&) = delete;
@@ -357,8 +382,17 @@ public:
     [[nodiscard]] LiveFrame frame() const;
     // Immutable startup membership of land members and their commandable squad roots.
     [[nodiscard]] std::span<const std::pair<sim::EntityId, sim::EntityId>> land_roster() const noexcept;
+    // Read-only debug copy of the land movement state (squad paths, slot targets, states) for the viewer overlay. Takes the
+    // session lock only if free; null when it is busy or the world is not land. Nothing flows back into the simulation.
+    [[nodiscard]] std::shared_ptr<const sim::tactical::LandOverlayData> land_overlay() const;
     // A kept snapshot of that completed tick, or null.
     [[nodiscard]] std::shared_ptr<const sim::tactical::TacticalSnapshot> snapshot_at(std::uint64_t tick) const;
+    // L1.2: every kept snapshot at one instant (one lock; ticks are unique), for a reader on another thread that must see
+    // the history as of a frame's start. `snapshot_in` answers like snapshot_at() over that copy.
+    using SnapshotHistory = std::vector<std::shared_ptr<const sim::tactical::TacticalSnapshot>>;
+    [[nodiscard]] SnapshotHistory history_copy() const;
+    [[nodiscard]] static std::shared_ptr<const sim::tactical::TacticalSnapshot> snapshot_in(
+        const SnapshotHistory& history, std::uint64_t tick) noexcept;
     // #494: Options::fog_player's cells after that kept tick, or null (no fog_player, a session
     // without fog rules, or a tick that left the history).
     [[nodiscard]] std::shared_ptr<const LiveFog> fog_at(std::uint64_t tick) const;
@@ -376,6 +410,16 @@ public:
     // unit orders were rejected, in the order they happened.
     [[nodiscard]] std::vector<core::Diagnostic> rejected_orders() const;
     [[nodiscard]] std::size_t worker_count() const noexcept;
+    // One past every command sequence the session accepted from `player`: where a local command
+    // scheduler continues after a battle was loaded (0 for a fresh session's player).
+    [[nodiscard]] std::uint64_t next_sequence(sim::tactical::PlayerId player) const;
+
+    // A player's save (#3989): the simulation thread saves the battle between two ticks, at once when
+    // it is paused or between ticks, otherwise right after the running tick, and hands the bytes (or
+    // why it could not) to `sink` on that thread with the completed tick. A newer request replaces one
+    // not yet taken. A battle without the AI host's save, or one under a step driver, reports a failure.
+    using SaveSink = std::function<void(std::uint64_t tick, core::Result<std::vector<std::uint8_t>> checkpoint)>;
+    void request_save(SaveSink sink);
     // Diagnostic const query serialized with stepping by the existing session mutex.
     [[nodiscard]] diagnostics::MemoryCapacity memory_capacity() const;
     // The scripts' load and diagnostics so far; empty without scripts.
@@ -385,7 +429,13 @@ public:
     void stop();
     // After stop(): the state hash of every completed tick, tick 1 first, and the replay of
     // the run (setup, final tick = completed tick, every submitted command).
+    // Under state_hash_policy on_demand the entries of the ticks that skipped their hash are empty
+    // (the last one is filled from the final state); require_tick_hashes() before a tick keeps it.
     [[nodiscard]] std::vector<std::string> tick_hashes() const;
+    // The explicit request for per-tick hashes: every tick that has not started yet is encoded and
+    // hashed, as under the always policy. A tick that already ran without its hash stays empty
+    // (its state is gone); blocks while a step holds the session. Idempotent.
+    void require_tick_hashes();
     [[nodiscard]] sim::tactical::TacticalReplay record() const;
     // Once failure() is set (#615): the replay through the failed tick, its commands included
     // (TacticalSession::record_through_next_tick), which a headless run replays into the same

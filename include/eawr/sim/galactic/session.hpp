@@ -60,7 +60,7 @@ enum class StateSection : std::uint16_t {
     history = 22, // GREF-24..26: session-owned per-player chart archives
 };
 inline constexpr std::size_t state_section_count = 23;
-inline constexpr std::string_view state_encoding_name = "eawr-galactic-state-v8";
+inline constexpr std::string_view state_encoding_name = "eawr-galactic-state-v11";
 
 struct GalacticTick {
     std::uint64_t completed_tick{};
@@ -108,6 +108,28 @@ class GalacticSession final {
 public:
     [[nodiscard]] std::vector<core::LoadNote> load_notes() const;
     [[nodiscard]] std::size_t load_note_count() const noexcept;
+    // Ordered runtime providers publish diagnostics after joining their own phase.
+    void add_runtime_load_notes(std::span<const core::LoadNote> notes);
+
+    // Process-local publication latch: opaque callback output and live story
+    // rewards cannot be rolled back. The provider controller observes this once
+    // per phase, before deciding whether a fault may roll back and retry.
+    class NativeOutputPhase {
+    public:
+        ~NativeOutputPhase();
+        NativeOutputPhase(const NativeOutputPhase&) = delete;
+        NativeOutputPhase& operator=(const NativeOutputPhase&) = delete;
+        [[nodiscard]] bool published() const noexcept;
+        void record_fault() noexcept;
+    private:
+        struct State;
+        explicit NativeOutputPhase(std::unique_ptr<State>);
+        std::unique_ptr<State> state_;
+        friend class GalacticSession;
+    };
+    [[nodiscard]] core::Result<std::unique_ptr<NativeOutputPhase>> begin_native_output_phase();
+    void note_native_output_published() noexcept;
+    [[nodiscard]] std::uint64_t native_post_publication_faults() const noexcept;
 
     using NativeInvasion = sim::galactic::NativeInvasion;
     struct NativeInvasionReceipt {
@@ -471,6 +493,12 @@ public:
     // snapshot, never an unfrozen shadow. S9 must retain this freeze boundary.
     class NativeActionShadow {
     public:
+#ifdef EAWR_GALACTIC_TEST_HOOKS
+        // Test hook for the exactness proof of the view-reuse paths. `reuse` is the production behaviour;
+        // `rebuild` restores the earlier redundant builds; `stale` (negative control) skips a reset the compare must notice.
+        enum class ViewReuse { reuse, rebuild, stale, corrupt_blocker };
+        static void set_view_reuse_for_test(ViewReuse) noexcept;
+#endif
         struct Force { NativeProductionRequest request; NativeForcePlacement placement; };
         struct FleetRequest { PlayerId player{}; CommandPayload payload; bool pending{}; NativeFleetReceipt receipt; };
         struct ControlRequest {
@@ -582,7 +610,7 @@ public:
     // requires that the creator is quiescent; it aborts the session safely.
     class NativeActionBarrier {
     public:
-        struct Work { std::size_t layers{}, read_checkpoints{}; };
+        struct Work { std::size_t layers{}, read_checkpoints{}, provider_savepoints{}, provider_rollbacks{}; };
         ~NativeActionBarrier();
         NativeActionBarrier(const NativeActionBarrier&) = delete;
         NativeActionBarrier& operator=(const NativeActionBarrier&) = delete;
@@ -597,7 +625,31 @@ public:
         // fresh global tail sees the actual admitted world in this same tick.
         [[nodiscard]] core::Result<void> finish_independent_players(const std::function<core::Result<void>()>& commit);
         [[nodiscard]] core::Result<void> select_player(PlayerId);
+        // World/action-journal participant of a native provider transaction.
+        // Retains a COW pointer and scalar cursors, never an archive or copied
+        // entity domain. Other native owners and callback reports must join
+        // the same transaction before a failed provider can safely retire.
+        // One savepoint at a time; both barrier and world outlive it. Settling
+        // it on the creating thread precedes changing player or entering tail.
+        class ProviderSavepoint {
+        public:
+            ~ProviderSavepoint(); // discard unless explicitly committed
+            ProviderSavepoint(const ProviderSavepoint&) = delete;
+            ProviderSavepoint& operator=(const ProviderSavepoint&) = delete;
+            [[nodiscard]] core::Result<void> commit();
+            [[nodiscard]] core::Result<void> rollback();
+        private:
+            struct Saved;
+            std::unique_ptr<Saved> saved_;
+            explicit ProviderSavepoint(std::unique_ptr<Saved>);
+            friend class NativeActionBarrier;
+        };
+        [[nodiscard]] core::Result<std::unique_ptr<ProviderSavepoint>> begin_provider(PlayerId);
         [[nodiscard]] core::Result<void> begin_tail();
+        // Discard an entire unpublished serial service phase. Unlike an
+        // unaccounted destructor this is an explicit deterministic-fault path.
+        // Never clears a pre-existing infrastructure/session failure.
+        [[nodiscard]] core::Result<void> discard();
         [[nodiscard]] core::Result<void> commit();
         [[nodiscard]] Work work() const noexcept;
     private:
@@ -694,6 +746,13 @@ public:
     // then per section its ID, version, length and bytes. The checkpoint's galaxy sections use
     // the same encodings.
     [[nodiscard]] std::vector<std::uint8_t> canonical_state_bytes() const;
+    // The same bytes as canonical_state_bytes() for the lockstep exchange (#5519): sections encode concurrently on the
+    // executor and share one fleet-row copy, then concatenate in section order. The only reuse across calls is the
+    // production offer tables, which never change after the owner is built; the save path keeps using the fresh
+    // serial canonical_state_bytes().
+    [[nodiscard]] std::vector<std::uint8_t> exchange_state_bytes(const PartitionExecutor& executor) const;
+    // Builds the exchange encoding's one-time inputs now (load time) instead of inside the first exchange tick.
+    void prepare_exchange_encoding() const;
     // Complete owner barrier, including non-hashed command/native cursors. No historical service.
     [[nodiscard]] core::Result<std::vector<std::uint8_t>> save_checkpoint_state() const;
     [[nodiscard]] core::Result<void> load_checkpoint_state(std::span<const std::uint8_t>);
@@ -706,6 +765,10 @@ public:
     // Test/CI flag; also enabled by EAWR_VERIFY_GALACTIC_HASH=1 at creation.
     // Independently recompute every section on each cached-hash request.
     void set_hash_verification(bool enabled) noexcept;
+    // Test flag: disable the population-projection memo so a run can be compared against recomputing every tick.
+    void set_population_memo(bool enabled) noexcept;
+    // Test-only negative control: build the memo key without fleet orbits, which a sensitive test must then detect.
+    void set_population_memo_drop_orbit(bool drop) noexcept;
     [[nodiscard]] std::shared_ptr<const GalacticSnapshot> snapshot() const noexcept;
     // Owner-thread projection. The context never enters canonical state or AI inputs.
     [[nodiscard]] std::shared_ptr<const GalacticSnapshot> view_snapshot(ObserverViewContext) const;

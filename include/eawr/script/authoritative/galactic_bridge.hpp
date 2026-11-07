@@ -21,6 +21,13 @@
 
 namespace eawr::script::authoritative {
 
+// Story lookups read the current completed publication, never the starting force table.
+using GalacticSnapshotReader = std::function<std::shared_ptr<const sim::galactic::GalacticSnapshot>()>;
+[[nodiscard]] core::Result<void> register_galactic_first_object(
+    ScriptScheduler&, const std::vector<std::pair<std::string, sim::galactic::TypeId>>& types,
+    const std::vector<std::pair<std::string, sim::galactic::PlanetId>>& planets,
+    GalacticSnapshotReader);
+
 // Coordinator-reserved: next after the engine adapter producer (16).
 inline constexpr std::uint32_t galactic_story_producer = first_simulation_producer + 1;
 // The plot engine's Story_Event_Trigger calls into sub-plot scripts (WST-20 (3), WST-55): after the pump events of the
@@ -82,6 +89,13 @@ public:
     [[nodiscard]] virtual bool admits_service(const sim::galactic::GalacticTick& tick) const noexcept {
         return tick.work.serviced;
     }
+    // The phase includes ordered native preparation, Lua service, and the
+    // native tail. A transactional adapter may rerun this complete operation
+    // after discarding an unpublished attempt; world.step remains outside it.
+    [[nodiscard]] virtual core::Result<ServiceReport> service_phase(
+        const sim::PartitionExecutor&, sim::galactic::GalacticSession&,
+        const sim::galactic::GalacticTick&, ScriptScheduler&,
+        const std::function<core::Result<ServiceReport>()>& run) { return run(); }
     [[nodiscard]] virtual core::Result<ServiceOptions> before_service(
         const sim::PartitionExecutor& executor, const sim::galactic::GalacticSession& world,
         const sim::galactic::GalacticTick& tick, ScriptScheduler& scripts) = 0;
@@ -117,6 +131,8 @@ public:
     [[nodiscard]] core::Result<void> set_ai_engine(std::shared_ptr<GalacticScriptEngine> engine);
     [[nodiscard]] core::Result<void> set_story_engine(std::shared_ptr<GalacticScriptEngine> engine);
     void set_state_hasher(std::shared_ptr<sim::StateHasher> hasher) noexcept;
+    // Ordered story tail; the same owner commits AI/object writes in after_service.
+    void set_global_value_committer(std::function<void(ServiceReport&)>);
     [[nodiscard]] core::Result<ScriptedGalacticTick> step(const sim::PartitionExecutor& executor,
         std::span<const sim::galactic::GameCommand> input = {}, bool local_conflict_pending = false);
 

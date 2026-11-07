@@ -3,12 +3,14 @@
 #include "land_checkpoint_fields_internal.hpp"
 #include "tactical_internal.hpp"
 #include "eawr/checkpoint/checkpoint.hpp"
+#include "eawr/checkpoint/tactical.hpp"
 
 namespace eawr::sim::tactical {
 namespace {
-// Coordinator-reserved section 18, version 6. Also frames the land-only canonical tail.
+// Coordinator-reserved section 18; the version word inside the section is the container version (one source of truth).
+// Also frames the land-only canonical tail.
 constexpr auto section_id = static_cast<std::uint16_t>(checkpoint::SectionId::land_state);
-constexpr std::uint16_t section_version = 6;
+constexpr std::uint16_t section_version = checkpoint::land_state_section_version;
 }
 
 namespace {
@@ -42,6 +44,10 @@ void TacticalSession::Impl::encode_land_partition(const std::size_t partition) c
     encode_rows(state.squad_parts[partition], moving.squads, range.begin, range.end);
     range = partition_range(partition, moving.members.size());
     encode_rows(state.member_parts[partition], moving.members, range.begin, range.end);
+    // Contacts are the largest vector of the serial tail in a dense fight; same row encoder, same order.
+    state.contact_parts[partition].clear();
+    range = partition_range(partition, moving.contacts.size());
+    encode_rows(state.contact_parts[partition], moving.contacts, range.begin, range.end);
 }
 
 // Byte layout is the field list (clear_bit, occupancy{occupations, changed, revision}, movement{...}, requests, searches).
@@ -66,8 +72,10 @@ std::vector<std::uint8_t> TacticalSession::Impl::land_bytes(const bool partition
     out(state.occupancy.revision(), moving.tick);
     records(moving.squads, state.squad_parts);
     records(moving.members, state.member_parts);
-    out(moving.contact_settings, moving.contacts, moving.contact_complexity, moving.last_contact_frame,
-        moving.contacts_serviced, state.requests, state.combat_state);
+    out(moving.contact_settings);
+    records(moving.contacts, state.contact_parts);
+    out(moving.contact_complexity, moving.last_contact_frame, moving.contacts_serviced, state.requests,
+        state.combat_state);
     out(static_cast<std::uint64_t>(state.searches.size()));
     for (const auto& [id, search] : state.searches) out(id, LandPathService::checkpoint(search));
     state.canonical_size_hint = out.bytes.size();
@@ -108,8 +116,8 @@ core::Result<void> TacticalSession::Impl::restore_land(const std::span<const std
                 [](const auto& row, EntityId id) { return row.state.entity_id < id; });
             return unit != live.end() && unit->state.entity_id == object;
         };
-        // Version 6 permits deaths, never new identities or rebindings. Immutable slots survive
-        // squad-index compaction; compare the bound squad identity rather than its old index.
+        // Version 7 permits deaths, never new identities or rebindings. Slots are mutable (WLPA-84) and are not
+        // compared; the authored extents and spacing gap are. Compare the bound squad identity rather than its old index.
         for (const auto& expected : land->content.occupations) {
             const auto saved = std::find_if(occupancy.occupations.begin(), occupancy.occupations.end(),
                 [&](const auto& row) { return row.object == expected.object; });
@@ -132,7 +140,8 @@ core::Result<void> TacticalSession::Impl::restore_land(const std::span<const std
             if (saved.object <= last_member || source == original.members.end() || source->object != saved.object
                 || saved.squad >= moving.squads.size() || saved.source != source->source
                 || moving.squads[saved.squad].object != original.squads[source->squad].object
-                || saved.profile != source->profile || saved.mask != source->mask || saved.slot != source->slot)
+                || saved.profile != source->profile || saved.mask != source->mask || saved.hard_x != source->hard_x
+                || saved.hard_y != source->hard_y || saved.gap != source->gap)
                 throw Invalid("land member binding disagrees with content");
             last_member = saved.object;
         }
@@ -145,6 +154,7 @@ core::Result<void> TacticalSession::Impl::restore_land(const std::span<const std
             const auto index = static_cast<std::size_t>(&saved - moving.squads.data());
             if (source == original.squads.end() || saved.maximum_speed != source->maximum_speed
                 || saved.has_formation != source->has_formation || saved.generic_team != source->generic_team
+                || saved.collision_class != source->collision_class || saved.jiggle != source->jiggle
                 || request == requests.end() || bound == land->requests.end() || target == combat_state.targets.end()
                 || (target->second.first && !land->bindings.contains(target->second.first))
                 || std::none_of(moving.members.begin(), moving.members.end(),

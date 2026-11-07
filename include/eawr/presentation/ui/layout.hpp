@@ -73,6 +73,14 @@ struct PixelRect {
 // The UI-L1 safe area in screen pixels.
 [[nodiscard]] PixelRect safe_area(const ReferenceSpace& space) noexcept;
 
+// UI-L6: the largest 16:9 box that fits the viewport, centred. A full-screen
+// plate that the retail rules stretch over a 16:9 screen is laid out inside
+// this box instead: pillarbox (bars left and right) on a wider screen,
+// letterbox (bars above and below) on a narrower one. At exactly 16:9 the box
+// is the whole viewport. A viewport with no room for a box (a side under 1 px
+// or a box under 1 px) yields an empty box.
+[[nodiscard]] PixelRect fit_16x9(Viewport viewport) noexcept;
+
 struct ReferencePoint {
     double x{};
     double y{};

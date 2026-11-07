@@ -1,12 +1,19 @@
-# Galactic replay format v10 (EAWRGCR)
+# Galactic replay format v12 (EAWRGCR)
 
-Current compatibility identities are replay format 10, galactic rules 6 and state
-encoding 15 (hash domain `eawr-galactic-state-v8`); published snapshot encoding is 8.
-Checkpoint galaxy section version 48 retains the arrival landing request, as well as spy enabled/cancelled facts and registered
+Current compatibility identities are replay format 12, galactic rules 7 and state
+encoding 18 (hash domain `eawr-galactic-state-v11`); published snapshot encoding is 9.
+Checkpoint galaxy section version 52 retains the arrival landing request, as well as spy enabled/cancelled facts and registered
 spy targets in the ability host. Ability setup/state encoding 9 adds authored ground
 spy profiles and runtime fields; ability setup encoding 10 adds each profile's initially enabled Galactic_Automatic spies
 (`u8` count, then per spy a text identity, `u64` identity, `i64` duration, `i64` influence range, `u32` mask), which the
 session applies from the live census without persisted state; the observer section owns timed visibility sources. Older project formats are rejected.
+
+Format 12 appends each control planet's ground layout after its built structures: a `u32`
+count followed by ascending unique object IDs (`u64`) and marker indices (`u32`). The
+same control encoding is included in state and checkpoint data. Galactic opcode 26
+(`SetGroundLayout`) carries a nonzero planet `u64`, nonzero `u32` count, then unique
+object `u64`, presence `u8` and, when present, marker `u32`. Opcode 27 (`LandUnits`)
+carries a nonzero planet `u64`, nonzero `u32` count and unique nonzero unit IDs (`u64`).
 
 Checkpoint section 48 appends the story goals and objectives per plot owner to the campaign owner payload, after the plot
 state (goal rows: dialog, variable, tag, chapter, completed, hidden, remove-after-viewed; objective rows; the objective
@@ -76,9 +83,9 @@ this kind; replay header and checkpoint layouts are unchanged.
 | Offset | Width | Field | Rule |
 |---:|---:|---|---|
 | 0 | 8 | magic | ASCII `EAWRGCR` followed by zero |
-| 8 | 2 | format_version | 6 |
-| 10 | 2 | flags | bit 0: debug commands admitted; bit 1: header extensions present; other bits zero |
-| 12 | 4 | rules_version | the galactic rules version of the build, 6 |
+| 8 | 2 | format_version | 12 |
+| 10 | 2 | flags | bit 0: debug commands; bit 1: header extensions; bit 2: explicit transport; bit 3: networked transport (requires bit 2); other bits zero |
+| 12 | 4 | rules_version | the galactic rules version of the build, 7 |
 | 16 | 32 | content_identity | identity of the content tables the galaxy was built from |
 | 48 | 32 | campaign_identity | identity of the campaign definition |
 | 80 | 8 | seed | the session seed |
@@ -317,6 +324,7 @@ A reserved number without an implementation is refused like an unknown one.
 | session | 1 pause, 2 resume, 3 set strategic speed, 4 set tactical speed | implemented |
 | session | 5 save request, 6 resign, 7 battle choice, 8 battle vote, 9 dialog acknowledge, 10 victory retry or continue, 11 seat leave, 12 seat rejoin | 5/7/11/12 implemented; remaining numbers reserved for save/battle/coop work |
 | session | 16 invasion accept | implemented (GCMP-04, WGP-89): u64 conflict, never zero; decided at execution from the agreed session state, so a refusal is journaled and replays identically |
+| session | 17 GUI click | implemented (WST-37): u8 length (1..96) then that many printable ASCII bytes, no spaces, the authored component name; the executing session raises it as `STORY_CLICK_GUI` to the issuing human seat's plots, so it changes only story state. Number provisional until the coordinator confirms |
 | session | 17..61 | reserved for the wave-3 walks |
 | session | 62 debug set planet owner, 63 debug set fleet orbit | implemented; only with header flag bit 0 |
 | galactic | 1 create fleet, 2 add members, 3 remove members, 4 merge fleets, 5 move fleet, 6 set orbit slot, 7 production, 8 land transports, 9..11 legacy production reservations, 12 black-market prepare, 13 black-market buy, 14 special action prepare, 15 special action execute, 16 special action cancel, 17 galactic ability | 1/2/3/4/6/7 implemented; others reserved |
@@ -876,3 +884,17 @@ kind 8 is system spy (WGCH-56/70/108): authored masks/duration reach the observe
 service under the actor's current owner, with successful insertion preceding story
 notification and success-only scheduling/consumption. Finite consumed-probe effects
 retain their expiry; ordinary source loss removes registered effects (WGUI-101).
+
+## Campaign rules and transport identity
+
+Replay format 11 records the transport override in header flags: bit 2 means an
+explicit transport choice, and bit 3 means networked transport. Bit 3 without bit 2
+is malformed; with neither bit, standalone producers follow the setup's existing
+victory/economy default. Campaign planners always record an explicit choice.
+The remaining header offsets are unchanged. The session state section writes
+one byte after the seed: 0 for omitted, 1 for local and 2 for networked.
+State encoding 17, galaxy checkpoint section 50 and galactic rules 7 refuse prior
+encodings. Snapshot schema 9 includes the resolved transport byte after its
+schema number. Setup identity v2 and agreement rules v5 also bind campaign rules
+flavour, independently of transport. All checked-in galactic replay corpora and
+their hashes are upgraded together with the C++ corpus generators.

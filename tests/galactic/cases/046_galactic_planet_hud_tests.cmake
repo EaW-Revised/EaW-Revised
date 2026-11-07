@@ -6,6 +6,6 @@ eawr_add_galactic_area_case(
     SOURCES planet_hud_tests.cpp
         "${PROJECT_SOURCE_DIR}/apps/viewer/src/galactic/planet_hud.cpp"
     INCLUDE_DIRS "${PROJECT_SOURCE_DIR}/include" "${PROJECT_SOURCE_DIR}/apps/viewer/src"
-    LIBS eawr::sim_galactic
+    LIBS eawr::sim_galactic eawr::ui_data
     TESTS galactic_planet_hud_contracts
 )

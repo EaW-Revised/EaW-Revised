@@ -409,6 +409,24 @@ core::Result<std::vector<std::byte>> open_sfx_sample(const vfs::Vfs& filesystem,
     return core::Result<std::vector<std::byte>>::failure(std::move(diagnostic));
 }
 
+std::optional<vfs::ReadLocation> sfx_sample_location(const vfs::Vfs& filesystem, const std::string_view name) {
+    auto candidates = sfx_sample_candidates(name);
+    if (candidates.empty()) return std::nullopt;
+    const bool rooted = candidates.front().starts_with("data/") && candidates.size() == 1;
+    const auto requested = vfs::canonicalize(rooted ? candidates.front() : candidates.back());
+    if (!requested) return std::nullopt;
+    if (rooted) candidates.push_back("data/audio/sfx/" + requested.value());
+    for (const auto& path : candidates) {
+        const auto records = filesystem.candidates(path);
+        if (!records) continue;
+        for (const auto& record : records.value()) {
+            if (record.origin == vfs::AssetOrigin::loose && record.canonical_path != requested.value()) continue;
+            if (auto location = filesystem.read_location(record)) return location;
+        }
+    }
+    return std::nullopt;
+}
+
 std::string music_sample_path(const std::string_view file) {
     std::string path = "data/audio/music/";
     for (const char c : trim(file)) path.push_back(c == '\\' ? '/' : static_cast<char>(std::tolower(static_cast<unsigned char>(c))));

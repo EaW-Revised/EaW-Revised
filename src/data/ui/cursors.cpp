@@ -1,4 +1,5 @@
 #include "eawr/data/ui/cursors.hpp"
+#include "eawr/vfs/vfs.hpp"
 #include "eawr/core/text.hpp"
 #include "eawr/data/xml.hpp"
 #include "ui_internal.hpp"

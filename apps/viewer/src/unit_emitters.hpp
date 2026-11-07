@@ -4,6 +4,7 @@
 #include "eawr/presentation/animation/animation.hpp"
 #include "eawr/platform/live_session.hpp"
 #include "eawr/presentation/particles/attachment_lifecycle.hpp"
+#include "eawr/presentation/particles/catchup_screen_space.hpp"
 #include "eawr/presentation/particles/particles.hpp"
 #include "eawr/presentation/particles/proxy_binding.hpp"
 #include "eawr/presentation/particles/render.hpp"
@@ -12,7 +13,7 @@
 #include "eawr/scene/space_population.hpp"
 #include "eawr/sim/tactical/snapshot.hpp"
 #include "eawr/sim/math/geometry.hpp"
-#include "eawr/vfs/vfs.hpp"
+#include "eawr/vfs/vfs_fwd.hpp"
 #include "particle_adapter.hpp"
 #include "space_populate.hpp"
 
@@ -104,6 +105,14 @@ public:
     // R-LIT-01/R-LIT-04: live bump particles use the same scene sun and fill
     // as static map particles, including map hazards admitted to the session.
     void follow_lighting(const GodotRenderer& renderer);
+    // N1: with this on, frame() starts the frame's own-sample batch (step, stream build, pack) on the particle workers
+    // WITHOUT the calling thread and returns true with final_pending(); the caller then does work that touches
+    // neither this owner nor its backend, and calls finish_frame, which joins the batch, commits in the same order,
+    // takes the statistics and runs the frame's projectile batch. The output equals the inline frame's. Off by default.
+    void set_async_final(bool on) noexcept { async_final_ = on; }
+    [[nodiscard]] bool final_pending() const noexcept { return final_pending_; }
+    // False (failure() set) when the backend failed. A no-op when nothing is pending.
+    [[nodiscard]] bool finish_frame(const SpacePopulation& population);
     // #421: a death clone as it is drawn at a presented tick: its model transform and its death
     // clip's pose (bones in the model's order, with their visibility).
     struct ClonePose final {
@@ -143,6 +152,8 @@ public:
     // #638: the pool the particle systems step on (null: the main thread alone); it must outlive
     // this object's frames.
     void set_workers(const particles::StepExecutor* workers) noexcept { registry_->set_executor(workers); }
+    // L1.2: the render backend, for the frame's latches (ParticleLatches); null once released.
+    [[nodiscard]] GodotParticleBackend* particle_backend() noexcept { return backend_.get(); }
     void measure_particles(bool on) noexcept {
         registry_->begin_measurement(on);
         measure_owner_ = on;
@@ -291,6 +302,9 @@ private:
         // the match (a replan, stop_all, a released emitter), so a quiet ship skips the walk.
         bool reconciled{};
         bool clone_planned{};
+        // D-ss: the last decision (hysteresis state) and this frame's: skip the historical pass.
+        bool per_tick_sampling{};
+        bool skip_historical{};
     };
     struct ModelFrames final {
         std::vector<std::optional<bool>> blast_phases; // BP-74: proxy ancestors' charge mesh, false=buildup
@@ -334,11 +348,27 @@ private:
     // Stands every running emitter of ship `index` at its bone on model transform `pose`.
     void place(std::size_t index, const sim::math::Mat3x4& pose);
     // Advances nonprojectile emitters and clones by one 30 Hz sample.
-    [[nodiscard]] bool advance_sample();
+    [[nodiscard]] bool advance_sample(bool async_final = false);
     // busy_: the slots (in slot order) that run emitters or clone proxies, which every per-frame pass
     // visits instead of all the pooled slots; visit_: the slots the frame's own sample handled.
     void rebuild_busy();
     [[nodiscard]] bool advance_running(float delta_seconds, bool projectiles);
+    // advance_running in its parts: the handles and steps of the batch (batch_handles_, batch_deltas_), and
+    // the statistics, drain releases and counters the batch's results give (batch_stats_), in running order.
+    void collect_running(float delta_seconds, bool projectiles);
+    void finish_running(bool projectiles);
+    // What frame() does after its last batch: the fighter experiment's count and the births' first ages.
+    [[nodiscard]] bool finish_tail(const SpacePopulation& population);
+    bool async_final_{};            // N1: kick the frame's own-sample batch without the caller
+    bool final_pending_{};          // N1: that batch is running; finish_frame is owed
+    double final_presented_tick_{}; // the tick the projectile batch of the same frame runs at
+    // D-ss: decides per ship which ones skip the historical pass of this multi-sample frame
+    // (Ship::skip_historical) and updates the census. Presentation data only. Returns whether the historical
+    // walk still needs the interpolated unit poses (some ordinary ship keeps its pass).
+    [[nodiscard]] bool decide_single_pass(const SpacePopulation& population, const sim::tactical::TacticalSnapshot& previous,
+                            const sim::tactical::TacticalSnapshot& latest, const FixedCamera& camera, std::uint64_t owed);
+    std::vector<std::size_t> skipped_;  // ships flagged skip_historical this frame (cleared at the next frame)
+    bool historical_pass_{};  // true while the historical samples' registry advance runs
     [[nodiscard]] bool advance_projectiles(double presented_tick);
     // #433: draws every running emitter again at the frame last set, without advancing.
     [[nodiscard]] bool present_running();
@@ -376,7 +406,7 @@ private:
     std::uint64_t prepared_model_requests_{}, prepared_models_{}, prepared_system_requests_{}, prepared_systems_{};
     std::uint64_t prepared_source_bytes_{};
     double asset_prepare_ms_{};
-    std::uint64_t backend_warm_requested_{}, backend_warm_admitted_{}, backend_warm_refused_{};
+    std::uint64_t backend_warm_requested_{}, backend_warm_admitted_{}, backend_warm_refused_{}, backend_warm_refused_programs_{};
     std::size_t backend_warm_policies_{};
     std::uint64_t backend_warm_texture_bytes_{};
     double backend_warm_ms_{};
@@ -400,6 +430,10 @@ private:
     std::uint64_t max_particles_{};
     std::uint64_t particles_{};
     std::uint64_t caught_up_{};        // samples run at their own tick before a frame's own
+    // D-ss census (ships per multi-sample frame): kept the historical pass, took one pass, culled (one pass),
+    // and the predicted error of the ships that were not culled, in bins of
+    // <1/16, <1/8, <1/4, <1/2, <1, <2, <4, <8, >= 8 pixels.
+    particles::CatchupCensus ss_;
     std::uint64_t unknown_samples_{};  // of those, samples whose snapshots had left the history
     std::uint64_t presented_frames_{};   // frames between samples that drew a running emitter (#433)
     std::uint64_t presented_effects_{};  // running emitters drawn on those frames

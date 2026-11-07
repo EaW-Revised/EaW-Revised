@@ -55,6 +55,7 @@ inline constexpr std::uint64_t synthesised_command_bit = std::uint64_t{1} << 63;
     case SpecialAbilityKind::tractor_beam: return AbilityKind::tractor_beam;
     case SpecialAbilityKind::energy_weapon: return AbilityKind::energy_weapon;
     case SpecialAbilityKind::leech_shields: return AbilityKind::leech_shields;
+    case SpecialAbilityKind::super_laser: return AbilityKind::super_laser;
     case SpecialAbilityKind::concentrate_fire: return AbilityKind::concentrate_fire;
     default: return std::nullopt;
     }
@@ -528,8 +529,14 @@ public:
         std::uint64_t& writes);
 
     // ECS storage mutation is serial: creating/removing a component can grow or compact a
-    // shared pool. Retain handles and unchanged components; only changed values are assigned.
-    void commit_units(std::vector<LiveUnit>& units, std::uint64_t& writes);
+    // shared pool. Retain handles and unchanged components. The destroy sweep, every emplace/remove and every new
+    // entity run serially in ascending ID; the changed values of existing components are assigned in place by the
+    // `registry-commit` phase over the fixed index partitions (below 256 units, inline as one partition). A failed
+    // phase leaves the commit unfinished: the tick fails and the session must not be stepped again.
+    [[nodiscard]] core::Result<void> commit_units(std::vector<LiveUnit>& units, std::uint64_t& writes,
+        const PartitionExecutor& executor);
+    // The original serial commit, kept as the test-only oracle for commit_units.
+    void commit_units_reference(std::vector<LiveUnit>& units, std::uint64_t& writes);
 
     // The targeting phase's world view (#73): the moved units in ascending ID with their health,
     // combat state and the visibility of the last published snapshot, and one space index over
@@ -569,6 +576,7 @@ public:
     void append_canonical_approach_state(std::vector<std::uint8_t>& bytes, const std::span<const LiveUnit> units, const CanonicalCounts* counts = nullptr) const;
     void append_canonical_sightings_state(std::vector<std::uint8_t>& bytes, const std::span<const LiveUnit> units, const CanonicalCounts* counts = nullptr) const;
     void append_canonical_garrison_marks_state(std::vector<std::uint8_t>& bytes, const std::span<const LiveUnit> units, const CanonicalCounts* counts = nullptr) const;
+    void append_canonical_script_invulnerable_state(std::vector<std::uint8_t>& bytes, const std::span<const LiveUnit> units, const CanonicalCounts* counts = nullptr) const;
     void append_canonical_craft_state(std::vector<std::uint8_t>& bytes,
         std::span<const std::vector<std::uint8_t>> encoded = {}) const;
     void append_canonical_squadron_orders_state(std::vector<std::uint8_t>& bytes,

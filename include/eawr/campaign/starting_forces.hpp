@@ -53,7 +53,7 @@ struct InitialCampaignRelations {
 // with authored faction factors. Geometry, access and contents have their owners.
 [[nodiscard]] core::Result<MovementInputs> prepare_initial_movement_inputs(
     const StartingForceInputs&, const data::galactic::GalacticData&,
-    std::span<const MovementPlayerBinding>);
+    std::span<const MovementPlayerBinding>, core::LoadNoteBuffer* notes = nullptr);
 // WGS-80 / CGS-03: dispatch against original behaviours and complete typed live
 // presence. Unknown or unrepresented branches explicitly refuse.
 [[nodiscard]] core::Result<StartingForcePlacement> place_starting_force(

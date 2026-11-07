@@ -3,29 +3,47 @@
 // reach the tick-zero barrier on identities each peer derived from its own content. The skirmish options bytes stay
 // pinned: a GC mode changes nothing about a skirmish room.
 #include "setup_test_support.hpp"
+#include "eawr/vfs/vfs.hpp"
 #include "fake_transport.hpp"
 
 #include "galactic_lobby_backend.hpp"
+#include "galactic_lan_match.hpp"
 #include "lan_match.hpp"
 #include "galactic_launch_options.hpp"
+#include "../../apps/viewer/src/galactic/faction_choices.hpp"
+#include "eawr/presentation/ui/campaign_setup.hpp"
+#include "../../apps/viewer/src/checkpoint_lobby_model.hpp"
 #include "eawr/platform/agreed_campaign.hpp"
 #include "eawr/platform/campaign_service_configuration.hpp"
 #include "eawr/campaign/mp_agreement.hpp"
 #include "eawr/campaign/mp_lobby_catalog.hpp"
 #include "eawr/net/galactic_lobby.hpp"
+#include "eawr/net/galactic_adapter.hpp"
+#include "eawr/checkpoint/game.hpp"
+#include "../../src/platform/galactic/live_save_transport.hpp"
 #include "eawr/net/lobby_session.hpp"
 #include "eawr/sim/tactical/victory.hpp"
+#include "eawr/sim/tactical/replay.hpp"
 #include "eawr/sim/world.hpp"
 #include "eawr/skirmish/start.hpp"
 #include "eawr/data/xml.hpp"
+#include "eawr/mods/save_description.hpp"
 #include "eawr/platform/sim_workers.hpp"
 #include "eawr/platform/live_game_session.hpp"
+#include "eawr/platform/saved_games.hpp"
+#include "eawr/platform/live_game_lockstep.hpp"
 #include "../support/env.hpp"
 #include "../support/temp_dir.hpp"
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
+#include <mutex>
+#include <memory>
+#include <future>
+#include <condition_variable>
+#include <deque>
 #include <functional>
 #include <filesystem>
 #include <fstream>
@@ -37,6 +55,7 @@
 #include <set>
 #include <stdexcept>
 #include <thread>
+#include <variant>
 
 namespace {
 using namespace setup_test;
@@ -225,6 +244,62 @@ void skirmish_bytes_pinned() {
 
 // ---- the campaign list ----
 
+// #5512: the campaign content loads on a worker. While it runs the UI thread's other backend calls return at once
+// instead of waiting behind the load, and a failed load still ends in a ready, refusing backend.
+void content_load_never_blocks_the_ui_thread() {
+    // The gate is shared with the detached prefetch thread, which may outlive a failing expect below.
+    struct Gate {
+        std::mutex mutex;
+        std::condition_variable changed;
+        bool released = false, entered = false;
+        std::atomic<int> loads{0};
+        void release() { { const std::lock_guard lock(mutex); released = true; } changed.notify_all(); }
+    };
+    const auto gate = std::make_shared<Gate>();
+    auto backend = std::make_shared<viewer::GalacticLobbyBackend>(viewer::GalacticLobbyLoader([gate] {
+        ++gate->loads;
+        std::unique_lock lock(gate->mutex);
+        gate->entered = true;
+        gate->changed.notify_all();
+        gate->changed.wait(lock, [&] { return gate->released; });
+        return eawr::core::Result<viewer::GalacticLobbyContent>::failure(
+            eawr::core::Diagnostic{.code = "EAWR-TEST-5512", .message = "synthetic slow load",
+                .logical_path = std::nullopt, .line = std::nullopt, .column = std::nullopt, .source_id = std::nullopt});
+    }));
+    // A failing expect must still let the gated loader return (the frame task and the prefetch thread wait on it),
+    // or the test hangs instead of failing; `frame` is declared outside the try so its wait happens after the release.
+    std::future<bool> frame;
+    try {
+        expect(!backend->content_ready(), "a backend built from a loader is not ready before the load");
+        viewer::GalacticLobbyBackend::prefetch_content(backend);
+        viewer::GalacticLobbyBackend::prefetch_content(backend);
+        {
+            std::unique_lock lock(gate->mutex);
+            expect(gate->changed.wait_for(lock, std::chrono::seconds(30), [&] { return gate->entered; }), "the prefetch thread runs the loader");
+        }
+        // The calls the lobby makes every frame, on a stand-in UI thread with a bounded deadline.
+        frame = std::async(std::launch::async, [&] {
+            const auto view = backend->checkpoint_view();
+            backend->clear_checkpoint();
+            return backend->agreement() == nullptr && !view && !backend->content_ready();
+        });
+        expect(frame.wait_for(std::chrono::seconds(10)) == std::future_status::ready,
+            "agreement, checkpoint view and clear return while the content load is still running");
+        if (frame.wait_for(std::chrono::seconds(0)) == std::future_status::ready) expect(frame.get(), "the frame calls saw an unloaded, empty backend");
+        gate->release();
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+        while (!backend->content_ready() && std::chrono::steady_clock::now() < deadline) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        expect(backend->content_ready(), "the backend becomes ready when the load returns");
+        const auto error = backend->load_error();
+        expect(error && error->code == "EAWR-TEST-5512", "a failed load is kept as the load error");
+        expect(backend->campaigns().empty(), "a failed load lists no campaigns");
+        expect(gate->loads == 1, "two prefetch requests run the loader once");
+    } catch (...) {
+        gate->release();
+        throw;
+    }
+}
+
 void campaign_list() {
     Local local;
     auto& data = local.data;
@@ -313,6 +388,198 @@ bool refused(const net::LobbySnapshot& snapshot, bool starting, const std::vecto
     return fragment.empty() || result.error().message.find(fragment) != std::string::npos;
 }
 
+// A mod with no Is_Multiplayer campaign (#6010): its dummy entries start as a faction nobody can hold. Names are arbitrary.
+void coop_catalog_without_multiplayer_campaign() {
+    Local local(Names{"ALPHA_HOUSE", "BETA_GUILD", "GAMMA_SWARM", "OMEGA_NOBODY"});
+    auto& data = local.data;
+    // a faction the data lists as not playable, and one that is neutral
+    dg::Faction hostile; hostile.name = "DELTA_RAIDERS"; hostile.is_neutral = false; hostile.is_playable = false;
+    hostile.displayed_tech_level_adjustment = 0;
+    data.factions.push_back(hostile);
+    auto base = data.campaigns.front();
+    base.is_multiplayer = false; base.name = "Filler_One"; base.starting_active_player = "Delta_Raiders";
+    base.home_locations.push_back({"DELTA_RAIDERS", "P"});
+    data.campaigns.front() = base;
+    auto add = [&](const std::string& name, const std::string& starter) {
+        auto row = base; row.name = name; row.starting_active_player = starter; data.campaigns.push_back(row);
+    };
+    add("Filler_Neutral", "OMEGA_NOBODY");     // neutral starter
+    add("Filler_Missing", "NOT_IN_THE_DATA");  // starter is no faction
+    add("Filler_AiOnly", "GAMMA_SWARM");       // a faction the data does not let a player hold
+    expect(cp::list_all_lobby_campaigns(data).empty(), "entries whose starter cannot be held are not listed");
+    expect(cp::first_hostable_lobby_campaign(cp::list_all_lobby_campaigns(data)) == nullptr, "an empty catalog has no hostable row");
+    add("Real_Solo_Beta", "Beta_Guild");
+    add("Real_Solo_Alpha", "ALPHA_HOUSE");
+    const auto list = cp::list_all_lobby_campaigns(data);
+    expect(list.size() == 2 && list[0].name == "Real_Solo_Beta" && list[1].name == "Real_Solo_Alpha",
+        "playable starters are listed in registry order, whatever their names");
+    const auto* first = cp::first_hostable_lobby_campaign(list);
+    expect(first == &list[0], "the room opens on the first eligible row, not on the registry's first entry");
+    auto options = net::default_galactic_lobby_options(*first, difficulty, match_seed);
+    expect(options.has_value(), "the first eligible row opens a room");
+    // the unplayable-first order still hosts: a hand-built catalog with a row that cannot seat anyone ahead of a good one
+    auto catalog = list;
+    catalog.insert(catalog.begin(), catalog[0]);
+    for (auto& faction : catalog[0].factions) faction.playable = false;
+    expect(cp::first_hostable_lobby_campaign(catalog) == &catalog[1], "a row with no playable faction is skipped");
+    expect(!net::default_galactic_lobby_options(catalog[0], difficulty, match_seed).has_value(), "the skipped row is the one that would be refused");
+    // co-op rows name the faction the players take
+    expect(cp::lobby_campaign_row_title(list[0], "Gateways") == "BETA_GUILD - Gateways"
+        && cp::lobby_campaign_row_title(list[1], "Gateways") == "ALPHA_HOUSE - Gateways",
+        "a co-op row names its faction first, so a cut caption keeps it");
+    auto multiplayer = list[0]; multiplayer.single_player_rules = false;
+    expect(cp::lobby_campaign_row_title(multiplayer, "Gateways") == "Gateways", "a multiplayer row keeps its title");
+}
+
+// Design B2: single-player entries join the list only on request, as co-op rows on their authored human faction.
+void coop_single_player_sets() {
+    Local local;
+    auto& data = local.data;
+    const auto base = data.campaigns.front();
+    auto add = [&](const std::string& name, auto change) { auto row = base; row.name = name; change(row); data.campaigns.push_back(row); };
+    add("SoloRebel", [](dg::Campaign& c) { c.is_multiplayer = false; c.starting_active_player = "Rebel"; });
+    add("SoloHidden", [](dg::Campaign& c) { c.is_multiplayer = false; c.starting_active_player = "Rebel"; c.is_listed = false; });
+    add("SoloTutorial", [](dg::Campaign& c) { c.is_multiplayer = false; c.starting_active_player = "Rebel"; c.tutorial = true; });
+    add("SoloStory", [](dg::Campaign& c) { c.is_multiplayer = false; c.starting_active_player = "Rebel"; c.is_story_campaign = true; });
+    add("SoloNoHuman", [](dg::Campaign& c) { c.is_multiplayer = false; c.starting_active_player.clear(); });
+    expect(cp::list_mp_lobby_campaigns(data).size() == 1, "single-player entries stay out of the multiplayer list");
+    const auto coop_tab = cp::list_coop_sp_lobby_campaigns(data);
+    expect(coop_tab.size() == 1 && coop_tab[0].name == "SoloRebel" && coop_tab[0].single_player_rules,
+        "the co-op list holds only listed, non-tutorial, non-story entries with a human faction");
+    const auto list = cp::list_all_lobby_campaigns(data);
+    expect(list.size() == 2 && list[0].name == "Multiplayer" && !list[0].single_player_rules && list[1] == coop_tab[0],
+        "the combined list is the multiplayer tab then the co-op tab");
+    expect(list[0] == cp::list_mp_lobby_campaigns(data)[0], "the multiplayer row is unchanged by the co-op list");
+    std::size_t playable{};
+    for (const auto& faction : list[1].factions) if (faction.playable) { ++playable; expect(faction.name == "REBEL", "only the authored human faction is playable"); }
+    expect(playable == 1, "one playable faction on a single-player entry");
+    auto options = require(net::default_galactic_lobby_options(list[1], difficulty, match_seed, 3, true));
+    std::size_t humans{};
+    for (const auto& row : options.rows) humans += row.human ? 1 : 0;
+    expect(humans == 1, "a single-player entry plans one co-op side even when two sides are asked for");
+    const auto snapshot = snapshot_of(options, {seat_of(0, 1, options, 1, "host"), seat_of(1, 2, options, 1, "guest")});
+    auto solo_game = snapshot; solo_game.game.map = "SoloRebel";
+    expect(net::validate_galactic_lobby(solo_game, true, list).has_value(), "co-op seats validate on a single-player entry");
+    expect(refused(solo_game, false, local.catalog(), "not an eligible campaign"), "the multiplayer catalog still refuses it");
+    viewer::GalacticLobbyBackend backend(local.content);
+    expect(backend.campaigns() == list && backend.validate(solo_game, true).has_value(),
+        "the production backend offers and validates the co-op campaign at Start");
+    auto two_rows = options; two_rows.rows[1].human = true;
+    expect(refused(snapshot_of(two_rows, {}), false, list, "cannot be held"), "a human row off the authored faction is refused");
+}
+
+// #6047: the difficulties a room offers are the entries the AI seats of the selected campaign can run. Start reads only the
+// AI seats' player types, so a human starter's and a neutral faction's type never count, and an offered value is never refused.
+void difficulty_follows_the_campaigns_ai_types() {
+    using Levels = std::array<std::string, 3>;
+    using Entries = std::array<std::string, 3>;
+    // Two families (a major and a minor type), a type that maps one entry to two levels, and a starter-only family.
+    const cp::LobbyAiLevels ai_levels = [](const std::string_view type) -> Levels {
+        if (type == "MAJOR_AI" || type == "MAJOR2_AI") return {"Easy_Default", "Normal_Default", "Hard_Default"};
+        if (type == "MINOR_AI") return {"Easy_Minor", "Normal_Minor", "Hard_Minor"};
+        if (type == "SKEWED_AI") return {"Easy_Default", "Hard_Default", "Hard_Default"};
+        if (type == "R_AI") return {"Easy_R", "Normal_R", "Hard_R"};
+        if (type == "E_AI") return {"Easy_E", "Normal_E", "Hard_E"};
+        return {};
+    };
+    const Entries default_family{"Easy_Default", "Normal_Default", "Hard_Default"};
+    Local local;
+    auto& data = local.data;
+    for (const char* extra : {"EXTRA_ONE", "EXTRA_TWO"}) {
+        auto faction = data.factions[2]; faction.name = extra; data.factions.push_back(faction);
+    }
+    const auto base = data.campaigns.front();
+    // AI types go to the AI factions in turn: EMPIRE, UNDERWORLD, EXTRA_ONE, EXTRA_TWO (the starter is REBEL).
+    const auto add = [&](const std::string& name, const std::vector<std::string>& types,
+                         const std::vector<std::pair<std::string, std::string>>& more = {}) {
+        auto row = base; row.name = name; row.is_multiplayer = false; row.starting_active_player = "REBEL";
+        row.ai_player_control.clear();
+        const char* const factions[] = {"EMPIRE", "UNDERWORLD", "EXTRA_ONE", "EXTRA_TWO"};
+        for (std::size_t index = 0; index < types.size(); ++index) row.ai_player_control.push_back({factions[index], types[index]});
+        for (const auto& [faction, type] : more) row.ai_player_control.push_back({faction, type});
+        data.campaigns.push_back(row);
+    };
+    add("Majors", {"Major_Ai", "Major_Ai"});
+    add("Mixed", {"Minor_Ai", "Major_Ai", "Major2_Ai"});
+    add("MinorOnly", {"Minor_Ai"});
+    add("Skewed", {"Major_Ai", "Skewed_Ai"});
+    add("NoAi", {});
+    // The reviewer's case: the human starter runs R_AI, the only AI seat runs E_AI; R_AI's entries cannot be run at Start.
+    add("StarterAndAi", {"E_Ai"}, {{"REBEL", "R_Ai"}});
+    // A type of the starter is the only carrier of an entry: the list must not offer it.
+    add("StarterOnlyCarrier", {"Skewed_Ai"}, {{"REBEL", "Major_Ai"}});
+    add("NeutralPair", {"Major_Ai"}, {{"NEUTRAL", "Minor_Ai"}});
+    const auto list = cp::list_coop_sp_lobby_campaigns(data, ai_levels);
+    const auto named = [&](const std::string_view name) -> const gc::MpLobbyCampaign& {
+        const auto* found = cp::find_mp_lobby_campaign(list, name);
+        expect(found != nullptr, "the co-op entry is listed");
+        return *found;
+    };
+    expect(named("Majors").difficulties == default_family, "one AI family offers its own three entries");
+    expect(named("Mixed").difficulties == default_family, "per level the entry most of the always-AI types share wins, though the minor type comes first");
+    expect(named("MinorOnly").difficulties == Entries{"Easy_Minor", "Normal_Minor", "Hard_Minor"}, "a campaign of minor AI offers the minor entries");
+    expect(named("Skewed").difficulties == Entries{"Easy_Default", "Normal_Default", ""},
+        "an entry the AI types map to two levels is not offered: the AI setup would refuse it as ambiguous");
+    expect(named("NoAi").difficulties == Entries{}, "a campaign without AI types states no list");
+    expect(named("StarterAndAi").difficulties == Entries{"Easy_E", "Normal_E", "Hard_E"},
+        "the human starter's AI type is not counted: its entries would be refused at Start");
+    expect(named("StarterOnlyCarrier").difficulties == Entries{"Easy_Default", "", ""},
+        "an entry only the starter's type carries is not offered, and the AI types' ambiguity still counts");
+    expect(named("NeutralPair").difficulties == default_family, "a neutral faction's AI type is not counted");
+    expect(cp::list_coop_sp_lobby_campaigns(data)[0].difficulties == Entries{}, "without the AI levels no campaign states a list");
+
+    // Multiplayer entries: a non-playable faction is always AI; playable factions run their Basic_AI only when left to the AI.
+    {
+        Local mp;
+        mp.data.factions[0].basic_ai = "MAJOR_AI"; mp.data.factions[1].basic_ai = "MINOR_AI";
+        auto certain = mp.data;
+        certain.campaigns[0].ai_player_control = {{"UNDERWORLD", "Major2_Ai"}};
+        expect(cp::list_mp_lobby_campaigns(certain, ai_levels)[0].difficulties == default_family,
+            "a multiplayer entry with an always-AI faction offers that type's entries, not the playable factions' Basic_AI");
+        expect(cp::list_mp_lobby_campaigns(mp.data, ai_levels)[0].difficulties == Entries{},
+            "playable factions that disagree share no entry that is safe whichever of them the AI plays");
+        mp.data.factions[1].basic_ai = "MAJOR2_AI";
+        expect(cp::list_mp_lobby_campaigns(mp.data, ai_levels)[0].difficulties == default_family,
+            "playable factions' Basic_AI types that all carry an entry offer it");
+    }
+
+    // The default and the room options follow the list; every offered entry validates, anything else is refused with a reason.
+    const auto& mixed = named("Mixed");
+    expect(gc::lobby_default_difficulty(mixed, "Normal_Default") == "Normal_Default"
+        && gc::lobby_default_difficulty(named("MinorOnly"), "Normal_Default") == "Normal_Minor"
+        && gc::lobby_default_difficulty(named("NoAi"), "Normal_Default") == "Normal_Default", "a room starts at the campaign's Normal entry");
+    gc::MpLobbyCampaign gap;
+    gap.difficulties = {"Easy_X", "", "Hard_X"};
+    expect(gc::lobby_default_difficulty(gap, "F") == "Hard_X", "without a Normal entry the middle of the valid ones, never silently the easiest");
+    gap.difficulties = {"Easy_X", "", ""};
+    expect(gc::lobby_default_difficulty(gap, "F") == "Easy_X", "a single valid entry is the default");
+    expect(gc::lobby_difficulty_offered(mixed, "HARD_DEFAULT") && !gc::lobby_difficulty_offered(mixed, "Hard_Minor"),
+        "the offered test folds ASCII case only");
+    expect(require(net::default_galactic_lobby_options(named("MinorOnly"), "Normal_Default", match_seed)).difficulty == "Normal_Minor",
+        "default options replace a difficulty the campaign's AI does not author");
+    expect(require(net::default_galactic_lobby_options(mixed, "Hard_Default", match_seed)).difficulty == "Hard_Default",
+        "default options keep an offered difficulty");
+    for (const auto& entry : mixed.difficulties) {
+        auto options = require(net::default_galactic_lobby_options(mixed, entry, match_seed, 3, false));
+        expect(net::validate_galactic_lobby(snapshot_of(options, {seat_of(0, 1, options, 1, "host")}), false, list).has_value(),
+            "every offered difficulty validates");
+    }
+    for (const char* wrong : {"Hard_Minor", "Normal_Skirmish", "Easy_Story"}) {
+        auto options = require(net::default_galactic_lobby_options(mixed, "Normal_Default", match_seed, 3, false));
+        options.difficulty = wrong;
+        expect(refused(snapshot_of(options, {seat_of(0, 1, options, 1, "host")}), false, list, "does not apply to campaign Mixed"),
+            "a difficulty the campaign does not offer is refused with its reason");
+    }
+    auto lower = require(net::default_galactic_lobby_options(mixed, "Normal_Default", match_seed, 3, false));
+    lower.difficulty = "normal_default";
+    expect(net::validate_galactic_lobby(snapshot_of(lower, {seat_of(0, 1, lower, 1, "host")}), false, list).has_value(),
+        "the difficulty compares in any case, as the AI setup does");
+    auto free_text = require(net::default_galactic_lobby_options(named("NoAi"), "Whatever_Mod", match_seed, 3, false));
+    expect(free_text.difficulty == "Whatever_Mod"
+        && net::validate_galactic_lobby(snapshot_of(free_text, {seat_of(0, 1, free_text, 1, "host")}), false, list).has_value(),
+        "a campaign without a list keeps accepting an authored name");
+}
+
 void staging_validation() {
     Local local;
     const auto catalog = local.catalog();
@@ -326,7 +593,7 @@ void staging_validation() {
 
     // Not a multiplayer campaign here: the catalog is the Is_Listed + Is_Multiplayer list.
     auto solo = good; solo.game.map = "Solo";
-    expect(refused(solo, false, catalog, "multiplayer campaign"), "a campaign outside the multiplayer list is refused");
+    expect(refused(solo, false, catalog, "not an eligible campaign"), "a campaign outside the multiplayer list is refused");
     auto missing = good; missing.game.map = "Nowhere";
     expect(refused(missing, false, catalog), "an unknown campaign is refused");
     // Rows must be this peer's own local content.
@@ -461,7 +728,30 @@ struct PeerState {
 };
 struct MonitorOwner {
     net::DesyncMonitor monitor;
-    MonitorOwner(net::MessageTransport& transport, net::DesyncOptions options) : monitor(transport, options) {}
+    struct Gate final : net::SessionMonitor {
+        net::DesyncMonitor& monitor;
+        bool advance{true};
+        explicit Gate(net::DesyncMonitor& value) : monitor(value) {}
+        bool needs_encoding(std::uint64_t tick, bool end) const override { return monitor.needs_encoding(tick, end); }
+        eawr::core::Result<void> record(std::uint64_t tick, std::string_view hash, std::span<const std::uint8_t> state,
+            std::span<const std::uint8_t> input, bool end) override { return monitor.record(tick, hash, state, input, end); }
+        eawr::core::Result<void> receive(const net::Received& frame) override { return monitor.receive(frame); }
+        eawr::core::Result<void> on_input_delay(std::uint64_t delay, std::uint64_t retained) override {
+            return monitor.on_input_delay(delay, retained);
+        }
+        eawr::core::Result<void> on_departure(net::PeerIndex peer, std::uint64_t tick) override { return monitor.on_departure(peer, tick); }
+        std::vector<net::PeerIndex> waiting_for_peers() const override { return monitor.waiting_for_peers(); }
+        bool frozen() const override { return monitor.frozen(); }
+        bool ready_for_resync() const override { return monitor.ready_for_resync(); }
+        eawr::core::Result<void> on_resync(std::uint64_t tick, std::string_view hash) override { return monitor.on_resync(tick, hash); }
+        eawr::core::Result<void> on_link_repair(net::PeerIndex peer, std::function<bool(net::PeerIndex)> ownership = {}) override {
+            return monitor.on_link_repair(peer, std::move(ownership));
+        }
+        bool may_step() const override { return advance && monitor.may_step(); }
+        eawr::core::Result<void> on_reconnect(std::uint64_t tick, std::string_view hash,
+            std::span<const net::PeerIndex> inactive) override { return monitor.on_reconnect(tick, hash, inactive); }
+    } gate;
+    MonitorOwner(net::MessageTransport& transport, net::DesyncOptions options) : monitor(transport, options), gate(monitor) {}
 };
 
 class GcRoom {
@@ -469,11 +759,22 @@ public:
     GcRoom(std::vector<std::shared_ptr<Local>> locals, const net::GalacticLobbyOptions& options, std::uint32_t host_row, std::uint32_t capacity = 0)
         : network(static_cast<std::uint32_t>(locals.size())) {
         const auto count = static_cast<unsigned>(locals.size());
+        monitors.resize(count);
         for (unsigned peer = 0; peer < count; ++peer) {
             peers.push_back({locals[peer], std::make_unique<viewer::GalacticLobbyBackend>(locals[peer]->content), 0, 0});
             peers[peer].backend->set_adapter_factory([this, peer](const net::SetupOffer&, const cp::MpAgreement& agreement)
                 -> eawr::core::Result<std::unique_ptr<net::SessionAdapter>> {
                 ++peers[peer].builds;
+                if (agreement.resume) {
+                    const sim::PartitionExecutor& workers = resumed_workers ? static_cast<const sim::PartitionExecutor&>(*resumed_workers) : executor;
+                    net::GalacticAdapterOptions options; options.clock_policy = resumed_clock_policy;
+                    auto adapter = std::make_unique<net::GalacticSessionAdapter>(*agreement.session, workers, options);
+                    if (!agreement.session->network_resume_state().empty()) {
+                        auto restored = adapter->restore_network_state(agreement.session->network_resume_state());
+                        if (!restored) return eawr::core::Result<std::unique_ptr<net::SessionAdapter>>::failure(restored.error());
+                    }
+                    return eawr::core::Result<std::unique_ptr<net::SessionAdapter>>::success(std::move(adapter));
+                }
                 return eawr::core::Result<std::unique_ptr<net::SessionAdapter>>::success(std::make_unique<TickZeroAdapter>(agreement.session));
             });
             transports.push_back(std::make_unique<eawr::testing::FakeTransport>(network, peer));
@@ -521,6 +822,18 @@ public:
     }
     net::LobbyHooks hooks(unsigned peer) {
         net::LobbyHooks value;
+        value.bind_setup_seats = [this, peer](const auto& snapshot, const auto& seats) {
+            return peers[peer].backend->bind_setup_seats(snapshot, seats);
+        };
+        value.application_frame = [this, peer](auto& transport, const auto& snapshot, const auto& frame, auto now) {
+            if (!net::GalacticCheckpointTransfer::handles(frame.frame)) return false;
+            peers[peer].backend->receive_transfer(transport, snapshot, frame, now); return true;
+        };
+        value.application_pump = [this, peer](auto& transport, const auto& snapshot, auto now) {
+            peers[peer].backend->pump_transfer(transport, snapshot, now);
+            const auto epoch = peers[peer].backend->selection_epoch();
+            const bool changed = epoch != observed_epochs[peer]; observed_epochs[peer] = epoch; return changed;
+        };
         value.validate = [this, peer](const net::LobbySnapshot& snapshot, bool starting) { return peers[peer].backend->validate(snapshot, starting); };
         value.offer = [this, peer](const net::LobbySnapshot& snapshot, const std::vector<net::SetupSeat>& seats) {
             return peers[peer].backend->offer(snapshot, seats);
@@ -528,11 +841,17 @@ public:
         value.setup = [this, peer](net::MessageTransport& transport, const net::LobbySnapshot&) -> eawr::core::Result<net::LobbySetupContext> {
             ++peers[peer].contexts;
             net::DesyncOptions monitor_options; monitor_options.exchange_every = 1000;
+            monitor_options.initial_tick = peers[peer].backend->initial_tick();
             auto owner = std::make_shared<MonitorOwner>(transport, monitor_options);
+            monitors[peer] = owner;
             auto supplied = providers(owner->monitor, executor);
+            supplied.monitor = &owner->gate;
             supplied.identify = [this, peer](const net::SetupOffer& selected) { return peers[peer].backend->identify(selected); };
             supplied.build = [this, peer](const net::SetupOffer& selected) { return peers[peer].backend->build(selected); };
             net::LobbySetupContext context; context.providers = std::move(supplied); context.lifetime = std::move(owner);
+            context.options.session.initial_tick = peers[peer].backend->initial_tick();
+            context.options.session.producer_sequences = peers[peer].backend->producer_sequences();
+            context.options.session.final_tick_count = peers[peer].backend->final_tick_count();
             return eawr::core::Result<net::LobbySetupContext>::success(std::move(context));
         };
         value.remove_peer = [](auto, auto) {};
@@ -540,6 +859,10 @@ public:
     }
     eawr::testing::FakeNetwork network;
     sim::InlineExecutor executor;
+    std::shared_ptr<eawr::platform::ThreadWorkerAdapter> resumed_workers;
+    net::GalacticClockPolicy resumed_clock_policy{net::GalacticClockPolicy::unrestricted};
+    std::array<std::uint64_t, net::max_match_seats> observed_epochs{};
+    std::vector<std::shared_ptr<MonitorOwner>> monitors;
     std::vector<PeerState> peers;
     std::vector<std::unique_ptr<eawr::testing::FakeTransport>> transports;
     std::vector<net::LobbySession> sessions;
@@ -555,6 +878,682 @@ std::string hex(const Digest& digest) {
     for (const auto byte : digest) { out.push_back("0123456789abcdef"[byte >> 4U]); out.push_back("0123456789abcdef"[byte & 15U]); }
     return out;
 }
+
+// The live drivers poll concurrently, so their in-memory transport owns a lock.
+struct LivePipes {
+    std::mutex mutex;
+    explicit LivePipes(std::size_t count) : inbox(count) {}
+    std::vector<std::deque<net::Received>> inbox;
+};
+
+eawr::core::Result<eawr::sim::tactical::TacticalContent> pending_fixture_content(const cp::ConflictRecord& entry) {
+    eawr::sim::tactical::TacticalContent content;
+    if (entry.tactical.campaign) {
+        content.economy.campaign = true;
+        content.economy.players = entry.tactical.campaign->players;
+    }
+    return eawr::core::Result<eawr::sim::tactical::TacticalContent>::success(std::move(content));
+}
+class LivePipe final : public net::MessageTransport {
+public:
+    LivePipe(LivePipes& pipes, net::PeerIndex peer) : pipes_(pipes), peer_(peer) {}
+    eawr::core::Result<void> send(net::PeerIndex to, std::span<const std::uint8_t> frame) override {
+        const std::lock_guard lock(pipes_.mutex);
+        pipes_.inbox.at(to).push_back({peer_, {frame.begin(), frame.end()}});
+        return eawr::core::Result<void>::success();
+    }
+    std::optional<net::Received> poll() override {
+        const std::lock_guard lock(pipes_.mutex);
+        auto& queue = pipes_.inbox.at(peer_);
+        if (queue.empty()) return {};
+        auto value = std::move(queue.front()); queue.pop_front(); return value;
+    }
+    net::LinkState link(net::PeerIndex) const override { return net::LinkState::open; }
+    net::PeerIndex self() const override { return peer_; }
+    std::uint32_t peer_count() const override { return static_cast<std::uint32_t>(pipes_.inbox.size()); }
+private:
+    LivePipes& pipes_;
+    net::PeerIndex peer_;
+};
+
+// Use the committed lobby core, the same retained file and the backend's
+// private restore factory used by the live launch handover.
+void recover_resumed_child(GcRoom& room, std::vector<net::LobbyResult> results,
+    std::shared_ptr<const Bytes> bytes, unsigned workers) {
+    namespace tactical = eawr::sim::tactical;
+    using Refusal = net::GalacticRecoveryRefusal;
+    std::array<std::shared_ptr<cp::GameSession>, 3> games;
+    std::array<std::shared_ptr<net::LobbyResult>, 3> admissions;
+    std::array<std::unique_ptr<viewer::GalacticLanMatch>, 3> matches;
+    std::array<std::shared_ptr<eawr::platform::LiveGameStepDriver>, 3> drivers;
+    std::array<unsigned, 3> publications{};
+    std::vector<eawr::core::Diagnostic> rejected;
+    auto refuse_restore = std::make_shared<std::atomic_bool>(false);
+    for (unsigned peer = 0; peer < 3; ++peer) {
+        games[peer] = room.peers[peer].agreement()->session;
+        admissions[peer] = std::make_shared<net::LobbyResult>(std::move(results[peer]));
+        const auto offer = admissions[peer]->setup().offer();
+        viewer::GalacticLanOptions options;
+        options.input_delay = offer.input_delay; options.final_tick_count = offer.final_tick_count;
+        options.recovery_offer = offer; options.initial_checkpoint = bytes;
+        options.recovery_restore = room.peers[peer].backend->recovery_factory(offer, workers, net::GalacticClockPolicy::limited);
+        if (peer == 2) {
+            auto restore = std::move(options.recovery_restore);
+            options.recovery_restore = [restore = std::move(restore), refuse_restore](const auto& package)
+                -> eawr::core::Result<std::unique_ptr<net::SessionAdapter>> {
+                if (!refuse_restore->load()) return restore(package);
+                eawr::core::Diagnostic error; error.code = "EAWR-TEST-RECOVERY"; error.message = "injected private restore failure";
+                return eawr::core::Result<std::unique_ptr<net::SessionAdapter>>::failure(std::move(error));
+            };
+        }
+        for (const auto& seat : offer.seats) options.seats.push_back({seat.seat, true});
+        auto monitor = room.monitors[peer];
+        matches[peer] = std::make_unique<viewer::GalacticLanMatch>(*room.transports[peer], std::move(options),
+            admissions[peer], monitor->monitor, [monitor](bool advance) { monitor->gate.advance = advance; }, monitor);
+        drivers[peer] = matches[peer]->driver();
+    }
+    const auto clock_start = std::chrono::steady_clock::now();
+    const auto clock_base = room.network.round;
+    const auto step = [&](unsigned peer, bool advance, std::span<const eawr::platform::LiveGameOrder> orders = {}) {
+        eawr::platform::LiveGameStepContext context{*games[peer], *room.resumed_workers, advance, {},
+            [&](auto error) { rejected.push_back(std::move(error)); }};
+        context.adopt_recovered_owner = [&](eawr::platform::RecoveredGameOwner owner) {
+            games[peer] = std::move(owner.session); ++publications[peer];
+            return eawr::core::Result<void>::success();
+        };
+        ++room.network.round;
+        const auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - clock_start).count();
+        require(drivers[peer]->step(context, orders, clock_base + static_cast<std::uint64_t>(now)));
+    };
+    const auto run = [&](std::uint64_t target, bool include_returning = true) {
+        const unsigned count = include_returning ? 3U : 2U;
+        for (unsigned round = 0; round < 10000; ++round) {
+            for (unsigned peer = 0; peer < count; ++peer) step(peer, games[peer]->completed_tick() < target);
+            if (std::all_of(games.begin(), games.begin() + count,
+                [&](const auto& game) { return game->completed_tick() == target; })) return;
+        }
+        throw std::runtime_error("resumed child fixture did not reach its target");
+    };
+    const auto initial = games[0]->completed_tick();
+    const auto conflict = games[0]->pending_conflict()->id;
+    const auto first = admissions[0]->setup().offer().seats[0].seat;
+    const auto second = admissions[0]->setup().offer().seats[2].seat;
+    const std::array<eawr::platform::LiveGameOrder, 1> choice{{{first, gc::BattleChoice{conflict, true}, {}}}};
+    step(0, true, choice); run(initial + 12);
+    expect(games[0]->battle() && games[1]->battle(), "saved pending conflict enters a child through the recorded choice");
+    if (!games[0]->battle() || !games[1]->battle()) throw std::runtime_error("missing resumed child");
+    const auto units = games[0]->battle()->units();
+    const auto root = std::find_if(units.begin(), units.end(), [&](const auto& unit) {
+        return unit.owner == 1 && unit.controller_seat == first;
+    });
+    if (root == units.end()) {
+        std::string seen = "missing first-seat child unit " + std::to_string(first.value) + "; child units:";
+        for (const auto& unit : units) seen += " [" + std::to_string(unit.entity_id) + " owner " + std::to_string(unit.owner)
+            + " seat " + std::to_string(unit.controller_seat.value) + "]";
+        throw std::runtime_error(seen);
+    }
+    const auto id = root->entity_id;
+    const auto gift = [&](sim::SeatId from, sim::SeatId to) {
+        tactical::PlayerCommand command{{0, 1, 1}, {id}, tactical::GiftPayload{to}};
+        command.origin = tactical::CommandOrigin::seat; command.issuing_seat = from;
+        const auto body = require(tactical::encode_command_body(command, games[0]->conflict()->tactical));
+        return eawr::platform::LiveGameOrder{from,
+            gc::TacticalLayerCommand{conflict, tactical::command_body_opcode(command), body}, {}};
+    };
+    const std::array<eawr::platform::LiveGameOrder, 1> first_gift{{gift(first, second)}};
+    step(0, true, first_gift); run(initial + 24);
+    const auto transferred = games[0]->battle()->units();
+    expect(std::any_of(transferred.begin(), transferred.end(), [&](const auto& unit) {
+        return unit.entity_id == id && unit.controller_seat == second;
+    }), "the applied gift changes controller before recovery");
+    // Rehash the container after damaging the child section: rejection must be
+    // due to reconstruction, and it must not publish into the live owners.
+    namespace checkpoint = eawr::checkpoint;
+    const auto parent_before = games[0]->state_sha256();
+    const auto child_before = games[0]->battle()->state_sha256();
+    const auto identities = checkpoint::game_identities(games[0]->galaxy().setup());
+    auto damaged = require(checkpoint::parse_checkpoint(require(checkpoint::save_game_checkpoint(*games[0], identities))));
+    checkpoint::GameLoadOptions load; load.script_requirement = cp::ScriptRequirement::none;
+    load.content = pending_fixture_content;
+    load.conflict_service = [](const auto&, const auto&, auto) {
+        return eawr::core::Result<std::optional<cp::RecordedAdmission>>::success({});
+    };
+    expect(static_cast<bool>(checkpoint::load_game_checkpoint(require(checkpoint::write_checkpoint(damaged)), identities,
+        load, *room.resumed_workers)), "the undamaged active-child checkpoint restores privately");
+    bool found_child = false;
+    for (auto& section : damaged.sections) if (section.id == static_cast<std::uint16_t>(checkpoint::SectionId::child_state)) {
+        section.bytes.push_back(0); found_child = true;
+    }
+    expect(found_child, "active child checkpoint has a child-state section");
+    expect(!checkpoint::load_game_checkpoint(require(checkpoint::write_checkpoint(damaged)), identities, load, *room.resumed_workers),
+        "a rehashed corrupt child is refused by the private restore");
+    expect(games[0]->state_sha256() == parent_before && games[0]->battle()->state_sha256() == child_before
+        && publications[0] == 0 && publications[1] == 0 && publications[2] == 0,
+        "corrupt child refusal leaves both live layers and publications untouched");
+    const std::array<eawr::platform::LiveGameOrder, 1> second_gift{{gift(second, first)}};
+    step(2, true, second_gift);
+    const auto before_disconnect = games[2]->battle_record();
+    expect(before_disconnect && std::count_if(before_disconnect->commands.begin(), before_disconnect->commands.end(), [](const auto& command) {
+        return std::holds_alternative<tactical::GiftPayload>(command.payload);
+    }) == 1, "the second gift is still pending when the returning peer disconnects");
+    room.network.open[2] = false;
+    run(initial + 45, false);
+    expect(std::none_of(games[0]->galaxy().seats().begin(), games[0]->galaxy().seats().end(), [&](const auto& seat) {
+        return seat.seat_id == second && seat.active;
+    }), "the interrupted saved seat departs before recovery");
+    room.network.open[2] = true;
+    const auto survivor0 = games[0];
+    const auto survivor1 = games[1];
+    std::array<std::array<unsigned, 256>, 3> recovery_frames{};
+    std::optional<std::uint64_t> recovery_barrier;
+    room.network.before_send = [&](auto from, auto, std::span<const std::uint8_t> frame) {
+        if (frame.empty()) return;
+        const auto outer = net::decode_lobby_frame(frame);
+        const auto* wrapped = outer ? std::get_if<net::LobbySetupFrame>(&outer.value()) : nullptr;
+        const auto payload = wrapped ? std::span<const std::uint8_t>(wrapped->frame) : frame;
+        ++recovery_frames[from][payload.front()];
+        if (from != 0 || payload.front() != net::gc_recovery_proof_kind) return;
+        const auto control = net::decode_galactic_recovery_control(payload);
+        if (control && control.value().stage == net::GalacticRecoveryStage::fence)
+            recovery_barrier = control.value().barrier;
+    };
+    const auto frame_summary = [&] {
+        std::string result;
+        for (std::size_t peer = 0; peer < recovery_frames.size(); ++peer)
+            for (std::size_t kind = 0; kind < recovery_frames[peer].size(); ++kind)
+                if (recovery_frames[peer][kind]) result += " " + std::to_string(peer) + ":"
+                    + std::to_string(kind) + "=" + std::to_string(recovery_frames[peer][kind]);
+        return result;
+    };
+    refuse_restore->store(true);
+    auto refused = matches[2]->request_recovery(0);
+    bool refused_settled = false;
+    for (unsigned round = 0; round < 20000; ++round) {
+        for (unsigned peer = 0; peer < 3; ++peer) step(peer, peer < 2 && games[peer]->completed_tick() < initial + 50);
+        if (refused.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready) {
+            const auto reason = refused.get();
+            if (reason != Refusal::restore) throw std::runtime_error("injected recovery returned "
+                + std::string(net::galactic_recovery_reason(reason)) + "; frames:" + frame_summary());
+            refused_settled = true; break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    expect(refused_settled && publications[0] == 0 && publications[1] == 0 && publications[2] == 0
+        && games[0] == survivor0 && games[1] == survivor1,
+        "failed recovery publishes no partial owner and preserves the survivors");
+    if (!refused_settled) throw std::runtime_error("injected recovery refusal did not settle");
+    for (unsigned drain = 0; drain < 4; ++drain) for (unsigned peer = 0; peer < 3; ++peer) step(peer, false);
+    run(initial + 55, false);
+    expect(games[0]->state_sha256() == games[1]->state_sha256() && games[0]->battle() && games[1]->battle(),
+        "survivors continue equally in the child after a refused recovery");
+    refuse_restore->store(false);
+    recovery_frames = {};
+    recovery_barrier.reset();
+    auto recovered = matches[2]->request_recovery(0);
+    bool settled = false;
+    for (unsigned round = 0; round < 20000; ++round) {
+        for (unsigned peer = 0; peer < 3; ++peer)
+            step(peer, peer < 2 && recovery_barrier && games[peer]->completed_tick() < *recovery_barrier);
+        if (recovered.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready) {
+            const auto reason = recovered.get();
+            if (reason != Refusal::none) throw std::runtime_error("resumed child recovery refused: "
+                + std::string(net::galactic_recovery_reason(reason)) + "; fence="
+                + (recovery_barrier ? std::to_string(*recovery_barrier) : "unannounced")
+                + "; ticks=" + std::to_string(games[0]->completed_tick()) + ","
+                + std::to_string(games[1]->completed_tick()) + "," + std::to_string(games[2]->completed_tick())
+                + "; frames:" + frame_summary());
+            settled = true; break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    room.network.before_send = {};
+    expect(recovery_barrier.has_value(), "the source announces a recovery barrier");
+    expect(settled && publications[2] == 1 && publications[0] == 0 && publications[1] == 0,
+        "only the returning owner is published");
+    if (!settled) throw std::runtime_error("resumed child recovery did not settle");
+    for (unsigned drain = 0; drain < 4; ++drain) for (unsigned peer = 0; peer < 3; ++peer) step(peer, false);
+    expect(games[0]->completed_tick() == games[1]->completed_tick()
+        && games[0]->state_sha256() == games[1]->state_sha256()
+        && games[0]->battle() && games[1]->battle()
+        && games[0]->battle()->state_sha256() == games[1]->battle()->state_sha256(),
+        "parent and child agree at the recovered frontier");
+    expect(games[2]->completed_tick() == games[0]->completed_tick()
+        && games[2]->state_sha256() == games[0]->state_sha256() && games[2]->battle()
+        && games[2]->battle()->state_sha256() == games[0]->battle()->state_sha256(),
+        "the returning saved seat agrees at the recovered frontier");
+    run(games[0]->completed_tick() + 20);
+    expect(games[0]->state_sha256() == games[1]->state_sha256()
+        && games[0]->battle() && games[1]->battle()
+        && games[0]->battle()->state_sha256() == games[1]->battle()->state_sha256(),
+        "recovered parent and active child agree after further play");
+    for (const auto& game : games) {
+        expect(game->state_sha256() == games[0]->state_sha256() && game->battle()
+            && game->battle()->state_sha256() == games[0]->battle()->state_sha256(),
+            "every rejoined owner retains equal parent and child state");
+        expect(std::any_of(game->galaxy().seats().begin(), game->galaxy().seats().end(), [&](const auto& seat) {
+            return seat.seat_id == second && seat.active;
+        }), "the original saved human seat is active after rejoin");
+        const auto replay = game->battle_record();
+        expect(replay && std::count_if(replay->commands.begin(), replay->commands.end(), [](const auto& command) {
+            return std::holds_alternative<tactical::GiftPayload>(command.payload);
+        }) == 2, "both gifts execute exactly once across recovery");
+        const auto recording = game->recording();
+        expect(std::count_if(recording.commands.commands.begin(), recording.commands.commands.end(), [](const auto& command) {
+            return std::holds_alternative<gc::BattleChoice>(command.payload);
+        }) == 1, "the resumed battle choice executes exactly once across recovery");
+    }
+    expect(rejected.empty(), "valid resumed child commands are not rejected");
+    for (auto& driver : drivers) driver->session_ended();
+}
+
+void production_file_resume(unsigned workers, bool single_player_rules, bool pending_battle = false) {
+    using Live = eawr::platform::LiveGameSession;
+    using namespace std::chrono_literals;
+    namespace tactical = eawr::sim::tactical;
+    const unsigned count = pending_battle ? 3U : 2U;
+    auto locals = locals_of(count);
+    if (pending_battle) for (auto& local : locals) {
+        local->content.restore_session = [](const cp::CampaignSetupPlan& plan, std::string_view,
+            std::span<const std::uint8_t> saved) -> eawr::core::Result<cp::MpPreparedSession> {
+            eawr::checkpoint::GameLoadOptions load;
+            load.script_requirement = cp::ScriptRequirement::none;
+            load.content = pending_fixture_content;
+            load.conflict_service = [](const auto&, const auto&, auto) {
+                return eawr::core::Result<std::optional<cp::RecordedAdmission>>::success({});
+            };
+            const sim::InlineExecutor executor;
+            auto restored = eawr::checkpoint::load_game_checkpoint(saved,
+                eawr::checkpoint::game_identities(plan.galaxy()), load, executor);
+            if (!restored) return eawr::core::Result<cp::MpPreparedSession>::failure(restored.error());
+            return eawr::core::Result<cp::MpPreparedSession>::success({
+                std::make_shared<cp::GameSession>(std::move(restored).value().session), {}, {}});
+        };
+    }
+    if (single_player_rules) for (auto& local : locals) {
+        auto entry = local->data.campaigns.front();
+        entry.name = "CoopSinglePlayer"; entry.is_multiplayer = false; entry.starting_active_player = "REBEL";
+        local->data.campaigns.push_back(std::move(entry));
+    }
+    GcRoom room(locals, coop_options(*locals[0]), 1);
+    room.resumed_workers = std::make_shared<eawr::platform::ThreadWorkerAdapter>(workers);
+    room.resumed_clock_policy = net::GalacticClockPolicy::limited;
+    room.admit(1, 1, "guest");
+    if (count == 3) room.admit(2, 1, "returning");
+    auto roster = require(net::galactic_roster_draft(room.host().snapshot(), locals[0]->catalog()));
+    if (single_player_rules) roster.campaign = "CoopSinglePlayer";
+    cp::MpSessionTerms terms; terms.seed = match_seed;
+    terms.command_quota = static_cast<std::uint32_t>(net::max_batch_commands);
+    terms.byte_quota = static_cast<std::uint32_t>(net::max_batch_bytes);
+    auto agreed = require(cp::seal_mp_agreement(locals[0]->content, roster, terms));
+    std::shared_ptr<eawr::platform::CampaignServiceConfiguration> pending_services;
+    if (pending_battle) {
+        const auto initial = agreed.plan->galaxy();
+        pending_services = std::make_shared<eawr::platform::CampaignServiceConfiguration>();
+        pending_services->configure = [initial](cp::GameSession& game) {
+            game.set_conflict_service([](const auto&, const auto&, auto) {
+                return eawr::core::Result<std::optional<cp::RecordedAdmission>>::success({});
+            }, pending_fixture_content, {}, cp::ScriptRequirement::none);
+            cp::ConflictRecord entry;
+            entry.id = game.galaxy().next_entity_id(); entry.planet = initial.planets.front().id;
+            entry.invader = 1; entry.defender = 2;
+            entry.tactical.content_identity = initial.content_identity;
+            entry.tactical.players = {{1, 1, 1, 1}, {2, 2, 2, 1}};
+            entry.tactical.campaign.emplace();
+            for (const auto player : {1U, 2U}) {
+                tactical::EconomyPlayer account; account.player = player; account.population_cap = 20; account.credit_cap = Fixed{};
+                entry.tactical.campaign->players.push_back(account);
+            }
+            // The lobby fixture installs no placement services, so the planned galaxy has no fleets and
+            // nothing to deploy. The conflict carries escort forces instead: they need no galactic parent,
+            // and each human seat of the invading side gets one root to control.
+            constexpr gc::TypeId escort_type = 2;
+            const std::array<gc::PlayerId, 4> owners{1, 1, 1, 2};
+            entry.tactical.first_free_entity_id = entry.id + 1 + owners.size();
+            for (std::size_t index = 0; index < owners.size(); ++index) {
+                const auto id = entry.id + 1 + index;
+                cp::ConflictForce force{id, escort_type, owners[index], 0, cp::ForceRole::escort};
+                entry.forces.push_back(force);
+                entry.tactical.units.push_back({id, escort_type, owners[index]});
+            }
+            for (const auto& seat : initial.seats) if (seat.active && seat.player <= 2)
+                entry.seats.push_back({seat.seat_id, seat.player});
+            return game.queue_conflict(std::move(entry), {cp::ConflictRoute::pending_tactical, false, false});
+        };
+    }
+    std::vector<net::SetupSeat> bindings;
+    for (unsigned peer = 0; peer < count; ++peer) bindings.push_back({peer, roster.seats[peer].seat_id, roster.seats[peer].player});
+
+    LivePipes pipes(count);
+    std::vector<std::unique_ptr<LivePipe>> transports(count);
+    std::vector<std::unique_ptr<viewer::GalacticLanMatch>> matches(count);
+    std::vector<std::unique_ptr<Live>> live(count);
+    const auto directory = std::filesystem::temp_directory_path() /
+        ("eawr-lobby-live-resume-" + std::to_string(workers) + (single_player_rules ? "-sp" : "-mp"));
+    std::filesystem::create_directories(directory);
+    std::filesystem::remove(directory / "host.eawrsave");
+    for (unsigned peer = 0; peer < count; ++peer) {
+        transports[peer] = std::make_unique<LivePipe>(pipes, peer);
+        viewer::GalacticLanOptions lan;
+        for (const auto& binding : bindings) lan.seats.push_back({binding.seat, true});
+        matches[peer] = std::make_unique<viewer::GalacticLanMatch>(*transports[peer], lan);
+        Live::Options options; options.workers = workers; options.pacing = Live::Pacing::driven;
+        options.step_driver = matches[peer]->driver(); options.saves.directory = directory.string();
+        options.services = pending_services;
+        eawr::platform::LiveSaveCampaignSource source;
+        source.campaign = roster.campaign; source.difficulty = roster.difficulty; source.multiplayer = true;
+        for (const auto& player : roster.players) source.factions.push_back({player.player, player.faction});
+        options.saves.campaign = std::move(source);
+        live[peer] = require(Live::start(agreed.plan->galaxy(), std::move(options)));
+    }
+    for (auto& peer : live) peer->advance_to(5);
+    for (auto& peer : live) expect(peer->wait_for(5, 30s), "live save fixture reaches tick five");
+    if (pending_battle) for (auto& peer : live)
+        expect(peer->frame().pending_conflict && !peer->frame().battle, "player save starts at a pending conflict");
+    eawr::platform::LiveSaveRequest request; request.seat = bindings[1].seat; request.name = "guest";
+    const auto rejected = live[1]->request_save(request);
+    expect(rejected && live[1]->save_outcomes().back().phase == eawr::platform::LiveSavePhase::rejected,
+        "the guest cannot publish a save");
+    request.seat = bindings[0].seat; request.name = "host";
+    const auto token = live[0]->request_save(request);
+    constexpr std::uint64_t horizon = 60;
+    for (auto& peer : live) peer->advance_to(horizon);
+    for (auto& peer : live) expect(peer->wait_for(horizon, 30s), "live peers continue after saving");
+    expect(live[0]->wait_save(token, 30s), "host file publication finishes");
+    const auto outcome = live[0]->save_outcomes().back();
+    expect(outcome.phase == eawr::platform::LiveSavePhase::completed && outcome.completed_tick < horizon,
+        "host publishes the agreed intermediate checkpoint");
+    const auto hashes = live[0]->tick_hashes();
+    for (const auto& peer : live)
+        expect(hashes == peer->tick_hashes() && hashes.size() >= horizon, "uninterrupted live peers agree");
+    auto bytes = std::make_shared<const Bytes>(require(eawr::platform::read_saved_game_bytes(directory.string(), "host")));
+    for (auto& peer : live) peer->stop();
+    auto candidate = require(room.peers[0].backend->inspect_checkpoint(*bytes));
+    expect(candidate.seed == match_seed && candidate.saved.completed_tick == outcome.completed_tick,
+        "inspection reads the real host file and its saved frontier");
+    auto corrupted = *bytes; corrupted.back() ^= 1;
+    expect(!room.peers[0].backend->inspect_checkpoint(corrupted), "corrupt host file is refused");
+    if (single_player_rules) {
+        auto options = require(net::decode_galactic_lobby_game(room.host().snapshot().game));
+        options.campaign = candidate.original_roster.campaign;
+        auto game = require(net::encode_galactic_lobby_game(options));
+        require(room.host().configure_game(std::move(game), room.host().snapshot().seats, room.revision()));
+        room.rounds(3);
+        for (const auto& peer : room.peers)
+            expect(peer.backend->validate(room.host().snapshot(), true).has_value(),
+                "an eligible SP entry can start as a new co-op game before checkpoint selection");
+    }
+    // Exercise the saved logical identities against the actual published file,
+    // before any checkpoint selection becomes visible in the room.
+    auto unknown = bindings; unknown.back().seat = sim::SeatId{9999};
+    const auto unknown_result = room.peers[0].backend->select_checkpoint(
+        room.host().snapshot(), candidate.original_roster, unknown, bytes, 1);
+    expect(!unknown_result && unknown_result.error().message.find("unknown_saved_human_seat") != std::string::npos,
+        "the actual host file refuses an unknown saved seat");
+    auto faction = bindings; faction.back().player = 2;
+    const auto faction_result = room.peers[0].backend->select_checkpoint(
+        room.host().snapshot(), candidate.original_roster, faction, bytes, 1);
+    expect(!faction_result && faction_result.error().message.find("saved_faction_mismatch") != std::string::npos,
+        "the actual host file refuses a different saved faction");
+    auto duplicate = bindings; duplicate.back().seat = duplicate.front().seat;
+    const auto duplicate_result = room.peers[0].backend->select_checkpoint(
+        room.host().snapshot(), candidate.original_roster, duplicate, bytes, 1);
+    expect(!duplicate_result && duplicate_result.error().message.find("duplicate_saved_seat") != std::string::npos,
+        "the actual host file refuses a duplicate saved seat");
+    expect(!room.peers[0].backend->checkpoint_view() && room.peers[0].backend->initial_tick() == 0,
+        "refused mappings never publish a partial restored owner");
+    for (auto& peer : room.peers) peer.backend->acceptance_final_tick(pending_battle ? 300 : horizon);
+    require(room.peers[0].backend->select_checkpoint(room.host().snapshot(), candidate.original_roster, bindings, bytes, 1));
+    for (unsigned i = 0; i < 1000 && !room.peers[0].backend->checkpoint_progress().agreed; ++i) room.round();
+    expect(room.peers[0].backend->checkpoint_progress().agreed, "both peers accept the transferred file");
+    room.all_ready();
+    require(room.host().start(room.revision())); room.rounds(3);
+    for (unsigned peer = 1; peer < count; ++peer) require(room.sessions[peer].accept_setup());
+    for (unsigned i = 0; i < 1000 && !std::all_of(room.sessions.begin(), room.sessions.end(),
+        [](const auto& session) { return session.result_ready(); }); ++i) room.round();
+    std::vector<net::LobbyResult> results;
+    for (auto& session : room.sessions) results.push_back(require(session.take_result()));
+    for (std::size_t i = 0; i < room.peers.size(); ++i) {
+        const auto& peer = room.peers[i];
+        expect(peer.agreement()->session->completed_tick() == outcome.completed_tick
+            && results[i].setup().adapter().state_hash() == hashes.at(outcome.completed_tick - 1)
+            && peer.agreement()->plan->galaxy().uses_network_transport()
+            && peer.agreement()->plan->rules_flavour() == (single_player_rules
+                ? cp::CampaignRulesFlavour::single_player : cp::CampaignRulesFlavour::multiplayer),
+            "restored N equals the uninterrupted live owner");
+        if (pending_battle) expect(peer.agreement()->session->pending_conflict() != nullptr,
+            "the real host file restores its pending conflict before the choice");
+    }
+    if (pending_battle) {
+        recover_resumed_child(room, std::move(results), bytes, workers);
+        eawr::testing::remove_temp_directory(directory);
+        return;
+    }
+    for (unsigned i = 0; i < 2000; ++i) {
+        ++room.network.round;
+        for (auto& result : results) require(result.setup().session().pump(room.network.round));
+    }
+    for (std::size_t i = 0; i < room.peers.size(); ++i)
+        expect(room.peers[i].agreement()->session->completed_tick() == horizon
+            && results[i].setup().adapter().state_hash() == hashes.at(horizon - 1),
+            "resumed N+k equals the uninterrupted live owner");
+    eawr::testing::remove_temp_directory(directory);
+}
+
+std::string checkpoint_room_resume(unsigned workers, unsigned count, bool relay, bool departed = false, unsigned lobby_failure = 0,
+    bool single_player_rules = false) {
+    auto locals = locals_of(count);
+    for (auto& local : locals) {
+        auto campaign = local->data.campaigns.front();
+        campaign.name = "CoopSinglePlayer"; campaign.is_multiplayer = false;
+        campaign.starting_active_player = "REBEL";
+        local->data.campaigns.push_back(std::move(campaign));
+    }
+    GcRoom room(locals, coop_options(*locals[0]), 1);
+    room.resumed_workers = std::make_shared<eawr::platform::ThreadWorkerAdapter>(workers);
+    room.resumed_clock_policy = net::GalacticClockPolicy::limited;
+    for (unsigned peer = 1; peer < count; ++peer) room.admit(peer, 1, "human" + std::to_string(peer));
+    auto roster = require(net::galactic_roster_draft(room.host().snapshot(), locals[0]->catalog()));
+    if (single_player_rules) roster.campaign = "CoopSinglePlayer";
+    if (departed) {
+        for (auto& seat : roster.seats) if (seat.kind != sim::SeatKind::human) ++seat.seat_id.value;
+        roster.seats.insert(roster.seats.begin() + static_cast<std::ptrdiff_t>(count),
+            gc::Seat{sim::SeatId{count + 1}, 1, sim::SeatKind::human, count, true, 1});
+    }
+    // Logical saved IDs deliberately differ from the new room's ephemeral IDs.
+    for (auto& seat : roster.seats) seat.seat_id.value += 10;
+    for (auto& team : roster.teams) team.lead.value += 10;
+    cp::MpSessionTerms terms; terms.seed = match_seed;
+    terms.command_quota = static_cast<std::uint32_t>(net::max_batch_commands); terms.byte_quota = static_cast<std::uint32_t>(net::max_batch_bytes);
+    auto source = require(cp::seal_mp_agreement(locals[0]->content, roster, terms));
+    net::GalacticAdapterOptions clock_options; clock_options.clock_policy = net::GalacticClockPolicy::limited;
+    net::GalacticSessionAdapter source_adapter(*source.session, *room.resumed_workers, clock_options);
+    constexpr std::uint64_t boundary = 7, horizon = 20;
+    if (departed) require(source.session->submit({{0, sim::SeatId{count + 11}, 0}, gc::SeatLeave{}}));
+    for (std::uint64_t tick = 0; tick < boundary; ++tick) require(source_adapter.step());
+    auto sequences = source.session->producer_sequences();
+    std::vector<net::SetupSeat> bindings;
+    for (unsigned peer = 0; peer < count; ++peer) {
+        const sim::SeatId seat{peer + 11}; sequences[seat] = 100 + peer;
+        bindings.push_back({peer, seat, 1});
+        room.peers[peer].backend->acceptance_final_tick(horizon);
+    }
+    require(source.session->retain_network_producer_sequences(sequences));
+    require(source.session->retain_network_resume_state(source_adapter.checkpoint_network_state()));
+    auto saved = require(eawr::checkpoint::parse_checkpoint(require(eawr::checkpoint::save_game_checkpoint(*source.session,
+        eawr::checkpoint::game_identities(source.session->galaxy().setup())))));
+    eawr::platform::LiveSaveCampaign description;
+    description.campaign = roster.campaign; description.difficulty = roster.difficulty; description.multiplayer = true;
+    description.faction = roster.players.front().faction; description.seat = bindings.front().seat.value;
+    saved.sections.push_back(eawr::platform::save_detail::encode_campaign(description));
+    const auto bytes = std::make_shared<const Bytes>(require(eawr::checkpoint::write_checkpoint(saved)));
+    auto candidate = require(room.peers[0].backend->inspect_checkpoint(*bytes));
+    if (single_player_rules) {
+        expect(room.peers[0].backend->campaigns().size() == 2,
+            "the eligible SP campaign is offered in the co-op catalog");
+        auto wrong = roster; wrong.campaign = "Multiplayer";
+        expect(!room.peers[0].backend->select_checkpoint(room.host().snapshot(), wrong, bindings, bytes, 1),
+            "saved SP setup cannot be restored as the MP entry");
+    }
+    if (!single_player_rules) {
+        auto wrong = roster; wrong.campaign = "CoopSinglePlayer";
+        expect(!room.peers[0].backend->select_checkpoint(room.host().snapshot(), wrong, bindings, bytes, 1),
+            "saved MP setup cannot be restored as the SP entry");
+    }
+    candidate.original_roster.tick_zero = roster.tick_zero;
+    expect(candidate.original_roster == roster && candidate.seed == match_seed, "UI inspection recovers original saved roster and seed without new-game placement");
+    expect(candidate.original_roster.players.size() == 4
+        && candidate.original_roster.players[2].faction == "UNDERWORLD"
+        && candidate.original_roster.players[3].faction == "NEUTRAL"
+        && std::any_of(candidate.original_roster.seats.begin(), candidate.original_roster.seats.end(), [](const auto& seat) {
+            return seat.player == 3 && seat.kind == sim::SeatKind::ai;
+        }), "saved roster retains the non-playable AI and neutral owners");
+    if (workers == 1 && !relay) {
+        auto wrong_seed_room = room.host().snapshot();
+        auto wrong_seed_options = require(net::decode_galactic_lobby_game(wrong_seed_room.game));
+        ++wrong_seed_options.seed;
+        wrong_seed_room.game = require(net::encode_galactic_lobby_game(wrong_seed_options));
+        expect(!room.peers[0].backend->prepare_checkpoint(wrong_seed_room, roster, bindings, bytes, 1),
+            "a room seed that differs from the saved setup is refused");
+        auto missing = bindings; missing.pop_back();
+        const auto missing_result = room.peers[0].backend->select_checkpoint(room.host().snapshot(), roster, missing, bytes, 1);
+        expect(!missing_result && missing_result.error().message.find("missing_human_seat") != std::string::npos, "missing saved human refuses by name");
+        auto unknown = bindings; unknown.back().seat = sim::SeatId{9999};
+        const auto unknown_result = room.peers[0].backend->select_checkpoint(room.host().snapshot(), roster, unknown, bytes, 1);
+        expect(!unknown_result && unknown_result.error().message.find("unknown_saved_human_seat") != std::string::npos, "unknown saved seat is refused");
+        auto faction = bindings; faction.back().player = 2;
+        const auto faction_result = room.peers[0].backend->select_checkpoint(room.host().snapshot(), roster, faction, bytes, 1);
+        expect(!faction_result && faction_result.error().message.find("saved_faction_mismatch") != std::string::npos, "saved faction mismatch is refused");
+        auto duplicate = bindings; duplicate.back().seat = duplicate.front().seat;
+        const auto duplicate_result = room.peers[0].backend->select_checkpoint(room.host().snapshot(), roster, duplicate, bytes, 1);
+        expect(!duplicate_result && duplicate_result.error().message.find("duplicate_saved_seat") != std::string::npos, "duplicate saved human refuses by name");
+        auto extra = bindings; extra.push_back({count, sim::SeatId{99}, 1});
+        const auto extra_result = room.peers[0].backend->select_checkpoint(room.host().snapshot(), roster, extra, bytes, 1);
+        expect(!extra_result && extra_result.error().message.find("extra_human_seat") != std::string::npos, "extra human refuses by name");
+        if (departed) {
+            auto inactive = bindings; inactive.back().seat = sim::SeatId{count + 11};
+            const auto inactive_result = room.peers[0].backend->select_checkpoint(room.host().snapshot(), roster, inactive, bytes, 1);
+            expect(!inactive_result && inactive_result.error().message.find("inactive_saved_seat") != std::string::npos, "departed saved human cannot reactivate through mapping");
+        }
+    }
+    room.all_ready();
+    if (workers == 1 && !relay) {
+        auto prepared = require(room.peers[0].backend->prepare_checkpoint(room.host().snapshot(), roster, bindings, bytes, 1));
+        auto display_only = room.host().snapshot();
+        display_only.mounted_mods = {1, 1, 0, 0, 0, 0};
+        const auto with_mods = require(room.peers[0].backend->prepare_checkpoint(display_only, roster, bindings, bytes, 1));
+        expect(with_mods.manifest.offer.setup == prepared.manifest.offer.setup
+            && with_mods.manifest.offer.identity.build == prepared.manifest.offer.identity.build
+            && with_mods.manifest.offer.identity.content == prepared.manifest.offer.identity.content
+            && with_mods.agreement->session->state_sha256() == prepared.agreement->session->state_sha256(),
+            "lobby mod descriptions do not affect checkpoint setup, identity or simulation hash");
+        expect(!room.peers[0].backend->checkpoint_view(), "preparation does not publish a checkpoint");
+        auto changed = room.host().snapshot();
+        ++changed.revision;
+        expect(!room.peers[0].backend->commit_checkpoint(std::move(prepared), changed),
+            "a changed room refuses an asynchronously prepared checkpoint");
+        expect(!room.peers[0].backend->checkpoint_view(), "stale preparation leaves the room unchanged");
+    }
+    if (lobby_failure == 2) room.network.fault = [](auto, auto, std::span<const std::uint8_t> frame) {
+        eawr::testing::FakeDelivery delivery; delivery.drop = !frame.empty() && frame.front() == net::save_chunk_kind; return delivery;
+    };
+    require(room.peers[0].backend->select_checkpoint(room.host().snapshot(), roster, bindings, bytes, 1));
+    if (lobby_failure == 2) {
+        room.rounds(3);
+        expect(room.peers[1].backend->checkpoint_manifest() && !room.peers[1].backend->checkpoint_progress().restored,
+            "failure before private restore retains a pending manifest");
+    }
+    if (relay) room.network.emulate(eawr::testing::wan_profiles[1]);
+    if (lobby_failure != 2) {
+        for (unsigned round = 0; round < 1000 && !room.peers[0].backend->checkpoint_progress().agreed; ++round) room.round();
+        expect(room.peers[0].backend->checkpoint_progress().agreed, "all restored proofs agree before Start");
+    }
+    if (lobby_failure) {
+        if (lobby_failure == 3) {
+            require(room.host().kick(2, room.revision())); room.drop_last();
+            const auto survived = room.sessions[1].pump(++room.network.round);
+            expect(static_cast<bool>(survived), "saved-seat refusal preserves surviving guest staging room");
+            expect(room.sessions[1].snapshot().seats.size() == 2, "survivor accepts reduced authoritative roster");
+            room.rounds(3);
+            for (unsigned peer = 0; peer < room.sessions.size(); ++peer) {
+                const auto progress = room.peers[peer].backend->checkpoint_progress();
+                expect(progress.refusal && progress.refusal->message.find("missing_human_seat") != std::string::npos,
+                    "missing saved human is a named refusal on every survivor");
+            }
+            const auto started = room.host().start(room.revision());
+            expect(!started && started.error().message.find("missing_human_seat") != std::string::npos,
+                "incomplete saved mapping cannot activate setup");
+        } else {
+            Bytes cancel{net::save_cancel_kind, 1,0,0,0,0,0,0,0, 14,0,0,0};
+            const std::string reason = "peer_cancelled"; cancel.insert(cancel.end(), reason.begin(), reason.end());
+            require(room.transports[1]->send(0, cancel)); room.rounds(3);
+            expect(room.peers[0].backend->checkpoint_progress().refusal.has_value(), "host receives peer cancellation");
+        }
+        require(room.sessions[1].chat("still in the staging room")); room.rounds(3);
+        expect(!room.host().chat_history().empty(), "chat remains usable after saved-seat/transfer refusal");
+        room.peers[0].backend->clear_checkpoint(); room.network.fault = {}; room.rounds(3);
+        for (unsigned peer = 0; peer < room.sessions.size(); ++peer) {
+            expect(!room.peers[peer].backend->checkpoint_manifest() && room.peers[peer].backend->initial_tick() == 0,
+                "explicit New Campaign clears even an already-refused transfer on every peer");
+            expect(room.sessions[peer].snapshot().phase == net::LobbyPhase::staging && !room.sessions[peer].setup_phase(),
+                "refusal never partially activates a setup");
+        }
+        room.commit();
+        for (auto& session : room.sessions) {
+            auto launch = require(session.take_result());
+            expect(launch.setup().adapter().completed_tick() == 0, "ordinary new-game launch succeeds after refused checkpoint is cleared");
+        }
+        return "cleared";
+    }
+    for (const auto& seat : room.host().snapshot().seats) expect(!seat.ready, "checkpoint selection clears every ready vote");
+    for (unsigned peer = 0; peer < count; ++peer) {
+        expect(room.peers[peer].backend->initial_tick() == boundary, "every peer restored completed N");
+        expect(room.peers[peer].backend->producer_sequences() == sequences, "logical producer continuation agrees");
+    }
+    // WAN delivery needs more than the fixture's three-round readiness helper.
+    room.round(2000);
+    for (auto& session : room.sessions) require(session.request(net::LobbyAction::ready, room.revision()));
+    room.rounds(300);
+    require(room.host().start(room.revision())); room.rounds(300);
+    for (unsigned peer = 1; peer < count; ++peer) require(room.sessions[peer].accept_setup());
+    for (unsigned round = 0; round < 1000 && !std::all_of(room.sessions.begin(), room.sessions.end(),
+        [](const auto& session) { return session.result_ready(); }); ++round) room.round();
+    std::vector<net::LobbyResult> results;
+    for (auto& session : room.sessions) results.push_back(require(session.take_result()));
+    for (unsigned peer = 0; peer < count; ++peer) {
+        expect(results[peer].setup().adapter().completed_tick() == boundary, "setup hash barrier never steps restored owner");
+        expect(room.peers[peer].agreement()->session->state_sha256() == source.session->state_sha256()
+            && results[peer].setup().adapter().state_hash() == source_adapter.state_hash(), "restored N equals the source state and limited clock");
+        expect(results[peer].setup().offer().seats == bindings, "authenticated peers retain assigned saved logical seats");
+    }
+    std::vector<net::SeatInput> source_inputs;
+    for (unsigned peer = 0; peer < count; ++peer) {
+        const auto admission_tick = std::max(results[peer].setup().session().next_seal(), boundary + 3);
+        const auto key = require(results[peer].setup().session().submit([](auto stamp) {
+            return net::encode_galactic_input(stamp, gc::PauseGalaxy{});
+        }));
+        expect(key.sequence == sequences.at(bindings[peer].seat) + 1 && key.tick == admission_tick,
+            "actual resumed campaign command follows saved inclusive maximum at the preserved lead");
+        source_inputs.push_back({key, require(net::encode_galactic_input(key, gc::PauseGalaxy{}))});
+    }
+    for (unsigned round = 0; round < 2000; ++round) {
+        ++room.network.round;
+        for (auto& result : results) require(result.setup().session().pump(room.network.round));
+    }
+    std::sort(source_inputs.begin(), source_inputs.end(), [](const auto& a, const auto& b) { return a.key < b.key; });
+    for (std::uint64_t tick = boundary; tick < horizon; ++tick) {
+        std::vector<net::SeatInput> inputs;
+        for (const auto& input : source_inputs) if (input.key.tick == tick) inputs.push_back(input);
+        require(source_adapter.install(inputs));
+        require(source_adapter.step());
+    }
+    for (std::size_t peer = 0; peer < room.peers.size(); ++peer)
+        expect(room.peers[peer].agreement()->session->completed_tick() == horizon
+            && room.peers[peer].agreement()->session->state_sha256() == source.session->state_sha256()
+            && results[peer].setup().adapter().state_hash() == source_adapter.state_hash(), "continued N+k equals uninterrupted campaign and limited clock");
+    return source.session->state_sha256();
+}
+
 
 void check_committed(GcRoom& room, const std::string& label, std::size_t humans, std::uint64_t seed = match_seed) {
     std::vector<net::LobbyResult> results;
@@ -600,6 +1599,26 @@ void two_peer_room() {
     expect(!room.host().set_game(net::LobbyGame{"Multiplayer", {'1', ' ', '3'}}, room.revision()), "skirmish bytes are not GC options");
     room.commit();
     check_committed(room, "two peers", 2);
+}
+
+void saved_mapping_clears_every_acceptance() {
+    auto locals = locals_of(2);
+    const auto options = two_side_options(*locals[0]);
+    GcRoom room(locals, options, 1);
+    room.admit(1, 2, "guest");
+    room.all_ready();
+    auto assignments = room.host().snapshot().seats;
+    expect(std::all_of(assignments.begin(), assignments.end(), [](const auto& row) { return row.ready; }),
+        "host and guest both accepted before saved mapping changes");
+    const auto first = assignments[0].selection;
+    assignments[0].selection = assignments[1].selection; assignments[0].selection.name = first.name;
+    assignments[1].selection = first; assignments[1].selection.name = "guest";
+    assignments[0].player = 2; assignments[1].player = 1;
+    require(room.host().configure_game(room.host().snapshot().game, assignments, room.revision()));
+    room.rounds(3);
+    for (const auto& session : room.sessions)
+        expect(std::none_of(session.snapshot().seats.begin(), session.snapshot().seats.end(), [](const auto& row) { return row.ready; }),
+            "atomic saved faction mapping clears every prior acceptance on both peers");
 }
 
 // The host switches a playable row Open <-> AI; a joined peer sees each edit and cannot be left on an AI row.
@@ -691,6 +1710,172 @@ void content_mismatch_returns_to_staging() {
     room.rounds(30);
     expect(room.host().snapshot().phase == net::LobbyPhase::staging && room.peers[1].builds == 0,
         "a peer whose installed AI data differs is refused before any shared step and the room returns to staging");
+}
+
+void mounted_mod_warning() {
+    namespace mods = eawr::mods;
+    mods::DescriptionEntry alpha; alpha.kind = mods::DescriptionKeyKind::workshop;
+    alpha.key = "workshop:alpha"; alpha.name = "Alpha"; alpha.version = "1";
+    alpha.checksum = std::array<std::uint8_t, 32>{};
+    auto beta = alpha; beta.key = "workshop:beta"; beta.name = "Beta";
+    const mods::ModDescription host{true, {alpha, beta}};
+    expect(eawr::viewer::mod_mismatch_message(host, host).empty(), "matching mods do not prompt");
+    const auto missing = eawr::viewer::mod_mismatch_message(host, {true, {alpha}});
+    expect(missing.find("Beta") != std::string::npos, "missing mod is named");
+    const auto reordered = eawr::viewer::mod_mismatch_message(host, {true, {beta, alpha}});
+    expect(reordered.find("Alpha") != std::string::npos && reordered.find("Beta") != std::string::npos,
+        "both orders name their mods");
+    expect(eawr::viewer::mod_mismatch_message(host, {}).empty(), "incomplete identities do not invent a mismatch");
+    expect(eawr::viewer::mod_comparison_incomplete(host, {}), "unavailable identities require an uncertain review");
+    expect(!eawr::viewer::mod_comparison_incomplete(host, host), "complete identical content needs no uncertain review");
+    auto changed = beta; changed.version = "2";
+    const auto version = eawr::viewer::mod_mismatch_message(host, {true, {alpha, changed}});
+    expect(version.find("Beta") != std::string::npos && version.find("host version 1") != std::string::npos
+        && version.find("your version 2") != std::string::npos, "version differences identify the host and guest");
+}
+
+// #5573: a campaign Start that the room aborts keeps the room's own reason, and the player's text names the part
+// of the two setups that differs instead of blaming the online service.
+void refused_start_is_diagnosed() {
+    const auto refused = [](GcRoom& room) {
+        room.admit(1, 2, "guest");
+        room.propose();
+        (void)room.sessions[1].accept_setup();
+        room.rounds(30);
+        expect(room.host().snapshot().phase == net::LobbyPhase::staging && room.host().notice()
+            && room.host().notice()->reason == net::LobbyReason::setup_failed, "the host reopens staging with a setup_failed notice");
+        return *room.host().notice();
+    };
+    const auto text_of = [](const net::LobbyNotice& notice) {
+        const auto diagnostic = viewer::galactic_start_aborted(notice);
+        expect(diagnostic.code == "EAWR-NET-1609", "a setup refusal is EAWR-NET-1609");
+        return viewer::online_start_failure_text(diagnostic, viewer::LanReason::refused, true);
+    };
+    const std::string tail = " Both players need the same game version, mods and campaign data.";
+    {
+        auto locals = locals_of(2);
+        locals[1]->content.ai_configuration = [](std::string_view faction, gc::PlayerId player, std::string_view) {
+            std::string text = "other:" + std::string(faction) + ":" + std::to_string(player);
+            return eawr::core::Result<Bytes>::success(Bytes(text.begin(), text.end()));
+        };
+        const auto options = two_side_options(*locals[0]);
+        GcRoom room(locals, options, 1);
+        const auto notice = refused(room);
+        expect(notice.message == "host offer differs from frozen room choices: ai-configuration",
+            "the guest names its differing AI claim: " + notice.message);
+        expect(text_of(notice) == "The campaign could not be set up with the other player. The AI configuration differs between your games." + tail,
+            "a differing AI claim is named in plain words");
+    }
+    {
+        auto locals = locals_of(2);
+        locals[1]->content.xml_digest = std::string(64, 'd');
+        const auto options = two_side_options(*locals[0]);
+        GcRoom room(locals, options, 1);
+        const auto notice = refused(room);
+        expect(notice.message == "match identity mismatch: gc-ai-data", "the identity refusal names its domain: " + notice.message);
+        expect(text_of(notice) == "The campaign could not be set up with the other player. The AI configuration differs between your games." + tail,
+            "differing AI data is named in plain words");
+    }
+    {
+        auto locals = locals_of(2);
+        locals[1]->content.script_manifest_digest = std::string(64, 'e');
+        const auto options = two_side_options(*locals[0]);
+        GcRoom room(locals, options, 1);
+        const auto notice = refused(room);
+        const auto text = text_of(notice);
+        expect(text.find("online service") == std::string::npos && text.ends_with(tail), "any other refusal gets the curated sentence: " + notice.message);
+    }
+    // The room's own reason survives (a withdrawn guest used to read as a setup failure).
+    auto locals = locals_of(2);
+    const auto options = two_side_options(*locals[0]);
+    GcRoom withdrawn(locals, options, 1);
+    withdrawn.admit(1, 2, "guest");
+    withdrawn.propose();
+    require(withdrawn.sessions[1].request(net::LobbyAction::unready, withdrawn.revision()));
+    withdrawn.rounds(3);
+    const auto& notice = withdrawn.host().notice();
+    expect(withdrawn.host().snapshot().phase == net::LobbyPhase::staging && notice && notice->reason == net::LobbyReason::not_ready,
+        "a guest withdrawing during Start aborts it with not_ready");
+    const auto diagnostic = viewer::galactic_start_aborted(notice);
+    expect(diagnostic.code == net::lobby_diagnostic(net::LobbyReason::not_ready, "").code && diagnostic.message == notice->message,
+        "the Start diagnostic keeps the notice's reason and message");
+    expect(viewer::online_start_failure_text(diagnostic, viewer::LanReason::cancelled, true).find("no longer ready") != std::string::npos,
+        "a withdrawn guest has its own online text");
+}
+
+// The Start log line both peers write: equal for agreeing peers, and it shows which input differs when they do not.
+void start_summary_compares_peers() {
+    const auto summary_of = [](Local& local, bool host) {
+        viewer::GalacticLobbyBackend backend(local.content);
+        const auto options = two_side_options(local);
+        const auto snapshot = snapshot_of(options, {seat_of(0, 1, options, 1, "Host"), seat_of(1, 2, options, 2, "Guest")});
+        const std::vector<net::SetupSeat> seats{{0, {1}, 1}, {1, {2}, 2}};
+        return backend.start_summary(require(backend.offer(snapshot, seats)), host);
+    };
+    const auto field = [](const std::string& line, const std::string& name) {
+        const auto at = line.find(" " + name + "=");
+        if (at == std::string::npos) return std::string{};
+        const auto start = at + name.size() + 2;
+        return line.substr(start, line.find(' ', start) - start);
+    };
+    Local host, same, other_ai;
+    other_ai.content.ai_configuration = [](std::string_view faction, gc::PlayerId player, std::string_view) {
+        std::string text = "other:" + std::string(faction) + ":" + std::to_string(player);
+        return eawr::core::Result<Bytes>::success(Bytes(text.begin(), text.end()));
+    };
+    const auto a = summary_of(host, true), b = summary_of(same, false), c = summary_of(other_ai, false);
+    expect(a.starts_with("role=host ") && b.starts_with("role=guest "), "the line names the role: " + a);
+    for (const char* name : {"mods", "scripts", "xml", "payload", "ai", "tick_zero", "identity", "domains"})
+        expect(!field(a, name).empty() && field(a, name) == field(b, name), std::string("agreeing peers log an equal ") + name);
+    expect(field(a, "payload") != field(c, "payload") && field(a, "ai") != field(c, "ai") && field(a, "domains") != field(c, "domains"),
+        "a differing AI claim shows in the payload, AI and domain digests");
+    expect(field(a, "xml") == field(c, "xml") && field(a, "scripts") == field(c, "scripts"), "the content digests that did not change stay equal");
+    expect(a.find("gc-room") == std::string::npos && a.find("Host") == std::string::npos && a.find("Guest") == std::string::npos,
+        "the line carries no room code or player name");
+    expect(a.find("domains=gc-ai-controllers:") != std::string::npos || a.find("gc-ai-controllers:") != std::string::npos, "identity domains are listed by name");
+}
+
+// The message strings the setup service and the guest derivation produce, and what the player is told for each.
+void setup_failure_texts() {
+    const std::string generic = "The campaign could not be set up with the other player. Both players need the same game version, mods and campaign data.";
+    const auto setup_failed = [](std::string message) { return net::lobby_diagnostic(net::LobbyReason::setup_failed, std::move(message)); };
+    const auto text = [&](std::string message, viewer::LanReason reason = viewer::LanReason::refused) {
+        return viewer::online_start_failure_text(setup_failed(std::move(message)), reason, true);
+    };
+    expect(text("host offer differs from frozen room choices") == generic, "an unnamed offer difference gets the generic sentence");
+    expect(text("tick-zero state differs") == generic, "a tick-zero refusal gets the generic sentence");
+    expect(text("Campaign content is unavailable.") == generic, "a guest derivation error gets the generic sentence");
+    expect(text("cannot read C:\\Users\\someone\\data\\file.xml") == generic, "a raw implementation string is never passed on");
+    expect(text("host offer differs from frozen room choices: start-state").find("The mods or campaign data differ between your games.") != std::string::npos,
+        "a differing start state is named as campaign data");
+    expect(text("match identity mismatch: gc-map").find("differs") == std::string::npos, "the data sentence is plural");
+    expect(text("match identity mismatch: gc-rules").find("The game version differs") != std::string::npos, "differing rules read as the game version");
+    expect(text("match identity mismatch: gc-map").find("The mods or campaign data differ between your games.") != std::string::npos, "a differing map reads as campaign data");
+    expect(text("match identity mismatch: something-new") == generic, "an unknown identity domain gets the generic sentence");
+    expect(text("setup readiness wait expired", viewer::LanReason::timeout) == "The campaign setup took too long. Try again.", "a timeout says so");
+    expect(text("peer disconnected during setup", viewer::LanReason::peer_left).find("left while") != std::string::npos, "a lost peer says so");
+    expect(viewer::online_start_failure_text(net::lobby_diagnostic(net::LobbyReason::link_closed, "peer lost during Start announcement"),
+        viewer::LanReason::peer_left, true).find("connection to the other player was lost") != std::string::npos, "link_closed has its own text");
+    expect(viewer::online_start_failure_text(net::lobby_diagnostic(net::LobbyReason::invalid_choice, "x"), viewer::LanReason::refused, true).empty(),
+        "other codes keep their existing handling");
+    // Online skirmish rooms fail Start with the same codes; none of the campaign wording reaches them.
+    for (const auto reason : {net::LobbyReason::setup_failed, net::LobbyReason::not_ready, net::LobbyReason::link_closed,
+             net::LobbyReason::left, net::LobbyReason::kicked, net::LobbyReason::host_closed})
+        expect(viewer::online_start_failure_text(net::lobby_diagnostic(reason, "match identity mismatch: gc-ai-data"),
+            viewer::LanReason::refused, false).empty(), "a skirmish room keeps the generic online text for every Start code");
+    const auto absent = viewer::galactic_start_aborted(std::nullopt);
+    expect(absent.code == "EAWR-NET-1609" && absent.message == "The campaign room ended before commitment.", "a room without a notice is a setup failure");
+
+    expect(viewer::failure_log_detail(setup_failed("host offer differs from frozen room choices: ai-configuration"))
+        == "message=\"host offer differs from frozen room choices: ai-configuration\"", "the log carries the real setup message");
+    expect(viewer::failure_log_detail(setup_failed("cannot read C:\\Users\\someone\\data\\file.xml now")) == "message=\"cannot read <path> now\"",
+        "path-like tokens are cut from the logged message");
+    expect(viewer::failure_log_detail(setup_failed("say \"hi\"")) == "message=\"say 'hi'\"", "quotes cannot break the log line");
+    expect(viewer::failure_log_detail(setup_failed(std::string(400, 'a'))).size() < 200, "the logged message is bounded");
+    eawr::core::Diagnostic named; named.code = "EAWR-NET-1762"; named.message = "Player Name could not reach Other Name";
+    expect(viewer::failure_log_detail(named).empty(), "messages that may name players are not logged");
+    named.code = "EAWR-NET-1520";
+    expect(viewer::failure_log_detail(named).empty(), "service messages are not logged");
 }
 
 // ---- the viewer's own match (what the lobby screen drives) over real loopback TCP ----
@@ -896,9 +2081,16 @@ struct LaunchOptions {
     std::string campaign;
     std::uint32_t seat{};
 };
-void verify_launch(const std::vector<std::shared_ptr<viewer::GalacticLaunch>>& launches) {
+void verify_launch(const std::vector<std::shared_ptr<viewer::GalacticLaunch>>& launches, bool host_saves = false) {
+    const auto initial_tick = launches.front()->owner->initial_tick;
     using Live = eawr::platform::LiveGameSession;
     std::vector<std::unique_ptr<Live>> games;
+    // #6012: a save made by the host of a lobby-started game, on the start path itself (no hand-set save campaign).
+    const auto save_directory = std::filesystem::temp_directory_path() / "eawr-lobby-launch-save-6012";
+    if (host_saves) {
+        std::filesystem::create_directories(save_directory);
+        std::filesystem::remove(save_directory / "lobby save.eawrsave");
+    }
     for (std::size_t peer = 0; peer < launches.size(); ++peer) {
         const auto& launch = launches[peer];
         LaunchOptions options;
@@ -913,24 +2105,119 @@ void verify_launch(const std::vector<std::shared_ptr<viewer::GalacticLaunch>>& l
                 && player.faction == seat.selection.faction, "LAN HUD identities follow the dense agreed seat order");
         }
         expect(options.lan_match->local_seat().value == launch->seat, "driver and viewer use the same local seat");
-        expect(launch->owner->session && launch->owner->session->completed_tick() == 0,
-            "launch keeps the derived tick-zero session");
+        expect(launch->owner->session && launch->owner->session->completed_tick() == initial_tick,
+            "launch keeps the agreed initial owner");
         Live::Options live; live.pacing = Live::Pacing::driven; live.workers = peer % 2 == 0 ? 1 : 4;
+        if (host_saves) live.saves.directory = save_directory.string();
         games.push_back(require(launch->start(std::move(live))));
     }
     constexpr std::uint64_t ticks = 12;
-    for (auto& game : games) game->advance_to(ticks);
-    for (auto& game : games) expect(game->wait_for(ticks, std::chrono::seconds(20)), "committed GC lobby advances agreed ticks");
+    for (auto& game : games) game->advance_to(initial_tick + ticks);
+    for (auto& game : games) expect(game->wait_for(initial_tick + ticks, std::chrono::seconds(20)), "committed GC lobby advances agreed ticks");
+    for (std::size_t peer = 0; peer < launches.size(); ++peer) {
+        const auto& launch = launches[peer];
+        const auto recovery = launch->match->view();
+        expect(recovery.recovery_anchor && recovery.recovery_anchor->completed_tick >= initial_tick + ticks
+            && recovery.recovery_refusal.empty(),
+            "real committed launches retain recovery through their current completed frontier");
+        const auto remote = static_cast<net::PeerIndex>((peer + 1) % launches.size());
+        auto retained = launch->match->recovery_package(remote,
+            {*recovery.recovery_anchor, launch->roster.seats[remote].seat});
+        expect(retained.wait_for(std::chrono::seconds(5)) == std::future_status::ready,
+            "the live loading owner answers its retained-checkpoint query");
+        const auto package = require(retained.get());
+        expect(package.checkpoint.completed_tick == initial_tick
+            && package.frontier.completed_tick >= initial_tick + ticks,
+            "new and resumed launches retain the initial checkpoint separately from the advancing frontier");
+    }
+    if (host_saves) {
+        // After the recovery checks above: a save refreshes the retained checkpoint, which those checks pin to the initial one.
+        eawr::platform::LiveSaveRequest request; request.seat = sim::SeatId{launches.front()->seat}; request.name = "lobby save";
+        const auto save_token = games.front()->request_save(request);
+        expect(save_token != 0, "the host requests a save of the lobby-started game");
+        const auto save_horizon = initial_tick + ticks + 12;
+        for (auto& game : games) game->advance_to(save_horizon);
+        for (auto& game : games) expect(game->wait_for(save_horizon, std::chrono::seconds(20)), "lobby-started games continue past the save");
+        expect(games.front()->wait_save(save_token, std::chrono::seconds(30)), "the lobby-started game's save is published");
+        const auto slot = require(eawr::platform::read_save_slot(save_directory.string(), "lobby save"));
+        expect(slot.campaign && slot.campaign->multiplayer && slot.campaign->campaign == "Multiplayer" && !slot.campaign->faction.empty()
+            && slot.campaign->seat == launches.front()->seat,
+            "a save made on the lobby start path records its campaign (campaign_identity), as the lobby's Load Game needs");
+        const auto listed = require(eawr::platform::list_saved_games(save_directory));
+        expect(std::any_of(listed.begin(), listed.end(), [](const auto& row) {
+                   return row.name == "lobby save" && row.campaign && row.campaign->multiplayer && !row.diagnostic; }),
+            "the saved game is listed as a loadable multiplayer campaign");
+        eawr::testing::remove_temp_directory(save_directory);
+    }
     for (auto& game : games) game->stop();
     const auto hashes = games.front()->tick_hashes();
     expect(hashes.size() >= ticks, "all agreed tick hashes were recorded");
     for (const auto& game : games) expect(game->tick_hashes() == hashes, "lobby-launched peers have equal state hashes on every tick");
 }
 
-void viewer_staging_room(std::uint64_t final_tick_count = 0) {
+// The mod description accepts some invisible direction marks that the room codec refuses. The host must see that before it
+// opens a room, so it can send "not known" instead of a list that would refuse its first guest.
+void mod_text_the_room_cannot_carry() {
+    eawr::mods::ModDescription plain;
+    plain.complete = true;
+    plain.entries.push_back({eawr::mods::DescriptionKeyKind::manual, "", "Plain Mod", std::nullopt, std::nullopt});
+    const auto fine = eawr::mods::encode_description(plain);
+    expect(fine && net::valid_lobby_mod_description(*fine), "an ordinary mod list passes the room codec check");
+    auto marked = plain;
+    marked.entries.front().name = "Mod" "\xE2\x80\x8E";
+    const auto bytes = eawr::mods::encode_description(marked);
+    expect(bytes.has_value(), "the description model accepts a left-to-right mark in a name");
+    expect(bytes && !net::valid_lobby_mod_description(*bytes), "the room codec check refuses it, so the host falls back to an empty list");
+    expect(net::valid_lobby_mod_description({}), "an empty list is always carried");
+    if (fine && !fine->empty()) {
+        const std::vector<std::uint8_t> truncated(fine->begin(), fine->end() - 1);
+        expect(!net::valid_lobby_mod_description(truncated), "a truncated list is refused");
+    }
+}
+
+// slow_load: every peer's session build takes this long, as a Remake campaign build does for minutes. With it the
+// link and setup timeouts are cut to a fraction of the build, so the room only starts if (1) the stream is serviced
+// through each build (while_pumping in the offer, identify and build hooks) and (2) the host does not time the
+// guest's preview wait while the guest derives (SetupOptions::untimed_preview_wait). Removing either one fails the
+// room. One thread drives both peers, so the fake build services the other seat, as its own UI thread would.
+void viewer_staging_room(std::uint64_t final_tick_count = 0, bool resume = false,
+    std::chrono::milliseconds slow_load = std::chrono::milliseconds::zero(), bool decline = false, bool host_leaves = false,
+    bool uncheckable = false) {
     Local host_content, guest_content;
+    viewer::LanMatch* host_seat = nullptr;
+    viewer::LanMatch* guest_seat = nullptr;
+    const auto slow_build = [slow_load](viewer::LanMatch*& other) {
+        const eawr::skirmish::FixtureOptions idle{};
+        const auto until = std::chrono::steady_clock::now() + slow_load;
+        while (std::chrono::steady_clock::now() < until) {
+            if (other) other->pump_setup(idle);
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+    };
+    if (slow_load.count() > 0) {
+        host_content.content.prepare_session = [&, slow_build](const cp::CampaignSetupPlan& plan, std::string_view)
+            -> eawr::core::Result<cp::MpPreparedSession> {
+            slow_build(guest_seat);
+            return eawr::core::Result<cp::MpPreparedSession>::success({
+                std::make_shared<cp::GameSession>(require(cp::GameSession::create(plan.galaxy()))), {}});
+        };
+        guest_content.content.prepare_session = [&, slow_build](const cp::CampaignSetupPlan& plan, std::string_view)
+            -> eawr::core::Result<cp::MpPreparedSession> {
+            slow_build(host_seat);
+            return eawr::core::Result<cp::MpPreparedSession>::success({
+                std::make_shared<cp::GameSession>(require(cp::GameSession::create(plan.galaxy()))), {}});
+        };
+    }
+    for (auto* local : {&host_content, &guest_content}) {
+        auto solo = local->data.campaigns.front();
+        solo.name = "SoloEmpire"; solo.is_multiplayer = false; solo.starting_active_player = "EMPIRE";
+        local->data.campaigns.push_back(std::move(solo));
+    }
     auto host_backend = std::make_shared<viewer::GalacticLobbyBackend>(host_content.content);
     auto guest_backend = std::make_shared<viewer::GalacticLobbyBackend>(guest_content.content);
+    // An uncheckable list is what the host sends when its mod text cannot travel: no bytes, and the room still opens.
+    if (uncheckable) host_backend->set_mounted_mods({});
+    else host_backend->set_mounted_mods({1, 1, 0, 0, 0, 0});
     expect(host_backend->final_tick_count() == net::max_session_ticks
         && guest_backend->final_tick_count() == net::max_session_ticks, "ordinary GC keeps the default session cap");
     if (final_tick_count) {
@@ -945,6 +2232,11 @@ void viewer_staging_room(std::uint64_t final_tick_count = 0) {
     host->configure_seats({1, 2}); guest->configure_seats({1, 2});
     host->configure_lobby("Host", 0, {}, builder); guest->configure_lobby("Guest", 1, {}, builder);
     host->configure_galactic(host_backend); guest->configure_galactic(guest_backend);
+    host_seat = host.get(); guest_seat = guest.get();
+    if (slow_load.count() > 0) {
+        const std::chrono::milliseconds cut = slow_load * 4 / 9; // each timeout is under half of a build
+        host->set_timeouts_for_test(cut, cut); guest->set_timeouts_for_test(cut, cut);
+    }
 
     // The mode is the host's: a room that never gets the options is a skirmish room.
     {
@@ -974,9 +2266,20 @@ void viewer_staging_room(std::uint64_t final_tick_count = 0) {
                     const auto start = peer->galactic_start();
                     return "room=" + std::to_string(state ? static_cast<int>(state->snapshot.phase) : -1)
                         + " setup=" + std::to_string(start && start->room->setup_phase()
-                            ? static_cast<int>(*start->room->setup_phase()) : -1) + " " + peer->view().message;
+                            ? static_cast<int>(*start->room->setup_phase()) : -1)
+                        + " revision=" + std::to_string(state ? state->snapshot.revision : 0)
+                        + " ready=" + (state && !state->snapshot.seats.empty() && state->snapshot.seats[0].ready ? "1" : "0")
+                        + (state && state->snapshot.seats.size() > 1 && state->snapshot.seats[1].ready ? "1" : "0")
+                        + " notice=" + (state && state->notice ? state->notice->message : "none")
+                        + " phase=" + std::to_string(static_cast<int>(peer->view().phase))
+                        + " reason=" + std::to_string(static_cast<int>(peer->view().reason))
+                        + " is_host=" + std::to_string(peer->view().host)
+                        + " connected=" + std::to_string(peer->view().connected)
+                        + " port=" + std::to_string(peer->view().port)
+                        + " code=" + peer->view().diagnostic_code + " " + peer->view().message;
                 };
-                expect(false, "galactic staging deadline at " + milestone + "; host " + describe(host) + "; guest " + describe(guest));
+                expect(false, "galactic staging deadline at " + milestone + " resume=" + std::to_string(resume)
+                    + " final=" + std::to_string(final_tick_count) + "; host " + describe(host) + "; guest " + describe(guest));
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
@@ -987,6 +2290,37 @@ void viewer_staging_room(std::uint64_t final_tick_count = 0) {
         return host_state && guest_state && host_state->snapshot.seats.size() == 2 && guest_state->snapshot == host_state->snapshot
             && !guest_state->identity_pending && !host_state->identity_pending;
     };
+    wait([&] { return guest->view().mod_review_pending; });
+    expect(guest->view().host_mod_description == (uncheckable ? Bytes{} : Bytes({1, 1, 0, 0, 0, 0})),
+        "guest review receives the host's description before staging");
+    for (unsigned i = 0; i < 10; ++i) { host->pump_setup(none); guest->pump_setup(none); }
+    expect(guest->view().mod_review_pending && !guest->lobby_state()
+        && !guest_backend->checkpoint_progress().restored,
+        "guest does not process lobby or checkpoint traffic before mod review");
+    const auto before_review = host->lobby_state()->snapshot;
+    std::vector<net::SetupSeat> pending_bindings;
+    for (std::size_t i = 0; i < before_review.seats.size(); ++i)
+        pending_bindings.push_back({static_cast<net::PeerIndex>(i), before_review.seats[i].seat, before_review.seats[i].player});
+    expect(!host->lobby_galactic_checkpoint(options, pending_bindings)
+        && host->lobby_state()->snapshot == before_review,
+        "host cannot start checkpoint selection while a guest is reviewing mods");
+    if (host_leaves) {
+        milestone = "host leaves during review";
+        host->cancel();
+        wait([&] { return guest->view().phase == viewer::LanPhase::ended; });
+        expect(!guest->view().mod_review_pending, "host disconnect ends a pending mod review");
+        guest->cancel();
+        return;
+    }
+    if (decline) {
+        milestone = "guest declines review";
+        guest->lobby_leave(); guest->cancel();
+        wait([&] { const auto state = host->lobby_state(); return state && state->snapshot.seats.size() == 1; });
+        expect(host->lobby_state()->snapshot.phase == net::LobbyPhase::staging, "declining leaves the host in staging");
+        host->cancel();
+        return;
+    }
+    guest->accept_mod_review();
     wait(synchronized);
     expect(guest->galactic_room() && net::lobby_game_mode(guest->lobby_state()->snapshot.game) == net::LobbyGameMode::galactic,
         "the guest reads the same mode from the same revision");
@@ -997,17 +2331,73 @@ void viewer_staging_room(std::uint64_t final_tick_count = 0) {
             && seats[1].selection.slot == 2 && seats[1].selection.faction == "EMPIRE" && seats[1].selection.team == 2
             && seats[0].player == 1 && seats[1].player == 2, "the host sits on the first human row, the guest on the free one");
     }
+    {
+        const auto& campaigns = host_backend->campaigns();
+        const auto* solo = cp::find_mp_lobby_campaign(campaigns, "SoloEmpire");
+        expect(solo != nullptr, "the co-op campaign is available in the room");
+        if (solo) {
+            const auto coop = require(net::default_galactic_lobby_options(*solo, difficulty, match_seed));
+            expect(host->lobby_galactic_game(coop), "host can switch both seats to a different co-op faction");
+            wait([&] { return synchronized() && host->lobby_state()->snapshot.game.map == "SoloEmpire"; });
+            const auto seats = host->lobby_state()->snapshot.seats;
+            expect(seats[0].player == 2 && seats[1].player == 2, "both seats share the authored human faction");
+            expect(host->lobby_galactic_game(options), "host can return to multiplayer campaigns");
+            wait([&] { return synchronized() && host->lobby_state()->snapshot.game.map == "Multiplayer"; });
+            expect(host->lobby_galactic_checkpoint(options, {{0, {11}, 1}, {1, {12}, 2}}), "restore separate rows for later checks");
+            wait([&] { return synchronized() && host->lobby_state()->snapshot.seats[0].player == 1; });
+        }
+    }
+    // The checkpoint UI changes rows and owner assignments in one existing lobby revision.
+    {
+        // Keep the guest's request budget for the faction-move checks below. Its admission/name,
+        // two moves and final Ready already exercise the four-request staging window.
+        auto colour_choice = host->lobby_state()->snapshot.seats[0].selection;
+        colour_choice.colour = 5;
+        expect(host->lobby_select(colour_choice), "host selects its profile colour before saved assignment");
+        wait(synchronized);
+        expect(host->lobby_ready(true), "host accepts before saved mapping changes");
+        wait([&] { return synchronized() && host->lobby_state()->snapshot.seats[0].ready; });
+        const std::vector<net::SetupSeat> swapped{{0, {12}, 2}, {1, {11}, 1}};
+        expect(host->lobby_galactic_checkpoint(options, swapped), "host atomically maps saved factions");
+        wait([&] { return synchronized() && host->lobby_state()->snapshot.seats[0].player == 2; });
+        expect(host->lobby_state()->snapshot.seats[1].player == 1, "both owners change in the same snapshot");
+        expect(host->lobby_state()->snapshot.seats[0].selection.colour == 5,
+            "saved faction mapping preserves the host's existing colour choice");
+        const auto mapped = host->lobby_state()->snapshot;
+        expect(std::none_of(mapped.seats.begin(), mapped.seats.end(), [](const auto& seat) { return seat.ready; }),
+            "saved mapping changes clear every human acceptance");
+        const auto before = host->lobby_state()->snapshot;
+        expect(!guest->lobby_galactic_checkpoint(options, swapped), "joiner cannot assign saved factions");
+        auto invalid = swapped; invalid[1].player = 999;
+        expect(!host->lobby_galactic_checkpoint(options, invalid) && host->lobby_state()->snapshot == before,
+            "invalid saved faction refuses without partially changing the room");
+        expect(host->lobby_galactic_checkpoint(options, {{0, {11}, 1}, {1, {12}, 2}}), "host restores the room factions");
+        wait([&] { return synchronized() && host->lobby_state()->snapshot.seats[0].player == 1; });
+    }
+    // A difficulty-only edit must also become a live room revision on the guest.
+    auto difficulty_only = options;
+    difficulty_only.difficulty = "Hard_Default";
+    expect(host->lobby_galactic_game(difficulty_only), "the host edits only difficulty");
+    milestone = "difficulty edit";
+    wait([&] { return synchronized() && require(net::decode_galactic_lobby_game(guest->lobby_state()->snapshot.game)) == difficulty_only; });
     // A host edit of the options is one shared revision.
     auto changed = options;
     changed.custom = true; changed.credits = 6500; changed.starting_tech = 2; changed.maximum_tech = 4;
+    changed.allow_heroes = false; changed.difficulty = "Hard_Default"; changed.auto_resolve = 3;
     expect(host->lobby_galactic_game(changed), "the host edits the campaign options");
     milestone = "option edit";
-    wait([&] { return synchronized() && require(net::decode_galactic_lobby_game(guest->lobby_state()->snapshot.game)).credits == 6500; });
+    wait([&] { return synchronized() && require(net::decode_galactic_lobby_game(guest->lobby_state()->snapshot.game)) == changed; });
     expect(!guest->lobby_galactic_game(options) && !guest->set_galactic_game(options), "a guest cannot edit the options or the mode");
     {   // Not a multiplayer campaign: refused by the host's validator, the room unchanged.
         const auto before = host->lobby_state()->snapshot;
         auto solo = changed; solo.campaign = "Solo";
         expect(!host->lobby_galactic_game(solo) && host->lobby_state()->snapshot == before, "a campaign outside the multiplayer list is refused");
+    }
+    {   // Invalid custom settings must not replace the published room.
+        const auto before = host->lobby_state()->snapshot;
+        auto invalid = changed; invalid.maximum_tech = invalid.starting_tech - 1;
+        expect(!host->lobby_galactic_game(invalid) && host->lobby_state()->snapshot == before,
+            "inverted custom tech range is refused without publishing");
     }
     // A seat moves to another faction row; its side follows the row.
     auto choice = guest->lobby_state()->snapshot.seats[1].selection;
@@ -1021,6 +2411,29 @@ void viewer_staging_room(std::uint64_t final_tick_count = 0) {
     expect(guest->lobby_select(choice), "the guest moves back to the second faction");
     wait([&] { return synchronized() && host->lobby_state()->snapshot.seats[1].selection.slot == 2 && host->lobby_state()->snapshot.seats[1].player == 2; });
 
+    if (resume) {
+        auto roster = require(net::galactic_roster_draft(host->lobby_state()->snapshot, host_content.catalog()));
+        for (auto& seat : roster.seats) seat.seat_id.value += 10;
+        for (auto& team : roster.teams) team.lead.value += 10;
+        cp::MpSessionTerms terms; terms.seed = changed.seed;
+        terms.command_quota = static_cast<std::uint32_t>(net::max_batch_commands); terms.byte_quota = static_cast<std::uint32_t>(net::max_batch_bytes);
+        auto prepared = require(cp::seal_mp_agreement(host_content.content, roster, terms));
+        const sim::InlineExecutor executor;
+        for (unsigned tick = 0; tick < 7; ++tick) require(prepared.session->step(executor));
+        const auto bytes = std::make_shared<const Bytes>(require(eawr::checkpoint::save_game_checkpoint(*prepared.session,
+            eawr::checkpoint::game_identities(prepared.session->galaxy().setup()))));
+        require(host_backend->select_checkpoint(host->lobby_state()->snapshot, roster, {{0, {11}, 1}, {1, {12}, 2}}, bytes, 1));
+        milestone = "checkpoint transferred and privately restored";
+        wait([&] { return host_backend->checkpoint_progress().agreed && guest_backend->checkpoint_progress().restored; });
+        expect(host_backend->checkpoint_bytes() && guest_backend->checkpoint_bytes()
+            && *guest_backend->checkpoint_bytes() == *bytes,
+            "the restored guest retains its verified transfer buffer for recovery at N");
+        expect(host_backend->initial_tick() == 7 && guest_backend->initial_tick() == 7, "TCP staging resumes at completed N");
+        const auto saved_view = guest_backend->checkpoint_view();
+        expect(saved_view && saved_view->completed_tick == 7 && saved_view->bindings[1].seat.value == 12
+            && saved_view->peers[1] == guest->view().seat, "joiner reads the checkpoint tick and authenticated saved-seat mapping");
+    }
+
     expect(host->lobby_ready(true) && guest->lobby_ready(true), "both players ready the campaign setup");
     milestone = "ready";
     wait([&] { return host->lobby_state()->snapshot.seats[0].ready && host->lobby_state()->snapshot.seats[1].ready; });
@@ -1031,7 +2444,7 @@ void viewer_staging_room(std::uint64_t final_tick_count = 0) {
     milestone = "Start frozen";
     wait([&] { return host->galactic_start() && guest->galactic_start() && guest->lobby_state()->snapshot.phase == net::LobbyPhase::starting; });
     const auto host_start = *host->galactic_start(), guest_start = *guest->galactic_start();
-    expect(host_start.options == guest_start.options && host_start.options.credits == 6500 && host_start.room && guest_start.room,
+    expect(host_start.options == changed && host_start.options == guest_start.options && host_start.room && guest_start.room,
         "both peers hold the frozen room and the agreed options at the seam");
     expect(host_start.room->snapshot().phase == net::LobbyPhase::starting && guest_start.room->snapshot().frozen_revision != 0
         && guest_start.room->snapshot().frozen_revision == host_start.room->snapshot().frozen_revision,
@@ -1044,12 +2457,12 @@ void viewer_staging_room(std::uint64_t final_tick_count = 0) {
         return host_launch && guest_launch;
     });
     expect(!host->take_galactic_launch() && !guest->take_galactic_launch(), "a committed launch is taken exactly once");
-    verify_launch({host_launch, guest_launch});
+    verify_launch({host_launch, guest_launch}, true);
     host_launch.reset(); guest_launch.reset();
     host->cancel(); guest->cancel();
 }
 
-void viewer_many_seat_launch(std::size_t count) {
+void viewer_many_seat_launch(std::size_t count, bool lose_during_load = false) {
     std::vector<std::shared_ptr<Local>> locals;
     std::vector<std::shared_ptr<viewer::LanMatch>> peers;
     std::vector<gc::PlayerId> owners;
@@ -1073,7 +2486,10 @@ void viewer_many_seat_launch(std::size_t count) {
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(60);
     const auto wait = [&](const auto& predicate) {
         while (true) {
-            for (const auto& peer : peers) peer->pump_setup(none);
+            for (const auto& peer : peers) {
+                peer->pump_setup(none);
+                if (peer->view().mod_review_pending) peer->accept_mod_review();
+            }
             if (predicate()) return;
             for (const auto& peer : peers) expect(peer->view().phase != viewer::LanPhase::ended,
                 "nine-seat campaign connection refused: " + peer->view().message);
@@ -1132,7 +2548,29 @@ void viewer_many_seat_launch(std::size_t count) {
         }
         return all;
     });
-    verify_launch(launches);
+    if (lose_during_load) {
+        // Every launch owns its stream on a load worker here. Lose one seat
+        // before either survivor starts its live driver, then let the galactic
+        // departure protocol decide the roster rather than aborting the load.
+        peers.back()->cancel();
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        expect(launches[0]->finish_load_transport && launches[1]->finish_load_transport,
+            "surviving launches retain their load handoffs");
+        using Live = eawr::platform::LiveGameSession;
+        std::vector<std::unique_ptr<Live>> survivors;
+        for (std::size_t i = 0; i < 2; ++i) {
+            Live::Options live; live.pacing = Live::Pacing::driven; live.workers = 1;
+            survivors.push_back(require(launches[i]->start(std::move(live))));
+        }
+        for (auto& game : survivors) game->advance_to(12);
+        for (auto& game : survivors)
+            expect(game->wait_for(12, std::chrono::seconds(20)), "galactic survivors advance after a seat is lost during loading");
+        for (auto& game : survivors) game->stop();
+        expect(survivors[0]->tick_hashes() == survivors[1]->tick_hashes(),
+            "galactic survivors agree after the loading departure");
+    } else {
+        verify_launch(launches);
+    }
     launches.clear();
     for (const auto& peer : peers) peer->cancel();
 }
@@ -1376,6 +2814,86 @@ void installed_observer_agreement(bool stock_only = false) {
     }
 }
 
+// #5572: the room has ONE AI difficulty; every AI seat caption derives from it (never a fixed "Medium").
+void ai_seat_caption_follows_room_difficulty() {
+    using eawr::net::GalacticAiCaption;
+    using eawr::net::galactic_ai_caption;
+    expect(galactic_ai_caption("Easy_Default") == GalacticAiCaption::easy, "Easy_Default names the Easy caption");
+    expect(galactic_ai_caption("Normal_Default") == GalacticAiCaption::normal, "Normal_Default names the Normal caption");
+    expect(galactic_ai_caption("HARD_default") == GalacticAiCaption::hard, "Hard names the Hard caption, any case");
+    expect(!galactic_ai_caption("Brutal_Mod") && !galactic_ai_caption(""), "a mod's own difficulty keeps its authored name");
+    expect(!galactic_ai_caption("Hardened_Mod") && !galactic_ai_caption("Normal_Brutal") && !galactic_ai_caption("Easyish"),
+        "a mod level that merely starts with a stock name keeps its authored name");
+    expect(galactic_ai_caption("easy") == GalacticAiCaption::easy && galactic_ai_caption("Medium_Default") == GalacticAiCaption::normal,
+        "a bare stock name and Medium_Default are stock levels");
+    // Roster level: every AI seat of a room built at a difficulty takes that difficulty's caption, none a fixed Medium.
+    const Local local;
+    for (const auto& level : {std::pair{"Easy_Default", GalacticAiCaption::easy}, std::pair{"Normal_Default", GalacticAiCaption::normal},
+             std::pair{"Hard_Default", GalacticAiCaption::hard}}) {
+        const auto options = require(eawr::net::default_galactic_lobby_options(local.catalog().front(), level.first, match_seed));
+        std::size_t ai_rows{};
+        for (const auto& row : options.rows) {
+            if (row.human) continue;
+            ++ai_rows;
+            expect(galactic_ai_caption(options.difficulty) == level.second, "every AI row of the room takes the room difficulty's caption");
+        }
+        expect(ai_rows > 0, "the room has an AI row to caption");
+    }
+}
+
+void faction_captions_and_selection() {
+    const auto root = std::filesystem::temp_directory_path() / ("eawr-gc-faction-labels-"
+        + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    struct Cleanup { std::filesystem::path path; ~Cleanup() { eawr::testing::remove_temp_directory(path); } } cleanup{root};
+    std::filesystem::create_directories(root / "base/xml");
+    std::filesystem::create_directories(root / "mod/xml");
+    std::ofstream(root / "base/xml/factionfiles.xml") << "<Faction_Files><File>factions.xml</File></Faction_Files>";
+    std::ofstream(root / "base/xml/factions.xml") << "<Factions><Faction Name=\"REBEL\"><Text_ID>BASE</Text_ID></Faction>"
+        "<Faction Name=\"EMPIRE\"><Text_ID>BASE</Text_ID></Faction></Factions>";
+    std::ofstream(root / "mod/xml/factions.xml") << "<Factions><Faction Name=\"REBEL\"><Text_ID>MOD_NAME</Text_ID></Faction>"
+        "<Faction Name=\"EMPIRE\"><Text_ID>MOD_NAME</Text_ID></Faction></Factions>";
+    const std::array mounts{eawr::vfs::MountSpec{"mod", root / "mod", "data", {}},
+        eawr::vfs::MountSpec{"base", root / "base", "data", {}}};
+    const auto files = require(eawr::vfs::Vfs::mount(mounts));
+    const auto catalog = require(eawr::data::load_catalog(files, eawr::data::Profile::foc));
+    eawr::data::ui::TextDatabase database;
+    database.entries.push_back({eawr::data::ui::text_key_crc("MOD_NAME"), "MOD_NAME", u"Republic"});
+    database.crc_order.push_back(0);
+    eawr::data::ui::TextLookup text(database);
+    const Local local;
+    const auto host = require(net::default_galactic_lobby_options(local.catalog().front(), difficulty, match_seed));
+    const auto joiner = require(net::decode_galactic_lobby_game(require(net::encode_galactic_lobby_game(host))));
+    const auto choices = eawr::viewer::galactic::faction_choices(joiner, catalog.catalog, &text);
+    expect(choices.size() == 2 && choices[0].caption == "Republic" && choices[1].caption == "Republic",
+        "both lobby rows resolve the synthetic mod chain, even with identical captions");
+    const auto without_text = eawr::viewer::galactic::faction_choices(joiner, catalog.catalog, nullptr);
+    expect(without_text.size() == choices.size(), "missing text lookup retains every lobby faction choice");
+    for (const auto& choice : without_text)
+        expect(choice.caption == joiner.rows[choice.row].faction,
+            "missing text lookup shows the faction identity rather than its Text_ID key");
+    std::vector<eawr::presentation::ui::FactionFacts> facts;
+    for (const auto& row : host.rows) {
+        eawr::presentation::ui::FactionFacts faction{};
+        faction.name = row.faction;
+        faction.title = eawr::presentation::ui::faction_display_name(catalog.catalog, &text, row.faction);
+        faction.playable = row.human;
+        facts.push_back(std::move(faction));
+    }
+    const eawr::presentation::ui::CampaignSetupModel setup({}, std::move(facts));
+    expect(setup.factions().size() == choices.size(), "campaign and lobby offer the same synthetic factions");
+    for (const auto& choice : choices) {
+        const auto& identity = joiner.rows[choice.row].faction;
+        const auto campaign = std::find_if(setup.factions().begin(), setup.factions().end(),
+            [&](const auto& faction) { return faction.name == identity; });
+        expect(campaign != setup.factions().end() && campaign->title == choice.caption,
+            "campaign setup and decoded joiner lobby show the same mod caption for each identity");
+    }
+    expect(eawr::viewer::galactic::faction_choice_player(joiner, choices[0].row) == host.rows[0].player
+        && eawr::viewer::galactic::faction_choice_player(joiner, choices[1].row) == host.rows[1].player,
+        "identical captions retain distinct host row identities on the joiner");
+    expect(!eawr::viewer::galactic::faction_choice_player(joiner, joiner.rows.size()), "invalid picker row is ignored");
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -1387,26 +2905,67 @@ int main(int argc, char** argv) {
             return 0;
         }
         if (argc != 1) throw std::runtime_error("usage: net_galactic_lobby_tests [--stock-ai]");
+        for (const auto workers : {1U, 2U, 4U, 8U})
+            for (const bool sp : {false, true}) production_file_resume(workers, sp);
+        for (const auto workers : {1U, 2U, 4U, 8U}) production_file_resume(workers, false, true);
+        static_cast<void>(checkpoint_room_resume(1, 2, false, false, 1));
+        static_cast<void>(checkpoint_room_resume(1, 2, false, false, 2));
+        static_cast<void>(checkpoint_room_resume(1, 3, false, false, 3));
+        std::string resume_reference;
+        for (const auto workers : {1U, 2U, 4U, 8U}) for (const auto count : {2U, 3U}) for (const bool relay : {false, true}) {
+            const auto hash = checkpoint_room_resume(workers, count, relay);
+            if (workers == 1 && count == 2 && !relay) resume_reference = hash;
+            if (count == 2) expect(hash == resume_reference, "resumed state is equal across transport profiles and 1/2/4/8 workers");
+        }
+        for (const auto workers : {1U, 2U, 4U, 8U})
+            for (const bool relay : {false, true}) static_cast<void>(checkpoint_room_resume(workers, 2, relay, true));
+        for (const unsigned failure : {1U, 2U, 3U})
+            static_cast<void>(checkpoint_room_resume(1, failure == 3 ? 3 : 2, false, false, failure, true));
+        static_cast<void>(checkpoint_room_resume(1, 2, false, true, 0, true));
+        std::string sp_resume_reference;
+        for (const auto workers : {1U, 2U, 4U, 8U}) {
+            const auto hash = checkpoint_room_resume(workers, 2, false, false, 0, true);
+            if (workers == 1) sp_resume_reference = hash;
+            else expect(hash == sp_resume_reference, "SP co-op resume is equal across worker counts");
+        }
         codec_and_mode();
+        faction_captions_and_selection();
         skirmish_bytes_pinned();
+        content_load_never_blocks_the_ui_thread();
         campaign_list();
+        coop_catalog_without_multiplayer_campaign();
+        coop_single_player_sets();
         campaign_labels();
         staging_validation();
+        difficulty_follows_the_campaigns_ai_types();
+        ai_seat_caption_follows_room_difficulty();
         roster_draft();
         two_peer_room();
+        saved_mapping_clears_every_acceptance();
         host_toggles_row_open_ai();
         nine_seat_room();
         two_sides_with_extra_ai();
         content_mismatch_returns_to_staging();
+        mounted_mod_warning();
+        refused_start_is_diagnosed();
+        setup_failure_texts();
+        start_summary_compares_peers();
         combined_agreement_identity();
         preparation_attempt_lifetime();
         wire_identity_and_preparation_keys();
         reoffer_keeps_agreed_services();
         acceptance_final_tick_agrees();
         viewer_staging_room();
+        viewer_staging_room(0, false, {}, true);
+        viewer_staging_room(0, false, {}, false, true);
+        viewer_staging_room(0, false, {}, false, false, true);
+        mod_text_the_room_cannot_carry();
         viewer_staging_room(12000);
+        viewer_staging_room(0, true);
+        viewer_staging_room(0, false, std::chrono::milliseconds(4500));
         viewer_many_seat_launch(9);
         viewer_many_seat_launch(8);
+        viewer_many_seat_launch(3, true);
         installed_observer_agreement();
         viewer::shutdown_lan_drains();
         std::cout << "galactic lobby contracts passed: gc1 codec and versioning, campaign list, staging refusals, two-peer and nine-seat rooms, skirmish bytes pinned\n";

@@ -74,6 +74,66 @@
           "home-path"
         ],
         "reason": "Exact slash-separated behaviour prose, not a user directory; match span only."
+      },
+      {
+        "path": "tests/net/galactic_lobby_tests.cpp",
+        "regex": "^\\ \\ \\ \\ expect\\(text\\(\"cannot\\ read\\ C\\x3a\\\\\\\\Users\\\\\\\\someone\\\\\\\\data\\\\\\\\file\\.xml\"\\)\\ ==\\ generic,\\ \"a\\ raw\\ implementation\\ string\\ is\\ never\\ passed\\ on\"\\);$",
+        "value_regex": "C\\x3a\\\\\\\\Users\\\\\\\\someone",
+        "match_only": true,
+        "patterns": [
+          "user-path"
+        ],
+        "reason": "Synthetic path used to test diagnostic redaction; exact line and value only."
+      },
+      {
+        "path": "tests/net/galactic_lobby_tests.cpp",
+        "regex": "^\\ \\ \\ \\ expect\\(viewer\\x3a\\x3afailure_log_detail\\(setup_failed\\(\"cannot\\ read\\ C\\x3a\\\\\\\\Users\\\\\\\\someone\\\\\\\\data\\\\\\\\file\\.xml\\ now\"\\)\\)\\ ==\\ \"message=\\\\\"cannot\\ read\\ <path>\\ now\\\\\"\",$",
+        "value_regex": "C\\x3a\\\\\\\\Users\\\\\\\\someone",
+        "match_only": true,
+        "patterns": [
+          "user-path"
+        ],
+        "reason": "Synthetic path used to test diagnostic redaction; exact line and value only."
+      },
+      {
+        "path": "tests/presentation/renderer/test_report_privacy.cpp",
+        "regex": "^\\ \\ \\ \\ const\\ std\\x3a\\x3avector<std\\x3a\\x3astring>\\ paths\\ =\\ \\{R\"\\(C\\x3a\\\\Users\\\\ExampleUser\\)\",\\ R\"\\(C\\x3a\\\\Users\\\\EXAMPL\\~1\\)\",\\ R\"\\(\\\\\\\\server\\\\profiles\\\\ExampleUser\\)\",\\ R\"\\(D\\x3a\\\\redirected\\\\AppData\\)\",\\ \"%USERPROFILE%\",\\ \"%APPDATA%\",\\ \"%TEMP%\"\\};$",
+        "value_regex": "C\\x3a\\\\Users\\\\ExampleUser",
+        "match_only": true,
+        "patterns": [
+          "user-path"
+        ],
+        "reason": "Synthetic profile path in the public privacy redaction fixture; exact line and value only."
+      },
+      {
+        "path": "tests/presentation/renderer/test_report_privacy.cpp",
+        "regex": "^\\ \\ \\ \\ const\\ std\\x3a\\x3avector<std\\x3a\\x3astring>\\ paths\\ =\\ \\{R\"\\(C\\x3a\\\\Users\\\\ExampleUser\\)\",\\ R\"\\(C\\x3a\\\\Users\\\\EXAMPL\\~1\\)\",\\ R\"\\(\\\\\\\\server\\\\profiles\\\\ExampleUser\\)\",\\ R\"\\(D\\x3a\\\\redirected\\\\AppData\\)\",\\ \"%USERPROFILE%\",\\ \"%APPDATA%\",\\ \"%TEMP%\"\\};$",
+        "value_regex": "C\\x3a\\\\Users\\\\EXAMPL",
+        "match_only": true,
+        "patterns": [
+          "user-path"
+        ],
+        "reason": "Synthetic profile path in the public privacy redaction fixture; exact line and value only."
+      },
+      {
+        "path": "tests/presentation/renderer/test_report_privacy.cpp",
+        "regex": "^\\ \\ \\ \\ const\\ std\\x3a\\x3astring\\ input\\ =\\ R\"json\\(\\{\"name\"\\x3a\"ExampleUser\",\"path\"\\x3a\"c\\x3a\\\\\\\\users\\\\\\\\EXAMPL\\~1\\\\\\\\Save\\\\\\\\slot\\.sav\",\"mixed\"\\x3a\"C\\x3a/UsErS\\\\\\\\ExampleUser/Mods/MyExampleUserMod\\.xml\",\"unc\"\\x3a\"\\\\\\\\\\\\\\\\server\\\\\\\\profiles\\\\\\\\ExampleUser\\\\\\\\saves\\\\\\\\one\\.sav\",\"redirect\"\\x3a\"d\\x3a/redirected/AppData/log\\.txt\",\"env\"\\x3a\"%TEMP%/a\\ %userprofile%/b\",\"mod\"\\x3a\"MyExampleUserMod\"\\}\\)json\";$",
+        "value_regex": "c\\x3a\\\\\\\\users\\\\\\\\EXAMPL",
+        "match_only": true,
+        "patterns": [
+          "user-path"
+        ],
+        "reason": "Synthetic profile path in the public privacy redaction fixture; exact line and value only."
+      },
+      {
+        "path": "tests/presentation/renderer/test_report_privacy.cpp",
+        "regex": "^\\ \\ \\ \\ const\\ std\\x3a\\x3astring\\ input\\ =\\ R\"json\\(\\{\"name\"\\x3a\"ExampleUser\",\"path\"\\x3a\"c\\x3a\\\\\\\\users\\\\\\\\EXAMPL\\~1\\\\\\\\Save\\\\\\\\slot\\.sav\",\"mixed\"\\x3a\"C\\x3a/UsErS\\\\\\\\ExampleUser/Mods/MyExampleUserMod\\.xml\",\"unc\"\\x3a\"\\\\\\\\\\\\\\\\server\\\\\\\\profiles\\\\\\\\ExampleUser\\\\\\\\saves\\\\\\\\one\\.sav\",\"redirect\"\\x3a\"d\\x3a/redirected/AppData/log\\.txt\",\"env\"\\x3a\"%TEMP%/a\\ %userprofile%/b\",\"mod\"\\x3a\"MyExampleUserMod\"\\}\\)json\";$",
+        "value_regex": "C\\x3a/UsErS\\\\\\\\ExampleUser",
+        "match_only": true,
+        "patterns": [
+          "user-path"
+        ],
+        "reason": "Synthetic profile path in the public privacy redaction fixture; exact line and value only."
       }
     ],
     "identifier_allow": [
@@ -262,7 +322,7 @@
       },
       {
         "path": "apps/viewer/src/live_session_prepare.cpp",
-        "sha256": "0a0ef22b4030bd7a7cd41e0fc2207c2125824a6ae2f786d7be046e5e287486e1",
+        "sha256": "bbc4d10f90cf9ad2457e7601c8039c59868db4efffea8603891799354edf398a",
         "patterns": [
           "lan-host"
         ],
@@ -270,7 +330,7 @@
       },
       {
         "path": "apps/viewer/src/live_session_prepare.cpp",
-        "sha256": "0952aab45214dcdb1e1588bcfdefffe03c69cfc6177ac462eea69d4a0eeafce0",
+        "sha256": "afbbe24fcacade544ea135912a6fff306e848d5485ada0c5bd18d377c3f58a2b",
         "patterns": [
           "lan-host"
         ],
@@ -278,7 +338,7 @@
       },
       {
         "path": "apps/viewer/src/live_session_prepare.cpp",
-        "sha256": "6334351ae4f911ab153833c44f0ff15cfe49c6b1f87fffde25fc8facc838c584",
+        "sha256": "019beebcc5bcf23f9f3b24e0ddeb362d5ede30ab88279b3ba0936d93e8eea68a",
         "patterns": [
           "lan-host"
         ],
@@ -286,7 +346,7 @@
       },
       {
         "path": "apps/viewer/src/live_session_prepare.cpp",
-        "sha256": "1a857bbc4b132fa3d957b14fa19ed6fb1f76c3c9276345ecccbeddcf6cee24e1",
+        "sha256": "a629fdc99a385bbedf455b40bec649cc1fde65d87e68122efe63dc29737ad6d0",
         "patterns": [
           "lan-host"
         ],
@@ -782,7 +842,7 @@
       },
       {
         "path": "apps/viewer/src/live_session_prepare.cpp",
-        "sha256": "ad5800c4a715a75ce2a4b52aa2b9ee316c3b059011e9e69fc0802c7e94934e16",
+        "sha256": "021974f42c50905cbf08847078f67979491de7baa938b6bf3ebb553a9e8436a1",
         "patterns": [
           "lan-host"
         ],
@@ -790,7 +850,7 @@
       },
       {
         "path": "apps/viewer/src/live_session_prepare.cpp",
-        "sha256": "f6cb60135ed1cd1b39513a761bbe0405a6e30368329706555a158deedd18f50b",
+        "sha256": "4979e58fdb972ac09b4fb36c16e4db720a8dd7e48c47520af452cedcacf66cef",
         "patterns": [
           "lan-host"
         ],
@@ -958,7 +1018,7 @@
       },
       {
         "path": "apps/viewer/src/battle_source_local.cpp",
-        "sha256": "7b6afb902adc43a7bb34dff260de9cbff2d0b1fea5b15a8f9bf0504fb36d54e1",
+        "sha256": "e7365755f8af29a4c1dc8ebb42f7719358236f6ec6cf2af9ee87cfd306e96c29",
         "patterns": [
           "lan-host"
         ],
@@ -1043,6 +1103,46 @@
           "lan-host"
         ],
         "reason": "C++ member named lan (LAN session option), not a LAN host name (#5343)"
+      },
+      {
+        "path": "apps/viewer/src/live_session_prepare.cpp",
+        "sha256": "eb8b8da3ba537ad52dfb9af68ec0311583ef07f5e7d750ca69853ed9db07f749",
+        "patterns": [
+          "lan-host"
+        ],
+        "reason": "Reviewed local LAN option member access, not a host; exact source line only."
+      },
+      {
+        "path": "apps/viewer/src/live_session_prepare.cpp",
+        "sha256": "6d21edb55cda16c55cc3afa66457f83825e6b6eb20a7cbed1583dbba75da955c",
+        "patterns": [
+          "lan-host"
+        ],
+        "reason": "Reviewed local LAN option member access, not a host; exact source line only."
+      },
+      {
+        "path": "apps/viewer/src/live_session_prepare.cpp",
+        "sha256": "b506945781a04faca3a06578f0495551e0ae7fe9878924edea3eaec6c847859b",
+        "patterns": [
+          "lan-host"
+        ],
+        "reason": "Reviewed local LAN option member access, not a host; exact source line only."
+      },
+      {
+        "path": "apps/viewer/src/live_session_save.cpp",
+        "sha256": "4ed3196068918f3f4e248cf30b4b743959858ad896ac758ee9eddc7e9fcc5aaa",
+        "patterns": [
+          "lan-host"
+        ],
+        "reason": "Reviewed local LAN option member access, not a host; exact source line only."
+      },
+      {
+        "path": "tests/presentation/renderer/test_skirmish_save_menu.py",
+        "sha256": "1ec92f520acfa00526d4572ec182078f0e842d3a7e41b8ed6d170020594d3a74",
+        "patterns": [
+          "lan-host"
+        ],
+        "reason": "Reviewed local LAN option member access, not a host; exact source line only."
       }
     ]
   },
@@ -1174,19 +1274,20 @@
       "tests/replay/fixtures/tactical-visibility-frame-7.eawr-replay": "74a4215f28f015cae40e791baf58d3be76efb3ba2125ac588e57126d24d7c9c4",
       "tests/replay/fixtures/zero-tick-v1.eawr-replay": "f92cda7a6f86d6a321a1f0a8858b35318959d54b6f35a6457f353d0dbeab9345",
       "tests/skirmish/fixtures/m2-start.eawr-replay": "f3df4e4e5b636e51fb5b564b88bd3d6b142e939c4f64d774a9f374e99246ca55",
+      "tests/skirmish/fixtures/saves/tactical-v2-host.eawr-ckp": "56c31b79a51c4e6844371ecfecf2e83cb4e227025c87844f96019e2ed393e311",
       "third_party/lua/test/life.lua": "8b6d100472572d4baf4ff06901077aad24d98336cdf7500871f07a486c7a25d2",
-      "tests/galactic/fixtures/control-corpus/political-conquest.eawr-gcreplay": "08a6ab57d166028846eb7f172f0f99aadc9a4c4788ebac4094d521bcea4d790c",
-      "tests/galactic/fixtures/corpus/coop-orders.eawr-gcreplay": "3da8d1272ec01ca834ae001ec99e46a65c1306f6e27bcd780483f559bbdd705c",
-      "tests/galactic/fixtures/corpus/fiscal-boundary.eawr-gcreplay": "8ee8caf4cd1512727bfa80cf017a77d32e856e40b60a4ae802d1b0ccf372ca58",
-      "tests/galactic/fixtures/corpus/partitioned-orders.eawr-gcreplay": "c2ddf57b69076c9404cebbdffb7ede6a66d919412be0923bc376b892b6aa2fb1",
-      "tests/galactic/fixtures/corpus/quiet-minimal.eawr-gcreplay": "749db81128e4529135d7402856411b246402d5c81565bc50235df48000166393",
-      "tests/galactic/fixtures/fleet-corpus/fleet-commands.eawr-gcreplay": "692cadcf05b92869b3466340097c7003cc3f74579c1c385688d44571ff0c70a5",
-      "tests/galactic/fixtures/graph-corpus/graph-rules.eawr-gcreplay": "2a5fccfebd9ccb42b4397668c69b4742bcc108fc5a540e7c40e802ea03935246",
-      "tests/galactic/fixtures/movement-corpus/fleet-travel.eawr-gcreplay": "e23a330f7c58e86f52ecbbc4c0cd97d3390ad999cd1e4e4e565df756ef71b16a",
-      "tests/galactic/fixtures/outcome-corpus/space-loss.eawr-gcreplay": "f46afdc80081a0223fc6e0e8e2b4ce18ae89bf95cc1c5756af371b90ce4b0a69",
-      "tests/galactic/fixtures/production-corpus/queues-basic.eawr-gcreplay": "8f1255be1c1ca1bf1208201056a6aba6434cefed336e4e9be5e6c29799966caf",
-      "tests/galactic/fixtures/production-corpus/queues-orbit.eawr-gcreplay": "0a882486124d334e491121e08946f4f95623f2ef140b3541f0bfd35da713c5a0",
-      "tests/galactic/fixtures/production-corpus/queues-paygo.eawr-gcreplay": "134296ec2d63efa45c5a98e6f67e8abf7053a249dcfc65a536f8f7d15ea060fd",
+      "tests/galactic/fixtures/control-corpus/political-conquest.eawr-gcreplay": "2687a2063854977352b0eaf423299952831b0fc1075574c411578338b676d34d",
+      "tests/galactic/fixtures/corpus/coop-orders.eawr-gcreplay": "ef76a0538fcf527f979a600c7f944aac7fa68148168de575205e92cb30e04ae5",
+      "tests/galactic/fixtures/corpus/fiscal-boundary.eawr-gcreplay": "046ccb3784c885798ac23ddeb14ed74d5470c7928b64e2b71fbd820ffd7cfbc0",
+      "tests/galactic/fixtures/corpus/partitioned-orders.eawr-gcreplay": "8ac5a89027c54c4778bb9742fef98788ae9f14349624a231a1bbdee9a49d1b61",
+      "tests/galactic/fixtures/corpus/quiet-minimal.eawr-gcreplay": "936a427530e9c2a7698a88aabafa535356c0857f550d450068ccdca1ae45323d",
+      "tests/galactic/fixtures/fleet-corpus/fleet-commands.eawr-gcreplay": "8e9ac7d25a6e01b32328c4801352db47e4a3bac86bbd10ecf8b841d1d98e60fb",
+      "tests/galactic/fixtures/graph-corpus/graph-rules.eawr-gcreplay": "5537b2c421cbd63bdd27e89f4c8f048f47734b4f06b6fffa5a9e443c87d38556",
+      "tests/galactic/fixtures/movement-corpus/fleet-travel.eawr-gcreplay": "9ed274f3d8675cbeb6bcaef771810c323f972a6c8eeaf0cf1820702082d6e8d3",
+      "tests/galactic/fixtures/outcome-corpus/space-loss.eawr-gcreplay": "224dd8e1b44d43cb8c35f709894b3b1b0981c2a90cd531c98f19a04f905095a7",
+      "tests/galactic/fixtures/production-corpus/queues-basic.eawr-gcreplay": "bbf686f83890a7995f7af36c45a92fa24110445fe67d45d095194cf73bfb07b9",
+      "tests/galactic/fixtures/production-corpus/queues-orbit.eawr-gcreplay": "1c8928d6b3b52316479144b1a5731bdc624bea633977e1d3ea72b40ac85b3411",
+      "tests/galactic/fixtures/production-corpus/queues-paygo.eawr-gcreplay": "e2437d5ea8ea8e6aabc5b1e86676a15262ee20ccb42dec1f87d221e12e1c569f",
       "tests/skirmish/fixtures/installed/banked-hardpoints.eawr-replay": "409e212ca189f3a16e2e7b47b5fbc33862555da0e27e13c2013ffb0b71b84ead",
       "tests/skirmish/fixtures/installed/carrier-waypoints.eawr-replay": "dcbec633230ecfd7c437f5b1bc3e201552493d7f2f36f974c9731e2a238c8ac2",
       "tests/skirmish/fixtures/installed/leech-shields.eawr-replay": "82894dfbc4f0ad81dbef7444a5fb9468e846482280e6c43e2b5d50dd12fbb173",
@@ -1200,6 +1301,7 @@
     "binary_allowlist_origins": {
       "third_party/lua/test/life.lua": "Upstream Lua 5.0.2 Life sample with non-UTF-8 display glyphs, normalized to LF; reviewed by exact SHA-256, from the distribution identified in third_party/lua/COPYRIGHT.",
       "tests/galactic/fixtures/control-corpus/political-conquest.eawr-gcreplay": "Synthetic campaign replay generated by tests/galactic/replay_corpus_generate.cpp; serialized project state, not original game assets.",
+      "tests/skirmish/fixtures/saves/tactical-v2-host.eawr-ckp": "Synthetic skirmish battle save of the content-free tactical-v2 corpus battle, generated by tests/skirmish/save_tests.cpp --save-fixture; serialized project state, not original game assets.",
       "tests/galactic/fixtures/corpus/coop-orders.eawr-gcreplay": "Synthetic campaign replay generated by tests/galactic/replay_corpus_generate.cpp; serialized project state, not original game assets.",
       "tests/galactic/fixtures/corpus/fiscal-boundary.eawr-gcreplay": "Synthetic campaign replay generated by tests/galactic/replay_corpus_generate.cpp; serialized project state, not original game assets.",
       "tests/galactic/fixtures/corpus/partitioned-orders.eawr-gcreplay": "Synthetic campaign replay generated by tests/galactic/replay_corpus_generate.cpp; serialized project state, not original game assets.",

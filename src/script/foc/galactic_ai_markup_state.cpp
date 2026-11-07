@@ -1,4 +1,5 @@
 #include "galactic_ai_markup.hpp"
+#include <stdexcept>
 #include "eawr/script/foc/galactic_ai_state.hpp"
 
 namespace eawr::script::foc::ai {
@@ -117,6 +118,7 @@ std::size_t GalacticMarkup::record_byte_upper_bound() const noexcept {
 }
 std::string GalacticMarkup::record_sync_hash(bool cold) const {
     std::scoped_lock lock(mutex_);
+    if (phase_abandoned_) throw std::logic_error("unsettled markup phase");
     return cold ? rebuild_records().digest("markup") : record_digest_.digest("markup");
 }
 std::vector<std::uint8_t> GalacticMarkup::encode() const { return encode_state(state()); }

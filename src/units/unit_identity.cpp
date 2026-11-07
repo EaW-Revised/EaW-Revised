@@ -1,4 +1,5 @@
 #include "eawr/units/domain_tags.hpp"
+#include "eawr/vfs/vfs.hpp"
 #include "eawr/units/unit_tables.hpp"
 
 #include "eawr/core/sha256.hpp"
@@ -336,7 +337,8 @@ void encode(Encoder& out, const UnitType& unit) {
             out.text("unresolved-ability-spawn-v1");
             out.text(ability.spawned_object);
         }
-        if (ability.type == "CONCENTRATE_FIRE" || ability.type == "ENERGY_WEAPON" || ability.type == "TRACTOR_BEAM") {
+        if (ability.type == "CONCENTRATE_FIRE" || ability.type == "ENERGY_WEAPON" || ability.type == "TRACTOR_BEAM"
+            || ability.type == "SUPER_LASER") {
             out.text("concentrate-fire-v1");
             out.fixed(ability.effective_radius);
             out.text(ability.gui_activated_ability_name);
@@ -785,6 +787,14 @@ void encode_special_ability_extensions(Encoder& out, const UnitTables& tables) {
                 out.text(profile.beam_owner_particle);
                 out.text(profile.beam_owner_bone);
             }
+            if (profile.kind == sim::tactical::SpecialAbilityKind::super_laser) {
+                out.text("super-laser-v1");
+                out.fixed(profile.beam_min_range); out.fixed(profile.beam_max_range);
+                out.fixed(profile.damage_per_frame); out.u32(profile.fire_delay_frames);
+                for (const auto channel : profile.leech_colour) out.u8(channel);
+                out.fixed(profile.leech_beam_width); out.u32(profile.leech_beam_frames);
+                out.text(profile.beam_owner_particle); out.text(profile.beam_owner_bone); out.text(profile.leech_texture);
+            }
             if (profile.kind == sim::tactical::SpecialAbilityKind::stealth) {
                 out.text("stealth-v1");
                 out.fixed(profile.stealth_transition);
@@ -993,7 +1003,7 @@ std::vector<std::uint8_t> canonical_encoding(const UnitTables& tables) {
     }
     // L2a: land company profiles bind as a trailing record only when a land load produced some.
     if (tables.domain == sim::tactical::BattleDomain::land && !tables.land_companies.empty()) {
-        out.text("land-companies-v3");
+        out.text("land-companies-v4");
         out.text("land-tail-format-2");
         out.each(tables.land_companies, [&](const LandCompany& company) {
             out.text(company.id);
@@ -1006,6 +1016,7 @@ std::vector<std::uint8_t> canonical_encoding(const UnitTables& tables) {
             out.flag(company.team_type_authored);
             out.text(company.team_locomotor); out.fixed(company.team_formation_spacing);
             out.fixed(company.team_max_speed);
+            out.u8(static_cast<std::uint8_t>(company.team_collision_class)); out.fixed(company.team_max_jiggle);
             out.fixed(company.formation_spacing);
             out.each(company.locomotion, [&](const LandLocomotionData& value) {
                 out.fixed(value.acceleration); out.fixed(value.deceleration);
@@ -1038,8 +1049,10 @@ std::vector<std::uint8_t> canonical_encoding(const UnitTables& tables) {
         });
     }
     if (tables.domain == sim::tactical::BattleDomain::land && !tables.land_static_objects.empty()) {
-        out.text("land-static-objects-v2");
+        out.text("land-static-objects-v3");
         out.each(tables.land_static_objects, [&](const LandStaticObject& row) {
+            out.flag(row.hq_victory_relevant);
+            out.flag(row.victory_relevant); out.flag(row.land_victory_relevant);
             out.text(row.id); out.text(row.xml_type); out.text(row.proxy_type); out.flag(row.land_obstacle);
             out.fixed(row.width); out.fixed(row.height); out.fixed(row.x_offset); out.fixed(row.y_offset);
             out.flag(row.fine_tune.has_value()); out.flag(row.fine_tune.value_or(false));

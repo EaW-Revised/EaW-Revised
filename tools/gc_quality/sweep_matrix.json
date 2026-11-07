@@ -1,0 +1,50 @@
+{
+  "_comment": "The quality-run cases registered as CTest tests (tests/galactic/cases/073_galactic_ai_profile_tests.cmake) and planned by tools/gc_quality/runner.py. A pool job cannot pass arguments to a test, so every (profile, arm, seed, ticks, probe) combination is its own registered test. Test name: galactic_ai_quality_<profile>_<arm>_s<seed>_t<ticks>[_<probe>]. Edit here only; the CMake file and the runner both read it.",
+  "profiles": {
+    "stock": {
+      "mods": "",
+      "campaign": "Sandbox_Equal_Footing_Underworld",
+      "runs": [
+        {"ticks": 54000, "arms": ["reference", "async"], "seeds": [1, 2, 3, 4, 5, 6, 7, 8]},
+        {"ticks": 54000, "arms": ["reference"], "seeds": [101, 102, 103, 104, 105, 106, 107, 108]},
+        {"ticks": 18000, "arms": ["reference", "async"], "seeds": [1, 2, 3, 4]},
+        {"ticks": 18000, "arms": ["reference"], "seeds": [101, 102, 103, 104]},
+        {"ticks": 27000, "arms": ["reference", "async"], "seeds": [1, 2, 3, 4]},
+        {"ticks": 27000, "arms": ["reference"], "seeds": [101, 102, 103, 104]},
+        {"ticks": 7200, "arms": ["reference", "async"], "seeds": [1, 2], "probe": "near1"},
+        {"ticks": 7200, "arms": ["reference", "async"], "seeds": [1, 2], "probe": "nearall"},
+        {"ticks": 7200, "arms": ["reference", "async"], "seeds": [1, 2], "probe": "deep1"},
+        {"ticks": 300, "arms": ["reference", "async"], "seeds": [1]}
+      ]
+    },
+    "raw": {
+      "mods": "1129810972",
+      "campaign": "Sandbox_The_Clone_Wars_Rebel",
+      "runs": [
+        {"ticks": 54000, "arms": ["reference", "async"], "seeds": [1, 2, 3]},
+        {"ticks": 54000, "arms": ["reference"], "seeds": [101, 102]},
+        {"ticks": 18000, "arms": ["reference", "async"], "seeds": [1, 2]},
+        {"ticks": 18000, "arms": ["reference"], "seeds": [101]},
+        {"ticks": 27000, "arms": ["reference", "async"], "seeds": [1, 2]},
+        {"ticks": 27000, "arms": ["reference"], "seeds": [101]},
+        {"ticks": 300, "arms": ["reference", "async"], "seeds": [1]}
+      ]
+    },
+    "bfc": {
+      "mods": "2712013423",
+      "campaign": "Sandbox_Equal_Footing_Underworld",
+      "runs": [
+        {"ticks": 27000, "arms": ["reference"], "seeds": [1, 2]},
+        {"ticks": 300, "arms": ["reference"], "seeds": [1]}
+      ]
+    },
+    "rawsep": {
+      "mods": "1129810972",
+      "campaign": "Sandbox_The_Clone_Wars_Empire",
+      "runs": [
+        {"ticks": 27000, "arms": ["reference"], "seeds": [1, 2]},
+        {"ticks": 300, "arms": ["reference"], "seeds": [1]}
+      ]
+    }
+  }
+}

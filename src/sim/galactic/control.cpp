@@ -10,6 +10,7 @@
 #include <array>
 #include <cassert>
 #include <map>
+#include <stdexcept>
 #include <limits>
 #include <set>
 #include <tuple>
@@ -162,6 +163,32 @@ core::Result<bool> has_ground_capability(const PoliticalControlSetup& inputs,
     return core::Result<bool>::success(false);
 }
 
+namespace {
+// Admission is computed before the surface or fleet is changed. The strict form
+// is for an explicit selection; the whole-fleet form retains fleet order and
+// skips ineligible members, stopping at the surface capacity.
+GalacticRejectReason select_landing_members(const PoliticalControlSetup& control,
+    const FleetControlSetup& fleet_control, const MovementSetup* movement,
+    std::span<const FleetMember> members, std::size_t available, bool strict,
+    std::vector<FleetMember>& landing) {
+    if (strict && members.size() > available) return GalacticRejectReason::resource_limit;
+    std::set<EntityId> seen;
+    for (const auto& member : members) {
+        if (strict && !seen.insert(member.id).second) return GalacticRejectReason::invalid_membership;
+        const auto* trait = find_row(fleet_control.types, member.type, [](const auto& row) { return row.type; });
+        const auto* input = type(control, member.type);
+        if (trait && trait->transport && input && landing.size() < available) {
+            auto qualified = has_ground_capability(control, member, movement);
+            if (!qualified) return GalacticRejectReason::unknown_value;
+            if (qualified.value()) { landing.push_back(member); continue; }
+        }
+        if (strict) return GalacticRejectReason::invalid_membership;
+    }
+    if (landing.empty()) return available ? GalacticRejectReason::invalid_membership : GalacticRejectReason::resource_limit;
+    return GalacticRejectReason::none;
+}
+} // namespace
+
 core::Result<void> validate_control_setup(const GalacticSetup& setup) {
     if (!setup.control) return core::Result<void>::success();
     const auto& s = *setup.control;
@@ -265,6 +292,7 @@ core::Result<void> validate_control_setup(const GalacticSetup& setup) {
             || (p.ground_base.level && !known(p.ground_base.owner))
             || (p.starbase.level && !known(p.starbase.owner))
             || p.ground_base.level > 5 || p.starbase.level > 5
+            || !ordered(p.ground_layout, [](const auto& r) { return r.object; })
             || !ordered(p.caps, [](const auto& r) { return r.player; })
             || !ordered(p.transition_modifiers, [](const auto& r) { return std::pair{r.category, r.source}; }))
             return invalid<void>("invalid planet political presence or modifier input");
@@ -289,7 +317,17 @@ core::Result<void> validate_control_setup(const GalacticSetup& setup) {
         for (const auto& record : p.built_structures)
             if (!record.type || !known(record.owner) || record.enable_level > 5)
                 return invalid<void>("invalid tactical built-object record (WGT-84)");
-        nested_count += p.built_structures.size() + p.landed.size() + p.special_control.size() + p.caps.size() + p.transition_modifiers.size();
+        std::set<std::uint32_t> markers;
+        for (const auto& entry : p.ground_layout) {
+            const auto owner = setup.planets[i].owner;
+            const bool landed = std::any_of(p.landed.begin(), p.landed.end(), [&](const auto& row) { return row.id == entry.object && row.owner == owner; });
+            const auto* site = setup.production ? find_row(setup.production->planets, p.planet, [](const auto& row) { return row.planet; }) : nullptr;
+            const bool structure = site && std::any_of(site->objects.begin(), site->objects.end(), [&](const auto& row) {
+                return row.id == entry.object && row.owner == owner && row.domain == ProductionDomain::ground && row.kind == ProductionKind::structure;
+            });
+            if (!entry.object || (!landed && !structure) || !markers.insert(entry.marker).second) return invalid<void>("invalid ground layout");
+        }
+        nested_count += p.built_structures.size() + p.landed.size() + p.special_control.size() + p.caps.size() + p.transition_modifiers.size() + p.ground_layout.size();
         if (!s.state.empty()) {
             const auto& state = s.state[i];
             if (state.planet != p.planet || !known(state.current_player) || (state.target_player && !known(state.target_player))
@@ -528,7 +566,7 @@ void GalacticSession::Impl::release_structure_object(PlanetProduction& planet, c
         const auto count = std::lower_bound(owner->counts.begin(), owner->counts.end(), object.type,
             [](const auto& row, auto id) { return row.type < id; });
         if (count != owner->counts.end() && count->type == object.type && count->owned) --count->owned;
-        const auto offer = find_row(planet.offers, object.type, [](const auto& row) { return row.type; });
+        const auto offer = find_row(planet.offers.rows(), object.type, [](const auto& row) { return row.type; });
         if (offer) owner->population_used = std::max(Fixed{}, math::subtract(owner->population_used, offer->population).value());
     }
     if (std::erase_if(production_originals, [&](const auto& row) { return row.id == object.id; }))
@@ -545,6 +583,10 @@ void GalacticSession::Impl::clear_control_structures(const std::size_t index, co
     bool removed = false;
     std::erase_if(planet.objects, [&](const auto& object) {
         if (object.kind != ProductionKind::structure || (only && object.domain != *only)) return false;
+        if (control && index < control->planets.size()) {
+            if (std::erase_if(control->planets[index].ground_layout, [&](const auto& row) { return row.object == object.id; }))
+                dirty[static_cast<std::size_t>(StateSection::control)] = true;
+        }
         if (removed_ids) removed_ids->push_back(object.id);
         release_structure_object(planet, object);
         removed = true;
@@ -617,6 +659,18 @@ void GalacticSession::Impl::update_production_control(const std::size_t index, c
     if (changed) dirty[static_cast<std::size_t>(StateSection::production)] = true;
 }
 
+const std::map<PlanetId, std::vector<Route>>& GalacticSession::Impl::incident_route_rows() const {
+    const auto build = [&] {
+        std::map<PlanetId, std::vector<Route>> rows;
+        for (const auto& route : sorted_routes()) { rows[route.from].push_back(route); rows[route.to].push_back(route); }
+        return rows;
+    };
+    if (!incident_route_cache) incident_route_cache = std::make_shared<const std::map<PlanetId, std::vector<Route>>>(build());
+    else if (verify_cached_hash && *incident_route_cache != build())
+        throw std::runtime_error("galactic incident routes differ from the live route table");
+    return *incident_route_cache;
+}
+
 core::Result<void> GalacticSession::Impl::service_control(const PartitionExecutor& executor,
     const std::uint64_t tick, std::vector<GalacticEvent>& events, GalacticTick::Work& work) {
     if (!control) return core::Result<void>::success();
@@ -645,17 +699,11 @@ core::Result<void> GalacticSession::Impl::service_control(const PartitionExecuto
             invalidate_observer_projection(false);
         }
     }
-    const auto inputs = *control; // immutable same-frame control/trade inputs
-    const auto route_rows = sorted_routes();
-    const auto fleet_rows = sorted_fleets();
-    std::map<PlanetId, std::vector<Route>> incident_routes;
-    for (const auto& route : route_rows) { incident_routes[route.from].push_back(route); incident_routes[route.to].push_back(route); }
-    std::map<PlanetId, std::vector<Fleet>> orbit;
-    for (const auto& fleet : fleet_rows) if (fleet.orbit) orbit[fleet.orbit].push_back(fleet);
-    for (auto& [id, rows] : orbit) {
-        (void)id;
-        std::stable_sort(rows.begin(), rows.end(), [](const auto& a, const auto& b) { return a.motion.orbit_entry < b.motion.orbit_entry; });
-    }
+    // Same-frame control/trade inputs: the partitioned phase below only reads them and every write happens in the
+    // ordered commit after it, which reads the live setup again, so no per-tick copy is needed.
+    const auto& inputs = *control;
+    const auto& incident_routes = incident_route_rows(); // routes never change after construction or restore
+    auto fleet_rows = sorted_fleets();
     std::vector<std::optional<core::Result<ControlStep>>> staged(inputs.planets.size());
     const auto actors = actor_inputs(); // immutable publication, rebuilt only on writes
     // GFS-07 services control every eligible frame. Recursive actor ability
@@ -674,6 +722,13 @@ core::Result<void> GalacticSession::Impl::service_control(const PartitionExecuto
             control_stealth_inputs.emplace(fleet_rows[i].id, std::move(*skip_rows[i]));
         control_stealth_generation = observer_input_generation;
         work.control_stealth_fleets += fleet_rows.size();
+    }
+    // Orbit lists take over the fleet rows once the stealth inputs above have read them.
+    std::map<PlanetId, std::vector<Fleet>> orbit;
+    for (auto& fleet : fleet_rows) if (fleet.orbit) orbit[fleet.orbit].push_back(std::move(fleet));
+    for (auto& [id, rows] : orbit) {
+        (void)id;
+        std::stable_sort(rows.begin(), rows.end(), [](const auto& a, const auto& b) { return a.motion.orbit_entry < b.motion.orbit_entry; });
     }
     const auto* cached_skip = actors.empty() ? nullptr : &std::as_const(control_stealth_inputs);
     const auto phase = executor.execute_phase("galactic-control", tick_partition_count, [&](std::size_t partition) {
@@ -705,6 +760,9 @@ core::Result<void> GalacticSession::Impl::service_control(const PartitionExecuto
         if (before != value.state) { control->state[i] = value.state; dirty[9] = true; }
         auto& planet = registry.get<session_detail::PlanetData>(planets.at(p.planet));
         if (effect.owner_changed) {
+            control->planets[i].ground_layout.clear();
+            dirty[static_cast<std::size_t>(StateSection::control)] = true;
+            invalidate_observer_projection();
             --owned_planet_counts[planet.owner];
             ++owned_planet_counts[value.state.current_player];
             record_planet_change(p.planet, planet.owner, value.state.current_player); // WGP-101
@@ -756,7 +814,9 @@ core::Result<void> GalacticSession::Impl::initialize_control() {
         if (!calculated) return core::Result<void>::failure(calculated.error());
         if (calculated.value().degraded) merge_load_notes(calculated.value().notes);
         control->state[i] = calculated.value().state;
-        registry.get<session_detail::PlanetData>(planets.at(inputs.planets[i].planet)).owner = calculated.value().state.current_player;
+        auto& planet = registry.get<session_detail::PlanetData>(planets.at(inputs.planets[i].planet));
+        if (planet.owner != calculated.value().state.current_player) control->planets[i].ground_layout.clear();
+        planet.owner = calculated.value().state.current_player;
         relocate_actor(inputs.planets[i].planet, calculated.value().state.current_player, inputs.planets[i].planet, 0);
     }
     return core::Result<void>::success();
@@ -764,6 +824,128 @@ core::Result<void> GalacticSession::Impl::initialize_control() {
 
 GalacticRejectReason GalacticSession::Impl::validate_landing(PlayerId player, FleetId id, PlanetId planet, bool pending_local_conflict) const {
     return session_detail::validate_native_landing(*this, player, id, planet, pending_local_conflict, session_detail::PausedKind::surface_deploy);
+}
+void GalacticSession::Impl::execute_ground_layout(const GameCommand& command, std::uint64_t tick,
+    std::vector<GalacticEvent>& events, bool pending_local_conflict) {
+    const auto& order = std::get<SetGroundLayout>(command.payload);
+    GalacticEvent event{tick, GalacticEventKind::command_executed, command.key.seat, order.planet,
+        command.key.sequence, 0, GalacticRejectReason::none};
+    const auto reject = [&](GalacticRejectReason reason) { event.kind = GalacticEventKind::command_rejected; event.reason = reason; events.push_back(event); };
+    const auto* issuer = seat(command.key.seat);
+    if (!issuer || !issuer->active) return reject(GalacticRejectReason::inactive_seat);
+    if (!control || !setup.fleet_control) return reject(GalacticRejectReason::unknown_subject);
+    if (session_detail::owner_paused_refusal(*this, session_detail::PausedKind::fleet_management,
+        pending_local_conflict, issuer->kind == SeatKind::human)) return reject(GalacticRejectReason::paused);
+    const auto target = planets.find(order.planet);
+    const auto* surface = find_row(control->planets, order.planet, [](const auto& row) { return row.planet; });
+    if (target == planets.end() || !surface) return reject(GalacticRejectReason::unknown_subject);
+    const auto owner = registry.get<session_detail::PlanetData>(target->second).owner;
+    if (owner != issuer->player) return reject(GalacticRejectReason::not_authorized);
+    if (order.entries.empty() || order.entries.size() > galactic_max_objects) return reject(GalacticRejectReason::invalid_membership);
+    auto layout = surface->ground_layout;
+    std::set<EntityId> seen;
+    for (const auto& entry : order.entries) {
+        if (!entry.object || !seen.insert(entry.object).second) return reject(GalacticRejectReason::invalid_membership);
+        const bool landed = std::any_of(surface->landed.begin(), surface->landed.end(), [&](const auto& row) { return row.id == entry.object && row.owner == owner; });
+        const auto* site = production ? find_row(production->planets, order.planet, [](const auto& row) { return row.planet; }) : nullptr;
+        const bool structure = site && std::any_of(site->objects.begin(), site->objects.end(), [&](const auto& row) {
+            return row.id == entry.object && row.owner == owner && row.domain == ProductionDomain::ground && row.kind == ProductionKind::structure;
+        });
+        if (!landed && !structure) return reject(GalacticRejectReason::invalid_membership);
+        std::erase_if(layout, [&](const auto& row) { return row.object == entry.object; });
+    }
+    for (const auto& entry : order.entries) if (entry.marker) layout.push_back({entry.object, *entry.marker});
+    std::set<std::uint32_t> markers;
+    for (const auto& row : layout) if (!markers.insert(row.marker).second) return reject(GalacticRejectReason::invalid_membership);
+    std::sort(layout.begin(), layout.end(), [](const auto& a, const auto& b) { return a.object < b.object; });
+    control->planets[static_cast<std::size_t>(surface - control->planets.data())].ground_layout = std::move(layout);
+    dirty[static_cast<std::size_t>(StateSection::control)] = true;
+    invalidate_observer_projection();
+    events.push_back(event);
+}
+GalacticRejectReason GalacticSession::Impl::admit_selected_landing(PlayerId player, PlanetId planet,
+    std::span<const EntityId> units, bool pending_local_conflict, std::vector<SelectedLandingMember>& result) const {
+    if (!control || !setup.fleet_control) return GalacticRejectReason::unknown_subject;
+    const auto* surface = find_row(control->planets, planet, [](const auto& row) { return row.planet; });
+    if (!surface) return GalacticRejectReason::unknown_value;
+    if (units.empty()) return GalacticRejectReason::invalid_membership;
+    const auto available = control->max_ground_forces - surface->landed.size();
+    if (units.size() > available) return GalacticRejectReason::resource_limit;
+    std::set<EntityId> seen;
+    std::vector<SelectedLandingMember> selected;
+    std::vector<FleetMember> members;
+    for (const auto id : units) {
+        if (!id || !seen.insert(id).second) return GalacticRejectReason::invalid_membership;
+        bool found = false;
+        for (const auto& [fleet_id, entity] : fleets) {
+            const auto& fleet = registry.get<session_detail::FleetData>(entity);
+            const auto member = std::find_if(fleet.members.begin(), fleet.members.end(), [id](const auto& row) { return row.id == id; });
+            if (member == fleet.members.end()) continue;
+            if (found) return GalacticRejectReason::invalid_membership;
+            if (const auto reason = validate_landing(player, fleet_id, planet, pending_local_conflict); reason != GalacticRejectReason::none) return reason;
+            const PlayerId ground = surface->ground_base.level ? surface->ground_base.owner
+                : (surface->landed.empty() ? 0 : surface->landed.front().owner);
+            if (ground && !allied(*control, fleet.owner, ground)) return GalacticRejectReason::movement_blocked;
+            selected.push_back({fleet_id, *member}); members.push_back(*member); found = true;
+        }
+        if (!found) return GalacticRejectReason::invalid_membership;
+    }
+    std::vector<FleetMember> qualified;
+    if (const auto reason = select_landing_members(*control, *setup.fleet_control,
+        movement_inputs ? movement_inputs.get() : nullptr, members, available, true, qualified);
+        reason != GalacticRejectReason::none) return reason;
+    result = std::move(selected);
+    return GalacticRejectReason::none;
+}
+void GalacticSession::Impl::execute_land_units(const GameCommand& command, const std::uint64_t tick,
+    std::vector<GalacticEvent>& events, const bool pending_local_conflict) {
+    const auto& order = std::get<LandUnits>(command.payload);
+    GalacticEvent event{tick, GalacticEventKind::command_executed, command.key.seat, order.planet,
+        command.key.sequence, 0, GalacticRejectReason::none};
+    const auto reject = [&](GalacticRejectReason reason) { event.kind = GalacticEventKind::command_rejected; event.reason = reason; events.push_back(event); };
+    const auto* issuer = seat(command.key.seat);
+    if (!issuer || !issuer->active) return reject(GalacticRejectReason::inactive_seat);
+    std::vector<SelectedLandingMember> selected;
+    if (const auto reason = admit_selected_landing(issuer->player, order.planet, order.units, pending_local_conflict, selected);
+        reason != GalacticRejectReason::none) return reject(reason);
+    const auto* supplied = find_row(control->planets, order.planet, [](const auto& row) { return row.planet; });
+    const auto index = static_cast<std::size_t>(supplied - control->planets.data());
+    auto& planet = control->planets[index];
+    const auto& current = registry.get<session_detail::PlanetData>(planets.at(order.planet));
+    if (!allied(*control, issuer->player, current.owner)) {
+        if (planet.starbase.level && !allied(*control, issuer->player, planet.starbase.owner)) planet.starbase = {};
+        planet.special_control.clear(); planet.production_owner = {};
+        fix_built_structures(planet.built_structures, issuer->player);
+        const bool had_ground_special = production && std::any_of(production->planets[index].objects.begin(),
+            production->planets[index].objects.end(), [](const auto& object) {
+                return object.domain == ProductionDomain::ground && object.kind == ProductionKind::structure;
+            });
+        clear_control_structures(index);
+        if (had_ground_special) refresh_ground_base_level(index);
+        PoliticalControlEffect effect; effect.planet = order.planet; effect.stop_production = true;
+        effect.old_owner = current.owner; effect.new_owner = current.owner; control_effects.push_back(effect);
+    }
+    events.push_back(event);
+    for (const auto& row : selected) {
+        const auto found = fleets.find(row.fleet);
+        auto& fleet = registry.get<session_detail::FleetData>(found->second);
+        std::erase(fleet.members, row.member);
+        planet.landed.push_back({row.member.id, row.member.type, fleet.owner});
+        relocate_actor(row.member.id, fleet.owner, order.planet, order.planet);
+        events.push_back({tick, GalacticEventKind::member_detached, command.key.seat, row.member.id, command.key.sequence, row.fleet, GalacticRejectReason::none});
+        if (fleet.members.empty()) {
+            registry.destroy(found->second); fleets.erase(found); --live_object_count;
+            lose_actor(row.fleet);
+            events.push_back({tick, GalacticEventKind::fleet_destroyed, command.key.seat, row.fleet, command.key.sequence, 0, GalacticRejectReason::none});
+        }
+    }
+    publish_surface_arrivals(order.planet, std::span<const SurfaceForce>(planet.landed).last(selected.size()));
+    dirty[static_cast<std::size_t>(StateSection::fleets)] = true;
+    invalidate_observer_projection();
+    dirty[static_cast<std::size_t>(StateSection::fleet_control)] = true;
+    if (setup.movement) dirty[static_cast<std::size_t>(StateSection::movement)] = true;
+    dirty[static_cast<std::size_t>(StateSection::control)] = true;
+    population_stale = true;
 }
 void GalacticSession::Impl::execute_landing(const GameCommand& command, const std::uint64_t tick,
     std::vector<GalacticEvent>& events, const bool pending_local_conflict) {
@@ -812,17 +994,10 @@ void GalacticSession::Impl::execute_landing(const GameCommand& command, const st
     const bool hostile = !allied(*control, fleet.owner, current.owner);
     std::vector<FleetMember> landing;
     const auto available = control->max_ground_forces - supplied->landed.size();
-    for (const auto& member : fleet.members) {
-        const auto* trait = find_row(setup.fleet_control->types, member.type, [](const auto& row) { return row.type; });
-        const auto* input = type(*control, member.type);
-        if (trait && trait->transport && input && landing.size() < available) {
-            auto qualified = has_ground_capability(*control, member, movement_inputs ? movement_inputs.get() : nullptr);
-            if (!qualified) return reject(GalacticRejectReason::unknown_value);
-            // WGM-38 / WGUI-25: friendly ownership does not waive a payload's stay-in-transport refusal.
-            if (qualified.value()) landing.push_back(member);
-        }
-    }
-    if (landing.empty()) return reject(available ? GalacticRejectReason::invalid_membership : GalacticRejectReason::resource_limit);
+    // WGM-38 / WGUI-25: friendly ownership does not waive a payload's stay-in-transport refusal.
+    if (const auto reason = select_landing_members(*control, *setup.fleet_control,
+        movement_inputs ? movement_inputs.get() : nullptr, fleet.members, available, false, landing);
+        reason != GalacticRejectReason::none) return reject(reason);
     events.push_back(event);
     auto& planet = control->planets[static_cast<std::size_t>(supplied - control->planets.data())];
     if (hostile) {
@@ -1129,7 +1304,42 @@ core::Result<GalacticSession::NativeFleetReceipt> GalacticSession::land_native_t
     std::vector<GalacticEvent> events;
     auto prepared = session_detail::land_native_transports_rows(impl, player, id, pending_local_conflict, events);
     if (!prepared) return Result::failure(prepared.error());
-    if (!prepared.value().published) return Result::success(prepared.value().receipt);
+    if (!prepared.value().published && prepared.value().receipt.admitted && impl.ability_host && impl.setup.ability_host) {
+        // WGA-234: hostile surface deployment uses the transport's ability
+        // callback instead of ordinary landing. Shadows only stage the landing;
+        // this runs on the ordered live replay, never in a worker partition.
+        const auto fleet = impl.fleets.find(id);
+        if (fleet != impl.fleets.end()) {
+            const auto& row = impl.registry.get<session_detail::FleetData>(fleet->second);
+            const auto orbit = row.orbit;
+            const auto* surface = find_row(impl.control->planets, orbit, [](const auto& value) { return value.planet; });
+            const auto seat = std::find_if(impl.seats.begin(), impl.seats.end(), [player](const auto& value) {
+                return value.player == player && value.active;
+            });
+            if (surface && surface->surface_accessible && surface->landed.size() != impl.control->max_ground_forces
+                && seat != impl.seats.end()
+                && !session_detail::native_allied(*impl.control, player,
+                    impl.registry.get<session_detail::PlanetData>(impl.planets.at(orbit)).owner)) {
+                const auto members = row.members;
+                for (auto at = members.rbegin(); at != members.rend(); ++at) {
+                    const auto* trait = find_row(impl.setup.fleet_control->types, at->type, [](const auto& value) { return value.type; });
+                    if (trait && trait->transport) {
+                        // Prepared shadow landing has no ability effects. Publish only
+                        // this live callback's actor changes through the retained owner.
+                        struct RestoreActorHandler {
+                            Impl& owner;
+                            NativeActorChangesHandler saved;
+                            ~RestoreActorHandler() { owner.native_actor_changes_handler = std::move(saved); }
+                        } restore{impl, impl.native_actor_changes_handler};
+                        if (!impl.native_actor_changes_handler && impl.native_live_ability_actor_changes)
+                            impl.native_actor_changes_handler = *impl.native_live_ability_actor_changes;
+                        impl.dispatch_ground_ability(at->id, orbit, seat->seat_id, 0, impl.completed_tick, events);
+                    }
+                }
+            }
+        }
+    }
+    if (!prepared.value().published && events.empty()) return Result::success(prepared.value().receipt);
     const auto old = impl.snapshot->events();
     events.insert(events.begin(), old.begin(), old.end());
     impl.snapshot = impl.publish_native_snapshot(std::move(events));
@@ -1432,6 +1642,8 @@ core::Result<void> GalacticSession::apply_control_battle(const ControlBattleRetu
         if (!planet.starbase.level) planet.starbase = {};
     }
     if (returned.land) fix_built_structures(planet.built_structures, returned.winner);
+    std::erase_if(planet.ground_layout, [&](const auto& row) { return std::find(departed.begin(), departed.end(), row.object) != departed.end(); });
+    if (returned.land && returned.winner == returned.invader) planet.ground_layout.clear();
     impl.control->planets[index] = std::move(planet);
     impl.unpublish_surface_departures(returned.planet, departed);
     impl.publish_surface_arrivals(returned.planet, arrived);
@@ -1513,6 +1725,8 @@ void encode_control(std::vector<std::uint8_t>& bytes, const PoliticalControlSetu
             put_u64(bytes, r.type); fixed(r.position.x); fixed(r.position.y); fixed(r.position.z);
             put_u32(bytes, r.enable_level); put_u32(bytes, r.owner);
         }
+        count(p.ground_layout.size());
+        for (const auto& r : p.ground_layout) { put_u64(bytes, r.object); put_u32(bytes, r.marker); }
     }
     count(s.routes.size());
     for (const auto& r : s.routes) { put_u64(bytes, r.route); fixed(r.political_gain); }
@@ -1610,6 +1824,13 @@ core::Result<PoliticalControlSetup> decode_control(const std::span<const std::ui
             if (!in.read_u64(r.type) || !r.type || !fixed(r.position.x) || !fixed(r.position.y) || !fixed(r.position.z)
                 || !in.read_u32(r.enable_level) || r.enable_level > 5 || !in.read_u32(r.owner) || !r.owner) return fail();
             p.built_structures.push_back(r);
+        }
+        if (!count(nested, 12)) return fail();
+        for (std::uint32_t j = 0; j < nested; ++j) {
+            GroundLayoutEntry r;
+            if (!in.read_u64(r.object) || !in.read_u32(r.marker)
+                || (!p.ground_layout.empty() && p.ground_layout.back().object >= r.object)) return fail();
+            p.ground_layout.push_back(r);
         }
         s.planets.push_back(std::move(p));
     }

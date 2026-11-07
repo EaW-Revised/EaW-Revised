@@ -781,6 +781,20 @@ void adapter() {
         && signed_inputs.value().types[1].build_cost == f(-1) && signed_inputs.value().base_mode_modifier == f(-5)
         && signed_inputs.value().players[0].hyperspace_factor == f(-2)
         && signed_inputs.value().players[0].corruption_bonus == f(-3), "all signed movement authoring reaches campaign inputs unchanged");
+    {   // GC-BRIBE-NEG: a negative Cheap/Expensive_Bribe_Cost loads as authored with a note, never an abort.
+        auto bribe_types = types;
+        bribe_types.types[0].cheap_bribe_cost = f(-5);
+        bribe_types.types[0].expensive_bribe_cost = f(-9);
+        eawr::core::LoadNoteBuffer buffer;
+        const auto bribed = eawr::campaign::build_movement_inputs(bribe_types, data, bindings, players, &buffer);
+        eawr::core::LoadNoteCollector collector; collector.merge(buffer);
+        const auto notes = collector.snapshot();
+        expect(bribed && bribed.value().types[0].cheap_bribe == f(-5) && bribed.value().types[0].expensive_bribe == f(-9)
+            && notes.size() == 2 && notes[0].code == "EAWR-LOAD-1037" && notes[0].file == "units.xml" && notes[0].line == 9
+            && notes[0].tag == "Cheap_Bribe_Cost" && notes[0].action == eawr::core::LoadAction::accepted
+            && notes[1].tag == "Expensive_Bribe_Cost", "negative bribe costs keep the authored value and note it");
+        expect(bool(eawr::campaign::build_movement_inputs(bribe_types, data, bindings, players)), "negative bribe cost loads without a note buffer");
+    }
     for (const auto workers : {1U, 2U, 4U, 8U}) {
         auto config = setup();
         config.rules.maximum_fleet_movement_distance = f(-1);

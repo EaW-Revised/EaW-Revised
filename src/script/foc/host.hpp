@@ -5,6 +5,7 @@
 // eawr_script_foc.
 
 #include "eawr/script/foc/tactical_ai.hpp"
+#include "story_plot_bindings.hpp"
 #include "ai_equations.hpp"
 #include "eawr/script/foc/galactic_ai.hpp"
 #include "ai_world.hpp"
@@ -115,6 +116,9 @@ struct Host {
     // Ordered native owner only. Partitioned Lua bindings must retain the
     // immediate-action scheduler seam rather than mutate this capability.
     std::shared_ptr<galactic_ai::Actions> galactic_execution;
+    // WST-56: the loaded plots and the sink for Lua plot requests; null where no plot engine is hosted. Set by the
+    // campaign before the first service and then only read.
+    std::shared_ptr<const StoryPlotLink> story_plots;
     // SAE-02/03: borrowed immutable world during the barrier's script service.
     const tactical::TacticalSession* world{};
     std::shared_ptr<const tactical::TacticalSnapshot> snapshot;

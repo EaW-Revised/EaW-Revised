@@ -1,7 +1,10 @@
 #include "galactic_mode_internal.hpp"
+#include "report_privacy.hpp"
+#include "viewer_path.hpp"
 #include "ui/build_queue_dial.hpp"
 #include "eawr/core/diagnostic.hpp"
 #include <godot_cpp/classes/image.hpp>
+#include <system_error>
 #include <godot_cpp/classes/viewport_texture.hpp>
 #include "render_profile_viewport.hpp"
 #include "ui/tactical_hud_internal.hpp"
@@ -18,6 +21,44 @@ namespace eawr::presentation::godot_backend {
 using namespace galactic_detail;
 
 namespace {
+
+#if defined(_WIN32)
+[[nodiscard]] std::wstring environment_value(const wchar_t* name) {
+    const DWORD size = GetEnvironmentVariableW(name, nullptr, 0);
+    if (!size) return {};
+    std::wstring value(size, L'\0');
+    const DWORD written = GetEnvironmentVariableW(name, value.data(), size);
+    if (!written || written >= size) return {};
+    value.resize(written);
+    return value;
+}
+
+[[nodiscard]] std::string sanitized_zoom_report(const std::string& report) {
+    std::vector<std::string> paths{"%USERPROFILE%", "%APPDATA%", "%TEMP%"};
+    std::vector<std::string> names;
+    for (const auto* variable : {L"USERPROFILE", L"APPDATA", L"TEMP"}) {
+        const auto value = environment_value(variable);
+        if (value.empty()) continue;
+        paths.push_back(ViewerPath::utf8(std::filesystem::path(value)));
+        if (std::wstring_view(variable) == L"USERPROFILE")
+            names.push_back(ViewerPath::utf8(std::filesystem::path(value).filename()));
+        const DWORD size = GetShortPathNameW(value.c_str(), nullptr, 0);
+        if (size) {
+            std::wstring short_path(size, L'\0');
+            const DWORD written = GetShortPathNameW(value.c_str(), short_path.data(), size);
+            if (written && written < size) {
+                short_path.resize(written);
+                paths.push_back(ViewerPath::utf8(std::filesystem::path(short_path)));
+                if (std::wstring_view(variable) == L"USERPROFILE")
+                    names.push_back(ViewerPath::utf8(std::filesystem::path(short_path).filename()));
+            }
+        }
+    }
+    const auto username = environment_value(L"USERNAME");
+    if (!username.empty()) names.push_back(ViewerPath::utf8(std::filesystem::path(username)));
+    return report_privacy::sanitize(report, std::move(paths), std::move(names));
+}
+#endif
 
 [[nodiscard]] int byte(const float value) { return static_cast<int>(std::lround(value * 255.0F)); }
 
@@ -143,6 +184,14 @@ void GalacticMode::State::write_report_controls(std::ostringstream& output) cons
         }
     }
     output << "}";
+    {
+        // #5508: radar blips flashing for the pending battle (one per radar, normal and advanced map).
+        std::size_t flashing = 0;
+        for (const auto& blips : radar_blips)
+            for (const auto& [id, control] : blips)
+                if (const auto* blip = static_cast<const EawrHudButton*>(control); blip && blip->flash_shown()) ++flashing;
+        output << ",\n  \"radar_pending\": {\"planet\": " << pending_battle_planet << ", \"flashing_blips\": " << flashing << "}";
+    }
     output << ",\n  \"battle_dialog\": " << (battle_dialog ? battle_dialog->report_json() : "null");
     output << ",\n  \"campaign_score\": " << (campaign_score ? campaign_score->report_json() : "null")
            << ",\n  \"campaign_score_consumed\": " << (score_consumed ? "true" : "false")
@@ -170,9 +219,10 @@ void GalacticMode::State::write_report_controls(std::ostringstream& output) cons
 
 void GalacticMode::State::write_report_phases(std::ostringstream& output) const {
     output << ",\n  \"presentation_phases\": [";
-    constexpr std::array phase_names{"main", "snapshot", "instances", "animation", "sample", "bind", "material_clock", "corruption", "camera_hud", "submit", "routes", "hud_facts", "hud_commands", "hud_fleets", "hud_ground", "hud_orbit", "hud_radar", "hud_labels", "hud_weapon"};
+    constexpr std::array phase_names{"main", "snapshot", "instances", "animation", "sample", "bind", "material_clock", "corruption", "camera_hud", "submit", "routes", "hud_facts", "hud_commands", "hud_fleets", "hud_ground", "hud_orbit", "hud_radar", "hud_labels", "hud_weapon", "hud_total", "lighting", "visibility"};
     static_assert(phase_names.size() == static_cast<std::size_t>(FramePhase::count));
-    for (std::size_t index = 0; index < frame_phase_costs.size(); ++index) {
+    const auto phase_count = options.zoom_timing ? frame_phase_costs.size() : static_cast<std::size_t>(FramePhase::hud_total);
+    for (std::size_t index = 0; index < phase_count; ++index) {
         const auto& cost = frame_phase_costs[index];
         output << (index ? ", " : "") << "{\"name\": " << json(phase_names[index])
                << ", \"calls\": " << cost.calls << ", \"total_ms\": " << cost.milliseconds
@@ -180,6 +230,20 @@ void GalacticMode::State::write_report_phases(std::ostringstream& output) const 
                << ", \"avg_ms\": " << (cost.calls ? cost.milliseconds / static_cast<double>(cost.calls) : 0.0) << "}";
     }
     output << "]";
+    if (options.zoom_timing) {
+        output << ",\n  \"zoom_timing\": {\"thread\":\"main\",\"clock\":\"godot_ticks_usec\","
+                  "\"note\":\"phase durations are nested CPU wall times for the preceding interval; the first sample includes setup; renderer calls enqueue work, not GPU completion\",\"phase_names\":[";
+        for (std::size_t i = 0; i < phase_names.size(); ++i) output << (i ? "," : "") << json(phase_names[i]);
+        output << "],\"frames\":[";
+        for (std::size_t i = 0; i < zoom_timing_frames.size(); ++i) {
+            const auto& sample = zoom_timing_frames[i];
+            output << (i ? "," : "") << "{\"frame\":" << sample.frame << ",\"entry_usec\":" << sample.entry_usec
+                   << ",\"camera_state\":" << sample.camera_state << ",\"phase_ms\":[";
+            for (std::size_t j = 0; j < sample.phase_ms.size(); ++j) output << (j ? "," : "") << sample.phase_ms[j];
+            output << "]}";
+        }
+        output << "]}";
+    }
 }
 
 void GalacticMode::State::write_report_corruption(std::ostringstream& output) const {
@@ -278,7 +342,8 @@ void GalacticMode::State::write_report_command_bar(std::ostringstream& output) c
         const auto hit_position = rect.position + hit.position;
         output << (controls_written++ ? ", " : "") << "{\"name\": " << json(name)
                << ", \"enabled\": " << (button->is_disabled() ? "false" : "true")
-               << ", \"visible\": " << (button->is_visible() ? "true" : "false")
+               // Drawn: the active tab without selected art keeps its hit area but is not drawn (#5857).
+               << ", \"visible\": " << (button->is_visible() && button->get_self_modulate().a > 0.0F ? "true" : "false")
                << ", \"rect\": [" << rect.position.x << ", " << rect.position.y << ", "
                << rect.size.x << ", " << rect.size.y << "]"
                << ", \"hit_rect\": [" << hit_position.x << ", " << hit_position.y << ", "
@@ -846,8 +911,25 @@ void GalacticMode::State::write_report_models(std::ostringstream& output) const 
 
 bool GalacticMode::State::write_report() const {
     if (options.report_path.empty()) return true;
+#if defined(_WIN32)
+    // Process-only observation is safe during a driven battle proof, where the
+    // mutable AI owner walk is excluded. Capture before report allocations and
+    // teardown; only a completed capture is evidence of its final boundary.
+    PROCESS_MEMORY_COUNTERS_EX process{};
+    process.cb = sizeof(process);
+    const bool process_available = MemoryAttribution::enabled() && GetProcessMemoryInfo(GetCurrentProcess(),
+        reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&process), sizeof(process)) != 0;
+#endif
     std::ostringstream output;
     write_report_identity(output);
+#if defined(_WIN32)
+    if (process_available) {
+        output << ",\n  \"process_at_report\":{\"scope\":\"before_report_formatting_and_teardown\",\"private_bytes\":"
+               << process.PrivateUsage << ",\"working_set_bytes\":" << process.WorkingSetSize
+               << ",\"peak_working_set_bytes\":" << process.PeakWorkingSetSize
+               << ",\"peak_pagefile_bytes\":" << process.PeakPagefileUsage << '}';
+    }
+#endif
     write_report_session(output);
     write_report_ai(output);
     write_report_controls(output);
@@ -863,6 +945,23 @@ bool GalacticMode::State::write_report() const {
     write_report_handoff(output);
     write_report_zoom_samples(output);
     write_report_models(output);
+    if (filesystem) {
+        const auto cache = scene::VfsAssetCache(*filesystem).model_stats();
+        output << ",\n  \"gc_model_cache\":{\"budget_off\":" << (options.model_cache_budget_off ? "true" : "false")
+               << ",\"retained_bytes\":" << cache.cache_retained_bytes << ",\"budget_bytes\":" << cache.cache_budget_bytes
+               << ",\"gameplay_model_loads\":" << cache.gameplay_loads
+               << ",\"first_gameplay_model\":" << json(cache.first_gameplay_model)
+               << ",\"battle_load_model_loads\":" << cache.battle_loads
+               << ",\"battle_load_boundaries\":" << cache.battle_load_boundaries
+               << ",\"prep_trim\":" << (prep_trim.applied ? "true" : "false")
+               << ",\"prep_trim_recorded\":" << (prep_trim.recorded ? "true" : "false")
+               << ",\"prep_trim_retained_before_bytes\":" << prep_trim.retained_before
+               << ",\"prep_trim_retained_after_bytes\":" << prep_trim.retained_after
+               << ",\"prep_trim_freed_bytes\":" << prep_trim.retained_before - prep_trim.retained_after
+               << ",\"loads_between_trim_and_start\":"
+               << (prep_trim.recorded && prep_trim.started ? prep_trim.unique_loads_at_start - prep_trim.unique_loads_at_trim : 0)
+               << '}';
+    }
     if (!memory_snapshots.empty()) {
         output << ",\n  \"memory_census\":{\"units\":\"bytes\",\"scope\":\"listed_lower_bounds_and_overlapping_monitors_not_disjoint_process_ownership\",\"snapshots\":[";
         for (std::size_t i = 0; i < memory_snapshots.size(); ++i) {
@@ -877,7 +976,12 @@ bool GalacticMode::State::write_report() const {
     if (!options.report_path.parent_path().empty()) std::filesystem::create_directories(options.report_path.parent_path(), error);
     std::ofstream file(options.report_path, std::ios::binary | std::ios::trunc);
     if (!file) return false;
-    file << output.str();
+    const auto report = output.str();
+#if defined(_WIN32)
+    file << (options.zoom_timing ? sanitized_zoom_report(report) : report);
+#else
+    file << report;
+#endif
     return static_cast<bool>(file);
 }
 

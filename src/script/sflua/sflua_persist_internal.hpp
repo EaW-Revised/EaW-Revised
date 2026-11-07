@@ -2,11 +2,9 @@
 
 #if !defined(EAWR_SFLUA_HARDWARE_TWIN)
 
-#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
-#include <map>
 #include <memory>
 #include <new>
 #include <set>

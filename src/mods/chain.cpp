@@ -157,6 +157,8 @@ void field(std::string& bytes, std::string_view value) {
 }
 } // namespace
 
+const ModRecord* find_chain_record(std::span<const ModRecord> records, const std::string& key) { return find_record(records, key); }
+
 std::optional<ModInfo> parse_modinfo(std::string_view text) {
     const auto j = mod_json(text);
     return j ? info_from_value(*j) : std::nullopt;

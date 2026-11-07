@@ -58,8 +58,8 @@ struct FileFilter {
     bool hide_identical = false;
 };
 
-// Reuses an already-mounted VFS: one enumerate_raw, then exact candidates/open(candidate).
-// A sole provider is never opened. No native mod-file writes or second mount/directory walk.
+// Reuses an already-mounted VFS: one enumerate_raw, then exact candidates/read_chunks(candidate).
+// Hashing reuses at most 1 MiB of read storage. A sole provider is never opened. No native mod-file writes or second mount/directory walk.
 [[nodiscard]] core::Result<FileIndex> build_file_index(const vfs::Vfs& filesystem,
     std::span<const std::string> layer_order, std::string chain_fingerprint);
 void summarize_file_index(FileIndex& index);

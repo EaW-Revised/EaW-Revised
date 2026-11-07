@@ -1023,6 +1023,61 @@ void test_hero_beams() {
 }
 
 
+// WSPL-03/05: a unit that authors SUPER_LASER (no hardpoint gate, no special unit) fires after Fire_Delay,
+// deals Damage_Per_Frame while the timer runs, ends with it, and the result is worker independent.
+void test_super_laser() {
+    for (const auto delay : {0U, 3U}) {
+        std::vector<std::string> baseline;
+        for (const auto workers : {1U, 8U}) {
+            auto initial = setup();
+            initial.units = {{1, corvette_type, 1, at(0, 0), math::identity_quat(), {}},
+                {2, frigate_type, 2, at(100, 0, 100), math::identity_quat(), {}}};
+            auto health = durability();
+            for (auto& row : health.profiles) { row.max_shields = {}; row.shield_refresh = {}; }
+            tactical::AbilityProfile ordinary;
+            ordinary.kind = tactical::AbilityKind::super_laser; ordinary.recharge_frames = 20; ordinary.expiration_frames = 4;
+            ordinary.gui_activated_ability_name = "spha";
+            auto holder = unit_of(corvette_type, ordinary);
+            tactical::SpecialAbilityProfile nested;
+            nested.name = "spha"; nested.style = tactical::SpecialActivationStyle::user_input;
+            nested.kind = tactical::SpecialAbilityKind::super_laser;
+            nested.service_interval = 1; nested.beam_max_range = units(300); nested.damage_per_frame = units(50);
+            nested.fire_delay_frames = delay; nested.filter.applicable_categories = 2;
+            holder.special = {nested};
+            tactical::AbilityTable table; table.profiles = {holder}; table.beam_damage_type = 0;
+            tactical::CombatProfile source; source.type_id = corvette_type; source.category_bits = 1;
+            tactical::CombatProfile target; target.type_id = frigate_type; target.category_bits = 2;
+            tactical::CombatTable combat; combat.profiles = {source, target};
+            auto created = tactical::TacticalSession::create(initial, {}, health, motion(), std::nullopt, combat, {}, table);
+            expect(static_cast<bool>(created), "WSPL-01: a SUPER_LASER row with its handler binds");
+            if (!created) continue;
+            auto world = std::move(created).value();
+            expect(static_cast<bool>(world.submit(command(0, 1, 0, 1,
+                tactical::AbilityPayload{tactical::AbilityKind::super_laser, tactical::AbilityAction::activate, 2}))),
+                "WSPL-02: a targeted SUPER_LASER command submits");
+            const eawr::platform::ThreadWorkerAdapter executor(workers);
+            std::vector<std::string> hashes;
+            for (unsigned frame = 0; frame < 12; ++frame) {
+                const auto stepped = world.step(executor);
+                expect(static_cast<bool>(stepped), "WSPL-05: the super laser service tick succeeds");
+                if (!stepped) break;
+                hashes.push_back(stepped.value().state_sha256);
+                if (frame == 0) expect(world.ability_state(1)->slots.front().active, "WSPL-03: the super laser switches on");
+                if (frame == 1 && delay != 0)
+                    expect(world.durability_state(2)->hull == units(3600), "WSPL-03: no damage before Fire_Delay has passed");
+            }
+            expect(!world.ability_state(1)->slots.front().active, "WSPL-05: the super laser ends with its timer");
+            const auto final = world.durability_state(2);
+            // The tick's impacts precede its commands, so a switch-on with no delay first hits one tick later;
+            // with a delay the timer starts at the fire frame, so the same window of four ticks is fully served.
+            expect(final && final->hull == units(3600 - (delay == 0 ? 3 : 4) * 50),
+                "WSPL-05: Damage_Per_Frame lands once per frame from the fire frame until the timer ends");
+            if (baseline.empty()) baseline = hashes;
+            else expect(hashes == baseline, "super laser state hashes equal at workers 1 and 8");
+        }
+    }
+}
+
 // WAB-36 (legacy #2997): the energy weapon and the tractor beam admit an enemy attack target, so a
 // player the engine plays switches them on through the attack-state pass with no ability command:
 // one per pass, in the nested abilities' authored order. Scenarios: 0 AI owner, energy weapon

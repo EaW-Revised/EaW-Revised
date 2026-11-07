@@ -11,12 +11,16 @@
 // synthetic gallery fixtures explicitly opt out. Rows retain the retail name and timestamp columns.
 
 #include "eawr/presentation/ui/load_game.hpp"
+#include "eawr/mods/save_description.hpp"
 
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <functional>
 #include <optional>
+#include <memory>
+#include <map>
+#include <utility>
 #include <span>
 #include <string>
 #include <string_view>
@@ -36,6 +40,7 @@ struct SavedGameFile final {
     std::optional<std::int64_t> last_write_seconds; // unix seconds
     std::uint64_t completed_tick{}, galactic_frame{}, bytes{};
     bool child{};            // saved during a tactical battle
+    bool skirmish{};         // #3989: a skirmish battle save
     std::string problem;     // why the file cannot be read; empty when it parses
 };
 
@@ -51,6 +56,8 @@ struct SavedGameClock final {
 // The retail load list scans the first 100 slots of the repository (WGS-161).
 inline constexpr std::size_t saved_game_list_limit = 100;
 
+enum class SavedGameFilter { single_player, multiplayer, all };
+
 // The rows for these files, in file order, as the retail list shows them: reserved slots keep
 // their TEXT key, then ascending WGS-156 key, equal keys in file order. Only the first
 // saved_game_list_limit files are listed.
@@ -63,6 +70,7 @@ public:
     explicit DirectorySavedGameStore(std::filesystem::path directory,
                                      SavedGameClock calendar = local_saved_game_clock(),
                                      bool require_campaign = true);
+    DirectorySavedGameStore(std::filesystem::path directory, SavedGameClock calendar, SavedGameFilter filter);
 
     [[nodiscard]] presentation::ui::SavedGameListing list() const override;
     [[nodiscard]] presentation::ui::DeleteResult erase(std::string_view name) override;
@@ -74,7 +82,37 @@ public:
 private:
     std::filesystem::path directory_;
     SavedGameClock calendar_;
-    bool require_campaign_;
+    SavedGameFilter filter_;
+};
+
+// Explicit worker operation: ordinary list() never performs admission.
+[[nodiscard]] presentation::ui::SavedGameListing checked_saved_game_listing(const DirectorySavedGameStore&,
+    const std::function<std::string(std::span<const std::uint8_t>)>& admission,
+    const std::function<void(std::string_view, std::span<const std::uint8_t>)>& observe = {});
+
+[[nodiscard]] std::string saved_game_mod_details(std::span<const std::uint8_t> bytes,
+    const mods::ModDescription& mounted);
+[[nodiscard]] std::optional<mods::ModDescription> saved_game_mod_description(std::span<const std::uint8_t> bytes);
+[[nodiscard]] std::string saved_game_mod_details(const std::optional<mods::ModDescription>& saved,
+    const mods::ModDescription& mounted);
+
+// The staging picker refreshes an already checked snapshot. Reading the list never touches disk.
+class SnapshotSavedGameStore final : public presentation::ui::SavedGameStore {
+public:
+    SnapshotSavedGameStore(std::shared_ptr<DirectorySavedGameStore> source, presentation::ui::SavedGameListing listing,
+        std::map<std::string, std::optional<mods::ModDescription>> details = {})
+        : source_(std::move(source)), listing_(std::move(listing)), details_(std::move(details)) {}
+    [[nodiscard]] presentation::ui::SavedGameListing list() const override { return listing_; }
+    [[nodiscard]] presentation::ui::DeleteResult erase(std::string_view name) override;
+    [[nodiscard]] std::filesystem::path directory() const override { return source_->directory(); }
+    [[nodiscard]] std::string details(std::string_view name, const mods::ModDescription& mounted) const {
+        const auto found = details_.find(std::string(name));
+        return found == details_.end() ? std::string("Mods: unavailable") : saved_game_mod_details(found->second, mounted);
+    }
+private:
+    std::shared_ptr<DirectorySavedGameStore> source_;
+    presentation::ui::SavedGameListing listing_;
+    std::map<std::string, std::optional<mods::ModDescription>> details_;
 };
 
 } // namespace eawr::viewer

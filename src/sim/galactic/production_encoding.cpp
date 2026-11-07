@@ -51,7 +51,6 @@ void encode_row(std::vector<std::uint8_t>&, const ProductionPlayer&);
 bool decode_row(Reader&, ProductionPlayer&);
 void encode_row(std::vector<std::uint8_t>&, const PlanetProduction&);
 bool decode_row(Reader&, PlanetProduction&);
-void encode_row(std::vector<std::uint8_t>&, const ProductionSetup&);
 bool decode_row(Reader&, ProductionSetup&);
 
 template <class T> void rows(std::vector<std::uint8_t>& bytes, const std::vector<T>& values) {
@@ -223,7 +222,7 @@ void encode_planet_inputs(std::vector<std::uint8_t>& bytes, const PlanetProducti
 }
 void encode_row(std::vector<std::uint8_t>& bytes, const PlanetProduction& v) {
     encode_planet_inputs(bytes, v);
-    rows(bytes, v.offers);
+    rows(bytes, v.offers.rows());
     for (const auto& queue : v.queues) rows(bytes, queue);
     rows(bytes, v.objects);
 }
@@ -244,16 +243,26 @@ bool decode_row(Reader& in, PlanetProduction& v) {
         && decode_row(in, v.enabled)
         && decode_row(in, v.surface_accessible)
         && decode_row(in, v.starbase_blocked)
-        && rows(in, v.offers)
+        && rows(in, v.offers.mutable_rows())
         && rows(in, v.queues[0])
         && rows(in, v.queues[1])
         && rows(in, v.objects);
 }
 void encode_production_rows(std::vector<std::uint8_t>& bytes, const ProductionSetup& v,
-    const ProductionOfferDigests* digests) {
+    const ProductionOfferDigests* digests, const ProductionOfferRows* offer_rows = nullptr) {
     put_u32(bytes, v.maximum_human_queue);
     rows(bytes, v.players);
-    if (!digests) rows(bytes, v.planets);
+    if (!digests && offer_rows) {
+        // The same bytes as rows(bytes, v.planets), with each planet's immutable offer table taken from the caller's cache.
+        put_u32(bytes, static_cast<std::uint32_t>(v.planets.size()));
+        for (std::size_t i = 0; i < v.planets.size(); ++i) {
+            const auto& planet = v.planets[i];
+            encode_planet_inputs(bytes, planet);
+            put_bytes(bytes, offer_rows->at(i));
+            for (const auto& queue : planet.queues) rows(bytes, queue);
+            rows(bytes, planet.objects);
+        }
+    } else if (!digests) rows(bytes, v.planets);
     else {
         put_u32(bytes, static_cast<std::uint32_t>(v.planets.size()));
         for (std::size_t i = 0; i < v.planets.size(); ++i) {
@@ -272,9 +281,6 @@ void encode_production_rows(std::vector<std::uint8_t>& bytes, const ProductionSe
         for (auto player : type.affiliated_players) put_u32(bytes, player);
     }
 }
-void encode_row(std::vector<std::uint8_t>& bytes, const ProductionSetup& v) {
-    encode_production_rows(bytes, v, nullptr);
-}
 bool decode_row(Reader& in, ProductionSetup& v) {
     std::uint32_t count{}; std::size_t affiliations{}; TypeId previous{};
     if (!in.read_u32(v.maximum_human_queue) || !rows(in, v.players) || !rows(in, v.planets)
@@ -282,7 +288,7 @@ bool decode_row(Reader& in, ProductionSetup& v) {
     for (std::uint32_t i = 0; i < count; ++i) {
         TechnologyType type; std::uint32_t players{};
         if (!in.read_u64(type.type) || !type.type || type.type <= previous || !in.read_i64(type.tech)
-            || type.tech < 0 || type.tech > std::numeric_limits<std::int32_t>::max()
+            || type.tech < std::numeric_limits<std::int32_t>::min() || type.tech > std::numeric_limits<std::int32_t>::max()
             || !decode_row(in, type.initially_locked) || !decode_row(in, type.slicer_unlockable)
             || !in.read_u32(players) || players > galactic_max_players || players > in.remaining() / 4) return false;
         previous = type.type; affiliations += players;
@@ -301,6 +307,13 @@ bool decode_row(Reader& in, ProductionSetup& v) {
 
 } // namespace
 void encode_census(std::vector<std::uint8_t>& bytes, const PopulationCensus& census) {
+    std::vector<const CensusObject*> objects;
+    objects.reserve(census.objects.size());
+    for (const auto& row : census.objects) objects.push_back(&row);
+    encode_census(bytes, census, objects);
+}
+void encode_census(std::vector<std::uint8_t>& bytes, const PopulationCensus& census,
+    const std::span<const CensusObject* const> objects) {
     put_u8(bytes, 2); // WGP-191: typed History combat-power inputs
     put_u32(bytes, static_cast<std::uint32_t>(census.types.size()));
     for (const auto& row : census.types) {
@@ -318,8 +331,9 @@ void encode_census(std::vector<std::uint8_t>& bytes, const PopulationCensus& cen
         put_u32(bytes, row.player); put_i64(bytes, row.base_capacity); put_u8(bytes, row.ai_uses_cap ? 1 : 0);
         rows(bytes, row.unusable_planets);
     }
-    put_u32(bytes, static_cast<std::uint32_t>(census.objects.size()));
-    for (const auto& row : census.objects) {
+    put_u32(bytes, static_cast<std::uint32_t>(objects.size()));
+    for (const auto* object : objects) {
+        const auto& row = *object;
         put_u64(bytes, row.id); put_u64(bytes, row.original_type); put_u32(bytes, row.owner);
         put_u64(bytes, row.planet); put_u64(bytes, row.container);
         put_u8(bytes, row.dead ? 1 : 0); put_u8(bytes, row.delete_pending ? 1 : 0);
@@ -427,10 +441,10 @@ void encode_population(std::vector<std::uint8_t>& bytes, std::span<const Populat
 }
 
 static void encode_production_impl(std::vector<std::uint8_t>& bytes, const ProductionSetup& production,
-    const ProductionOfferDigests* digests) {
+    const ProductionOfferDigests* digests, const ProductionOfferRows* offer_rows = nullptr) {
     put_u8(bytes, digests ? 8 : 7); // distinct production hash domain; wire format remains 7
     if (digests) encode_production_rows(bytes, production, digests);
-    else encode_row(bytes, production);
+    else encode_production_rows(bytes, production, nullptr, offer_rows);
     put_u8(bytes, production.fleet_blockers ? 1 : 0);
     if (production.fleet_blockers) rows(bytes, *production.fleet_blockers);
     put_u8(bytes, production.nested_creation ? 1 : 0);
@@ -454,12 +468,25 @@ static void encode_production_impl(std::vector<std::uint8_t>& bytes, const Produ
 void encode_production(std::vector<std::uint8_t>& bytes, const ProductionSetup& production) {
     encode_production_impl(bytes, production, nullptr);
 }
+void encode_production(std::vector<std::uint8_t>& bytes, const ProductionSetup& production, const ProductionOfferRows& offer_rows) {
+    encode_production_impl(bytes, production, nullptr, &offer_rows);
+}
+ProductionOfferRows production_offer_rows(const ProductionSetup& production) {
+    ProductionOfferRows result;
+    result.reserve(production.planets.size());
+    for (const auto& planet : production.planets) {
+        std::vector<std::uint8_t> bytes;
+        rows(bytes, planet.offers.rows());
+        result.push_back(std::move(bytes));
+    }
+    return result;
+}
 ProductionOfferDigests production_offer_digests(const ProductionSetup& production) {
     ProductionOfferDigests result;
     result.reserve(production.planets.size());
     for (const auto& planet : production.planets) {
         std::vector<std::uint8_t> bytes;
-        rows(bytes, planet.offers);
+        rows(bytes, planet.offers.rows());
         result.push_back(core::sha256(bytes));
     }
     return result;

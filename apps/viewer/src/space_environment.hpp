@@ -2,6 +2,7 @@
 
 #include "battle_scene.hpp"
 #include "battle_camera.hpp"
+#include "load_job.hpp"
 #include <utility>
 
 #include "map_camera.hpp"
@@ -14,7 +15,7 @@
 #include "eawr/presentation/space/environment_scene.hpp"
 #include "eawr/sim/snapshot.hpp"
 #include "eawr/skirmish/attract.hpp"
-#include "eawr/vfs/vfs.hpp"
+#include "eawr/vfs/vfs_fwd.hpp"
 
 #include <godot_cpp/classes/node3d.hpp>
 
@@ -54,6 +55,7 @@ struct SpacePopulateContext final {
     std::span<const std::uint32_t> environment_records;
     sim::AssetId first_asset{};
     sim::EntityId first_entity{};
+    EnqueueLoadStep enqueue{};
 };
 // One frame of a live population (#80, the live session's units).
 using SpaceLiveUpdate = BattleScene::Update;
@@ -68,6 +70,7 @@ struct SpacePopulateResult final {
     // Null retains the standalone/menu clock. A live tactical population owns
     // this source and observes its admitted frames during `live`, before effects.
     const RenderClock* render_clock{};
+    std::function<std::vector<sim::RenderInstance>()> ready_instances{};
 };
 using SpacePopulateHook = std::function<core::Result<SpacePopulateResult>(const SpacePopulateContext& context)>;
 
@@ -189,8 +192,8 @@ public:
     // Plans, uploads and submits. A false return has already written the
     // report; the caller exits non-zero.
     [[nodiscard]] bool ready(godot::Node3D& host, const assets::Map& map, const vfs::Vfs& filesystem,
-                             const assets::ObjectTypeCatalog& catalog, bool catalog_loaded,
-                             const std::string& catalog_failure);
+                              const assets::ObjectTypeCatalog& catalog, bool catalog_loaded,
+                              const std::string& catalog_failure, const EnqueueLoadStep& enqueue = {});
     [[nodiscard]] std::optional<int> process(double delta);
     // Why ready() returned false; empty otherwise.
     [[nodiscard]] std::string failure() const;
@@ -202,6 +205,8 @@ public:
     void camera_event(const viewer::camera_input::RawEvent& event);
     void camera_focus(bool focused);
     void camera_pointer_left();
+    void camera_sample_pointer(float x, float y);
+    void camera_clear_pointer_sample();
     void camera_viewport(float width, float height);
     // The attract's locked view (Options::saved_camera) keeps its field of view, window size and
     // clip planes and takes this eye and look-at (render basis) from the next frame on. Inert for

@@ -13,6 +13,10 @@ namespace eawr::presentation::godot_backend::detail {
 
 // The loader's captured content owner must outlive this recipe. A generated or
 // transformed texture keeps its snapshot unless the loader reproduces it exactly.
+// One exception: a texture whose mip chain was generated after loading (assets::Source::authored_levels, #5989) is
+// verified against its file's authored levels alone and then released like any other. A later read gives those authored
+// levels back, never the generated ones: regenerating a chain costs tens of milliseconds a texture on the thread that
+// asks, which a re-admission during play must not pay. The generated levels return with the next load.
 using TextureLoader = std::function<std::optional<assets::Texture>(const assets::Source&)>;
 
 class TextureRecipe final {
@@ -24,6 +28,9 @@ public:
 
     [[nodiscard]] const assets::Texture* retained() const { return retained_.get(); }
 
+    // Where the pixels came from, also after the CPU snapshot was released (texture census).
+    [[nodiscard]] const assets::Source& source() const { return retained_ ? retained_->source : source_; }
+
     // Called only after successful GPU admission. Verify once, without retaining
     // the decoded control, then release every mip allocation of the snapshot.
     void uploaded() {
@@ -31,9 +38,10 @@ public:
         verified_ = true;
         if (!loader_ || retained_->source.logical_path.empty()) { loader_ = {}; return; }
         auto decoded = loader_(retained_->source);
-        if (!decoded || !same_content(*retained_, *decoded)) { loader_ = {}; return; }
+        const std::size_t levels = retained_->source.authored_levels != 0 ? retained_->source.authored_levels : retained_->mips.size();
+        if (!decoded || !same_content(*retained_, *decoded, levels)) { loader_ = {}; return; }
         source_ = retained_->source;
-        identity_ = identity(*retained_);
+        identity_ = identity(*decoded);
         retained_.reset();
     }
 
@@ -60,11 +68,12 @@ private:
         }
         return writer.digest();
     }
-    [[nodiscard]] static bool same_content(const assets::Texture& a, const assets::Texture& b) {
+    // The first `levels` levels of `a` against all of `b`, which must hold exactly that many.
+    [[nodiscard]] static bool same_content(const assets::Texture& a, const assets::Texture& b, const std::size_t levels) {
         if (a.width != b.width || a.height != b.height || a.format != b.format
             || a.has_alpha != b.has_alpha || a.source_origin != b.source_origin
-            || a.mips.size() != b.mips.size()) return false;
-        for (std::size_t i = 0; i < a.mips.size(); ++i) {
+            || a.mips.size() < levels || b.mips.size() != levels) return false;
+        for (std::size_t i = 0; i < levels; ++i) {
             const auto& x = a.mips[i];
             const auto& y = b.mips[i];
             if (x.width != y.width || x.height != y.height || x.row_pitch != y.row_pitch || x.bytes != y.bytes)

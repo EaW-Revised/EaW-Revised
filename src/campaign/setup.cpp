@@ -645,7 +645,7 @@ core::Result<void> plan_player_resources(const data::galactic::GalacticData& dat
         }
         tech_plan.push_back({binding.player.player_id, current, maximum});
         const auto& home = homes[index];
-        if (options.mode == CampaignSetupMode::multiplayer && (!options.custom || options.custom->allow_heroes) && home.planet) {
+        if (options.resolved_rules_flavour() == CampaignRulesFlavour::multiplayer && (!options.custom || options.custom->allow_heroes) && home.planet) {
             for (const auto& original : faction->multiplayer_campaign_heroes) {
                 const auto type = type_ids.find(key(original));
                 if (type == type_ids.end()) return invalid<void>("missing original identity for multiplayer hero " + original, campaign->file);
@@ -709,7 +709,7 @@ core::Result<void> plan_victory_setup(const data::galactic::GalacticData& data, 
         campaign->ai_victory_galactic_control.value_or(one), campaign->ai_victory_faction_names,
         campaign->ai_victory_leader_names, campaign->ai_victory_planet_names};
     gc::VictoryContext context;
-    context.multiplayer = options.mode == CampaignSetupMode::multiplayer;
+    context.multiplayer = options.resolved_rules_flavour() == CampaignRulesFlavour::multiplayer;
     gc::PlayerId starting{};
     for (const auto& binding : options.players) {
         const auto* faction = data.faction(binding.faction);
@@ -751,7 +751,7 @@ void seal_campaign_identity(const auto* campaign, const CampaignSetupOptions& op
     // Coordinator-reserved identity domain. Explicit bindings and owner activity join the
     // selected definition/content, so two menus selecting different roots cannot alias.
     Identity identity;
-    identity.text("eawr-campaign-setup-v1");
+    identity.text("eawr-campaign-setup-v2");
     identity.bytes.insert(identity.bytes.end(), galaxy_setup.content_identity.begin(), galaxy_setup.content_identity.end());
     identity.text(key(campaign->name));
     identity.integer(options.players.size());
@@ -762,6 +762,7 @@ void seal_campaign_identity(const auto* campaign, const CampaignSetupOptions& op
     identity.integer(options.types.size());
     for (const auto& type : options.types) { identity.integer(type.id); identity.text(key(type.original_type)); }
     identity.integer(options.mode == CampaignSetupMode::multiplayer ? 1 : 0);
+    identity.integer(options.resolved_rules_flavour() == CampaignRulesFlavour::multiplayer ? 1 : 0);
     identity.integer(options.custom ? 1 : 0);
     if (options.custom) {
         identity.integer(static_cast<std::uint64_t>(options.custom->credits));
@@ -770,7 +771,7 @@ void seal_campaign_identity(const auto* campaign, const CampaignSetupOptions& op
         identity.integer(options.custom->allow_heroes ? 1 : 0);
     }
     if (options.seat_control) {
-        // Appended only when present, so a single-player identity keeps its bytes.
+        // Seat control belongs to transport, independently of campaign rules.
         identity.text("seat-control");
         identity.integer(options.seat_control->teams.size());
         for (const auto& team : options.seat_control->teams) {
@@ -834,6 +835,9 @@ core::Result<CampaignSetupPlan> plan_campaign_setup(const data::galactic::Galact
     }
     if (options.mode != CampaignSetupMode::single_player && options.mode != CampaignSetupMode::multiplayer)
         return invalid<CampaignSetupPlan>("unknown galactic mode", campaign->file);
+    if (options.resolved_rules_flavour() != CampaignRulesFlavour::single_player
+        && options.resolved_rules_flavour() != CampaignRulesFlavour::multiplayer)
+        return invalid<CampaignSetupPlan>("unknown campaign rules flavour", campaign->file);
     if (options.seat_control && options.mode != CampaignSetupMode::multiplayer)
         return invalid<CampaignSetupPlan>("seat control requires multiplayer mode", campaign->file);
     // WGS-75: campaign staging resets custom options on selection and exposes its
@@ -849,10 +853,12 @@ core::Result<CampaignSetupPlan> plan_campaign_setup(const data::galactic::Galact
     plan.human_observers_.erase(std::unique(plan.human_observers_.begin(), plan.human_observers_.end()), plan.human_observers_.end());
     if (plan.human_observers_.empty() && plan.solo_reference_human_) plan.human_observers_.push_back(*plan.solo_reference_human_);
     plan.mode_ = options.mode;
+    plan.rules_flavour_ = options.resolved_rules_flavour();
     // GOBS-01 / WGS-04: campaign definition construction defaults auto-reveal true.
     plan.observer_auto_reveal_ = campaign->planet_auto_reveal.value_or(true);
     if (const auto* delay = data.constant("Planet_Reveal_Delay_Time")) plan.observer_reveal_delay_ = delay->number;
     plan.campaign_name_ = campaign->name;
+    plan.galaxy_.networked_transport = options.mode == CampaignSetupMode::multiplayer;
     plan.galaxy_.seed = options.forced_seed.value_or(options.seed);
     plan.galaxy_.seats = options.seats;
     plan.galaxy_.seat_control = options.seat_control;
@@ -1139,6 +1145,23 @@ core::Result<CampaignRoot> CampaignRoot::create(CampaignSetupPlan plan, const Ca
         auto nested = prepare_nested_creation(*services.stock_starting_forces, &load_buffer, &placement_context->omitted_templates);
         if (!nested) return core::Result<CampaignRoot>::failure(nested.error());
         placement_context->production.nested_creation = std::move(nested).value();
+        // An unusable company is a construction limitation, not a reason to
+        // reject every campaign that happens to load its authored type.
+        for (auto& row : placement_context->census.types) if (row.company) {
+            const auto transport = std::lower_bound(placement_context->movement.types.begin(),
+                placement_context->movement.types.end(), row.transport,
+                [](const auto& type, auto id) { return type.type < id; });
+            if (transport == placement_context->movement.types.end() || transport->type != row.transport || !transport->transport) {
+                const auto binding = std::find_if(services.stock_starting_forces->bindings.begin(),
+                    services.stock_starting_forces->bindings.end(), [&](const auto& value) { return value.id == row.type; });
+                setup_load_note(load_buffer, "EAWR-LOAD-1300",
+                    binding == services.stock_starting_forces->bindings.end() ? std::to_string(row.type) : binding->original_type,
+                    "Company_Transport_Unit", std::to_string(row.transport), "company construction omitted",
+                    core::LoadAction::skipped_object);
+                placement_context->omitted_templates.insert(row.type);
+                row.company = false; row.transport = 0;
+            }
+        }
         // Census and production share the same authored composites. Disable the
         // affected template and its ancestors, rather than inventing live children.
         auto& nested_types = placement_context->production.nested_creation->types;
@@ -1228,8 +1251,9 @@ core::Result<CampaignRoot> CampaignRoot::create(CampaignSetupPlan plan, const Ca
                 const auto at = std::find_if(placement_context->production.planets.begin(), placement_context->production.planets.end(),
                     [&](const auto& row) { return row.planet == mark.planet; });
                 if (at == placement_context->production.planets.end()) return invalid<CampaignRoot>("initial-placement planet context is absent");
-                const auto offer = std::find_if(at->offers.begin(), at->offers.end(), [&](const auto& row) { return row.type == mark.type; });
-                if (offer == at->offers.end()) continue; // An over-budget offer was explicitly omitted above.
+                auto& offer_rows = at->offers.mutable_rows();
+                const auto offer = std::find_if(offer_rows.begin(), offer_rows.end(), [&](const auto& row) { return row.type == mark.type; });
+                if (offer == offer_rows.end()) continue; // An over-budget offer was explicitly omitted above.
                 offer->initially_placed = true;
             }
             if (services.mark_initial_placement)
@@ -1447,7 +1471,7 @@ core::Result<CampaignRoot> CampaignRoot::create(CampaignSetupPlan plan, const Ca
     }
     if (setup.production) {
         normalize_campaign_offers(*setup.production, load_buffer, plan.campaign_name());
-        if (placement_context) for (auto& planet : setup.production->planets) for (auto& offer : planet.offers)
+        if (placement_context) for (auto& planet : setup.production->planets) for (auto& offer : planet.offers.mutable_rows())
             if (placement_context->omitted_templates.contains(offer.type)) offer.direct_build_allowed = false;
     }
     if (setup.census) (void)normalize_campaign_census(*setup.census, load_buffer, plan.campaign_name());
@@ -1523,5 +1547,9 @@ std::span<const core::LoadNote> CampaignRoot::load_notes() const {
 }
 void CampaignRoot::stop_root() noexcept {
     game_.reset(); plan_.reset(); caps_.clear(); load_notes_.clear(); combined_load_notes_.clear();
+}
+
+CampaignRoot CampaignRoot::from_restored(CampaignSetupPlan plan, GameSession game) {
+    return CampaignRoot(std::move(plan), std::move(game), {});
 }
 } // namespace eawr::campaign

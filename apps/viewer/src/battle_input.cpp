@@ -1,11 +1,15 @@
 #include "battle_input.hpp"
+#include "battle_selection_settings.hpp"
 
 #include "camera_input.hpp"
+#include "settings_store.hpp"
+#include "eawr/presentation/ui/selection_config.hpp"
 
 #include "eawr/presentation/ui/command_sink.hpp"
 #include "eawr/presentation/ui/minimap.hpp"
 #include "eawr/presentation/ui/hud_shell.hpp"
 #include "eawr/scene/scene.hpp"
+#include "eawr/units/content_selection.hpp"
 #include "eawr/battle/start.hpp"
 #include "eawr/skirmish/roster_gate.hpp"
 #include "eawr/sim/tactical/types.hpp"
@@ -19,6 +23,7 @@
 #include <godot_cpp/classes/rendering_server.hpp>
 #include <godot_cpp/classes/viewport.hpp>
 #include <godot_cpp/classes/world2d.hpp>
+#include <godot_cpp/variant/transform2d.hpp>
 
 #include <algorithm>
 #include <cstdio>
@@ -58,6 +63,7 @@ BattleInput::~BattleInput() {
 
 void BattleInput::prepare(const vfs::Vfs& filesystem, const data::Catalog& catalog, const LiveSessionView& live,
                           const std::shared_ptr<GodotShaderCache>& shaders) {
+    prepare_battle_selection_settings<ActiveSettings>(selection_fallback_, filesystem);
     world_ui_->prepare(filesystem, catalog, live, shaders);
     cursor_.prepare(filesystem);
     beacon_delay_ = ui::beacon_place_delay(filesystem);
@@ -65,6 +71,13 @@ void BattleInput::prepare(const vfs::Vfs& filesystem, const data::Catalog& catal
 
 void BattleInput::note(std::string text) {
     if (log_.size() < log_limit) log_.push_back(std::move(text));
+}
+
+std::array<float, 6> BattleInput::final_transform() const {
+    Viewport* viewport = host_ != nullptr ? host_->get_viewport() : nullptr;
+    if (viewport == nullptr) return {1.0F, 0.0F, 0.0F, 1.0F, 0.0F, 0.0F};
+    const Transform2D t = viewport->get_final_transform();
+    return {t.columns[0].x, t.columns[0].y, t.columns[1].x, t.columns[1].y, t.columns[2].x, t.columns[2].y};
 }
 
 ui::ScreenRect BattleInput::viewport_rect() const { return {0.0F, 0.0F, viewport_[0], viewport_[1]}; }
@@ -87,7 +100,9 @@ void BattleInput::refresh(LiveSessionView& live, const BattleScene& population, 
     if (!pick_shapes_loaded_ && live.tables() != nullptr) {
         // #665 (WSU-11, WSU-12): the collidable meshes projectiles hit (DG-36), in model space
         // before Scale_Factor like the pick box, and the override sphere.
+        const units::FootprintTypeSelection selection(*live.tables());
         for (const units::UnitType& type : live.tables()->units) {
+            if (!selection.keeps(type)) continue;
             std::vector<std::array<ui::Vec3f, 3>> triangles;
             // OR-20: include attached hardpoint meshes in the unit pick; only a reticle names
             // a hardpoint in the order. Mesh contacts always identify the owning unit.
@@ -113,6 +128,7 @@ void BattleInput::refresh(LiveSessionView& live, const BattleScene& population, 
             pick_shapes_.insert_or_assign(battle::type_id(type.id), std::move(shape));
         }
         for (const units::ObstacleType& type : live.tables()->obstacles) {
+            if (!selection.keeps(type)) continue;
             PickShape shape;
             shape.selectable = type.selectable;
             shape.mouse_sensitive = type.mouse_sensitive;

@@ -96,7 +96,7 @@ struct FactionColour final {
 }
 
 // The faction table player indices resolve against. The colour is read from
-// the faction's own last active definition, not through Catalog::resolve,
+// the faction's own first active definition, not through Catalog::resolve,
 // whose winner lookup spans every category.
 [[nodiscard]] std::vector<FactionColour> faction_colours(const data::Catalog& catalog) {
     std::vector<FactionColour> result;
@@ -104,11 +104,7 @@ struct FactionColour final {
         const data::Definition* source = nullptr;
         for (const data::Definition* definition : catalog.find_all(id)) {
             if (definition->category != data::Category::faction || !definition->active) continue;
-            if (source == nullptr || definition->registry_order > source->registry_order
-                || (definition->registry_order == source->registry_order
-                    && definition->definition_order > source->definition_order)) {
-                source = definition;
-            }
+            if (source == nullptr) source = definition; // find_all lists the strongest layer's first registration first
         }
         FactionColour faction;
         faction.id = id;
@@ -234,8 +230,8 @@ void resolve_object(Placement& placement, const assets::Placement& source,
     }
     if (source.type_resolution == assets::TypeResolution::collision) {
         add_issue(placement, Cause::crc_collision, hex32(*source.type_crc));
-        return;
     }
+    if (source.type_candidates.empty()) return;
     const assets::ObjectTypeRef& type = source.type_candidates.front();
     placement.object_id = type.logical_name;
     placement.object_provenance.tag = "type_crc";

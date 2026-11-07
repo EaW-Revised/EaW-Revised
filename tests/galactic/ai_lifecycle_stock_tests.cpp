@@ -312,6 +312,145 @@ void cadence() {
     suppressed.step(5, 1, {a::Mode::galactic, true, false});
     expect(suppressed.services->native_landing_services == 1, "ordinary admitted due execution services the native landing owner after suppression ends");
 }
+void phase_rollback() {
+    struct FaultServices final : Services {
+        bool armed{}, throws{};
+        a::gc::PlayerId fault_player{};
+        core::Result<void> run(const a::ServiceInput& input, auth::ScriptScheduler& scripts) override {
+            auto served = Services::run(input, scripts);
+            if (!armed || input.player != fault_player || input.service != a::Service::execution) return served;
+            if (throws) throw std::runtime_error("lifecycle phase fixture");
+            core::Diagnostic diagnostic; diagnostic.code = "lifecycle-phase-fixture";
+            return core::Result<void>::failure(std::move(diagnostic));
+        }
+    };
+    std::string reference;
+    for (const auto workers : {1U, 2U, 4U, 8U}) {
+        platform::ThreadWorkerAdapter executor(workers);
+        auto setup = fixture();
+        auto next = setup.players.front(); next.player = 3; setup.players.push_back(next);
+        next.player = 4; setup.players.push_back(next);
+        auto queries = std::make_shared<Queries>(); auto services = std::make_shared<FaultServices>();
+        auto manager = must(a::Manager::create(setup, {queries, {}, {}, services, {}, {}, {}}));
+        auto scripts = scheduler();
+        queries->world.clocks = {0, 0}; must(manager->service({0, 0}, {}, scripts));
+        const auto before = must(manager->capture()); const auto state_before = manager->lifecycle();
+        const auto trace_before = manager->trace(); const auto dropped_before = manager->trace_dropped();
+        queries->values["TriggerA"] = a::Number(1); queries->world.clocks = {3, 3};
+        for (const auto player : {2U, 3U, 4U}) for (const bool throws : {false, true}) for (const bool after_mutation : {false, true}) {
+            auto phase = must(manager->begin_phase());
+            expect(phase->work().player_copies == 0 && phase->work().trace_intents == 0,
+                "lifecycle begin copies no player policies or retained diagnostic history");
+            expect(!manager->begin_phase() && !manager->restore(before), "lifecycle phase refuses nesting and external restore");
+            services->armed = true; services->fault_player = player; services->throws = throws;
+            bool caught{};
+            try {
+                const auto failed = [&]() -> core::Result<void> {
+                    if (after_mutation) return manager->service({3, 3}, {}, scripts);
+                    if (throws) throw std::runtime_error("lifecycle phase fixture");
+                    core::Diagnostic diagnostic; diagnostic.code = "lifecycle-phase-fixture";
+                    return core::Result<void>::failure(std::move(diagnostic));
+                }();
+                expect(!failed && failed.error().code == "lifecycle-phase-fixture", "lifecycle preserves native Result failure");
+            } catch (const std::runtime_error& error) { caught = std::string_view(error.what()) == "lifecycle phase fixture"; }
+            expect(caught == throws, "lifecycle preserves deterministic exception identity");
+            if (after_mutation) {
+                expect(manager->faulted_provider() == player && manager->provider_threw() == throws,
+                    "lifecycle fault attribution identifies the actual first/middle/last callback and exception kind");
+                expect(phase->work().player_copies == player - 1 && phase->work().trace_intents > 0 && manager->lifecycle() != state_before,
+                    "first/middle/last native failures retain each first-written player once and mutate deadlines/policy");
+                expect(!phase->commit(), "failed lifecycle chain cannot publish traces");
+            }
+            expect(manager->trace() == trace_before && manager->trace_dropped() == dropped_before,
+                "failed lifecycle work never publishes or evicts earlier observer traces");
+            must(phase->rollback());
+            expect(!manager->faulted_provider() && !manager->provider_threw(), "rollback clears transient provider fault attribution");
+            expect(manager->lifecycle() == state_before && must(manager->capture()).components == before.components
+                && must(manager->record_sync_hash()) == must(manager->record_sync_hash(true)),
+                "lifecycle rollback restores exact deadlines, activation order, policy, scalar clocks and native hash");
+        }
+        services->armed = false;
+        auto retry = must(manager->begin_phase()); must(manager->service({3, 3}, {}, scripts)); must(retry->commit());
+        expect(!retry->commit() && manager->trace().size() > trace_before.size(), "lifecycle retry publishes its traces once");
+        auto oracle_queries = std::make_shared<Queries>(); auto oracle_services = std::make_shared<Services>();
+        auto oracle = must(a::Manager::create(setup, {oracle_queries, {}, {}, oracle_services, {}, {}, {}}));
+        auto oracle_scripts = scheduler();
+        oracle_queries->world.clocks = {0, 0}; must(oracle->service({0, 0}, {}, oracle_scripts));
+        oracle_queries->values["TriggerA"] = a::Number(1); oracle_queries->world.clocks = {3, 3};
+        must(oracle->service({3, 3}, {}, oracle_scripts));
+        expect(must(oracle->capture()).components == must(manager->capture()).components && oracle->trace() == manager->trace(),
+            "lifecycle retry equals independent uninterrupted native policy/deadline/trace oracle");
+        // Manager-only calls above do not advance the scheduler service clock.
+        auth::ServiceOptions options; options.host_paced = [](std::uint64_t) { return true; };
+        must(scripts.service(executor, options)); must(oracle_scripts.service(executor, options));
+        const auto digest = must(manager->state_hash()) + must(scripts.state_hash());
+        expect(must(oracle_scripts.state_hash()) == must(scripts.state_hash()), "lifecycle retry leaves scheduler continuation identical");
+        if (reference.empty()) reference = digest; else expect(digest == reference, "lifecycle phase faults and retry equal on 1/2/4/8 workers");
+        const auto revision = manager->state_revision();
+        { auto unsettled = must(manager->begin_phase()); static_cast<void>(unsettled); }
+        expect(manager->state_revision() != revision && !manager->record_sync_hash() && !manager->lifecycle_hash() && !manager->begin_phase(),
+            "unaccounted lifecycle phase invalidates hash memoization and refuses continuation");
+    }
+}
+void native_retirement_state() {
+    std::string reference;
+    for (const auto workers : {1U, 2U, 4U, 8U}) {
+        platform::ThreadWorkerAdapter executor(workers);
+        auto setup = fixture(); auto next = setup.players.front(); next.player = 3; setup.players.push_back(next);
+        next.player = 4; setup.players.push_back(next);
+        Rig owner(setup); owner.step(0, 0);
+        const auto legacy = must(owner.manager->capture()); const auto legacy_hash = must(owner.manager->state_hash());
+        Rig legacy_loaded(setup); must(legacy_loaded.manager->restore(legacy));
+        expect(must(legacy_loaded.manager->capture()).components == legacy.components && must(legacy_loaded.manager->state_hash()) == legacy_hash
+            && legacy_loaded.manager->retirement_notes().empty(), "old no-tail lifecycle bytes remain canonical on restore");
+        expect(!owner.manager->retire_provider(99, a::NativeProviderFault::result)
+            && !owner.manager->retire_provider(2, static_cast<a::NativeProviderFault>(3)), "retirement refuses unknown owners and reasons");
+        {
+            auto phase = must(owner.manager->begin_phase());
+            expect(!owner.manager->retire_provider(2, a::NativeProviderFault::result), "retirement is forbidden inside a speculative phase");
+            must(phase->commit());
+        }
+        must(owner.manager->retire_provider(2, a::NativeProviderFault::result));
+        must(owner.manager->retire_provider(4, a::NativeProviderFault::deterministic_exception));
+        expect(!owner.manager->retire_provider(2, a::NativeProviderFault::result), "duplicate retirement cannot create another transition");
+        const auto saved = must(owner.manager->capture()); const auto hash = must(owner.manager->state_hash());
+        expect(saved.components != legacy.components && hash != legacy_hash
+            && must(owner.manager->record_sync_hash()) == must(owner.manager->record_sync_hash(true)), "retirement participates in native SHA and warm/cold record hashes");
+        const auto notes = owner.manager->retirement_notes();
+        expect(notes.size() == 2 && notes[0].authored_value == "result" && notes[1].authored_value == "deterministic-exception"
+            && notes[0].phase == core::LoadPhase::runtime && notes[0].effective_value == "retired", "retirement derives ordered runtime notes without exception text");
+        Rig loaded(setup); must(loaded.manager->restore(must(a::decode_native_state(must(a::encode_native_state(saved))))));
+        expect(must(loaded.manager->capture()).components == saved.components && must(loaded.manager->state_hash()) == hash
+            && loaded.manager->retirement_notes().size() == notes.size(), "native retirement component survives canonical envelope reconstruction");
+        owner.services->calls.clear(); loaded.services->calls.clear();
+        for (std::uint64_t tick = 3; tick <= 12; ++tick) {
+            owner.step(tick, tick); loaded.step(tick, tick);
+            expect(owner.manager->lifecycle() == loaded.manager->lifecycle(), "restored retirement preserves sibling service deadlines and decisions");
+        }
+        expect(!owner.services->calls.empty() && std::all_of(owner.services->calls.begin(), owner.services->calls.end(),
+            [](const auto& input) { return input.player == 3; }) && !owner.manager->service_due(2, a::Service::execution, 1000),
+            "retired first/last native owners stay excluded while the middle sibling continues");
+        must(owner.scripts.service(executor)); must(loaded.scripts.service(executor));
+        const auto digest = must(owner.manager->state_hash()) + must(owner.scripts.state_hash());
+        expect(digest == must(loaded.manager->state_hash()) + must(loaded.scripts.state_hash()), "native retirement continuation keeps scheduler and owner hashes equal");
+        if (reference.empty()) reference = digest; else expect(digest == reference, "retirement reconstruction equals on 1/2/4/8 workers");
+        const auto malformed = [&](std::string_view tag, std::uint64_t count,
+            std::initializer_list<std::pair<std::uint64_t, std::uint64_t>> rows, bool trailing = false) {
+            auto state = legacy; auto& bytes = state.components.begin()->second;
+            const auto word = [&](std::uint64_t value) { for (unsigned i = 0; i < 8; ++i) bytes.push_back(static_cast<std::uint8_t>(value >> (8U * i))); };
+            word(tag.size()); bytes.insert(bytes.end(), tag.begin(), tag.end()); word(count);
+            for (const auto& [player, reason] : rows) { word(player); word(reason); }
+            if (trailing) bytes.push_back(0);
+            Rig refused(setup);
+            expect(!refused.manager->restore(state), "malformed retirement tail is a normal load refusal");
+        };
+        constexpr std::string_view tag = "native-provider-retirement-v1";
+        malformed("unknown", 1, {{2, 1}}); malformed(tag, 0, {}); malformed(tag, 4, {});
+        malformed(tag, 2, {{2, 1}, {2, 2}}); malformed(tag, 2, {{4, 1}, {2, 1}});
+        malformed(tag, 1, {{99, 1}}); malformed(tag, 1, {{2, 0}}); malformed(tag, 1, {{2, 3}});
+        malformed(tag, 1, {}); malformed(tag, 1, {{2, 1}}, true);
+    }
+}
 void configured_cadence() {
     auto setup = fixture();
     setup.service_periods = {300, 3, 10, 10, 300, 5};
@@ -755,7 +894,7 @@ void installed_loading() {
 } // namespace
 
 int main(int argc, char** argv) {
-    try { if (argc > 1 && std::string_view(argv[1]) == "--bounded") bounded_diagnostics(argc > 2 ? static_cast<std::size_t>(std::stoul(argv[2])) : 1); else if (argc > 1 && std::string_view(argv[1]) == "--state") contributor_state(); else if (argc > 1) installed_loading(); else { mounted_equation_files(); mounted_space_equation_and_unresolved_entries(); mounted_properties_equation(); mounted_template_files(); mounted_validation_work(); category_width(); cadence(); configured_cadence(); templates(); template_failure_consumers(); restore(); reversal_funding(); equal_funding_write(); worker_equality(); } }
+    try { if (argc > 1 && std::string_view(argv[1]) == "--bounded") bounded_diagnostics(argc > 2 ? static_cast<std::size_t>(std::stoul(argv[2])) : 1); else if (argc > 1 && std::string_view(argv[1]) == "--state") contributor_state(); else if (argc > 1) installed_loading(); else { mounted_equation_files(); mounted_space_equation_and_unresolved_entries(); mounted_properties_equation(); mounted_template_files(); mounted_validation_work(); category_width(); cadence(); phase_rollback(); native_retirement_state(); configured_cadence(); templates(); template_failure_consumers(); restore(); reversal_funding(); equal_funding_write(); worker_equality(); } }
     catch (const std::exception& error) { ++failures; std::cerr << error.what() << '\n'; }
     return failures ? 1 : 0;
 }

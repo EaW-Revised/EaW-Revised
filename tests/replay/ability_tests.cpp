@@ -69,6 +69,7 @@ int main(int argc, char* argv[]) {
     test_projectile_defence_transaction();
     test_impact_shooter_bonus();
     test_fire_range_bonus();
+    test_script_invulnerable();
     test_hero_environment_damage_routing();
     test_hero_damage_after_escorts_die();
     test_hero_wingmen();
@@ -77,6 +78,7 @@ int main(int argc, char* argv[]) {
     test_buzz_droids();
     test_hostile_buzz_droids();
     test_hero_beams();
+    test_super_laser();
     test_beam_autofire();
     test_concentrate_autofire();
     test_arriving_beam_autofire();

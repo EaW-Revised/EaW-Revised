@@ -13,12 +13,10 @@
 #include "eawr/sim/tactical/session.hpp"
 #include "eawr/skirmish/start.hpp"
 #include "eawr/units/unit_tables.hpp"
-#include "eawr/vfs/vfs.hpp"
+#include "eawr/vfs/vfs_fwd.hpp"
 
 #include <algorithm>
 #include <cctype>
-#include <fstream>
-#include <iostream>
 #include <iterator>
 #include <map>
 #include <memory>

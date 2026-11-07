@@ -28,6 +28,8 @@ class Node3D;
 class RID;
 }
 
+namespace eawr::presentation::shader_activation { struct Artifact; }
+
 namespace eawr::presentation::godot_backend {
 
 namespace detail { struct ModelRecipeProbe; struct RecipeMemoryProbe; }
@@ -80,6 +82,15 @@ public:
     void owner_census(diagnostics::OwnerCensus& output) const;
     // The main-thread callback returns empty after this renderer is destroyed.
     [[nodiscard]] std::function<assets::RetainedPayload()> recipe_memory_probe() const;
+    // Opt-in texture owner census (--eawr-texture-census, default off). With the switch off no record is
+    // kept anywhere and the probe returns an empty string. On, the probe builds one JSON snapshot of every
+    // live GPU texture (main thread only; never call it per frame). Set the switch before any upload.
+    static void set_texture_census(bool enabled) noexcept;
+    [[nodiscard]] static bool texture_census_enabled() noexcept;
+    [[nodiscard]] std::function<std::string(std::string_view phase)> texture_census_probe() const;
+    // One census JSON per live renderer that holds textures, for load-phase snapshots (main thread only).
+    // Empty with the switch off. Only renderers created after the switch was set are walked.
+    [[nodiscard]] static std::vector<std::string> texture_census_snapshots(std::string_view label);
     // Install before uploading. Captured mounted content must outlive renderer
     // recipes; each recipe freezes its loader, including across later changes.
     // Only a byte-identical reload permits releasing the CPU texture snapshot.
@@ -95,6 +106,16 @@ public:
     explicit GodotRenderer(godot::Node3D& host, std::shared_ptr<GodotShaderCache> shaders = {},
         bool attach_scene = true);
     ~GodotRenderer() override;
+
+    // Activation/main thread only. Uses the normal material compiler and
+    // reflected admission, then draws a private offscreen surface and waits
+    // for the render thread before returning a retained immutable shader pin.
+    [[nodiscard]] core::Result<std::shared_ptr<const shader_activation::Artifact>> prewarm_shader_material(
+        const MaterialDescription& material);
+    // Numeric values from the admitted instance-register plan; material and
+    // texture resources are prepared at upload, outside frame submission.
+    [[nodiscard]] core::Result<void> set_translated_parameters(sim::EntityId entity,
+        std::span<const MaterialBinding> parameters);
 
     GodotRenderer(GodotRenderer&&) noexcept;
     GodotRenderer& operator=(GodotRenderer&&) noexcept;
@@ -257,6 +278,12 @@ public:
     void forget_instance_pose(sim::EntityId entity_id);
     // Diagnostic provenance comes from the producer, never from a mesh/type name.
     void set_render_category(sim::EntityId entity_id, render_categories::Role role);
+    // Opt-in producer identity, established while the model-owning unit is composed.
+    void set_diagnostic_owner(sim::EntityId entity_id, std::uint64_t unit, std::string_view model,
+                              render_categories::HullPart part = render_categories::HullPart::unclassified,
+                              std::string_view object = {}, std::string_view layer = {},
+                              std::string_view categories = {}, std::string_view xml_type = {},
+                              std::string_view kind = {});
     // Opt-in render-counter diagnostic; census allocation occurs only at report phases.
     void write_churn_census(std::ostream& output) const;
     // Immutable upload metadata, copied before worker visibility preparation.

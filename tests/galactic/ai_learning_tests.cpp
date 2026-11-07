@@ -28,8 +28,13 @@ namespace {
 struct MovementFixture {
     struct Movement { std::uint32_t player{}; std::uint64_t actor{}, conflict_location{}; bool finished{}; std::uint64_t freestore_actor{}; };
     std::map<std::uint64_t, Movement> rows;
+    std::uint64_t refuse_request{};
     const auto& movements() const { return rows; }
     eawr::core::Result<void> movement_conflict(std::uint64_t request, std::uint64_t location, bool begin) {
+        if (request == refuse_request) {
+            eawr::core::Diagnostic error; error.code = "TEST-BATTLE"; error.message = "unavailable native movement";
+            return eawr::core::Result<void>::failure(std::move(error));
+        }
         rows.at(request).conflict_location = begin ? location : 0;
         if (begin) rows.at(request).finished = false;
         return eawr::core::Result<void>::success();
@@ -200,6 +205,25 @@ void battle_contracts() {
         if (workers == 1) reference = hash; else require(reference == hash, "battle callback continuation equals on 1/2/4/8");
         must(services.battle({cp::GalacticAiBattleKind::returned, 1200, conflict, *snapshot, &result, true}));
         require(delivered == 4, "auto-resolve return does not invent an entry subscription or repeat completed end");
+        for (const bool refuse_movement : {false, true}) {
+            auto unavailable = std::make_shared<MovementFixture>();
+            unavailable->rows = {{1, {1, 50, 0, false}}, {2, {1, 50, 0, false}}};
+            unavailable->refuse_request = refuse_movement ? 1 : 0;
+            std::vector<std::uint64_t> delivered_requests, degraded_requests;
+            const auto listener = ga::movement_battle_listener(unavailable, [](auto) { return true; },
+                [&](std::uint64_t request, bool, const auto&) {
+                    delivered_requests.push_back(request);
+                    if (request == 1) {
+                        eawr::core::Diagnostic error; error.code = "TEST-BATTLE"; error.message = "unavailable script or freestore delivery";
+                        return eawr::core::Result<void>::failure(std::move(error));
+                    }
+                    return eawr::core::Result<void>::success();
+                }, [&](std::uint64_t request, const auto&) { degraded_requests.push_back(request); });
+            must(listener({cp::GalacticAiBattleKind::entered, 1300, conflict, *snapshot}));
+            require(degraded_requests == std::vector<std::uint64_t>{1} && delivered_requests.back() == 2
+                && unavailable->rows.at(2).conflict_location == 10,
+                "unavailable movement, freestore or script callback cannot abort the battle or suppress the next listener");
+        }
     }
 }
 }

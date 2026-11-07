@@ -320,7 +320,7 @@ core::Result<RejectReason> session_detail::Tick::CommandHandlers::apply_beam_abi
         if (target == staged.end()) return core::Result<RejectReason>::success(RejectReason::target_not_live);
         if (!phase.impl_->beam_target_valid(source, target->second, *nested) || !phase.impl_->beam_in_range(source, target->second, *nested))
             return core::Result<RejectReason>::success(RejectReason::ability_unavailable);
-        if (state.active && payload.ability == AbilityKind::energy_weapon)
+        if (state.active && (payload.ability == AbilityKind::energy_weapon || payload.ability == AbilityKind::super_laser))
             return core::Result<RejectReason>::success(RejectReason::ability_unavailable);
         // WHE-60: retarget unlocks the old recipient before installing the new source entry.
         if (state.active) {
@@ -870,7 +870,7 @@ core::Result<RejectReason> session_detail::Tick::CommandHandlers::apply_ability(
         return apply_spawned_ability(unit_id, payload, command_tick);
     }
     if (payload.ability == AbilityKind::energy_weapon || payload.ability == AbilityKind::tractor_beam
-        || payload.ability == AbilityKind::leech_shields) {
+        || payload.ability == AbilityKind::leech_shields || payload.ability == AbilityKind::super_laser) {
         return apply_beam_ability(unit_id, payload, command_tick, ledgers, staged);
     }
     if (payload.ability == AbilityKind::concentrate_fire) {

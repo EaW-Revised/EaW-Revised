@@ -1,5 +1,6 @@
 #include "ability_ruins_support.hpp"
 #include "eawr/platform/sim_workers.hpp"
+#include <stdexcept>
 
 // WGCH-67/140..143/176..179: the shared live ruins adapter (native effect 17).
 namespace {
@@ -21,6 +22,30 @@ void expect_ruined(const gc::GalacticSession& world, const char* label) {
     expect(snapshot->observer()->planets[0].landed_transports.empty() && snapshot->observer()->planets[0].ground_level == 0,
         "observer landed and base facts follow the ordered commit");
     for (const auto& record : snapshot->observer()->records) expect(record.sources.empty(), "structure influence detaches from every observer record");
+}
+void notice_entry_latch() {
+    for (const bool throws : {false, true}) {
+        const auto config = ruins_setup(false); auto game = take(eawr::campaign::GameSession::create(config));
+        std::unique_ptr<gc::GalacticSession::NativeOutputPhase> output; std::size_t callbacks{};
+        eawr::testing::must(game.configure_native_replay_owners([&](auto& world) {
+            output = take(world.begin_native_output_phase());
+            world.set_ability_consumption_handler([&](const auto&) -> eawr::core::Result<void> {
+                ++callbacks;
+                expect(output->published(), "story_notice entry publishes before hero cleanup even without an opaque story handler");
+                if (throws) throw std::runtime_error("injected fault after story notice entry");
+                eawr::core::Diagnostic error; error.code = "INJECTED-AFTER-STORY-NOTICE";
+                return eawr::core::Result<void>::failure(std::move(error));
+            });
+            return eawr::core::Result<void>::success();
+        }));
+        bool refused{};
+        try { refused = !game.request_planet_ruins(config.planets[0].id); } catch (const std::runtime_error&) { refused = true; }
+        output->record_fault();
+        expect(refused && callbacks == 1 && output->published() && game.galaxy().native_post_publication_faults() == 1,
+            "fault after actual notice entry is retained as a published-output refusal, with no callback retry");
+        expect(!game.galaxy().snapshot()->control()->planets[0].destroyed && present(game.galaxy(), hero),
+            "notice-before-cleanup ordering stays unchanged when later hero consumption fails");
+    }
 }
 void ruins(const eawr::sim::PartitionExecutor& pool, std::vector<std::string>& hashes, bool with_companion) {
     const auto config = ruins_setup(with_companion); const auto planet = config.planets[0].id;
@@ -108,6 +133,7 @@ void aborts_transition(const eawr::sim::PartitionExecutor& pool, std::vector<std
 } // namespace
 int case_galactic_ability_ruins_tests() {
     try {
+        notice_entry_latch();
         std::vector<std::string> baseline; eawr::platform::ThreadWorkerAdapter one(1);
         ruins(one, baseline, false); ruins(one, baseline, true); without_flag(one, baseline); aborts_transition(one, baseline);
         for (std::size_t count : {2U, 4U, 8U}) {

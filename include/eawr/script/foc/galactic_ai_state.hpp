@@ -10,6 +10,12 @@ namespace eawr::script::foc::galactic_ai {
 inline constexpr std::uint32_t native_state_version = 1;
 inline constexpr std::uint32_t native_sync_digest_version = 2;
 inline constexpr std::size_t native_state_max_bytes = 32U * 1024U * 1024U;
+// Project archive quotas, independent of stock/mod authored values.
+inline constexpr std::size_t native_state_max_text_bytes = 1048576;
+inline constexpr std::size_t native_state_max_rows = 262144;
+inline constexpr std::size_t native_state_max_nodes = 1048576;
+inline constexpr std::size_t native_record_archive_reserve = 1024;
+inline constexpr std::size_t global_value_max_retained_bytes = native_state_max_bytes - native_record_archive_reserve;
 inline constexpr std::size_t native_state_max_components = 64;
 [[nodiscard]] core::Result<std::vector<std::uint8_t>> encode_native_state(const NativeState&);
 [[nodiscard]] core::Result<NativeState> decode_native_state(std::span<const std::uint8_t>);

@@ -3,13 +3,22 @@
 
 #include "../../support/check.hpp"
 #include "eawr/presentation/live/unit_fade.hpp"
+#include "eawr/sim/tactical/types.hpp"
 
+#include <algorithm>
 #include <array>
+#include <bit>
 #include <cmath>
+#include <cstdint>
 #include <iostream>
+#include <iterator>
 #include <limits>
+#include <map>
 #include <optional>
+#include <random>
+#include <span>
 #include <string>
+#include <vector>
 
 namespace {
 
@@ -182,7 +191,206 @@ void test_extreme_elapsed_frames() {
     }
 }
 
+// The pre-flat implementation of UnitFade::advance (one std::map entry per tracked unit, binary searches of the
+// ascending inputs), kept here as the reference the flat sorted-vector version must equal bit for bit.
+class ReferenceFade final {
+public:
+    explicit ReferenceFade(const live::UnitFadeLooks looks) : looks_(looks) {}
+
+    void advance(const std::span<const EntityId> visible, const std::span<const EntityId> alive, const double frames,
+                 const std::span<const EntityId> immediate) {
+        std::vector<EntityId> first_sight;
+        for (const EntityId entity : alive) {
+            if (!std::binary_search(ever_seen_.begin(), ever_seen_.end(), entity)) first_sight.push_back(entity);
+        }
+        if (!first_sight.empty()) {
+            ever_seen_.insert(ever_seen_.end(), first_sight.begin(), first_sight.end());
+            std::sort(ever_seen_.begin(), ever_seen_.end());
+        }
+        for (auto entry = fading_.begin(); entry != fading_.end();) {
+            entry = std::binary_search(alive.begin(), alive.end(), entry->first) ? std::next(entry) : fading_.erase(entry);
+        }
+        for (const EntityId entity : visible) {
+            auto entry = fading_.find(entity);
+            if (entry != fading_.end()) {
+                entry->second.target_visible = true;
+                continue;
+            }
+            const bool spawned_now = std::binary_search(first_sight.begin(), first_sight.end(), entity)
+                || std::binary_search(immediate.begin(), immediate.end(), entity);
+            fading_.emplace(entity, State{spawned_now ? 1.0 : 0.0, 0.0, true});
+        }
+        for (auto& [entity, state] : fading_) {
+            if (!std::binary_search(visible.begin(), visible.end(), entity)) state.target_visible = false;
+        }
+        const double elapsed = std::isfinite(frames) ? std::max(0.0, frames) : 0.0;
+        const double whole = std::floor(elapsed);
+        const double fraction = elapsed - whole;
+        const double frame_seconds = 1.0 / static_cast<double>(eawr::sim::tactical::logical_frames_per_second);
+        for (auto& [entity, state] : fading_) {
+            const double target = state.target_visible ? 1.0 : 0.0;
+            if (std::binary_search(immediate.begin(), immediate.end(), entity)) {
+                state.value = target;
+                state.velocity = 0.0;
+                continue;
+            }
+            ease(state.value, state.velocity, target, looks_.smooth_seconds, frame_seconds, whole);
+            ease(state.value, state.velocity, target, looks_.smooth_seconds, fraction * frame_seconds);
+        }
+        for (auto& [entity, state] : fading_) state.value = std::clamp(state.value, 0.0, 1.0);
+        for (auto entry = fading_.begin(); entry != fading_.end();) {
+            const bool done = !entry->second.target_visible && entry->second.value <= looks_.hide_threshold;
+            entry = done ? fading_.erase(entry) : std::next(entry);
+        }
+    }
+
+    [[nodiscard]] std::vector<live::UnitFade::Row> rows() const {
+        std::vector<live::UnitFade::Row> result;
+        for (const auto& [entity, state] : fading_) result.push_back({entity, state.value, state.velocity, state.target_visible});
+        return result;
+    }
+
+private:
+    struct State {
+        double value{1.0};
+        double velocity{0.0};
+        bool target_visible{true};
+    };
+    static void ease(double& value, double& velocity, const double target, const double smooth_seconds,
+                     const double dt, const double steps = 1.0) {
+        if (dt <= 0.0 || smooth_seconds <= 0.0 || steps <= 0.0) return;
+        const double omega = 2.0 / smooth_seconds;
+        const double x = omega * dt;
+        const double one_decay = 1.0 / (1.0 + x + 0.48 * x * x + 0.235 * x * x * x);
+        const double decay = steps == 1.0 ? one_decay : std::pow(one_decay, steps);
+        if (decay == 0.0) {
+            value = target;
+            velocity = 0.0;
+            return;
+        }
+        const double change = value - target;
+        const double temp = (velocity + omega * change) * dt * steps;
+        velocity = (velocity - omega * temp) * decay;
+        value = target + (change + temp) * decay;
+    }
+
+    live::UnitFadeLooks looks_;
+    std::map<EntityId, State> fading_;
+    std::vector<EntityId> ever_seen_;
+};
+
+[[nodiscard]] std::uint64_t bits(const double value) { return std::bit_cast<std::uint64_t>(value); }
+
+// The flat sorted-vector UnitFade equals the map reference on a long seeded sequence: after every call the
+// tracked entities, every stored double (compared as bits), opacity() and drawn() are identical. The sequence
+// covers births, deaths, visibility flips, tagged-instant sets (also for ids outside `alive`), a duplicated
+// visible id, visible ids the session does not hold, fractional, zero, stalled, negative and non-finite frame
+// counts, and three ease configurations including the no-retirement one.
+void test_flat_matches_reference() {
+    const live::UnitFadeLooks configurations[] = {{}, {10.0, 0.0}, {0.25, 0.4}};
+    std::size_t compared_rows = 0;
+    for (std::size_t configuration = 0; configuration < std::size(configurations); ++configuration) {
+        std::mt19937_64 random(0x5eed0000ULL + configuration);
+        live::UnitFade flat(configurations[configuration]);
+        ReferenceFade reference(configurations[configuration]);
+        const double frame_choices[] = {0.0, 1.0, 1.0, 1.0, 0.5, 2.25, 7.0, 40.75, 400.5, -3.0,
+                                        std::numeric_limits<double>::quiet_NaN(), std::numeric_limits<double>::infinity()};
+        for (int step = 0; step < 600; ++step) {
+            std::vector<EntityId> alive, visible, immediate;
+            for (EntityId id = 1; id <= 160; ++id) {
+                if (random() % 100 < 85U + static_cast<unsigned>((step / 40) % 10)) alive.push_back(id + (id > 80 ? 5000 : 0));
+            }
+            for (const EntityId id : alive) {
+                if (random() % 100 < 45) visible.push_back(id);
+                if (random() % 100 < 4) immediate.push_back(id);
+            }
+            if (step % 7 == 0) visible.push_back(9000 + step); // shown but not held by the session
+            if (step % 11 == 0 && !visible.empty()) visible.insert(visible.begin() + 1, visible.front()); // duplicate id
+            if (step % 13 == 0) immediate.push_back(9500 + step); // tag outside `alive`
+            std::sort(visible.begin(), visible.end());
+            std::sort(immediate.begin(), immediate.end());
+            immediate.erase(std::unique(immediate.begin(), immediate.end()), immediate.end());
+            const double frames = frame_choices[random() % std::size(frame_choices)];
+            flat.advance(visible, alive, frames, immediate);
+            reference.advance(visible, alive, frames, immediate);
+
+            const auto got = flat.rows();
+            const auto want = reference.rows();
+            bool same = got.size() == want.size();
+            for (std::size_t index = 0; same && index < got.size(); ++index) {
+                same = got[index].entity == want[index].entity && bits(got[index].value) == bits(want[index].value)
+                    && bits(got[index].velocity) == bits(want[index].velocity)
+                    && got[index].target_visible == want[index].target_visible;
+            }
+            if (!same) {
+                expect(false, "flat UnitFade differs from the reference at configuration " + std::to_string(configuration)
+                                  + ", step " + std::to_string(step));
+                return;
+            }
+            compared_rows += got.size();
+            const auto drawn = flat.drawn();
+            bool drawn_same = drawn.size() == want.size();
+            for (std::size_t index = 0; drawn_same && index < drawn.size(); ++index) {
+                drawn_same = drawn[index] == want[index].entity
+                    && flat.opacity(drawn[index]) == std::optional<float>(static_cast<float>(want[index].value));
+            }
+            if (!drawn_same) {
+                expect(false, "flat UnitFade drawn()/opacity() differ from the reference at step " + std::to_string(step));
+                return;
+            }
+            if (step % 50 == 0 && !alive.empty()) {
+                expect(!flat.opacity(1234567).has_value(), "an unknown entity has no opacity");
+            }
+        }
+    }
+    expect(compared_rows > 20000, "the sequence compared enough tracked rows to mean something");
+}
+
+// A caller that hands over unsorted or duplicated ids gets the decisions of the sorted, unique input.
+void test_unsorted_inputs_are_normalised() {
+    live::UnitFade sorted, shuffled;
+    sorted.advance({{1, 2, 3}}, {{1, 2, 3, 4}}, 0.0);
+    shuffled.advance({{3, 1, 2, 2}}, {{4, 2, 1, 3}}, 0.0);
+    sorted.advance({{2}}, {{1, 2, 3, 4}}, 3.0);
+    shuffled.advance({{2, 2}}, {{3, 4, 1, 2}}, 3.0);
+    const auto a = sorted.rows();
+    const auto b = shuffled.rows();
+    bool same = a.size() == b.size();
+    for (std::size_t index = 0; same && index < a.size(); ++index) {
+        same = a[index].entity == b[index].entity && bits(a[index].value) == bits(b[index].value)
+            && bits(a[index].velocity) == bits(b[index].velocity) && a[index].target_visible == b[index].target_visible;
+    }
+    expect(same, "unsorted inputs decide like their sorted unique equivalent");
+}
+
 } // namespace
+
+// opacity_walk answers exactly like opacity(), for ascending, repeated and descending queries alike.
+void test_opacity_walk_matches_opacity() {
+    std::mt19937_64 random(0x0ac17eULL);
+    live::UnitFade fade;
+    std::vector<EntityId> visible, alive;
+    for (EntityId id = 1; id <= 300; ++id) {
+        alive.push_back(id * 2);
+        if (random() % 3 != 0) visible.push_back(id * 2);
+    }
+    for (int step = 0; step < 40; ++step) {
+        for (auto& id : visible) if (random() % 11 == 0) id = alive[static_cast<std::size_t>(random() % alive.size())];
+        std::sort(visible.begin(), visible.end());
+        visible.erase(std::unique(visible.begin(), visible.end()), visible.end());
+        fade.advance(visible, alive, 1.0);
+        std::size_t cursor = 0;
+        for (EntityId id = 0; id <= 605; ++id) {
+            expect(fade.opacity_walk(id, cursor) == fade.opacity(id), "ascending walk matches opacity()");
+        }
+        for (int probe = 0; probe < 200; ++probe) {
+            const EntityId id = random() % 620;
+            expect(fade.opacity_walk(id, cursor) == fade.opacity(id), "random-order walk matches opacity()");
+        }
+        std::size_t stale = 100000;
+        expect(fade.opacity_walk(40, stale) == fade.opacity(40), "an out-of-range cursor is repositioned");
+    }
+}
 
 int main() {
     {
@@ -257,6 +465,9 @@ int main() {
     test_paused_battle_holds();
     test_catch_up_matches_small_steps();
     test_extreme_elapsed_frames();
+    test_flat_matches_reference();
+    test_unsorted_inputs_are_normalised();
+    test_opacity_walk_matches_opacity();
     if (failures != 0) {
         std::cerr << failures << " unit fade check(s) failed\n";
         return 1;

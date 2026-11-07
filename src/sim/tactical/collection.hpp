@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <map>
 #include <memory>
+#include <span>
 #include <vector>
 
 // The candidate collection order of target scans (docs/behaviour/space-targeting.md CO-01 to
@@ -82,6 +83,15 @@ public:
     // One tick's update (CO-11): members gone or changed owner leave, new ones enter, the rest
     // report a changed box, all in ascending ID; then every tree is serviced at `frame`.
     void update(const std::vector<Member>& members, std::uint64_t frame);
+    // How a member differs from the committed trees (CO-11): a new member, or one whose owner changed (it leaves its
+    // old tree and enters the new one), enters; a changed box moves; an unchanged one needs nothing.
+    enum class Change : std::uint8_t { none, enter, moved };
+    // Read only: workers classify each member against the trees as they stand before this tick's update, which is
+    // the state update() sees at that member's turn (only the member's own entry changes before it).
+    [[nodiscard]] Change classify(const Member& member) const;
+    // The same update with every member's classification computed ahead of time, in the same order as `members`.
+    // The tree edits (the history) stay one ordered pass; the lookups that decide them are no longer part of it.
+    void update(const std::vector<Member>& members, std::span<const Change> changes, std::uint64_t frame);
     [[nodiscard]] std::vector<EntityId> collect(PlayerId owner, const CullBox& query) const;
     void ray_collect(PlayerId owner, const math::Vec3& from, const math::Vec3& to, std::vector<EntityId>& out) const;
     [[nodiscard]] bool empty() const noexcept;

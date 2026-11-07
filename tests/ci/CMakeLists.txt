@@ -21,6 +21,7 @@ add_test(NAME ci_replay_numbers COMMAND "${Python3_EXECUTABLE}" "${PROJECT_SOURC
 add_test(NAME ci_replay_numbers_contract COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_replay_numbers.py")
 
 
+
 add_test(NAME ci_native_cpp_fixture COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_native_cpp_fixture.py")
 add_test(NAME ci_game_data_tests COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_game_data_tests.py")
 
@@ -74,6 +75,7 @@ add_test(
 
 
 
+
 # Contracts added by the melee, menu, minimap and galactic HUD work.
 eawr_add_python_contract(python_performance_melee_parity_analyze tests.performance.test_melee_parity_analyze)
 eawr_add_python_contract(python_performance_melee_staging tests.performance.test_melee_staging)
@@ -84,10 +86,16 @@ eawr_add_python_contract(python_presentation_renderer_viewer_galactic_planet_too
 
 eawr_add_python_contract(python_presentation_renderer_viewer_galactic_orbit_runtime tests.presentation.renderer.test_viewer_galactic_orbit_runtime)
 
+eawr_add_python_contract(python_performance_audio_loop_stream_cache tests.performance.test_audio_loop_stream_cache)
+
+
 
 
 
 eawr_add_python_contract(python_performance_remake_bench tests.performance.test_remake_bench)
+eawr_add_python_contract(python_performance_drawtype_profile tests.performance.test_drawtype_profile)
+eawr_add_python_contract(python_performance_hull_drill tests.performance.test_hull_drill)
+eawr_add_python_contract(python_performance_gc_quality tests.performance.test_gc_quality)
 
 eawr_add_python_contract(python_presentation_renderer_land_viewport tests.presentation.renderer.test_land_viewport)
 eawr_add_python_contract(python_presentation_renderer_viewer_galactic_ground_stack_runtime tests.presentation.renderer.test_viewer_galactic_ground_stack_runtime)
@@ -99,6 +107,10 @@ add_test(NAME ci_campaign_policy_compare COMMAND "${Python3_EXECUTABLE}"
 
 
 
+add_test(NAME ci_kit_engine COMMAND "${Python3_EXECUTABLE}"
+         "${CMAKE_CURRENT_SOURCE_DIR}/test_kit_engine.py")
+add_test(NAME ci_engine_signature_pins COMMAND "${Python3_EXECUTABLE}"
+         "${CMAKE_CURRENT_SOURCE_DIR}/test_engine_signature_pins.py")
 
 
 
@@ -115,4 +127,5 @@ eawr_add_python_contract(python_presentation_renderer_viewer_galactic_wheel_zoom
 eawr_add_python_contract(python_presentation_renderer_viewer_story_summary_runtime tests.presentation.renderer.test_viewer_story_summary_runtime)
 
 eawr_label_tests(DEFAULT ci-tools)
+
 

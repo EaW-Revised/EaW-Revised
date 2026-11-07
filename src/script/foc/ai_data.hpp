@@ -102,7 +102,16 @@ struct Difficulty {
     Real land_contrast_multiplier{real(1)};
     Real land_goal_cycle_sleep{};
     Real land_build_time_multiplier{real(1)};
+    std::string name; // the entry's authored name (difficultyadjustments.xml); the map key is upper case
 };
+
+// The goal-cycle sleep and contrast multiplier of the mode a tactical session runs (space unless land).
+[[nodiscard]] inline Real mode_goal_cycle_sleep(const Difficulty& d, const sim::tactical::BattleDomain domain) noexcept {
+    return domain == sim::tactical::BattleDomain::land ? d.land_goal_cycle_sleep : d.space_goal_cycle_sleep;
+}
+[[nodiscard]] inline Real mode_contrast_multiplier(const Difficulty& d, const sim::tactical::BattleDomain domain) noexcept {
+    return domain == sim::tactical::BattleDomain::land ? d.land_contrast_multiplier : d.space_contrast_multiplier;
+}
 
 // gameconstants.xml values of the space perception grid and targets; engine defaults where
 // the file has no tag (PG-01 to PG-04).

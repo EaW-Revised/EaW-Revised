@@ -1,5 +1,12 @@
 #include "path_bench_internal.hpp"
+#include "eawr/vfs/vfs.hpp"
 #include "eawr/battle/start.hpp"
+
+#include <algorithm>
+#include <fstream>
+#include <functional>
+#include <iostream>
+#include <sstream>
 
 namespace path_bench {
 

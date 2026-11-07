@@ -966,8 +966,15 @@ int run_foc_plan_cases(int argc, char** argv) {
     auto content = load(*root, underworld);
     if (!content) return 1;
 
+    const bool economy_pair = economy_run && argc > 5;
+    const std::size_t pair_worker = economy_pair ? std::strtoull(argv[5], nullptr, 10) : 0;
+    if (economy_pair && pair_worker != 2 && pair_worker != 4 && pair_worker != 8) {
+        std::cerr << "economy worker must be 2, 4, or 8\n";
+        return 1;
+    }
     std::vector<Run> runs;
     for (const std::size_t workers : {std::size_t{1}, std::size_t{2}, std::size_t{4}, std::size_t{8}}) {
+        if (economy_pair && workers != 1 && workers != pair_worker) continue;
         auto result = run(*content, workers, ticks);
         if (!result) return 1;
         std::cout << workers << " worker(s): " << ticks << " ticks in " << result->seconds << " s, final "
@@ -1002,6 +1009,17 @@ int run_foc_plan_cases(int argc, char** argv) {
             "SAE-10: recorded ordinary commands reproduce every headless world hash");
         return failures == 0 ? 0 : 1;
     }
+    std::vector<std::string> timeline;
+    for (const auto& event : first.journal.plans) timeline.push_back(line_of(event));
+    for (std::size_t index = 1; index < runs.size(); ++index) {
+        std::vector<std::string> other;
+        for (const auto& event : runs[index].journal.plans) other.push_back(line_of(event));
+        expect(runs[index].hashes == first.hashes, "every tick's combined hash matches worker count 1");
+        expect(runs[index].commands == first.commands, "the script commands match worker count 1");
+        expect(other == timeline, "the plan journal matches worker count 1");
+        expect(runs[index].diagnostics == first.diagnostics, "the script diagnostics match worker count 1");
+    }
+    if (economy_pair && pair_worker != 2) return failures == 0 ? 0 : 1;
     if (economy_run) {
         // WAS-19/30: keep the installed cash equation and Lua; arrange only
         // its inputs. The Empire owns a level-one station and starts below
@@ -1062,16 +1080,6 @@ int run_foc_plan_cases(int argc, char** argv) {
             std::cout << "reinforcement point: " << static_cast<double>(point.first) / eawr::sim::math::Fixed::scale
                 << ", " << static_cast<double>(point.second) / eawr::sim::math::Fixed::scale << " x" << count << '\n';
         }
-    }
-    std::vector<std::string> timeline;
-    for (const auto& event : first.journal.plans) timeline.push_back(line_of(event));
-    for (std::size_t index = 1; index < runs.size(); ++index) {
-        std::vector<std::string> other;
-        for (const auto& event : runs[index].journal.plans) other.push_back(line_of(event));
-        expect(runs[index].hashes == first.hashes, "every tick's combined hash matches worker count 1");
-        expect(runs[index].commands == first.commands, "the script commands match worker count 1");
-        expect(other == timeline, "the plan journal matches worker count 1");
-        expect(runs[index].diagnostics == first.diagnostics, "the script diagnostics match worker count 1");
     }
     if (argc > 2 && argv[2][0] != 0) {
         std::ofstream out(argv[2], std::ios::binary);

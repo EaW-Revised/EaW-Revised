@@ -1,6 +1,7 @@
 #pragma once
 
 #include "eawr/core/result.hpp"
+#include "eawr/core/load_note.hpp"
 #include "eawr/sim/tactical/free_space.hpp"
 #include "eawr/sim/tactical/pads.hpp"
 #include "eawr/sim/tactical/types.hpp"
@@ -13,6 +14,7 @@
 #include <map>
 #include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 // Skirmish purchasing (#530, docs/behaviour/space-purchasing.md): credits and income (PU-01 to
@@ -250,7 +252,15 @@ struct HeroDeployment {
     friend bool operator==(const HeroDeployment&, const HeroDeployment&) = default;
 };
 
+// Diagnostic-only metadata: intentionally equal regardless of notes/provenance.
+struct EconomyLoadNotes {
+    std::vector<core::LoadNote> pending;
+    std::map<TypeId, std::string> type_names;
+    friend bool operator==(const EconomyLoadNotes&, const EconomyLoadNotes&) { return true; }
+};
+
 struct EconomyRules {
+    EconomyLoadNotes load_notes; // excluded from state, digest, replay and checkpoint encoding
     bool campaign{}; // WGT-26/28: identity reserves, campaign costs and restrictions
     SkirmishMatchPolicy match_policy{};        // replay binding, not a ledger field
     PadRules pads;                            // WBP-01..19: object services, never producer queues
@@ -302,6 +312,17 @@ struct EconomyRules {
 // option has a positive price and build time, max_queue is positive and the bounds are ordered.
 [[nodiscard]] std::vector<IncomeCategory> initial_income_categories(const EconomyRules& rules, std::size_t partitions);
 
+namespace economy_load {
+[[nodiscard]] std::string decimal(math::Fixed value);
+void append(core::LoadNoteBuffer& notes, const char* code, const std::string& object, const std::string& tag,
+    std::string authored, std::string effective, const std::string& message,
+    core::LoadAction action = core::LoadAction::clamped, bool retail_default = false,
+    std::string_view diagnostic_code = diagnostic_codes::invalid_setup);
+} // namespace economy_load
+
+void normalize_economy(EconomyRules& rules, core::LoadNoteBuffer& notes);
+[[nodiscard]] core::Result<EconomyRules> prepare_economy(
+    const EconomyRules& source, std::span<const Player> players, core::LoadNoteBuffer& notes);
 [[nodiscard]] core::Result<void> validate_economy(const EconomyRules& rules, std::span<const Player> players);
 
 // --- State ---------------------------------------------------------------------------------------

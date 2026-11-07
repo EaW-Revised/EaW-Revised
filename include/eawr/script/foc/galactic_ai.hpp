@@ -343,12 +343,14 @@ struct PlayerLifecycle {
     TemplatePolicy policy;
     bool operator==(const PlayerLifecycle&) const = default;
 };
+enum class NativeProviderFault : std::uint8_t { result = 1, deterministic_exception = 2 };
 struct LifecycleState {
     std::uint32_t version{2};
     Clocks clocks;
     Admission admission;
     std::vector<PlayerLifecycle> players; // ascending player identity
     ServicePeriods service_periods{retail_service_periods};
+    std::map<gc::PlayerId, NativeProviderFault> retired_providers; // optional compatible native tail, sorted owner identity
     bool operator==(const LifecycleState&) const = default;
 };
 // Process-local work counters for the immutable per-player policy snapshots that
@@ -374,6 +376,24 @@ struct ServiceTrace {
 inline constexpr std::string_view lifecycle_component = "galactic-ai-lifecycle";
 class Manager final : public authoritative::GalacticScriptEngine, public TrackedStateContributor {
 public:
+    class PhaseSavepoint {
+    public:
+        struct Work { std::size_t player_copies{}, trace_intents{}; };
+        ~PhaseSavepoint();
+        PhaseSavepoint(const PhaseSavepoint&) = delete;
+        PhaseSavepoint& operator=(const PhaseSavepoint&) = delete;
+        [[nodiscard]] Work work() const noexcept;
+        [[nodiscard]] core::Result<void> commit();
+        [[nodiscard]] core::Result<void> rollback();
+    private:
+        struct Saved;
+        explicit PhaseSavepoint(std::unique_ptr<Saved>);
+        std::unique_ptr<Saved> saved_;
+        friend class Manager;
+    };
+    // Bounded serial coordination slices, copied only on their first write.
+    // Manager must outlive the token; native service owners enlist separately.
+    [[nodiscard]] core::Result<std::unique_ptr<PhaseSavepoint>> begin_phase();
     [[nodiscard]] static core::Result<std::shared_ptr<Manager>> create(LifecycleSetup, Capabilities);
     ~Manager() override;
     [[nodiscard]] core::Result<void> service(Clocks, Admission, authoritative::ScriptScheduler&);
@@ -388,6 +408,11 @@ public:
     [[nodiscard]] core::Result<void> after_service(authoritative::ServiceReport&) override;
     void set_admission(Admission) noexcept;
     [[nodiscard]] LifecycleState lifecycle() const;
+    [[nodiscard]] bool provider_retired(gc::PlayerId) const noexcept;
+    [[nodiscard]] std::optional<gc::PlayerId> faulted_provider() const noexcept;
+    [[nodiscard]] bool provider_threw() const noexcept;
+    [[nodiscard]] core::Result<void> retire_provider(gc::PlayerId, NativeProviderFault);
+    [[nodiscard]] std::vector<core::LoadNote> retirement_notes() const;
     [[nodiscard]] core::Result<void> restore_lifecycle(const LifecycleState&);
     [[nodiscard]] core::Result<std::string> lifecycle_hash() const;
     [[nodiscard]] core::Result<NativeState> capture() const override;

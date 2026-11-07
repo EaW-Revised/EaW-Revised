@@ -1,7 +1,6 @@
 #pragma once
 
 #include "eawr/core/result.hpp"
-#include "eawr/sim/replay.hpp"
 #include "eawr/sim/snapshot.hpp"
 
 #include <cstddef>
@@ -13,6 +12,8 @@
 #include <vector>
 
 namespace eawr::sim {
+
+struct Replay;
 
 // Every partitioned tick phase splits its N ascending-ID inputs into this many contiguous
 // ranges, whatever the executor's worker count, so no result can depend on the worker count

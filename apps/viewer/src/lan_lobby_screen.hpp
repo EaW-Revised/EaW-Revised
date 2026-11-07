@@ -58,6 +58,10 @@ public:
         std::string profile;
         // Empty: --eawr-font-cache, else EAWR_FONT_CACHE, else the checkout's out/fonts.
         std::filesystem::path font_cache;
+        std::filesystem::path save_directory;
+        // Fixture knobs (#5512): the saved-game listing worker never returns; the listing limit in milliseconds (0: the default).
+        bool fault_listing_hang{};
+        int listing_timeout_ms{};
         presentation::ui::LayoutRules rules{presentation::ui::LayoutRules::aspect_correct};
         std::string language{"ENGLISH"};
         // The transport; null makes the real TCP one. A presentation fixture passes a fake.
@@ -96,6 +100,8 @@ public:
         bool accepted{};
         bool enabled{};
         bool visible{};
+        float name_width{};          // drawn width of the name/Open combo
+        float name_authored_width{}; // width the dialog authors for it
     };
     struct Snapshot final {
         std::string page;
@@ -140,9 +146,18 @@ public:
         std::vector<std::string> connections; // the curated per-seat online connection list
         bool connections_open{};
         bool options_open{}, credits_custom{}, credits_enabled{};
+        std::optional<net::GalacticLobbyOptions> galactic_options; // the published options, separate from the modal draft
+        std::string options_error;
+        // #5512: the canvas layers of the lobby and of the Load Game list (-1: no list), the list's own state and the Load Game button.
+        int lobby_layer{}, list_layer{-1};
+        bool list_visible{}, load_game_disabled{};
+        godot::Vector2 list_cancel_centre{-1.0F, -1.0F}, window{};
+        float list_box_scale{-1.0F}, list_scale{-1.0F}; // the list's own message box vs the list (-1: no box)
+        std::string list_note;
         std::int64_t credits{}, credits_min{}, credits_max{};
         double credits_position{};
         std::string credits_caption;
+        std::string pointer{"{}"};           // the pointer probe (lan_lobby_screen_probe.cpp): hover, modal layers, load list
     };
 
     EawrLanLobby();
@@ -218,14 +233,32 @@ private:
     void on_box_result(int64_t result);
 
     void handle_button(const std::string& id);
+    // Scripted pointer steps (hover, click, click_row) and the scene probe, lan_lobby_screen_probe.cpp (#5512).
+    bool run_pointer_action(const std::string& verb, const std::string& argument);
+    [[nodiscard]] std::string pointer_json() const;
     void refresh_lobby();
     void draw_chat(class EawrUiList& list, const presentation::ui::ChatLog& log);
     void commit_name_from_edit();
     void refresh_staging();
     // GCMP-07 (#4363): the Galactic Conquest mode of the staging; the room's mode comes from the lobby snapshot.
     void configure_galactic_content();
+    // The galactic backend (created on first use) with its content load running on a worker thread. True once the load finished.
+    [[nodiscard]] bool prefetch_galactic_content();
+    // The campaign's localized title for the room list; the campaign name itself while its content is not loaded.
+    [[nodiscard]] std::string campaign_display_name(const std::string& campaign);
+    void finish_pending_galactic();
     [[nodiscard]] std::optional<std::string> host_galactic_game();
     void refresh_galactic_staging();
+    void refresh_checkpoint_staging();
+    void open_checkpoint_list();
+    void process_checkpoint_read();
+    void checkpoint_closed();
+    // Frees the list screen (if any) and restores the lobby's own layer: every exit from a staging room goes through here.
+    void close_checkpoint_list();
+    void checkpoint_chosen(godot::String directory, godot::String name);
+    void select_checkpoint_seat(int64_t index, int64_t peer);
+    void apply_checkpoint_selection();
+    void new_campaign();
     void refresh_galactic_preview(Impl& impl, PageState& state, Resources& resources,
                                   const sim::galactic::MpLobbyCampaign* campaign);
     void refresh_galactic_roster(Impl& impl, PageState& state, Resources& resources, const LanView& view,
@@ -282,6 +315,10 @@ private:
     bool action_accept(Impl& impl);
     // MNU-22: the host's advanced options dialog over the staging (#4041); guests read the summary list.
     void build_options_overlay();
+    void build_galactic_options_overlay();
+    void show_galactic_options_values();
+    void close_galactic_options(bool accept);
+    void reset_galactic_options();
     void open_options();
     void show_options_values();
     void close_options(bool accept);
@@ -309,6 +346,7 @@ private:
     void leave_staging();
     void announce();
     void show_failure(const std::string& message);
+    void review_host_mods();
     void note_chat(presentation::ui::ChatKind kind, const std::string& line, const std::string& sender = {});
     void play_sound(const std::string& wanted);
 

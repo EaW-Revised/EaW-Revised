@@ -1,9 +1,9 @@
 #pragma once
 
 #include "eawr/data/galactic/galactic_data.hpp"
+#include "eawr/data/xml.hpp"
 #include "eawr/data/retail_values.hpp"
 
-#include <map>
 #include <optional>
 #include <set>
 #include <string>

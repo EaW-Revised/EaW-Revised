@@ -75,6 +75,18 @@ void TacticalSession::Impl::append_canonical_garrison_marks_state(std::vector<st
         }
 }
 
+void TacticalSession::Impl::append_canonical_script_invulnerable_state(std::vector<std::uint8_t>& bytes, const std::span<const LiveUnit> units, const CanonicalCounts* counts) const {
+        // TL-03, SINV v1: the flagged units in stable ID order; absent while no unit holds the flag.
+        const auto flagged = counts ? counts->script_invulnerable_units : static_cast<std::uint64_t>(std::count_if(units.begin(), units.end(),
+            [](const auto& unit) { return unit.script_invulnerable; }));
+        if (flagged == 0) return;
+        bytes.insert(bytes.end(), script_invulnerable_tag.begin(), script_invulnerable_tag.end());
+        sim::detail::append_u32(bytes, script_invulnerable_block_version);
+        sim::detail::append_u64(bytes, flagged);
+        for (const auto& unit : units) if (unit.script_invulnerable)
+            sim::detail::append_u64(bytes, unit.state.entity_id);
+}
+
 void TacticalSession::Impl::append_canonical_heroes_state(std::vector<std::uint8_t>& bytes, const std::span<const LiveUnit> units, const CanonicalCounts* counts) const {
         // Killed craft spinning away (#447); a session without any hashes as before.
         const auto heroes = (counts ? counts->heroes : static_cast<std::uint64_t>(std::count_if(units.begin(), units.end(), [](const LiveUnit& unit) {

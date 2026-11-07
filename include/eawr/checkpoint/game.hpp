@@ -2,6 +2,7 @@
 
 #include "eawr/checkpoint/tactical.hpp"
 #include "eawr/campaign/game_session.hpp"
+#include "eawr/mods/save_description.hpp"
 
 namespace eawr::checkpoint {
 
@@ -22,14 +23,34 @@ namespace eawr::checkpoint {
 // (boundary tick, chained frontier digest, last sealed key, dropped counts); the frontier input digest is
 // sha256(previous digest || replay window bytes), never a digest of the window alone.
 // v48 (#2044): the owner tail ends with the holocron story goals and objectives per plot owner, after the plot state.
-inline constexpr std::uint16_t galaxy_section_version = 48;
+// v49: agreed resume metadata, producer continuation and complete policy site archives.
+inline constexpr std::uint16_t galaxy_section_version = 52;
+inline constexpr std::uint16_t mod_list_section_version = 1;
+
+// Transport starts a fresh epoch at completed_tick. Both cursors denote the first
+// unsealed/unsent tick; producer sequences continue by logical seat, never peer index.
+struct GameResumeMetadata {
+    std::uint64_t completed_tick{}, next_send{}, next_seal{}, hash_tick{};
+    Digest capture_commitment{}, state_digest{}, frontier_digest{}, monitor_digest{};
+    std::vector<std::uint8_t> network_state;
+    std::vector<sim::galactic::GalacticPlayer> players;
+    std::vector<sim::galactic::Seat> seats;
+    std::optional<sim::galactic::SeatControlState> control;
+    std::map<sim::SeatId, std::uint64_t> producer_sequences;
+};
+[[nodiscard]] core::Result<GameResumeMetadata> inspect_game_resume(const Checkpoint&);
+// Original recording setup for private mounted-service preparation, without a restore.
+[[nodiscard]] core::Result<sim::galactic::GalacticSetup> inspect_game_setup(const Checkpoint&);
+[[nodiscard]] core::Result<mods::ModDescription> inspect_game_mods(const Checkpoint&);
 
 [[nodiscard]] Identities game_identities(const sim::galactic::GalacticSetup& setup);
 [[nodiscard]] core::Result<std::vector<std::uint8_t>> save_game_checkpoint(
     const campaign::GameSession& session, const Identities& build,
-    std::span<const std::uint8_t> presentation_hints = {});
+    std::span<const std::uint8_t> presentation_hints = {},
+    const mods::ModDescription& mod_description = {});
 
 struct GameLoadOptions {
+    mods::ModDescription mounted_mods;
     // Reinstall pure runtime adapters before direct owner import. Never run new-game placement.
     std::function<core::Result<void>(campaign::GameSession&)> configure_session;
     // Space assembly callbacks. Complete providers for other layers register
@@ -72,6 +93,7 @@ struct GameRestore {
     RestoreWork work;
     std::vector<std::uint8_t> presentation_hints;
     std::vector<sim::galactic::GameCommand> first_commands;
+    std::vector<mods::DescriptionFinding> mod_findings;
 };
 
 [[nodiscard]] core::Result<GameRestore> load_game_checkpoint(std::span<const std::uint8_t> bytes,

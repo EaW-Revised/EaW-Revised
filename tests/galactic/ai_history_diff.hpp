@@ -57,7 +57,7 @@ inline Bytes scripts_without_world_digest(const cp::GameSession& game) {
     bytes.erase(at, end);
     return bytes;
 }
-inline void equal_except_history(cp::GameSession& left, cp::GameSession& right) {
+inline void equal_except_history(cp::GameSession& left, cp::GameSession& right, std::string_view comparison) {
     const auto a = without_history(left), b = without_history(right);
     if (a != b) {
         const auto first = std::mismatch(a.begin(), a.end(), b.begin(), b.end());
@@ -66,7 +66,32 @@ inline void equal_except_history(cp::GameSession& left, cp::GameSession& right) 
     }
     eawr::testing::require(a == b,
         "complete saved owners differ only in History rows");
-    eawr::testing::require(take(left.save_galactic_ai()).state->components == take(right.save_galactic_ai()).state->components,
+    const auto left_ai = take(left.save_galactic_ai()), right_ai = take(right.save_galactic_ai());
+    eawr::testing::require(left_ai.state && right_ai.state, "History controls have native AI state");
+    for (const auto& [name, bytes] : left_ai.state->components) {
+        const auto found = right_ai.state->components.find(name);
+        if (found == right_ai.state->components.end() || found->second != bytes) {
+            std::cerr << "History native mismatch comparison=" << comparison << " component=" << name
+                << " left_bytes=" << bytes.size();
+            if (found != right_ai.state->components.end()) {
+                const auto mismatch = std::mismatch(bytes.begin(), bytes.end(), found->second.begin(), found->second.end());
+                std::cerr << " right_bytes=" << found->second.size()
+                    << " first_offset=" << std::distance(bytes.begin(), mismatch.first);
+                const auto offset = static_cast<std::size_t>(std::distance(bytes.begin(), mismatch.first));
+                if (offset < bytes.size() && offset < found->second.size()) {
+                    std::cerr << " left_byte=" << static_cast<unsigned>(bytes[offset])
+                        << " right_byte=" << static_cast<unsigned>(found->second[offset]) << " context=";
+                    const auto begin = offset > 200 ? offset - 200 : 0;
+                    for (auto i = begin; i < std::min(bytes.size(), offset + 32); ++i) {
+                        const auto ch = bytes[i];
+                        std::cerr << (ch >= 32 && ch <= 126 ? static_cast<char>(ch) : '.');
+                    }
+                }
+            } else std::cerr << " right=missing";
+            std::cerr << '\n';
+        }
+    }
+    eawr::testing::require(left_ai.state->components == right_ai.state->components,
         "History service ownership does not change any native component");
     eawr::testing::require(scripts_without_world_digest(left) == scripts_without_world_digest(right),
         "script payloads differ only in the digest of their History-bearing world");
@@ -94,8 +119,8 @@ inline void verify(const Plan& plan, const Services& services, const Configurati
     baseline.game()->schedule_history_rebase(boundary);
     corrected.game()->schedule_history_rebase(boundary);
     take(baseline.game()->step(executor)); take(corrected.game()->step(executor)); take(restored.session.step(executor));
-    equal_except_history(*baseline.game(), *corrected.game());
-    equal_except_history(*baseline.game(), restored.session);
+    equal_except_history(*baseline.game(), *corrected.game(), "fresh");
+    equal_except_history(*baseline.game(), restored.session, "restored");
     std::ofstream output(directory / "history-owner-diff.tsv");
     output << "owner\ttick\tplayer\tindex\tframe\teconomy_bits\tplanets\ttechnology\tmilitary_bits\n";
     std::size_t fresh_difference{}, restored_difference{};

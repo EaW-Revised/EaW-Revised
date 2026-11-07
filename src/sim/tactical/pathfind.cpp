@@ -1,5 +1,7 @@
 #include "pathfind_search_internal.hpp"
 
+#include <optional>
+
 // docs/behaviour/space-movement.md, "Avoidance": the rules are cited there (AV-nn) with their
 // research evidence; this file follows FoC's space path finder and object tracking
 // step by step, in Q24 where FoC uses binary32.

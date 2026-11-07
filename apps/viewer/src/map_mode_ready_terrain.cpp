@@ -41,18 +41,6 @@ const std::string terrain_lit_shader = land_look::terrain_shader(true);
     return land_look::with_map_fog(lit ? terrain_lit_shader : terrain_surface_shader);
 }
 
-constexpr std::string_view skydome_shader = R"GODOT(
-shader_type spatial;
-render_mode unshaded, cull_disabled, depth_draw_never;
-uniform sampler2D eawr_diffuse : filter_linear_mipmap, repeat_enable;
-void vertex() {
-    vec4 clip = PROJECTION_MATRIX * MODELVIEW_MATRIX * vec4(VERTEX, 1.0);
-    POSITION = vec4(clip.xy, clip.w * CLIP_SPACE_FAR, clip.w);
-}
-void fragment() {
-    ALBEDO = texture(eawr_diffuse, UV).rgb;
-}
-)GODOT";
 
 
 [[nodiscard]] sim::math::Mat3x4 identity_transform() {

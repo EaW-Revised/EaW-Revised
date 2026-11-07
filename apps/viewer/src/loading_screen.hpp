@@ -118,6 +118,13 @@ private:
     std::unique_ptr<Layout> layout_;
     std::unique_ptr<LoadingPlanet> planet_;
     std::chrono::steady_clock::time_point planet_started_{};
+    bool animated_background_{};
+    bool timing_enabled_{};
+    bool planet_report_enabled_{};
+    std::chrono::steady_clock::time_point timing_start_{};
+    std::unique_ptr<std::array<double, 65536>> draw_offsets_ms_;
+    std::size_t draw_offsets_count_{}, draw_offsets_dropped_{};
+    double load_wall_ms_{};
     std::string failure_;
     std::vector<std::string> notes_;
     godot::RID fill_item_;

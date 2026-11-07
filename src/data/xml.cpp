@@ -1,6 +1,8 @@
 #include "eawr/core/load_profile.hpp"
+#include "eawr/vfs/vfs.hpp"
 #include "xml_internal.hpp"
 #include "eawr/diagnostics/owner_census.hpp"
+#include <algorithm>
 #include <atomic>
 #include <optional>
 #include <unordered_map>
@@ -194,6 +196,7 @@ core::Result<LoadResult> load_catalog(
         std::string_view path;
         std::string_view root;
         std::string_view schema_type;
+        bool additive{};
     };
     static constexpr RegistrySpec registries[] = {
         {Category::game_object, "data/xml/gameobjectfiles.xml", "Game_Object_Files", "GameObjectType"},
@@ -201,6 +204,7 @@ core::Result<LoadResult> load_catalog(
         {Category::faction, "data/xml/factionfiles.xml", "Faction_Files", "Faction"},
         {Category::campaign, "data/xml/campaignfiles.xml", "Campaign_Files", "Campaign"},
         {Category::sfx, "data/xml/sfxeventfiles.xml", "SFXEvent_Files", "SFXEvent"},
+        {Category::sfx, "data/xml/sfxeventfilesadditions.xml", "SFXEvent_Files", "SFXEvent", true},
     };
 
     auto impl = std::make_shared<Catalog::Impl>();
@@ -208,6 +212,36 @@ core::Result<LoadResult> load_catalog(
     impl->generation = next_generation.fetch_add(1, std::memory_order_relaxed);
     std::vector<core::Diagnostic> diagnostics;
     core::LoadNoteCollector notes;
+    const auto note_declaration = [&notes](const ParsedDocument& parsed, const vfs::AssetRecord& record) {
+        if (parsed.compatible_header.empty()) return;
+        core::LoadNote note;
+        note.code = core::load_note_codes::compatible_xml_header;
+        note.classification = core::LoadCategory::unknown_degrade;
+        note.layer.mod_id = record.layer_id;
+        note.file = record.canonical_path;
+        note.line = parsed.offsets.line_column(static_cast<std::ptrdiff_t>(parsed.compatible_header_offset)).first;
+        note.authored_value = parsed.compatible_header;
+        note.action = core::LoadAction::accepted;
+        note.effective_value = "declaration omitted";
+        note.retail = "debug header walk; complete-document capture pending";
+        note.message = "XML header accepted with compatibility parsing";
+        notes.append(std::move(note));
+    };
+    const auto note_skipped_xml = [&notes](const vfs::AssetRecord& record, const core::Diagnostic& error) {
+        core::LoadNote note;
+        note.code = core::load_note_codes::skipped_xml_file;
+        note.classification = core::LoadCategory::unknown_degrade;
+        note.layer.mod_id = record.layer_id;
+        note.file = record.canonical_path;
+        note.line = error.line;
+        note.action = core::LoadAction::skipped_object;
+        note.effective_value = "file omitted";
+        note.retail = "debug build XML reader: a syntax error, several root nodes or a missing xml header fails the "
+                      "whole file read (XML R-12)";
+        note.diagnostic_code = error.code;
+        note.message = error.message;
+        notes.append(std::move(note));
+    };
     LoadHealth health;
     const auto fail_load = [&health](const core::Diagnostic& diagnostic) {
         if (!health.fatal) health.fatal = diagnostic;
@@ -232,7 +266,26 @@ core::Result<LoadResult> load_catalog(
     std::size_t global_registry_order = 0;
     std::optional<core::load_profile::Scope> registry_scope;
     registry_scope.emplace(core::load_profile::Phase::catalog_registry);
+    std::unordered_set<std::string> included_sfx_paths;
     for (const auto& registry : registries) {
+        // SH-03: additions extend the winning retail/mod registry without
+        // resurrecting lower primary registries. Includes use normal VFS priority.
+        std::vector<vfs::AssetRecord> registry_candidates;
+        if (registry.additive) {
+            if (auto candidates = vfs.candidates(registry.path)) {
+                std::unordered_set<std::string> layers;
+                for (const auto& candidate : candidates.value())
+                    if (layers.insert(candidate.layer_id).second) registry_candidates.push_back(candidate);
+            }
+        }
+        if (registry.additive && registry_candidates.empty()) continue;
+        std::reverse(registry_candidates.begin(), registry_candidates.end());
+        if (registry_candidates.empty()) {
+            if (auto winner = vfs.stat(registry.path)) registry_candidates.push_back(winner.value());
+        }
+        // Retain the existing missing-registry diagnostic below.
+        if (registry_candidates.empty()) registry_candidates.emplace_back();
+        for (const auto& candidate : registry_candidates) {
         impl->registry_roots.push_back(RegistryRoot{
             .category = registry.category,
             .registry_path = std::string(registry.path),
@@ -241,8 +294,9 @@ core::Result<LoadResult> load_catalog(
             .input_sha256 = std::nullopt,
         });
         auto& root_receipt = impl->registry_roots.back();
-        auto bytes = vfs.open(registry.path);
-        auto record = vfs.stat(registry.path);
+        auto bytes = candidate.canonical_path.empty() ? vfs.open(registry.path) : vfs.open(candidate);
+        auto record = candidate.canonical_path.empty() ? vfs.stat(registry.path)
+            : core::Result<vfs::AssetRecord>::success(candidate);
         if (!bytes || !record) {
             root_receipt.outcome = unavailable_outcome(!bytes ? bytes.error() : record.error());
             if (record) root_receipt.source = SourceLocation{record.value().canonical_path,
@@ -262,11 +316,13 @@ core::Result<LoadResult> load_catalog(
             root_receipt.outcome = "parse_error";
             parse_outcomes[record.value().canonical_path] = {false, parsed.error().message};
             diagnostics.push_back(parsed.error());
+            diagnostics.back().severity = core::Severity::warning;
             diagnostics.back().code = std::string(diagnostic_codes::registry_invalid);
+            note_skipped_xml(record.value(), diagnostics.back());
             ++health.registry_invalid;
-            fail_load(diagnostics.back());
             continue;
         }
+        note_declaration(parsed.value(), record.value());
         parse_outcomes[record.value().canonical_path] = {true, "parsed active registry XML"};
         if (!ascii_iequals(parsed.value().root.name(), registry.root)) {
             root_receipt.outcome = "parse_error";
@@ -282,10 +338,23 @@ core::Result<LoadResult> load_catalog(
             continue;
         }
         root_receipt.outcome = "loaded";
+        if (core::load_profile::active) {
+            std::uint64_t entries = 0;
+            for (const auto file : parsed.value().root.children())
+                entries += file.type() == pugi::node_element && ascii_iequals(file.name(), "File");
+            core::load_profile::file_cost(record.value().canonical_path,
+                [&](core::load_profile::FileCost& cost) { cost.includes = entries; });
+        }
         std::size_t local_order = 0;
         for (const auto file : parsed.value().root.children()) {
             if (file.type() != pugi::node_element || !ascii_iequals(file.name(), "File")) continue;
             const auto path = included_path(registry.path, file.child_value());
+            core::load_profile::Scope include_scope(core::load_profile::Phase::include_expand);
+            core::load_profile::file_cost(path, [](core::load_profile::FileCost& cost) { ++cost.requests; });
+            if (registry.category == Category::sfx) {
+                const bool already_loaded = !included_sfx_paths.insert(path).second;
+                if (registry.additive && already_loaded) continue;
+            }
             RegistryFile registry_file{
                 .category = registry.category,
                 .registry_path = std::string(registry.path),
@@ -296,8 +365,15 @@ core::Result<LoadResult> load_catalog(
                 .outcome = "missing",
                 .input_sha256 = std::nullopt,
             };
+            std::optional<core::load_profile::Scope> read_scope;
+            read_scope.emplace(core::load_profile::Phase::xml_include_read);
             auto included_bytes = vfs.open(path);
             auto included_record = vfs.stat(path);
+            read_scope.reset();
+            if (included_bytes && included_record)
+                core::load_profile::file_cost(path, [&](core::load_profile::FileCost& cost) {
+                    cost.layer = included_record.value().layer_id;
+                });
             if (!included_bytes || !included_record) {
                 registry_file.outcome = unavailable_outcome(!included_bytes ? included_bytes.error() : included_record.error());
                 if (included_record) registry_file.source = SourceLocation{included_record.value().canonical_path,
@@ -305,6 +381,10 @@ core::Result<LoadResult> load_catalog(
                 auto error = !included_bytes ? included_bytes.error() : included_record.error();
                 error.code = std::string(diagnostic_codes::registry_include_missing);
                 error.message = "active registry include is unavailable: " + path;
+                // A missing include is omitted like retail (R-10), a mod data mistake: warning, not error.
+                // An unreadable existing file keeps the error severity.
+                if (registry_file.outcome != "read_error")
+                    error.severity = core::Severity::warning;
                 const bool unreadable = registry_file.outcome == "read_error";
                 diagnostics.push_back(std::move(error));
                 if (unreadable) {
@@ -344,26 +424,31 @@ core::Result<LoadResult> load_catalog(
                 core::load_profile::LayerKind::registry, included_bytes.value().size());
             registry_file.source = SourceLocation{included_record.value().canonical_path,
                 included_record.value().source_id, included_record.value().layer_id, 1, 1};
-            registry_file.input_sha256 = input_hash(included_bytes.value());
+            {
+                core::load_profile::Scope hash_scope(core::load_profile::Phase::xml_input_hash);
+                registry_file.input_sha256 = input_hash(included_bytes.value());
+            }
             auto included = parse_document(included_bytes.value(), included_record.value());
             if (!included) {
                 registry_file.outcome = "parse_error";
                 parse_outcomes[included_record.value().canonical_path] = {false, included.error().message};
                 diagnostics.push_back(included.error());
+                diagnostics.back().severity = core::Severity::warning;
+                note_skipped_xml(included_record.value(), diagnostics.back());
                 ++health.include_failed;
-                if (registry.category == Category::hardpoint) {
-                    // C-06: R-10 and R-13 do not make an admitted hardpoint parse failure recoverable.
-                    ++health.hardpoint_include_failed;
-                    fail_load(diagnostics.back());
-                }
+                if (registry.category == Category::hardpoint) ++health.hardpoint_include_failed;
                 impl->registry_files.push_back(std::move(registry_file));
                 ++global_registry_order;
                 continue;
             }
+            note_declaration(included.value(), included_record.value());
             parse_outcomes[included_record.value().canonical_path] = {true, "parsed active registry include"};
             registry_file.loaded = true;
             registry_file.outcome = "loaded";
             std::size_t definition_order = 0;
+            core::load_profile::Scope merge_scope(core::load_profile::Phase::definition_merge);
+            const core::load_profile::FileScope merge_timer(path, included_record.value().layer_id,
+                                                           &core::load_profile::FileCost::merge_ms);
             for (const auto definition : included.value().root.children()) {
                 if (definition.type() != pugi::node_element) continue;
                 auto category = registry.category;
@@ -386,6 +471,7 @@ core::Result<LoadResult> load_catalog(
             impl->registry_files.push_back(std::move(registry_file));
             ++global_registry_order;
         }
+        } // registry candidates
     }
 
     registry_scope.reset();
@@ -414,7 +500,12 @@ core::Result<LoadResult> load_catalog(
         if (!parsed) {
             parse_outcomes[record.canonical_path] = {false, parsed.error().message};
             diagnostics.push_back(parsed.error());
+            diagnostics.back().severity = core::Severity::warning;
+            // XML R-12: the original game opens only registry-listed files. A file no registry reaches is never
+            // read, so its syntax error omits nothing and leaves no load note; a registered file already left
+            // its note where the registry or include was read (above), so this pass adds none either.
         } else {
+            note_declaration(parsed.value(), record);
             parse_outcomes[record.canonical_path] = {true, "parsed effective physical XML"};
         }
     }
@@ -435,11 +526,86 @@ core::Result<LoadResult> load_catalog(
     }
 
     index_winners(*impl, diagnostics);
+    // A repeated Name keeps every definition; lookups answer the first registered one (PL-20). The data stays as authored.
+    for (const auto& definition : impl->definitions) {
+        if (!definition.winner) continue;
+        const auto found = impl->by_id.find(ascii_lower(definition.id));
+        if (found == impl->by_id.end()) continue;
+        // A mod overriding a vanilla object is the normal layered path; only repeats inside the winning layer are notable.
+        std::size_t same_layer = 0;
+        for (const auto index : found->second)
+            if (impl->definitions[index].root.source.layer_id == definition.root.source.layer_id) ++same_layer;
+        if (same_layer < 2) continue;
+        core::LoadNote note;
+        note.code = core::load_note_codes::duplicate_object_name;
+        note.classification = core::LoadCategory::retail_accepts;
+        note.layer.mod_id = definition.root.source.layer_id;
+        note.file = definition.root.source.logical_path;
+        note.line = definition.root.source.line;
+        note.object = definition.id;
+        note.tag = "Name";
+        note.authored_value = std::to_string(same_layer) + " definitions";
+        note.action = core::LoadAction::accepted;
+        note.effective_value = "all kept; lookups use the first registered";
+        note.retail = "PL-20: every definition is registered and the first name registration answers lookups";
+        note.message = "duplicate object Name '" + definition.id + "'";
+        notes.append(std::move(note));
+    }
     std::vector<const Definition*> member_definitions;
     member_definitions.reserve(impl->definitions.size());
     for (const auto& definition : impl->definitions) member_definitions.push_back(&definition);
     derive_member_flags(member_definitions, impl->member_flags, impl->member_flags_issue, impl->member_roster_notes);
     return core::Result<LoadResult>::success(LoadResult{Catalog(std::move(impl)), std::move(diagnostics), std::move(health), notes.snapshot()});
+}
+
+core::Result<ShadowedDefinitions> load_shadowed_definitions(
+    const vfs::Vfs& vfs, const Catalog& catalog, const LoadOptions& options) {
+    Catalog::Impl shadow;
+    ShadowedDefinitions result;
+    std::size_t registry_order = 0;
+    for (const auto& file : catalog.registry_files()) {
+        auto candidates = vfs.candidates(file.included_path);
+        if (!candidates) {
+            result.diagnostics.push_back(candidates.error());
+            ++registry_order;
+            continue;
+        }
+        // The first candidate is the same winner the active loader opened.
+        for (std::size_t i = 1; i < candidates.value().size(); ++i) {
+            const auto& candidate = candidates.value()[i];
+            auto bytes = vfs.open(candidate);
+            if (!bytes) { result.diagnostics.push_back(bytes.error()); continue; }
+            auto parsed = parse_document(bytes.value(), candidate);
+            if (!parsed) { result.diagnostics.push_back(parsed.error()); continue; }
+            std::string_view schema_type;
+            switch (file.category) {
+            case Category::game_object: schema_type = "GameObjectType"; break;
+            case Category::hardpoint: schema_type = "HardPoint"; break;
+            case Category::faction: schema_type = "Faction"; break;
+            case Category::campaign: schema_type = "Campaign"; break;
+            case Category::sfx: schema_type = "SFXEvent"; break;
+            case Category::ability: schema_type = "GameObjectType"; break;
+            }
+            std::size_t definition_order = 0;
+            for (const auto definition : parsed.value().root.children()) {
+                if (definition.type() != pugi::node_element) continue;
+                auto category = file.category;
+                std::string schema(schema_type);
+                if (category == Category::game_object) {
+                    const auto concrete = canonical_object_type(definition.name());
+                    if (concrete && is_ability_type(*concrete)) { category = Category::ability; schema = *concrete; }
+                }
+                add_definition(shadow, definition, bytes.value(), candidate, catalog.profile(), category,
+                    std::move(schema), registry_order, definition_order++, result.diagnostics, options, parsed.value().offsets);
+                if (file.category == Category::game_object)
+                    add_nested_abilities(shadow, definition, bytes.value(), candidate, catalog.profile(),
+                        registry_order, definition_order, result.diagnostics, options, parsed.value().offsets);
+            }
+        }
+        ++registry_order;
+    }
+    result.definitions = std::move(shadow.definitions);
+    return core::Result<ShadowedDefinitions>::success(std::move(result));
 }
 
 core::Result<LoadResult> load_catalog_strict(const vfs::Vfs& vfs, const Profile profile) {
@@ -489,11 +655,14 @@ std::string registry_include_path(const std::string_view registry_path, const st
 core::Result<XmlDocument> load_document(const vfs::Vfs& vfs, const std::string_view logical_path) {
     auto record = vfs.stat(logical_path);
     if (!record) return core::Result<XmlDocument>::failure(record.error());
-    auto bytes = vfs.open(logical_path);
+    return load_document(vfs, record.value());
+}
+
+core::Result<XmlDocument> load_document(const vfs::Vfs& vfs, const vfs::AssetRecord& found) {
+    auto bytes = vfs.open(found);
     if (!bytes) return core::Result<XmlDocument>::failure(bytes.error());
-    auto parsed = parse_document(bytes.value(), record.value());
+    auto parsed = parse_document(bytes.value(), found);
     if (!parsed) return core::Result<XmlDocument>::failure(parsed.error());
-    const auto& found = record.value();
     auto root = build_node(parsed.value().root, bytes.value(), found, parsed.value().offsets);
     apply_document_overrides(root, found.canonical_path);
     return core::Result<XmlDocument>::success(XmlDocument{

@@ -73,6 +73,10 @@ public:
             if (auto prepared = prepare_turn(executor); !prepared)
                 return core::Result<std::shared_ptr<tactical::ObjectTurnService>>::failure(prepared.error());
         }
+        // The land movement host has no object-turn seam (it refuses a provider): the goal system and freestore run
+        // in the engine's own world phases there, so a land world gets no provider.
+        if (world.domain() == tactical::BattleDomain::land)
+            return core::Result<std::shared_ptr<tactical::ObjectTurnService>>::success({});
         return core::Result<std::shared_ptr<tactical::ObjectTurnService>>::success(shared_from_this());
     }
 
@@ -762,7 +766,7 @@ core::Result<PreparedAiSession> prepare_session(
             std::sort(omitted_types.begin(), omitted_types.end());
             if (auto admitted = session.omit_object_script_decisions(omitted_types); !admitted) return admitted;
         }
-        for (const std::string_view verb : {verb_move, verb_attack, verb_attack_move, verb_guard, verb_ability, verb_special_fire, verb_buy, verb_pad_build, verb_reinforce, verb_credit_grant, verb_reservation_debit, verb_reveal_all}) {
+        for (const std::string_view verb : {verb_move, verb_attack, verb_attack_move, verb_guard, verb_ability, verb_special_fire, verb_buy, verb_pad_build, verb_reinforce, verb_credit_grant, verb_reservation_debit, verb_reveal_all, verb_make_invulnerable}) {
             if (auto added = session.register_verb(verb, translate_order); !added) return added;
         }
         if (host->setup.perception.campaign_game && host->setup.campaign_can_retreat && host->setup.campaign_retreat_order) {
@@ -784,7 +788,7 @@ core::Result<PreparedAiSession> prepare_session(
         const auto identity = core::sha256_hex(std::span(reinterpret_cast<const std::uint8_t*>(combined.data()), combined.size()));
         return session.set_engine(std::make_shared<FreestoreEngine>(host, goals, identity, notes));
     };
-    return SessionResult::success({std::move(scripts).value(), std::move(bind), std::move(load_notes)});
+    return SessionResult::success({std::move(scripts).value(), std::move(bind), std::move(load_notes), closure});
 }
 
 core::Result<authoritative::ScriptedTacticalSession> create_session(

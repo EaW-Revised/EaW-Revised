@@ -21,6 +21,7 @@ struct Token final {
 };
 struct Include final {
     std::string parent, logical, content_sha256;
+    std::string source_id{}, layer_id{}, origin{};
 };
 struct Stage final {
     std::string stage, entry, profile;
@@ -41,6 +42,8 @@ struct Identity final {
     std::uint32_t descriptor_version{assets::effect_descriptor_version};
     std::uint32_t result_schema_version{1}, options_manifest_version{1};
     std::string selection_policy, resolver_policy, translator, emitter;
+    std::string root_source, root_layer, root_origin;
+    std::uint32_t parser_schema{1};
     std::string binding_policy, state_policy, technique_policy, admission_policy;
     std::string godot_engine, shader_abi, language, renderer, backend, platform, architecture;
     // Producer's finite numeric IDs in its canonical order; no ad hoc textual

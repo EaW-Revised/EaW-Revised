@@ -75,6 +75,25 @@ bool present(const eawr::campaign::GameSession& game, eawr::sim::EntityId id) {
 }
 
 void cases(const eawr::sim::PartitionExecutor& pool, std::vector<std::string>& hashes) {
+    {
+        auto config = setup();
+        auto& n = *config.ability_host->profiles[0].neutralize;
+        n.base_curve = {{f(1), f(1)}, {f(1), f(1)}};
+        n.history_curve = {{f(0), f(0)}, {f(1), f(2)}, {f(1), f(3)}};
+        auto game = eawr::campaign::GameSession::create(config);
+        expect(static_cast<bool>(game), "neutralization host accepts duplicate curve points");
+        if (game) {
+            const auto identities = cp::game_identities(config);
+            const auto saved = cp::save_game_checkpoint(game.value(), identities);
+            expect(static_cast<bool>(saved), "duplicate curves save in checkpoint");
+            if (saved) {
+                const auto restored = cp::load_game_checkpoint(saved.value(), identities, {}, pool);
+                expect(static_cast<bool>(restored), "duplicate curves restore from checkpoint");
+                if (restored) expect(restored.value().session.galaxy().setup().ability_host == config.ability_host,
+                    "checkpoint preserves duplicate curve order and values");
+            }
+        }
+    }
     {   // Price (WGCH-22), absence samples (WGCH-21/93), forgery, restore, success (WGCH-26).
         const auto config = setup(); auto game = take(eawr::campaign::GameSession::create(config));
         const auto prepared = prepare(game, config, pool, hashes);

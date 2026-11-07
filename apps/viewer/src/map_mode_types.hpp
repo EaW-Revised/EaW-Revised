@@ -2,9 +2,12 @@
 
 #include "attract_camera.hpp"
 #include "land_battle_scene.hpp"
+#include "land_overlay_view.hpp"
 #include "map_mode_assets.hpp"
 #include "options_screen.hpp"
+#include "load_job.hpp"
 #include <chrono>
+#include <string>
 
 namespace eawr::core::tick_profile { struct Recording; }
 
@@ -30,6 +33,11 @@ struct MapMode::State final {
     ~State();
 
     Options options;
+    godot::Node3D* pointer_host{};
+    bool pointer_blocked{};
+    struct ReadyLoad;
+    std::shared_ptr<ReadyLoad> ready_load;
+    ReadyStatus ready_status{ReadyStatus::pending};
     std::unique_ptr<GodotRenderer> renderer;
     // E-space-primary-sky-v1: a kind-2 map is composed by SpaceEnvironment;
     // the land members below stay unused for it. The populated placements
@@ -42,6 +50,8 @@ struct MapMode::State final {
     std::optional<std::uint64_t> followed_projectile;
     std::unique_ptr<SpacePopulation> space_population;
     std::unique_ptr<LandBattleScene> land_population;
+    // Land movement debug overlay (F4; default off): order targets, paths, slot targets by squad state.
+    std::unique_ptr<LandOverlayView> land_overlay;
     std::vector<sim::RenderInstance> land_static_instances;
     std::vector<std::string> land_pose_trace;
     std::optional<std::uint64_t> land_trace_tick;
@@ -61,6 +71,9 @@ struct MapMode::State final {
     // #638: the pool the live battle's particle systems step on; declared before the objects
     // that use it, so it goes last.
     std::unique_ptr<ParticleWorkers> particle_workers;
+    // L1.3: the particle lane over `particle_workers` (null: land battles, no battle). Declared after the pool it
+    // borrows; ~State shuts it down before any owner a lane job reads dies.
+    std::unique_ptr<ParticleLane> particle_lane;
     // #82: the local player's selection and orders on the live session; declared after the
     // session, the population and the space view, so it goes first.
     std::unique_ptr<BattleInput> battle;
@@ -84,6 +97,11 @@ struct MapMode::State final {
     std::optional<PerfTrace> perf_trace;  // --eawr-perf-trace (#601)
     // #638: the main thread's ms in this frame's unit emitters, battle effects and breakoff props.
     double particle_ms{};
+    // L1.3: last frame's lane job (see PerfTrace::Frame); the lane thread writes none of these, the join does.
+    double lane_wall_ms{}, lane_start_delay_ms{}, lane_join_wait_ms{};
+    std::uint32_t lane_violations{};
+    double lane_main_help_ms{}, lane_retirement_ms{};
+    std::size_t lane_main_help_tasks{};
     double emitter_frame_ms{};
     double effects_frame_ms{};
     double debris_frame_ms{};
@@ -148,6 +166,8 @@ struct MapMode::State final {
     std::optional<std::uint32_t> fog_team;
     std::optional<std::uint64_t> fog_revision;
     std::optional<std::uint64_t> fog_tick;
+    // --eawr-model-cache-load-budget <MiB|off>: replaces the RAM-scaled strong model-cache budget during load.
+    std::optional<std::uint64_t> model_cache_load_budget_override;
     bool fog_paint_requested{};
     bool fog_inject_input{};
     std::uint32_t fog_ignored_inputs{};
@@ -191,6 +211,11 @@ struct MapMode::State final {
     // Once per frame: a closed menu resumes the battle, and a confirmed Quit Game leaves it.
     void service_game_menu();
     void free_game_menu();
+    // #3989: the in-game menu's Save writes to this folder (--eawr-save-dir or --eawr-galactic-save-dir, else the
+    // user data folder's saves, as the front end's Load list reads), with the camera and the map as its hints.
+    std::filesystem::path save_directory;
+    [[nodiscard]] std::filesystem::path player_save_directory() const;
+    [[nodiscard]] bool save_battle(const std::string& name, bool overwrite);
     [[nodiscard]] std::optional<std::array<float, 2>> game_menu_point(const std::string& name) const;
     godot::Control* lan_overlay{};
     godot::Control* lan_incident{};
@@ -481,7 +506,10 @@ struct MapMode::State final {
     [[nodiscard]] bool activate_land_camera(Node3D& host, const assets::Map& map, eawr::viewer::MapCameraSource source);
     [[nodiscard]] bool prepare_ready_particles(Node3D& host, const assets::Map& map);
     [[nodiscard]] bool ready_space(Node3D& host, const assets::Map& map,
-                                   const assets::ObjectTypeCatalog& catalog, const std::string& catalog_failure);
+                                   const assets::ObjectTypeCatalog& catalog, const std::string& catalog_failure,
+                                   const EnqueueLoadStep& enqueue = {});
+    [[nodiscard]] bool finish_ready_space(bool ready);
+    void install_land_move_trace_log();
     [[nodiscard]] bool ready_land_population(const assets::Map& map, std::vector<sim::RenderInstance>& instances,
                                              sim::AssetId& next_asset, sim::EntityId& next_entity);
     [[nodiscard]] std::string terrain_material_program() const;
@@ -619,7 +647,9 @@ struct MapMode::State final {
     [[nodiscard]] bool verify_capture(const CaptureResult& capture);
     [[nodiscard]] bool verify_unlocked_capture(const CaptureResult& capture);
     struct PlacementComposition;
-    [[nodiscard]] bool prepare_live_population(Node3D& host, const assets::Map& map, std::optional<eawr::viewer::MapCameraSource>& space_camera_source, std::vector<std::uint32_t>& session_records);
+    [[nodiscard]] bool prepare_live_population(Node3D& host, const assets::Map& map, std::optional<eawr::viewer::MapCameraSource>& space_camera_source, std::vector<std::uint32_t>& session_records, const EnqueueLoadStep* queue);
+    // Set when an attract load has run the live-population sections as steps and re-enters ready_space.
+    bool live_population_prepared{false};
     [[nodiscard]] SpacePopulateHook make_population_hook();
     void collect_capture_variants(scene::VfsAssetCache& cache, PlacementComposition& work);
     void collect_placement_colours(PlacementComposition& work);

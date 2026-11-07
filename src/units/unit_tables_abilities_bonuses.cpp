@@ -1,5 +1,7 @@
 #include "unit_tables_decode.hpp"
 
+#include <algorithm>
+
 namespace eawr::units::unit_tables_detail {
 
 void Loader::load_bonus_abilities(Object& object, UnitType& unit, const std::string& name, const AbilityFields& child_text) {

@@ -8,6 +8,7 @@
 #include "eawr/sim/tactical/durability.hpp"
 #include "eawr/sim/tactical/replay.hpp"
 #include "eawr/sim/tactical/session.hpp"
+#include "../../src/sim/tactical/tactical_internal.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -80,6 +81,80 @@ constexpr std::int64_t one = std::int64_t{1} << 24;
             hardpoint(Role::fighter_bay, 1500, ".50", "1.5")}};
     table.profiles = {nebulon, acclamator, corellian, station};
     return table;
+}
+
+// Retail keeps hardpoints in a growable list indexed by a 32-bit int: the old 255 cap is gone.
+void test_many_hardpoints() {
+    using Role = tactical::HardpointRole;
+    for (const std::size_t count : {std::size_t{256}, std::size_t{1000}, tactical::max_hardpoints_per_type}) {
+        auto table = foc_table();
+        table.profiles[0].hardpoints.assign(count, hardpoint(Role::weapon, 390));
+        expect(static_cast<bool>(tactical::validate_durability(table)),
+            std::to_string(count) + " hardpoints validate");
+    }
+    auto beyond = foc_table();
+    beyond.profiles[0].hardpoints.assign(tactical::max_hardpoints_per_type + 1, hardpoint(Role::weapon, 390));
+    expect(!tactical::validate_durability(beyond), "hardpoints beyond the bound are refused");
+    // The service sums stay exact for a 1000-hardpoint type (no wrap, no failure).
+    tactical::DurabilityTable table;
+    table.rules = {decimal("0.2"), decimal("0.4"), decimal("0.33")};
+    tactical::DurabilityProfile big{10, units(5400), decimal("2.2"), false, {}};
+    big.hardpoints.assign(1000, hardpoint(Role::weapon, 390));
+    table.profiles = {big};
+    auto state = tactical::full_durability(table.profiles[0]);
+    const auto served = tactical::service_durability(table.profiles[0], table.rules, state);
+    expect(static_cast<bool>(served) && served.value().destroyed_hardpoints.empty(), "a full 1000-hardpoint type services cleanly");
+    // Saturated sums keep absurd mod totals from wrapping int64.
+    tactical::DurabilityProfile absurd{20, units(5400), decimal("2.2"), false, {}};
+    absurd.hardpoints.assign(1000, hardpoint(Role::weapon, tactical::max_durability_health));
+    auto absurd_state = tactical::full_durability(absurd);
+    expect(static_cast<bool>(tactical::service_durability(absurd, table.rules, absurd_state)),
+        "saturated hardpoint sums service without wrapping");
+}
+
+// append_event's hardpoint byte: one byte below 255 (stock bytes unchanged), 0xFF + u32 from 255 up.
+std::uint32_t read_le32(const std::vector<std::uint8_t>& bytes, const std::size_t at) {
+    return static_cast<std::uint32_t>(bytes[at]) | (static_cast<std::uint32_t>(bytes[at + 1]) << 8)
+        | (static_cast<std::uint32_t>(bytes[at + 2]) << 16) | (static_cast<std::uint32_t>(bytes[at + 3]) << 24);
+}
+
+// Decodes the hardpoint field of one hardpoint_destroyed event; returns the byte count consumed by it.
+std::size_t decode_event_hardpoint(const std::vector<std::uint8_t>& bytes, std::uint32_t& hardpoint) {
+    constexpr std::size_t at = 8 + 4 + 3; // tick, player, kind/order/reason
+    if (bytes[at] != 0xFF) {
+        hardpoint = bytes[at];
+        return 1;
+    }
+    hardpoint = read_le32(bytes, at + 1);
+    return 5;
+}
+
+void test_event_hardpoint_encoding() {
+    for (const std::uint32_t value : {0U, 1U, 254U, 255U, 256U, 65535U, 0xFFFFFFFFU}) {
+        tactical::Event event;
+        event.kind = tactical::EventKind::hardpoint_destroyed;
+        event.tick = 7;
+        event.sequence = 9;
+        event.unit = eawr::sim::EntityId{11};
+        event.hardpoint = value;
+        std::vector<std::uint8_t> bytes;
+        tactical::detail::append_event(bytes, event);
+        std::uint32_t decoded = 0;
+        const auto width = decode_event_hardpoint(bytes, decoded);
+        const std::size_t expected_width = value < 255 ? 1 : 5;
+        const auto label = std::to_string(value);
+        expect(width == expected_width, "event hardpoint " + label + " has the expected width");
+        expect(decoded == value, "event hardpoint " + label + " round trips");
+        expect(bytes.size() == 15 + expected_width + 16, "event hardpoint " + label + " total size");
+        if (value < 255) expect(bytes[15] == value, "event hardpoint " + label + " keeps its one byte");
+        else expect(bytes[15] == 0xFF, "event hardpoint " + label + " uses the escape byte");
+    }
+    // 0xFF alone used to mean "255"; it is now the escape, so 255 is written 0xFF 0xFF 0 0 0.
+    tactical::Event event;
+    event.hardpoint = 255;
+    std::vector<std::uint8_t> bytes;
+    tactical::detail::append_event(bytes, event);
+    expect(bytes[15] == 0xFF && read_le32(bytes, 16) == 255, "index 255 is the escape followed by u32 255");
 }
 
 void test_validation() {
@@ -638,6 +713,8 @@ int main(const int argc, char** argv) {
         return 2;
     }
     test_validation();
+    test_many_hardpoints();
+    test_event_hardpoint_encoding();
     test_rules();
     test_zero_health_recovery();
     test_service();

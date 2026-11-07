@@ -1,5 +1,7 @@
 #include "replay_parse_internal.hpp"
 
+#include <optional>
+
 namespace eawr::sim::tactical::replay_parse_detail {
 using namespace replay_detail;
 
@@ -85,6 +87,13 @@ core::Result<void> parse_commands(
             control.policy.factions.push_back(faction);
             roster_bytes += 8U;
             command.payload = std::move(control);
+        } else if (opcode == detail::opcode_script_invulnerable) {
+            ScriptInvulnerablePayload invulnerable;
+            std::uint32_t enabled{}, invulnerable_reserved{};
+            if (!reader.read_u32(enabled) || !reader.read_u32(invulnerable_reserved) || enabled > 1 || invulnerable_reserved != 0)
+                return fail<Parsed>(diagnostic_codes::invalid_command, "invalid script-invulnerable payload" + at, logical_path);
+            invulnerable.enabled = enabled != 0;
+            command.payload = invulnerable;
         } else if (opcode == detail::opcode_gift) {
             GiftPayload gift;
             std::uint32_t gift_reserved{};

@@ -2,6 +2,7 @@
 #include "../../src/sim/tactical/session_store_abilities.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -557,6 +558,118 @@ void test_fire_range_bonus() {
             if (reference.empty()) reference = hashes;
             else expect(reference == hashes, "WFR-01: fire range hashes agree at 1/2/4/8 workers");
         }
+    }
+}
+
+
+void test_script_invulnerable() {
+    // TL-03: the Lua Make_Invulnerable flag blocks combat and environment damage (DG-40), leaves privileged
+    // script damage alone, is idempotent, and survives a checkpoint round trip in domain 11.
+    auto table = durability();
+    auto hull = table.profiles.front();
+    hull.max_shields = Fixed{};
+    for (const unsigned kind : {0U, 1U, 2U, 3U}) {
+        for (const bool flagged : {false, true}) {
+            tactical::Hit hit;
+            hit.amount = units(20);
+            hit.projectile = kind < 2;
+            hit.area = kind == 1;
+            hit.kind = kind == 2 ? tactical::HitKind::asteroid : tactical::HitKind::ordinary;
+            hit.target_script_invulnerable = flagged;
+            auto health = tactical::full_durability(hull);
+            const auto applied = tactical::apply_hit(hull, *table.damage, health, hit, 0);
+            // Kind 3 is plain script damage (no projectile, ordinary): privileged, so the flag never stops it.
+            const bool blocked = flagged && kind < 3;
+            expect(applied && (health.hull == hull.max_hull) == blocked,
+                blocked ? "TL-03: the flag blocks projectile, area and environmental damage"
+                        : "TL-03: unflagged units and privileged script damage still lose hull");
+        }
+    }
+
+    std::vector<std::string> baseline;
+    for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+        auto raw_health = durability();
+        raw_health.profiles.front().max_shields = Fixed{};
+        const auto run = [&](const unsigned scenario, std::vector<std::string>& hashes,
+            std::optional<tactical::TacticalSession>& keep) -> bool {
+            auto created = tactical::TacticalSession::create(setup(), {}, raw_health);
+            expect(static_cast<bool>(created), "TL-03: session creates");
+            if (!created) return false;
+            auto session = std::move(created).value();
+            // Scenario 0: no flag. 1: set twice (idempotent). 2: set then cleared. 3: set on a dead unit id.
+            std::uint64_t sequence = 0;
+            if (scenario == 1 || scenario == 2) {
+                expect(static_cast<bool>(session.submit(command(2, 1, sequence++, 1, tactical::ScriptInvulnerablePayload{true}))),
+                    "TL-03: flag command submits");
+                expect(static_cast<bool>(session.submit(command(3, 1, sequence++, 1, tactical::ScriptInvulnerablePayload{true}))),
+                    "TL-03: a second set submits");
+            }
+            if (scenario == 2) expect(static_cast<bool>(session.submit(command(6, 1, sequence++, 1, tactical::ScriptInvulnerablePayload{false}))),
+                "TL-03: clear command submits");
+            if (scenario == 3) expect(static_cast<bool>(session.submit(command(2, 1, sequence++, 99, tactical::ScriptInvulnerablePayload{true}))),
+                "TL-03: a command naming no live unit still submits");
+            expect(static_cast<bool>(session.submit(command(8, 1, sequence++, 1, tactical::DamagePayload{units(10), tactical::hull_target}))),
+                "TL-03: privileged script damage submits");
+            const eawr::platform::ThreadWorkerAdapter executor(workers);
+            for (unsigned frame = 0; frame < 12; ++frame) {
+                const auto step = session.step(executor);
+                expect(static_cast<bool>(step), "TL-03: step succeeds");
+                if (!step) return false;
+                hashes.push_back(step.value().state_sha256);
+            }
+            const auto final = session.durability_state(1);
+            const auto full = raw_health.profiles.front().max_hull;
+            expect(final && final->hull.raw() < full.raw(), "TL-03: privileged script damage reaches a flagged unit");
+            const auto checkpoint = session.save_checkpoint_state();
+            // Domain 9 unless a unit still holds the flag; the leading uint32 is little-endian.
+            const unsigned domain = scenario == 1 ? 11U : 9U;
+            expect(checkpoint && checkpoint.value().size() >= 4 && checkpoint.value()[0] == domain
+                && checkpoint.value()[1] == 0 && checkpoint.value()[2] == 0 && checkpoint.value()[3] == 0,
+                "TL-03: the flag selects domain 11; a cleared or absent flag keeps domain 9");
+            if (scenario == 1) {
+                // Opcode 34 survives write and parse with its flag and unit list intact.
+                const auto bytes = tactical::write_replay(session.record());
+                expect(static_cast<bool>(bytes), "TL-03: the replay with opcode 34 writes");
+                if (bytes) {
+                    const auto parsed = tactical::parse_replay(bytes.value());
+                    bool found = false;
+                    if (parsed) for (const auto& recorded : parsed.value().commands)
+                        if (const auto* payload = std::get_if<tactical::ScriptInvulnerablePayload>(&recorded.payload))
+                            found = found || (payload->enabled && recorded.units == std::vector<eawr::sim::EntityId>{1});
+                    expect(found, "TL-03: opcode 34 round-trips through the replay writer and parser");
+                }
+            }
+            if (checkpoint && scenario == 1) {
+                auto fresh = tactical::TacticalSession::from_replay(session.record(), {}, raw_health);
+                expect(static_cast<bool>(fresh), "TL-03: checkpoint factory succeeds");
+                if (fresh) {
+                    keep.emplace(std::move(fresh).value());
+                    const auto loaded = keep->load_checkpoint_state(checkpoint.value());
+                    expect(static_cast<bool>(loaded), "TL-03: a flagged checkpoint loads");
+                    if (!loaded) { keep.reset(); return true; }
+                    const auto recaptured = keep->save_checkpoint_state();
+                    expect(recaptured && recaptured.value() == checkpoint.value(),
+                        "TL-03: checkpoint round-trip preserves canonical bytes");
+                    const auto resumed = keep->step(executor);
+                    const auto original = session.step(executor);
+                    expect(resumed && original && resumed.value().state_sha256 == original.value().state_sha256,
+                        "TL-03: a restored session continues with the same hash");
+                    // A flagged domain whose flag is gone is noncanonical and refused.
+                    auto tampered = checkpoint.value();
+                    tampered[0] = 12;
+                    auto victim = tactical::TacticalSession::from_replay(session.record(), {}, raw_health);
+                    if (victim) expect(!victim.value().load_checkpoint_state(tampered), "TL-03: a mismatched fire-range domain is refused");
+                }
+            }
+            return true;
+        };
+        std::vector<std::string> plain, once, cleared, ghost;
+        std::optional<tactical::TacticalSession> restored, unused;
+        if (!run(0, plain, unused) || !run(1, once, restored) || !run(2, cleared, unused) || !run(3, ghost, unused)) continue;
+        expect(plain != once, "TL-03: the flag enters the state hash");
+        expect(ghost.size() == plain.size() && cleared.size() == plain.size(), "TL-03: a missing unit and a cleared flag both step normally");
+        if (baseline.empty()) baseline = once;
+        else expect(baseline == once, "TL-03: flagged hashes agree at 1/2/4/8 workers");
     }
 }
 

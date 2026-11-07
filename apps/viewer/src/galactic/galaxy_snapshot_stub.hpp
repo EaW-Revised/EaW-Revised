@@ -43,6 +43,22 @@ struct PlanetAbilityMetadata final {
     std::string title{}, description{};
 };
 
+// The planet's weather (Encyclopedia_Weather_*): icon file plus the localized name and info text.
+struct PlanetWeatherMetadata final {
+    std::string icon{}, name{}, info{};
+};
+
+// Hover text of the weather icon: name, then info on the next line (either may be empty).
+[[nodiscard]] inline std::string weather_tooltip(const PlanetWeatherMetadata& weather) {
+    if (weather.name.empty()) return weather.info;
+    return weather.info.empty() ? weather.name : weather.name + '\n' + weather.info;
+}
+
+// GHUD-R45: the Planet Info dialog sections, localized (empty when the planet authors no key or it is unresolved).
+struct PlanetInfoMetadata final {
+    std::string tactical{}, advantage{}, history{}, weather{}, terrain{}, population{};
+};
+
 struct StubPlanet final {
     ObjectId id{};
     std::string name;
@@ -52,6 +68,8 @@ struct StubPlanet final {
     sim::math::Fixed scale = sim::math::Fixed::from_raw(sim::math::Fixed::scale);
     std::optional<PlayerId> owner;
     PlanetAbilityMetadata ability{};
+    PlanetWeatherMetadata weather{};
+    PlanetInfoMetadata info{};
 };
 
 struct StubRoute final {

@@ -22,8 +22,10 @@ std::string_view flight_profile_error(const FlightProfile& profile) noexcept {
     if (!bounded(profile.curve_distance)) return "Projectile_Rocket_Curve_Distance outside supported geometry domain";
     if (!bounded(profile.straight_distance)) return "Projectile_Rocket_Straight_Distance outside supported geometry domain";
     if (!bounded(profile.curve_offset)) return "Projectile_Rocket_Curve_Offset outside supported geometry domain";
-    if (profile.lifetime && (profile.lifetime->raw() < 0 || profile.lifetime->raw() > 3600 * math::Fixed::scale))
-        return "Projectile_Max_Lifetime outside supported [0, 3600] seconds";
+    // #5696: a documented sim limit (loader-strictness-sk.md SKI-69, F7): the Q24 arithmetic bounds the lifetime, not
+    // a retail rule (no retail bound was found; retail parses the value with atof). A mod's 5000 s lifetime loads as authored.
+    if (profile.lifetime && (profile.lifetime->raw() < 0 || profile.lifetime->raw() > (std::int64_t{1} << 18) * math::Fixed::scale))
+        return "Projectile_Max_Lifetime outside supported [0, 262144] seconds";
     if (profile.kind == FlightKind::rocket && profile.curve_distance.raw() == 0)
         return "Projectile_Rocket_Curve_Distance must be positive for ROCKET subdivision (RFL-09)";
     return {};

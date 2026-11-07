@@ -48,6 +48,7 @@ inline constexpr std::uint32_t handle_taskforce = 5;   // id: TaskForce ID
 inline constexpr std::uint32_t handle_block = 6;       // id: block_id(instance, command sequence)
 inline constexpr std::uint32_t handle_ai_target = 7;   // id: AI target ID
 inline constexpr std::uint32_t handle_freestore = 8;   // id: galactic player ID
+inline constexpr std::uint32_t handle_galactic_budget = 18; // id: owning native plan ID
 
 // Engine requests of the plan bindings (ScriptCommand::verb); after_service takes them.
 inline constexpr std::string_view verb_ai = "foc.ai";
@@ -703,7 +704,7 @@ struct PlayerAi {
     std::map<sim::EntityId, AttackPositioning> positioning;
     tactical::PlayerId player{};
     const PlayerType* type{};
-    const Template* space_template{};
+    const Template* mode_template{};
     Difficulty difficulty{};
     bool galactic{};
     galactic_ai::TemplatePolicy galactic_policy;
@@ -950,7 +951,15 @@ public:
     [[nodiscard]] core::Result<std::shared_ptr<void>> galactic_decision_scope(tactical::PlayerId);
     // S9a: the player whose Lua chain a galactic script instance belongs to (a freestore instance carries its
     // player, a plan instance its slot's player), or 0 for an instance no player owns.
+    void reset_native_fault_context() noexcept { native_fault_candidate_.reset(); native_provider_threw_ = false; }
+    void select_native_fault_context(tactical::PlayerId player) noexcept { native_fault_candidate_ = player ? std::optional{player} : std::nullopt; }
+    void clear_native_fault_context() noexcept { native_fault_candidate_.reset(); }
+    [[nodiscard]] std::optional<tactical::PlayerId> native_fault_provider() const noexcept { return native_fault_candidate_; }
+    [[nodiscard]] bool native_provider_threw() const noexcept { return native_provider_threw_; }
+    void set_galactic_retirement_reader(std::function<bool(tactical::PlayerId)> reader) { galactic_retired_ = std::move(reader); }
+    [[nodiscard]] bool galactic_provider_retired(tactical::PlayerId player) const { return galactic_retired_ && galactic_retired_(player); }
     [[nodiscard]] std::uint64_t galactic_chain_owner(std::uint64_t instance) const;
+    [[nodiscard]] core::Result<void> retire_galactic_provider(tactical::PlayerId, authoritative::ScriptScheduler&);
 
     // Serial, before the script service: perception, goals, planning and execution of every AI
     // player in ascending player ID (GS-01). Engine events for the scripts are submitted to
@@ -1015,7 +1024,9 @@ public:
     [[nodiscard]] const std::vector<std::uint64_t>* target_list(tactical::PlayerId player) const;
     // WGA-452: exact category membership of the current manager's active set.
     [[nodiscard]] std::optional<std::uint64_t> active_goal_count(tactical::PlayerId player, std::uint64_t category) const;
-    [[nodiscard]] std::optional<Real> global_value(const std::string& name) const;
+    using GlobalScalar = std::variant<Real, std::string, bool>;
+    [[nodiscard]] std::optional<authoritative::Value> global_value(const std::string& name) const;
+    void commit_global_values(authoritative::ServiceReport&);
     // A unit's type as the goal system counts it (a squadron container's squadron type).
     [[nodiscard]] bool in_freestore(const ViewUnit& unit, tactical::PlayerId player) const;
     // FH-11, AI-08: a freestore unit the freestore's unit service calls On_Unit_Service for: one
@@ -1282,8 +1293,19 @@ private:
 
     using NativeRecordKey = std::tuple<std::uint32_t, std::uint32_t, core::RecordDigest::Bytes>;
     using NativeRecordRows = std::map<NativeRecordKey, core::RecordDigest::Bytes, NativeRecordLess>;
+    struct NativePhaseUndo {
+        std::map<NativeRecordKey, std::optional<core::RecordDigest::Bytes>, NativeRecordLess> records;
+        std::vector<PlanRecord> plan_reports;
+        std::vector<TickCost> cost_reports;
+    };
+    NativePhaseUndo* native_phase_{};
+    std::optional<tactical::PlayerId> native_fault_candidate_;
+    bool native_provider_threw_{};
+    std::function<bool(tactical::PlayerId)> galactic_retired_;
+    bool native_phase_abandoned_{};
     void enable_native_records();
     void refresh_native_records() noexcept;
+    [[nodiscard]] std::uint64_t native_collection_nodes() noexcept;
     [[nodiscard]] bool native_record_selected(const NativeRecordKey&) const;
     [[nodiscard]] bool native_record_kind_selected(std::uint32_t) const;
     [[nodiscard]] bool native_record_owner_kind_selected(std::uint32_t, std::uint32_t) const;
@@ -1407,7 +1429,7 @@ private:
     std::map<sim::EntityId, std::map<sim::EntityId, Real>> threats_;
     // This tick's first hit on each object: (attacker, deliberate) (EX-44).
     std::map<sim::EntityId, std::pair<sim::EntityId, bool>> last_hits_;
-    std::map<std::string, Real, std::less<>> globals_;
+    std::map<std::string, GlobalScalar, std::less<>> globals_;
     std::vector<PlanRecord> records_;
     std::vector<TickCost> costs_;
     std::uint64_t records_dropped_{};

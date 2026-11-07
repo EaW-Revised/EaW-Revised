@@ -70,6 +70,7 @@ Defined = 0
 Last = "none"
 function Base_Definitions() Defined = Defined + 1 end
 function Story_Event_Trigger(name) Last = name; Hits = Hits + 1 end
+function Fault_Callback() error('injected callback failure') end
 function main()
     while true do coroutine.yield(true) end
 end
@@ -83,7 +84,7 @@ void host(const std::filesystem::path& root) {
     write(data / "scripts" / "story" / "Other_Script.lua", "require(\"StoryProbe\")\n");
     write(data / "scripts" / "story" / "Free_Script.lua", "require(\"StoryProbe\")\nfunction main() GameRandom.Free_Random(1, 2) end\n");
     write(data / "scripts" / "story" / "Dist_Script.lua", "require(\"StoryProbe\")\nfunction main() DiscreteDistribution.Create().Insert(1, 1) end\n");
-    write(data / "scripts" / "story" / "Fault_Script.lua", "require(\"StoryProbe\")\nfunction main() Find_First_Object(\"Empire\") end\n");
+    write(data / "scripts" / "story" / "Fault_Script.lua", "require(\"StoryProbe\")\nfunction main() Find_Hint(\"Empire\") end\n");
     write(data / "xml" / "unrelated.xml", "<Unrelated/>");
     eawr::vfs::MountSpec mount; mount.layer_id = "story-host"; mount.data_root = data;
     const auto files = take(eawr::vfs::Vfs::mount(std::vector<eawr::vfs::MountSpec>{mount}));
@@ -131,17 +132,21 @@ void host(const std::filesystem::path& root) {
     };
     bool only_find_player = true;
     for (const auto& row : first.diagnostics)
-        if (row.code == auth::codes::script_error && row.message.find("Find_First_Object") == std::string::npos) only_find_player = false;
+        if (row.code == auth::codes::script_error && row.message.find("Find_Hint") == std::string::npos) only_find_player = false;
     expect(codes_of(first, auth::codes::forbidden_capability) == 0 && only_find_player,
-        "GameRandom.Free_Random and DiscreteDistribution.Create run (RGC-190..199); only the unbound Find_First_Object ends a script");
+        "GameRandom.Free_Random and DiscreteDistribution.Create run (RGC-190..199); only the unbound Find_Hint ends a script");
     bool named_fault = false;
     for (const auto& row : first.diagnostics)
-        named_fault = named_fault || (row.message.find(std::string(auth::codes::missing_api)) != std::string::npos && row.message.find("Find_First_Object") != std::string::npos);
+        named_fault = named_fault || (row.message.find(std::string(auth::codes::missing_api)) != std::string::npos && row.message.find("Find_Hint") != std::string::npos);
     expect(named_fault, "an unbound engine function faults with its own name");
+    const auto retired = content->find("G.xml")->instance;
+    expect(scripts.retired_instances() == std::vector<std::uint64_t>{retired}
+        && first.load_notes.size() == 1 && first.load_notes[0].code == "EAWR-LOAD-1400"
+        && first.load_notes[0].object == std::to_string(retired), "the unbound story provider retires with one runtime LoadNote");
 
     // The calls: the scripted sub-plot is called; the unscripted, the unbound and the unknown ones are dropped.
     std::uint64_t sequence = 0;
-    const std::vector<st::ScriptCall> calls{{0, "Probe_Event"}, {1, "Ignored"}, {2, "Ignored"}, {0, "Second_Event"}};
+    const std::vector<st::ScriptCall> calls{{0, "Probe_Event"}, {1, "Ignored"}, {2, "Ignored"}, {6, "Ignored_Retired"}, {0, "Second_Event"}};
     take(cpn::forward_galactic_story_calls(scripts, *content, subs, calls, sequence));
     expect(sequence == 2, "only calls for running scripts take an event sequence");
     options.time_tick = 2;
@@ -159,6 +164,8 @@ void host(const std::filesystem::path& root) {
     const auto saved = take(scripts.save());
     auto reloaded = take(cpn::create_galactic_story_scheduler(*content, config));
     take(reloaded.load(saved));
+    expect(reloaded.retired_instances() == std::vector<std::uint64_t>{retired}
+        && !reloaded.create_instance(retired, content->find("G.xml")->module), "story restore retains retirement and refuses restart");
     expect(take(reloaded.state_hash()) == take(scripts.state_hash()), "a restored story scheduler has the saved state");
     options.time_tick = 3; take(scripts.service(executor, options));
     take(reloaded.service(executor, options));
@@ -179,6 +186,24 @@ void host(const std::filesystem::path& root) {
         if (reference.empty()) reference = hash;
         expect(hash == reference, "story script state is equal on " + std::to_string(workers) + " workers");
     }
+    auto callback = make();
+    options.time_tick = 1; take(callback.service(executor, options));
+    auth::ScriptEvent fault;
+    fault.key = {2, auth::first_simulation_producer, a->instance, 0};
+    fault.target = a->instance; fault.kind = auth::ScriptEvent::Kind::call; fault.name = "Fault_Callback";
+    take(callback.submit_event(std::move(fault)));
+    options.time_tick = 2;
+    const auto faulted = take(callback.service(executor, options));
+    const auto survivors = callback.instances();
+    expect(faulted.load_notes.size() == 1 && faulted.load_notes[0].object == std::to_string(a->instance)
+        && !std::binary_search(survivors.begin(), survivors.end(), a->instance)
+        && std::binary_search(survivors.begin(), survivors.end(), content->find("D.xml")->instance),
+        "uncaught story callback failure retires only its provider");
+    std::uint64_t after_fault = 0;
+    take(cpn::forward_galactic_story_calls(callback, *content, subs, calls, after_fault));
+    expect(after_fault == 0, "later story requests for retired providers are dropped");
+    options.time_tick = 3;
+    expect(take(callback.service(executor, options)).load_notes.empty(), "story service continues without repeated retirement notes");
 }
 // One sub-plot whose script body is `body`: the scheduler of the story host after its first service, the report of that
 // service and the instance. Every call of one test builds the same sub-plot position, so the instance is the same and two
@@ -199,7 +224,7 @@ auth::SessionConfig story_config(std::uint64_t seed) {
 
 Scripted run_scripted(const std::filesystem::path& root, const std::string& name, const std::string& body, bool multiplayer = false,
     std::uint64_t seed = 4242, const eawr::sim::PartitionExecutor& executor = eawr::sim::InlineExecutor{},
-    const cpn::GalacticStoryPlayers& players = {}) {
+    const cpn::GalacticStoryPlayers& players = {}, auth::GalacticSnapshotReader reader = {}) {
     const auto data = root / name / "loose";
     std::filesystem::remove_all(root / name);
     write(data / "scripts" / "story" / "Rand_Script.lua", body);
@@ -207,7 +232,7 @@ Scripted run_scripted(const std::filesystem::path& root, const std::string& name
     const auto files = take(eawr::vfs::Vfs::mount(std::vector<eawr::vfs::MountSpec>{mount}));
     auto subs = std::vector<st::SubPlotDef>{sub("R.xml", "Rand_Script", {})};
     auto content = take(cpn::GalacticStoryScripts::load(files, subs));
-    auto scripts = take(cpn::create_galactic_story_scheduler(*content, story_config(seed), multiplayer, players));
+    auto scripts = take(cpn::create_galactic_story_scheduler(*content, story_config(seed), multiplayer, players, std::move(reader)));
     std::vector<std::string> notes;
     take(cpn::start_galactic_story_scripts(scripts, *content, notes));
     expect(notes.empty(), "the random-test script starts");
@@ -429,6 +454,8 @@ end
     expect(integer_global(range, "Bad_First") >= 0 && integer_global(range, "Bad_First") <= 32767, "a non-number first argument still draws over the default range");
     expect(integer_global(range, "Bad_Second") >= 0 && integer_global(range, "Bad_Second") <= 4, "a non-number second argument still draws over 0..first");
     expect(count_code(range.first, auth::codes::invalid_request) == 2, "RGC-195 each bad argument is reported once");
+    expect(range.scripts.retired_instances().empty() && range.first.load_notes.empty(),
+        "RGC-195 argument fallback diagnostics do not retire the running story provider");
     expect(count_code(range.first, auth::codes::script_warning) == 0, "single-player Free_Random raises no warning");
 
     // RGC-196: in a multiplayer game Free_Random warns and is the plain GameRandom call on the game stream.
@@ -506,7 +533,7 @@ end
 void player_lookup(const std::filesystem::path& root) {
     // Synthetic names, including a loaded faction with no player; deliberately unsorted player IDs.
     const cpn::GalacticStoryPlayers roster{{"Copper", "Indigo", "Unseated", "Minor"},
-        {{9, "Copper"}, {7, "Indigo"}, {2, "Copper"}, {11, "Minor"}}, 7};
+        {{9, "Copper"}, {7, "Indigo"}, {2, "Copper"}, {11, "Minor"}}, 7, {}};
     const eawr::sim::InlineExecutor inline_executor;
     const auto run = [&](const std::string& name, const std::string& body, const cpn::GalacticStoryPlayers& players) {
         return run_scripted(root, name, "function Count_Values(...) return arg.n end\n" + body, false, 4242, inline_executor, players);
@@ -557,6 +584,20 @@ end
         true, 4242, inline_executor, without_local);
     expect(multiplayer_absent.first.diagnostics.empty() && integer_global(multiplayer_absent, "LocalValues") == 0,
         "multiplayer's absent canonical local player returns no values without diagnostics");
+    // Co-op deviation: a shared local player is exposed in multiplayer, and only that one; the per-peer one stays hidden.
+    auto shared = roster;
+    shared.shared_local_player = shared.local_player;
+    shared.local_player = 99;
+    auto shared_run = run_scripted(root, "players_shared_local", "function Count_Values(...) return arg.n end\n" + body,
+        true, 4242, inline_executor, shared);
+    expect(shared_run.first.diagnostics.empty() && integer_global(shared_run, "LocalValues") == 1 && handle_id(shared_run, "Local") == 7,
+        "co-op: multiplayer Find_Player('local') returns the shared faction, never the per-peer local player");
+    auto shared_unregistered = roster;
+    shared_unregistered.shared_local_player = 98;
+    auto shared_missing = run_scripted(root, "players_shared_unregistered", "function Count_Values(...) return arg.n end\n" + body,
+        true, 4242, inline_executor, shared_unregistered);
+    expect(shared_missing.first.diagnostics.empty() && integer_global(shared_missing, "LocalValues") == 0,
+        "an unregistered shared local player returns no values");
     without_local.local_player = 99;
     auto invalid_local = run("invalid_local", "function main() Missing = Count_Values(Find_Player('LOCAL')) end", without_local);
     expect(invalid_local.first.diagnostics.empty() && integer_global(invalid_local, "Missing") == 0, "an absent configured local player returns no wrapper");
@@ -596,6 +637,342 @@ end
         expect(hash == reference, "player lookup continuation is equal on " + std::to_string(workers) + " workers");
     }
 }
+void live_object_and_difficulty(const std::filesystem::path& root) {
+    namespace gc = eawr::sim::galactic;
+    gc::SyntheticGalaxyOptions shape; shape.players = 2; shape.planets = 4;
+    auto world = take(gc::GalacticSession::create(gc::synthetic_galaxy(shape)));
+    const auto base = world.snapshot();
+    std::shared_ptr<const gc::GalacticSnapshot> published;
+    const auto publish = [&](std::vector<gc::CensusObject> actors) {
+        gc::NativeSnapshotChanges changes;
+        changes.actors = std::make_shared<const std::vector<gc::CensusObject>>(std::move(actors));
+        published = gc::GalacticSnapshot::native_view(base, std::move(changes));
+    };
+    gc::CensusObject older{}; older.id = 40; older.original_type = 70; older.current_type = 70;
+    gc::CensusObject newer = older; newer.id = 41;
+    gc::CensusObject dead = older; dead.id = 38; dead.dead = true;
+    gc::CensusObject pending = older; pending.id = 39; pending.delete_pending = true;
+    publish({newer, dead, pending, older});
+    cpn::GalacticStoryPlayers players{};
+    players.factions = {"Copper", "Indigo"};
+    players.players = {{1, "Copper", "HARD"}, {2, "Indigo", "Normal"}};
+    players.types = {{"Hero_Probe", 70}};
+    players.planets = {{"Planet_Probe", base->planets().front().id}};
+    std::string reference;
+    for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+        publish({newer, dead, pending, older});
+        const eawr::platform::ThreadWorkerAdapter executor(workers);
+        auto run = run_scripted(root, "live_" + std::to_string(workers), R"LUA(
+function main()
+    First = Find_First_Object("hero_probe")
+    Same = rawequal(First, Find_First_Object("HERO_PROBE", "ignored"))
+    Missing = Find_First_Object("Absent") == nil
+    Planet = Find_First_Object("planet_probe")
+    Player = Find_Player("Copper")
+    Difficulty = Player.Get_Difficulty()
+    HumanDifficulty = Find_Player("Indigo").Get_Difficulty()
+    coroutine.yield(true)
+    Next = Find_First_Object("Hero_Probe")
+    DifficultyAfter = Player.Get_Difficulty()
+end
+)LUA", false, 4242, executor, players, [&] { return published; });
+        const auto object_id = [&](auth::ScriptScheduler& scripts, std::string_view name) {
+            const auto value = take(scripts.read_global(run.instance, name));
+            const auto* object = value ? std::get_if<auth::Handle>(&value->data) : nullptr;
+            return object ? object->id : 0;
+        };
+        expect(run.first.diagnostics.empty() && object_id(run.scripts, "First") == 40,
+            "first-object chooses the lowest live matching identity independent of publication order");
+        expect(flag_global(run, "Same") && flag_global(run, "Missing")
+            && object_id(run.scripts, "Planet") == base->planets().front().id,
+            "first-object interns wrappers, returns nil for missing types, and resolves planet names");
+        const auto difficulty = take(run.scripts.read_global(run.instance, "Difficulty"));
+        const auto human = take(run.scripts.read_global(run.instance, "HumanDifficulty"));
+        expect(difficulty && std::get<std::string>(difficulty->data) == "Hard"
+            && human && std::get<std::string>(human->data) == "Normal", "player methods expose configured difficulty and the non-AI default");
+        const auto saved = take(run.scripts.save());
+        auto restored = take(cpn::create_galactic_story_scheduler(*run.content, story_config(4242), false, players, [&] { return published; }));
+        take(restored.load(saved));
+        newer.id = 42;
+        publish({newer});
+        auth::ServiceOptions options; options.time_tick = 2;
+        const auto next = take(run.scripts.service(executor, options));
+        const auto loaded = take(restored.service(executor, options));
+        const auto after = take(restored.read_global(run.instance, "DifficultyAfter"));
+        expect(next.diagnostics.empty() && loaded.diagnostics.empty() && object_id(run.scripts, "Next") == 42
+            && object_id(restored, "Next") == 42 && after && std::get<std::string>(after->data) == "Hard",
+            "lookup follows births/removals and restored player handles retain difficulty");
+        expect(take(restored.state_hash()) == take(run.scripts.state_hash()), "restored live lookup continuation matches");
+        const auto hash = take(run.scripts.state_hash());
+        if (reference.empty()) reference = hash;
+        expect(hash == reference, "live object lookup and player difficulty agree across worker counts");
+        newer.id = 41;
+    }
+}
+void advisor_hints_stub(const std::filesystem::path& root) {
+    cpn::GalacticStoryPlayers players{}; players.factions = {"Copper"}; players.players = {{1, "Copper", "Normal"}};
+    std::string reference;
+    for (const auto workers : {1U, 2U, 4U, 8U}) {
+        const eawr::platform::ThreadWorkerAdapter executor(workers);
+        auto run = run_scripted(root, "hints_" + std::to_string(workers), R"LUA(
+function main()
+    local player = Find_Player("Copper")
+    player.Enable_Advisor_Hints("Space", false)
+    player.Enable_Advisor_Hints("Land", false)
+    Continued = true
+    coroutine.yield(true)
+end
+)LUA", true, 4242, executor, players);
+        expect(flag_global(run, "Continued") && run.scripts.retired_instances().empty()
+            && count_code(run.first, auth::codes::unsupported_api) == 2 && run.first.load_notes.empty(),
+            "warned advisor presentation stub preserves co-op story script instead of retiring it on a nil method");
+        const auto hash = take(run.scripts.state_hash());
+        if (workers == 1) reference = hash; else expect(hash == reference, "advisor presentation degradation is equal on 1/2/4/8");
+    }
+}
+
+void planet_lookup(const std::filesystem::path& root) {
+    cpn::GalacticStoryPlayers input{};
+    input.planets = {{"Azure", 9}, {"aZure", 7}, {"Amber", 2}};
+    auto run = run_scripted(root, "planets", R"LUA(
+function main()
+    First = FindPlanet("aZuRe")
+    Same = rawequal(First, FindPlanet("AZURE", "ignored"))
+    Missing = FindPlanet("Absent") == nil
+end
+)LUA", false, 4242, eawr::sim::InlineExecutor{}, input);
+    const auto result = take(run.scripts.read_global(run.instance, "First"));
+    const auto* handle = result ? std::get_if<auth::Handle>(&result->data) : nullptr;
+    expect(run.first.diagnostics.empty() && handle && handle->id == 7, "named planet resolves to its object handle");
+    expect(flag_global(run, "Same") && flag_global(run, "Missing"), "lookup ignores extra arguments, reuses wrappers, and returns nil for unknown names");
+    auto invalid = run_scripted(root, "invalid_planet", "function main() FindPlanet(false) end",
+        false, 4242, eawr::sim::InlineExecutor{}, input);
+    expect(count_code(invalid.first, auth::codes::invalid_request) == 1 && invalid.scripts.instances().empty(),
+        "non-string planet lookup diagnoses and ends the script");
+}
+// RGC-176..178: the three creation bindings against a recording stand-in for the ordered native shadow. The native
+// creation itself (identities, journal, free-store hand-off) is covered by the installed-game story case.
+struct SpawnLog {
+    std::vector<std::string> actions;
+    std::uint64_t next{500};
+    bool null_creation{};
+    bool ai_owner{true};
+    bool missing_actor{};
+};
+struct SpawnState final : auth::ImmediateEffectState {
+    std::shared_ptr<SpawnLog> log;
+    explicit SpawnState(std::shared_ptr<SpawnLog> shared) : log(std::move(shared)) {}
+    std::unique_ptr<auth::ImmediateEffectState> clone() const override { return std::make_unique<SpawnState>(log); }
+    eawr::core::Result<auth::ValueList> apply(std::string_view action, const auth::ValueList& args) override {
+        std::string row(action);
+        for (const auto& value : args)
+            if (const auto* handle = std::get_if<auth::Handle>(&value.data)) row += ":" + std::to_string(handle->kind) + "/" + std::to_string(handle->id);
+        log->actions.push_back(row);
+        if (action == "galactic.spawn_unit") {
+            if (log->null_creation) return eawr::core::Result<auth::ValueList>::success({});
+            return eawr::core::Result<auth::ValueList>::success({auth::Value{std::vector<auth::Value>{auth::Value{auth::Handle{1, log->next++}}}}});
+        }
+        if (action == "galactic.story_prevent_ai_usage") {
+            if (log->missing_actor) return eawr::core::Result<auth::ValueList>::success({auth::Value{false}, auth::Value{std::string("actor")}});
+            if (!log->ai_owner) return eawr::core::Result<auth::ValueList>::success({auth::Value{false}, auth::Value{std::string("pool")}});
+            return eawr::core::Result<auth::ValueList>::success({auth::Value{true}});
+        }
+        return eawr::core::Result<auth::ValueList>::success({});
+    }
+    eawr::core::Result<auth::ValueList> query(std::string_view, const auth::ValueList&) const override {
+        return eawr::core::Result<auth::ValueList>::success({});
+    }
+};
+struct SpawnHost final : auth::ImmediateEffectHost {
+    std::shared_ptr<SpawnLog> log;
+    explicit SpawnHost(std::shared_ptr<SpawnLog> shared) : log(std::move(shared)) {}
+    eawr::core::Result<std::unique_ptr<auth::ImmediateEffectState>> capture() const override {
+        return eawr::core::Result<std::unique_ptr<auth::ImmediateEffectState>>::success(std::make_unique<SpawnState>(log));
+    }
+    eawr::core::Result<void> publish(std::unique_ptr<auth::ImmediateEffectState>) override { return eawr::core::Result<void>::success(); }
+};
+
+cpn::GalacticStoryPlayers spawn_roster() {
+    cpn::GalacticStoryPlayers players{};
+    players.factions = {"Copper", "Indigo"};
+    players.players = {{1, "Copper", "Normal"}, {2, "Indigo", "Normal"}};
+    players.types = {{"Hero_Probe", 70}, {"Other_Probe", 71}};
+    players.planets = {{"Planet_Probe", 9}};
+    return players;
+}
+
+Scripted run_spawn(const std::filesystem::path& root, const std::string& name, const std::string& body,
+    const std::shared_ptr<SpawnLog>& log, const eawr::sim::PartitionExecutor& executor = eawr::sim::InlineExecutor{}) {
+    const auto data = root / name / "loose";
+    std::filesystem::remove_all(root / name);
+    write(data / "scripts" / "story" / "Rand_Script.lua", body);
+    eawr::vfs::MountSpec mount; mount.layer_id = "story-spawn-" + name; mount.data_root = data;
+    const auto files = take(eawr::vfs::Vfs::mount(std::vector<eawr::vfs::MountSpec>{mount}));
+    auto subs = std::vector<st::SubPlotDef>{sub("R.xml", "Rand_Script", {})};
+    auto content = take(cpn::GalacticStoryScripts::load(files, subs));
+    auto scripts = take(cpn::create_galactic_story_scheduler(*content, story_config(4242), true, spawn_roster()));
+    if (log) take(scripts.set_immediate_effect_host(std::make_shared<SpawnHost>(log), 16));
+    std::vector<std::string> notes;
+    take(cpn::start_galactic_story_scripts(scripts, *content, notes));
+    auth::ServiceOptions options; options.time_tick = 1;
+    auto report = take(scripts.service(executor, options));
+    const auto instance = content->find("R.xml")->instance;
+    return Scripted{std::move(content), std::move(subs), std::move(scripts), std::move(report), instance};
+}
+std::uint64_t handle_id(Scripted& run, std::string_view name) {
+    const auto value = take(run.scripts.read_global(run.instance, name));
+    const auto* handle = value ? std::get_if<auth::Handle>(&value->data) : nullptr;
+    return handle ? handle->id : 0;
+}
+std::size_t spawn_count(const SpawnLog& log) {
+    return static_cast<std::size_t>(std::count_if(log.actions.begin(), log.actions.end(),
+        [](const auto& row) { return row.rfind("galactic.spawn_unit", 0) == 0; }));
+}
+
+void spawn_bindings(const std::filesystem::path& root) {
+    // Find_Object_Type: case-insensitive original type names; nil for an unknown name; a non-string ends the script.
+    auto lookup = run_spawn(root, "find_type", R"LUA(
+function main()
+    A = Find_Object_Type("hero_probe")
+    Same = rawequal(A, Find_Object_Type("HERO_PROBE", "ignored"))
+    Missing = Find_Object_Type("Absent") == nil
+end
+)LUA", nullptr);
+    expect(lookup.first.diagnostics.empty() && handle_id(lookup, "A") == 70 && flag_global(lookup, "Same") && flag_global(lookup, "Missing"),
+        "Find_Object_Type resolves original type names case-insensitively and returns nil for an unknown one");
+    auto bad_name = run_spawn(root, "find_type_bad", "function main() Find_Object_Type(false) end", nullptr);
+    expect(count_code(bad_name.first, auth::codes::invalid_request) == 1 && bad_name.scripts.instances().empty(),
+        "Find_Object_Type with a non-string diagnoses and ends the script");
+
+    // Spawn_Unit + Prevent_AI_Usage: the native action sees (player, planet, type); the script gets a one-element table.
+    const std::string good = R"LUA(
+function main()
+    local list = Spawn_Unit(Find_Object_Type("Hero_Probe"), FindPlanet("Planet_Probe"), Find_Player("Copper"))
+    Count = table.getn(list)
+    Unit = list[1]
+    Unit.Prevent_AI_Usage(true)
+    Done = true
+end
+)LUA";
+    std::string reference;
+    for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+        const eawr::platform::ThreadWorkerAdapter executor(workers);
+        auto log = std::make_shared<SpawnLog>();
+        auto run = run_spawn(root, "spawn_" + std::to_string(workers), good, log, executor);
+        expect(run.first.diagnostics.empty() && flag_global(run, "Done") && integer_global(run, "Count") == 1 && handle_id(run, "Unit") == 500,
+            "RGC-178 Spawn_Unit returns a one-element table holding the new object");
+        expect(log->actions == (std::vector<std::string>{"galactic.spawn_unit:2/1:1/9:3/70", "galactic.story_prevent_ai_usage:1/500"}),
+            "RGC-176 the creation takes the given player, the given planet and the type; Prevent_AI_Usage targets the new object");
+        const auto hash = take(run.scripts.state_hash());
+        if (reference.empty()) reference = hash;
+        expect(hash == reference, "Spawn_Unit scripts agree across worker counts");
+    }
+
+    // A human owner has no AI pool: Prevent_AI_Usage warns and the script goes on.
+    auto human_log = std::make_shared<SpawnLog>(); human_log->ai_owner = false;
+    auto human = run_spawn(root, "spawn_human", good, human_log);
+    expect(flag_global(human, "Done") && count_code(human.first, auth::codes::script_warning) == 1 && human.scripts.instances().size() == 1,
+        "Prevent_AI_Usage for an owner without an AI pool is a warning, not a script error");
+
+    // An object the free store does not know is a different warning from a missing pool.
+    auto stray_log = std::make_shared<SpawnLog>(); stray_log->missing_actor = true;
+    auto stray = run_spawn(root, "spawn_stray_actor", good, stray_log);
+    expect(flag_global(stray, "Done") && count_code(stray.first, auth::codes::script_warning) == 1
+        && stray.first.diagnostics.front().message.find("free store") != std::string::npos
+        && human.first.diagnostics.front().message.find("AI pool") != std::string::npos,
+        "Prevent_AI_Usage on an object unknown to the free store warns with its own reason");
+
+    // Hash scope: only content that names Spawn_Unit or Prevent_AI_Usage asks for the ordered native service.
+    const auto scope_content = [&](const std::string& name, const std::string& body) {
+        const auto data = root / name / "loose";
+        std::filesystem::remove_all(root / name);
+        write(data / "scripts" / "story" / "Rand_Script.lua", body);
+        eawr::vfs::MountSpec mount; mount.layer_id = "story-scope-" + name; mount.data_root = data;
+        const auto files = take(eawr::vfs::Vfs::mount(std::vector<eawr::vfs::MountSpec>{mount}));
+        const std::vector<st::SubPlotDef> plots{sub("R.xml", "Rand_Script", {})};
+        return take(cpn::GalacticStoryScripts::load(files, plots));
+    };
+    expect(!scope_content("scope_plain", "function main() Plain = FindPlanet('Planet_Probe') end")->uses_immediate_effects()
+        && !scope_content("scope_lookalike", "function main() My_Spawn_Unit_Count = 1 end")->uses_immediate_effects(),
+        "a story without the creation bindings keeps the partitioned service (negative control)");
+    expect(scope_content("scope_spawn", good)->uses_immediate_effects()
+        && scope_content("scope_prevent", "function main() local o = Find_First_Object('X') o.Prevent_AI_Usage(true) end")->uses_immediate_effects(),
+        "a story naming Spawn_Unit or Prevent_AI_Usage asks for the ordered native service");
+    // The instance bound follows the story's own count (no AI-sized bound): three scripted sub-plots bind with a limit of three.
+    {
+        const auto data = root / "scope_three" / "loose";
+        std::filesystem::remove_all(root / "scope_three");
+        for (const char* name : {"A_Script", "B_Script", "C_Script"}) write(data / "scripts" / "story" / (std::string(name) + ".lua"), good);
+        eawr::vfs::MountSpec mount; mount.layer_id = "story-scope-three"; mount.data_root = data;
+        const auto files = take(eawr::vfs::Vfs::mount(std::vector<eawr::vfs::MountSpec>{mount}));
+        const std::vector<st::SubPlotDef> plots{sub("A.xml", "A_Script", {}), sub("B.xml", "B_Script", {}), sub("C.xml", "C_Script", {})};
+        auto content = take(cpn::GalacticStoryScripts::load(files, plots));
+        auto scripts = take(cpn::create_galactic_story_scheduler(*content, story_config(4242), true, spawn_roster()));
+        take(scripts.set_immediate_effect_host(std::make_shared<SpawnHost>(std::make_shared<SpawnLog>()), content->entries().size()));
+        std::vector<std::string> notes;
+        take(cpn::start_galactic_story_scripts(scripts, *content, notes));
+        auth::ServiceOptions options; options.time_tick = 1;
+        take(scripts.service(eawr::sim::InlineExecutor{}, options));
+        expect(content->entries().size() == 3 && scripts.instances().size() == 3, "all three story instances load and run under the story-sized bound");
+    }
+
+    // RGC-176 error paths: nothing is created, the script ends with a named diagnostic.
+    const std::vector<std::pair<std::string, std::string>> refusals{
+        {"no_type", "Spawn_Unit(Find_Object_Type('Absent'), FindPlanet('Planet_Probe'), Find_Player('Copper'))"},
+        {"no_planet", "Spawn_Unit(Find_Object_Type('Hero_Probe'), FindPlanet('Absent'), Find_Player('Copper'))"},
+        {"no_player", "Spawn_Unit(Find_Object_Type('Hero_Probe'), FindPlanet('Planet_Probe'), nil)"},
+        {"two_arguments", "Spawn_Unit(Find_Object_Type('Hero_Probe'), FindPlanet('Planet_Probe'))"},
+        {"swapped", "Spawn_Unit(Find_Object_Type('Hero_Probe'), Find_Player('Copper'), FindPlanet('Planet_Probe'))"},
+        {"string_type", "Spawn_Unit('Hero_Probe', FindPlanet('Planet_Probe'), Find_Player('Copper'))"},
+    };
+    for (const auto& [name, call] : refusals) {
+        auto log = std::make_shared<SpawnLog>();
+        auto run = run_spawn(root, "refuse_" + name, "function main()\n" + call + "\nReached = true\nend\n", log);
+        expect(count_code(run.first, auth::codes::invalid_request) == 1 && spawn_count(*log) == 0 && run.scripts.instances().empty(),
+            "RGC-176 " + name + " raises a named script error and creates nothing");
+    }
+    // The planet must be a planet: a created object is not one.
+    auto not_planet_log = std::make_shared<SpawnLog>();
+    auto not_planet = run_spawn(root, "refuse_object_planet", R"LUA(
+function main()
+    local t = Find_Object_Type("Hero_Probe")
+    local list = Spawn_Unit(t, FindPlanet("Planet_Probe"), Find_Player("Copper"))
+    Spawn_Unit(t, list[1], Find_Player("Copper"))
+    Reached = true
+end
+)LUA", not_planet_log);
+    expect(count_code(not_planet.first, auth::codes::invalid_request) == 1 && not_planet.scripts.instances().empty() && spawn_count(*not_planet_log) == 1,
+        "RGC-176 a non-planet object as the second argument creates nothing");
+
+    // RGC-178: a null creation is a warning and no table.
+    auto null_log = std::make_shared<SpawnLog>(); null_log->null_creation = true;
+    auto null_run = run_spawn(root, "spawn_null", R"LUA(
+function main()
+    Result = Spawn_Unit(Find_Object_Type("Hero_Probe"), FindPlanet("Planet_Probe"), Find_Player("Copper"))
+    Done = true
+end
+)LUA", null_log);
+    expect(flag_global(null_run, "Done") && count_code(null_run.first, auth::codes::script_warning) == 1
+        && handle_id(null_run, "Result") == 0 && integer_global(null_run, "Result") == -1,
+        "RGC-178 a null creation warns and returns no table");
+
+    // L-57: Prevent_AI_Usage needs an object and a Boolean.
+    auto prevent_log = std::make_shared<SpawnLog>();
+    auto prevent = run_spawn(root, "prevent_bad", R"LUA(
+function main()
+    local list = Spawn_Unit(Find_Object_Type("Hero_Probe"), FindPlanet("Planet_Probe"), Find_Player("Copper"))
+    list[1].Prevent_AI_Usage("yes")
+    Reached = true
+end
+)LUA", prevent_log);
+    expect(!prevent.first.diagnostics.empty() && prevent.scripts.instances().empty()
+        && std::none_of(prevent_log->actions.begin(), prevent_log->actions.end(), [](const auto& row) { return row.rfind("galactic.story_prevent", 0) == 0; }),
+        "Prevent_AI_Usage without a Boolean is a script error and changes nothing");
+
+    // Without the ordered native shadow (no AI runtime) creation faults by name instead of pretending.
+    auto bare = run_spawn(root, "spawn_no_host", good, nullptr);
+    expect(!bare.first.diagnostics.empty() && bare.scripts.instances().empty(), "Spawn_Unit without a native shadow host faults and creates nothing");
+}
 } // namespace
 
 int case_galactic_story_script_host_tests(int argc, char** argv) {
@@ -610,6 +987,10 @@ int case_galactic_story_script_host_tests(int argc, char** argv) {
         random_streams(root / "random");
         distribution_state(root / "random");
         player_lookup(root / "players");
+        planet_lookup(root / "planets");
+        live_object_and_difficulty(root / "objects");
+        advisor_hints_stub(root / "hints");
+        spawn_bindings(root / "spawn");
     } catch (const std::exception& error) { std::cerr << "FAIL: " << error.what() << '\n'; return 1; }
     return galactic_test::failures ? 1 : 0;
 }

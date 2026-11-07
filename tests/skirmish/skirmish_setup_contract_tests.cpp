@@ -1,9 +1,11 @@
 #include "skirmish_start_support.hpp"
+#include "eawr/vfs/vfs.hpp"
 #include "setup_map_reference.hpp"
 #include "setup_map_golden.hpp"
 #include "../../src/skirmish/setup_workers.hpp"
 #include "eawr/core/load_profile.hpp"
 #include "eawr/data/tag_trace.hpp"
+#include "eawr/presentation/ui/faction_display.hpp"
 #include "eawr/core/result.hpp"
 #include "eawr/sim/world.hpp"
 #include "eawr/sim/tactical/types.hpp"
@@ -24,6 +26,7 @@
 #include <ios>
 #include <iostream>
 #include <iterator>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <span>
@@ -36,6 +39,80 @@
 
 namespace skirmish_start_test_support {
 void setup_contract(const std::filesystem::path& fixtures) {
+    {
+        auto tables = synthetic_tables();
+        auto inputs = synthetic_inputs(tables);
+        auto fixture = synthetic_fixture();
+        // Observe both header paths at the start seam with identical lobby and type data.
+        const auto modern = skirmish::build_start(fixture, inputs);
+        expect(modern && std::any_of(modern.value().units.begin(), modern.value().units.end(), [](const auto& unit) {
+            return unit.state.owner == 1 && unit.role == skirmish::UnitRole::fleet && unit.record == 2
+                && unit.state.position == at(30, 40);
+        }), "WSS-54: new markers select the first runtime team spawn for the first teammate");
+        auto mixed = fixture;
+        mixed.slots[1].team = 0;
+        expect(!skirmish::build_start(mixed, inputs), "WSS-19: new-marker teammates must share a faction");
+        inputs.new_markers = false;
+        std::erase_if(inputs.placements, [](const auto& value) { return value.marker; });
+        const auto spawn = [&](std::uint32_t record, const char* name, std::int32_t owner, Vec3 position) {
+            auto value = marker(record, name, position, 0);
+            value.owner_index = owner;
+            value.owner_faction = "ignored synthetic label"; // Index, not a stale label, selects the faction.
+            inputs.placements.push_back(std::move(value));
+        };
+        spawn(20, "PLAYER_0_SPAWN_POINT_MARKER", 0, at(1000, 2000));
+        spawn(21, "PLAYER_0_SPAWN_POINT_MARKER", 1, at(-1000, -2000));
+        spawn(22, "PLAYER_1_SPAWN_POINT_MARKER", 0, at(3000, 4000));
+        spawn(23, "player_0_spawn_point_marker", 0, at(5000, 6000));
+        auto station = object(24, "Station_A", "SpaceStructure", 0, "Rebel", at(7000, 8000), 90);
+        inputs.placements.push_back(station);
+        // Labels deliberately contradict faction grouping; legacy relationships remain faction-based.
+        fixture.slots[1].team = 0;
+        fixture.slots[2].team = 1;
+        const auto legacy_start = skirmish::build_start(fixture, inputs);
+        expect(static_cast<bool>(legacy_start), "WSS-19/54: legacy factions start without any team station or team spawn");
+        if (legacy_start) {
+            const auto& start = legacy_start.value();
+            const auto unit_at = [&](std::uint32_t owner, skirmish::UnitRole role, std::uint32_t record, Vec3 position) {
+                return std::any_of(start.units.begin(), start.units.end(), [&](const auto& unit) {
+                    return unit.state.owner == owner && unit.role == role && unit.record == record && unit.state.position == position;
+                });
+            };
+            expect(unit_at(1, skirmish::UnitRole::free_unit, 23, at(5000, 6000))
+                && unit_at(1, skirmish::UnitRole::fleet, 20, at(1000, 2000)),
+                "WSS-54: legacy companies cycle the matching faction's zero-index spawn set");
+            expect(unit_at(2, skirmish::UnitRole::free_unit, 21, at(-1000, -2000))
+                && unit_at(3, skirmish::UnitRole::fleet, 22, at(3000, 4000)),
+                "WSS-54: enemy owner filtering and same-faction ordinal choose distinct authored starts");
+            expect(unit_at(1, skirmish::UnitRole::station, 24, at(7000, 8000)),
+                "WSS-50: authored station stays live and maps to its faction's first installed player");
+            expect(std::any_of(start.units.begin(), start.units.end(), [](const auto& unit) {
+                return unit.record == 8 && unit.state.owner == 2;
+            }) && std::none_of(start.units.begin(), start.units.end(), [](const auto& unit) { return unit.record == 12; }),
+                "WSS-50: authored playable ownership survives while absent-faction discardable objects are removed");
+            expect(std::any_of(start.markers.begin(), start.markers.end(), [](const auto& value) {
+                return value.player == 1 && value.use == skirmish::MarkerUse::spawn && value.record == 23;
+            }) && std::none_of(start.markers.begin(), start.markers.end(), [](const auto& value) {
+                return value.player == 1 && value.use == skirmish::MarkerUse::spawn && value.record != 23;
+            }), "WSS-54: camera and reinforcement facing retain the first selected legacy marker");
+            expect(start.players[0].player.team_id == start.players[2].player.team_id
+                && start.players[0].player.team_id != start.players[1].player.team_id,
+                "WSS-19: legacy relationships follow faction independently of team labels");
+        }
+        // Removing the selected ordinal is a located project refusal, never a team-marker fallback.
+        std::erase_if(inputs.placements, [](const auto& value) { return value.record == 22; });
+        const auto missing = skirmish::build_start(fixture, inputs);
+        expect(!missing && missing.error().logical_path == fixture.map
+            && missing.error().message.find("slot 3") != std::string::npos
+            && missing.error().message.find("PLAYER_1_SPAWN_POINT_MARKER") != std::string::npos,
+            "WSS-54: unsupported legacy marker set refuses with the map, player and marker name");
+        // The validation rule is about authored order, never literal faction names.
+        std::swap(inputs.factions[1], inputs.factions[2]);
+        const auto absent = skirmish::build_start(fixture, inputs);
+        expect(!absent && absent.error().logical_path == fixture.map
+            && absent.error().message.find("indices 0 and 1") != std::string::npos,
+            "WSS-19: changing authored faction order changes the required legacy factions");
+    }
     // WSS-25/52: chosen cash reaches all playable factions without an AI income multiplier.
     {
         auto tables = synthetic_tables();
@@ -154,6 +231,114 @@ void setup_contract(const std::filesystem::path& fixtures) {
                             "synthetic station/spawn records expose both supported authored teams");
                     }
                 }
+            }
+            if (catalog) for (const float bad_position : {1.0e20F, std::numeric_limits<float>::quiet_NaN()}) {
+                setup_map_golden::write_team_corpus(directory, 4, bad_position);
+                auto invalid_fs = eawr::vfs::Vfs::mount(std::span(&mount, 1));
+                skirmish::Fixture invalid_fixture;
+                invalid_fixture.map = "data/art/maps/team_contract.ted";
+                const eawr::units::UnitTables tables;
+                auto invalid = skirmish::read_start_inputs(invalid_fixture, invalid_fs.value(), catalog.value().catalog, tables);
+                expect(invalid && invalid.value().placements.size() == 4, "bad TED position skips only its placement");
+                if (invalid) expect(invalid.value().placement_load_notes.size() == 1
+                    && invalid.value().placement_load_notes.front().code == "EAWR-LOAD-0452"
+                    && invalid.value().placement_load_notes.front().message == "TED record 4 position does not convert to Q24"
+                    && invalid.value().placement_load_notes.front().action == eawr::core::LoadAction::skipped_placement,
+                    "bad TED position retains diagnostic in a load note");
+                setup_map_golden::write_team_corpus(directory);
+            }
+            if (catalog) {
+                skirmish::Fixture fixture;
+                fixture.map = "data/art/maps/team_contract.ted";
+                const auto missing_base = eawr::data::with_overrides(catalog.value().catalog,
+                    std::array{eawr::data::ValueOverride{"Team_00_Space_Station", "Variant_Of_Existing_Type", {"Absent_Base"}}});
+                const auto cycle = eawr::data::with_overrides(catalog.value().catalog,
+                    std::array{eawr::data::ValueOverride{"Team_00_Space_Station", "Variant_Of_Existing_Type", {"Team_00_Space_Station"}}});
+                const eawr::units::UnitTables empty_tables;
+                expect(missing_base && cycle, "variant placement overlays are admitted");
+                if (missing_base && cycle) {
+                    const auto skipped = skirmish::read_start_inputs(fixture, fs.value(), missing_base.value(), empty_tables);
+                    expect(skipped && skipped.value().placements.size() == 3
+                        && std::any_of(skipped.value().placement_load_notes.begin(), skipped.value().placement_load_notes.end(), [](const auto& note) {
+                            return note.code == "EAWR-XML-0008" && note.object == "Team_00_Space_Station"
+                                && note.action == eawr::core::LoadAction::skipped_placement;
+                        }), "missing variant base skips only the placement and records its diagnostic");
+                    const auto rejected = skirmish::read_start_inputs(fixture, fs.value(), cycle.value(), empty_tables);
+                    expect(!rejected && rejected.error().code == eawr::data::diagnostic_codes::variant_cycle,
+                        "variant cycle remains a failure");
+                }
+                eawr::units::UnitTables tables;
+                eawr::units::UnitType unit;
+                unit.id = "Team_00_Space_Station";
+                unit.table_order = 10;
+                unit.movement.space_layer = "Capital";
+                unit.footprint.space_obstacle = true;
+                unit.footprint.hazard.nebula = true;
+                tables.units.push_back(unit);
+                auto bound = skirmish::read_start_inputs(fixture, fs.value(), catalog.value().catalog, tables);
+                expect(bound && !bound.value().placements.front().space_hazard,
+                    "unit-only hazard footprint does not bind a space hazard");
+                if (bound) {
+                    auto prop = bound.value().placements.front();
+                    prop.element = "SpaceProp";
+                    prop.marker = false;
+                    expect(!skirmish::is_map_object_placement(prop), "unit-only SpaceProp remains dropped");
+                }
+                eawr::units::ObstacleType obstacle;
+                obstacle.id = unit.id;
+                obstacle.table_order = 1;
+                obstacle.space_layer = "Capital";
+                obstacle.footprint = unit.footprint;
+                tables.obstacles.push_back(obstacle);
+                bound = skirmish::read_start_inputs(fixture, fs.value(), catalog.value().catalog, tables);
+                expect(bound && bound.value().placements.front().space_hazard,
+                    "earlier obstacle winner binds the hazard");
+                tables.obstacles.back().table_order = 20;
+                bound = skirmish::read_start_inputs(fixture, fs.value(), catalog.value().catalog, tables);
+                expect(bound && !bound.value().placements.front().space_hazard,
+                    "earlier unit winner does not bind the losing obstacle hazard");
+            }
+            for (const bool collision_unit : {false, true}) {
+                setup_map_golden::write_team_corpus(directory, 4, 0.0F, 0.0F, true, collision_unit);
+                auto collision_fs = eawr::vfs::Vfs::mount(std::span(&mount, 1));
+                auto collision_catalog = eawr::data::load_catalog(collision_fs.value(), eawr::data::Profile::foc);
+                expect(static_cast<bool>(collision_catalog), "collision catalog loads");
+                if (collision_catalog) {
+                    skirmish::Fixture fixture;
+                    fixture.map = "data/art/maps/team_contract.ted";
+                    eawr::units::LoadInput load;
+                    load.catalog = &collision_catalog.value().catalog;
+                    load.filesystem = &collision_fs.value();
+                    load.space_map = fixture.map;
+                    load.types = {collision_unit ? "SYNTH_OIVRHNPFF4K4" : "Fixture_Rebel"};
+                    auto tables = eawr::units::load_unit_tables(load);
+                    expect(static_cast<bool>(tables), "collision map unit tables load");
+                    if (tables) {
+                        expect(std::any_of(tables.value().obstacles.begin(), tables.value().obstacles.end(), [](const auto& obstacle) {
+                            return obstacle.id == "SYNTH_QLU1MOI5PTT3";
+                        }), "map collection retains first catalog candidate");
+                        const auto bound = skirmish::read_start_inputs(fixture, collision_fs.value(), collision_catalog.value().catalog, tables.value());
+                        expect(bound && bound.value().placements.back().type == "SYNTH_QLU1MOI5PTT3"
+                            && std::any_of(bound.value().placement_load_notes.begin(), bound.value().placement_load_notes.end(), [](const auto& note) {
+                                return note.code == "EAWR-LOAD-0455" && note.effective_value == "SYNTH_QLU1MOI5PTT3";
+                            }), "tactical placement selects and reports the same collision winner");
+                    }
+                }
+                setup_map_golden::write_team_corpus(directory);
+            }
+            if (catalog) {
+                setup_map_golden::write_team_corpus(directory, 4, 0.0F, 1.0e20F);
+                auto invalid_fs = eawr::vfs::Vfs::mount(std::span(&mount, 1));
+                skirmish::Fixture invalid_fixture;
+                invalid_fixture.map = "data/art/maps/team_contract.ted";
+                const eawr::units::UnitTables tables;
+                auto invalid = skirmish::read_start_inputs(invalid_fixture, invalid_fs.value(), catalog.value().catalog, tables);
+                expect(invalid && invalid.value().placements.size() == 4, "bad TED orientation skips only its placement");
+                if (invalid) expect(invalid.value().placement_load_notes.size() == 1
+                    && invalid.value().placement_load_notes.front().code == "EAWR-LOAD-0453"
+                    && invalid.value().placement_load_notes.front().action == eawr::core::LoadAction::skipped_placement,
+                    "bad TED orientation retains its diagnostic in a load note");
+                setup_map_golden::write_team_corpus(directory);
             }
             if (catalog) for (const auto capacity : {9U, 8U}) {
                 setup_map_golden::write_team_corpus(directory, capacity);
@@ -506,7 +691,8 @@ void setup_contract(const std::filesystem::path& fixtures) {
             "<MP_Default_Win_Condition_Float_Param>2.5</MP_Default_Win_Condition_Float_Param>"
             "<MP_Default_Allow_Auto_Resolve>2</MP_Default_Allow_Auto_Resolve>"
             "<MP_Default_Win_Condition>0</MP_Default_Win_Condition>"
-            "<MP_Default_Space_Tactical_Win_Condition>SKIRMISH_SPACE_ENEMY_STARBASE_DESTROYED</MP_Default_Space_Tactical_Win_Condition>";
+            "<MP_Default_Space_Tactical_Win_Condition>SKIRMISH_SPACE_ENEMY_STARBASE_DESTROYED</MP_Default_Space_Tactical_Win_Condition>"
+            "<MP_Default_Land_Tactical_Win_Condition>SKIRMISH_ALL_ENEMY_BASE_COMPONENTS_DESTROYED</MP_Default_Land_Tactical_Win_Condition>";
         const auto constants = [&](const std::string& xml) {
             std::ofstream file(directory / "xml/gameconstants.xml");
             file << "<GameConstants>" << xml;
@@ -520,6 +706,7 @@ void setup_contract(const std::filesystem::path& fixtures) {
             "<Container Name=\"Policy_Hero\"><Is_Named_Hero>yes</Is_Named_Hero></Container>"
             "<Container Name=\"Policy_Derived\"><Variant_Of_Existing_Type>Policy_Hero</Variant_Of_Existing_Type></Container>"
             "<HeroUnit Name=\"Policy_Not_Hero\"><Is_Named_Hero>no</Is_Named_Hero></HeroUnit>"
+            "<SpaceUnit Name=\"Policy_Owner\"><Abilities><Lucky_Shot_Attack_Ability Name=\"Policy_Super\"/></Abilities></SpaceUnit>"
             "<UpgradeObject Name=\"Policy_Super\"><Is_Skirmish_Tactical_Super_Weapon>yes</Is_Skirmish_Tactical_Super_Weapon></UpgradeObject>"
             "</Objects>";
         const eawr::vfs::MountSpec mount{.layer_id = "synthetic-mod", .data_root = directory,
@@ -591,8 +778,15 @@ void setup_contract(const std::filesystem::path& fixtures) {
             expect(remounted && !cache.find(remounted.value(), *shared_catalog, {}), "cache rejects remounted effective content");
             const eawr::data::Catalog replacement_catalog;
             expect(!cache.find(*shared_fs, replacement_catalog, {}), "cache rejects replacement catalog");
+            write("nested/hidden.ted", 2, 4, false);
+            write("../../custommaps/nested/hidden.ted", 2, 4, true);
             // Keep the rest of this existing corpus on its original mounted view.
             filesystem = eawr::vfs::Vfs::mount(std::span<const eawr::vfs::MountSpec>(&mount, 1));
+            const auto nested_list = skirmish::setup_maps(filesystem.value(), catalog, all_query);
+            expect(nested_list && nested_list.value().size() == 5
+                && std::none_of(nested_list.value().begin(), nested_list.value().end(), [](const auto& map) {
+                    return map.path.find("/nested/") != std::string::npos;
+                }), "root-only discovery hides nested maps in both directories");
             const auto defaults = skirmish::read_match_defaults(filesystem.value());
             expect(defaults && !defaults.value().allow_heroes && !defaults.value().free_starting_units
                 && defaults.value().allow_superweapons && defaults.value().pre_built_base
@@ -610,11 +804,21 @@ void setup_contract(const std::filesystem::path& fixtures) {
             auto loaded = eawr::data::load_catalog(filesystem.value(), eawr::data::Profile::foc);
             expect(static_cast<bool>(loaded), "synthetic inherited policy catalog loads");
             if (loaded) {
+                const auto inspected_maps = skirmish::setup_maps(filesystem.value(), loaded.value().catalog);
+                expect(inspected_maps && !inspected_maps.value().empty(),
+                    "map listing reads land victory constants without unit tables");
                 skirmish::FixtureOptions custom_start;
                 custom_start.map = "data/custommaps/loose.ted";
                 const auto custom_fixture = skirmish::fixture_from_options(custom_start, filesystem.value(), loaded.value().catalog);
-                expect(!custom_fixture && custom_fixture.error().message == "Legacy map starts are not supported yet.",
+                expect(static_cast<bool>(custom_fixture),
                     "custom-directory fixture reaches authored start validation instead of rejecting its logical path");
+                if (custom_fixture) {
+                    const eawr::units::UnitTables empty_tables;
+                    const auto legacy_inputs = skirmish::read_start_inputs(custom_fixture.value(), filesystem.value(),
+                        loaded.value().catalog, empty_tables);
+                    expect(legacy_inputs && !legacy_inputs.value().new_markers,
+                        "WSS-54: the legacy header survives mounted map loading into start inputs");
+                }
                 custom_start.map = "data/custommaps/land.ted";
                 const auto custom_land = skirmish::fixture_from_options(custom_start, filesystem.value(), loaded.value().catalog);
                 expect(!custom_land && custom_land.error().message == "skirmish map must be a space map",
@@ -623,8 +827,9 @@ void setup_contract(const std::filesystem::path& fixtures) {
                     filesystem.value(), loaded.value().catalog);
                 expect(!placed_land && placed_land.error().message == "demo map must be a space map",
                     "placed fixture shares custom-directory path admission and battle-kind validation");
-                for (const auto* path : {"data/other/loose.ted", "data/custommaps/nested/loose.ted",
-                    "data/custommaps/../loose.ted", "data/custommaps/loose.xml", "data/custommaps/nested\\loose.ted"}) {
+                for (const auto* path : {"data/other/loose.ted", "data/art/maps/nested/hidden.ted",
+                    "data/custommaps/nested/hidden.ted", "data/custommaps/../loose.ted", "/data/custommaps/loose.ted",
+                    "C:/data/custommaps/loose.ted", "data/custommaps/loose.xml", "data/custommaps/nested\\loose.ted"}) {
                     custom_start.map = path;
                     const auto invalid = skirmish::fixture_from_options(custom_start, filesystem.value(), loaded.value().catalog);
                     expect(!invalid && invalid.error().message.starts_with("skirmish map must be a logical"),
@@ -675,7 +880,7 @@ void setup_contract(const std::filesystem::path& fixtures) {
     {
         const auto directory = std::filesystem::temp_directory_path()
             / ("eawr-setup-factions-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
-        std::filesystem::create_directories(directory / "xml");
+        setup_map_golden::write_team_corpus(directory);
         std::ofstream(directory / "xml/factionfiles.xml")
             << "<Faction_Files><File>factions.xml</File><File>factions_more.xml</File></Faction_Files>";
         std::ofstream(directory / "xml/factions.xml")
@@ -683,15 +888,16 @@ void setup_contract(const std::filesystem::path& fixtures) {
                "<Faction Name=\"Rebel\"><Is_Playable>Yes</Is_Playable><Text_ID>TEXT_REBEL</Text_ID></Faction>"
                "<Faction Name=\"Empire\"><Is_Playable>Yes</Is_Playable></Faction>"
                "<Faction Name=\"Pirates\"><Is_Playable>No</Is_Playable><Create_Player_In_Multiplayer_Games>Yes</Create_Player_In_Multiplayer_Games></Faction>"
+               "<Faction Name=\"Unmarked\"></Faction>"
                "<Faction Name=\"Alpha_Fleet\"><Is_Playable>Yes</Is_Playable><Text_ID>TEXT_ALPHA</Text_ID>"
                "<Is_Debug_Switchable_To>No</Is_Debug_Switchable_To></Faction>"
                "<Faction Name=\"Derived_Fleet\"><Variant_Of_Existing_Type>Alpha_Fleet</Variant_Of_Existing_Type></Faction>"
-               "<Faction Name=\"Bare_Fleet\"><Is_Playable>Yes</Is_Playable></Faction>"
+               "<Faction Name=\"Bare_Fleet\"><Is_Playable>No</Is_Playable></Faction>"
                "</Factions>";
-        // A later file shadows Bare_Fleet: the resolved flag, not the first definition, decides.
+        // The first Bare_Fleet definition decides despite the later duplicate.
         std::ofstream(directory / "xml/factions_more.xml")
             << "<Factions>"
-               "<Faction Name=\"Bare_Fleet\"><Is_Playable>No</Is_Playable></Faction>"
+               "<Faction Name=\"Bare_Fleet\"><Is_Playable>Yes</Is_Playable></Faction>"
                "<Faction Name=\"Zed_Fleet\"><Is_Playable>Yes</Is_Playable></Faction>"
                "</Factions>";
         const eawr::vfs::MountSpec mount{.layer_id = "synthetic-factions", .data_root = directory,
@@ -709,6 +915,77 @@ void setup_contract(const std::filesystem::path& fixtures) {
             expect(factions.size() == 5 && factions[0].text_id == "TEXT_REBEL" && factions[1].text_id.empty()
                 && factions[2].text_id == "TEXT_ALPHA" && factions[3].text_id == "TEXT_ALPHA",
                 "WSS-12: captions come from the resolved Text_ID, inherited when a variant omits it");
+            for (const auto& translated : {std::u16string(u"Republic"), std::u16string(u"Alliance")}) {
+                eawr::data::ui::TextDatabase database;
+                database.entries.push_back({eawr::data::ui::text_key_crc("TEXT_REBEL"), "TEXT_REBEL", translated});
+                database.crc_order.push_back(0);
+                eawr::data::ui::TextLookup lookup(database);
+                const auto& catalog = loaded.value().catalog;
+                expect(eawr::presentation::ui::faction_display_name(catalog, &lookup, "Rebel")
+                    == eawr::data::ui::to_utf8(translated), "faction caption uses the active chain's text");
+                expect(eawr::presentation::ui::faction_display_name(catalog, &lookup, "Empire") == "Empire",
+                    "missing faction Text_ID retains the faction identity");
+                expect(eawr::presentation::ui::faction_display_name(catalog, &lookup, "Derived_Fleet") == "Derived_Fleet",
+                    "a Text_ID missing from the database falls back to the faction identity");
+                expect(eawr::presentation::ui::faction_display_name(catalog, nullptr, "Rebel") == "Rebel",
+                    "no text database falls back to the faction identity, not the Text_ID key");
+            }
+            for (const auto& blank : {std::u16string{}, std::u16string(u" \t\r\n")}) {
+                eawr::data::ui::TextDatabase database;
+                database.entries.push_back({eawr::data::ui::text_key_crc("TEXT_REBEL"), "TEXT_REBEL", blank});
+                database.crc_order.push_back(0);
+                eawr::data::ui::TextLookup lookup(database);
+                expect(eawr::presentation::ui::faction_display_name(loaded.value().catalog, &lookup, "Rebel") == "Rebel",
+                    "blank resolved faction caption falls back to the faction identity");
+            }
+            skirmish::FixtureOptions selection;
+            selection.map = "data/art/maps/team_contract.ted";
+            selection.slots = skirmish::m2_fixture().slots;
+            selection.slots->front().faction = "Derived_Fleet";
+            const auto inherited = skirmish::fixture_from_options(selection, filesystem.value(), loaded.value().catalog);
+            expect(static_cast<bool>(inherited),
+                "a faction offered through an inherited playable flag is admitted to a match");
+            if (inherited) {
+                const eawr::units::UnitTables empty_tables;
+                const auto inputs = skirmish::read_start_inputs(inherited.value(), filesystem.value(),
+                    loaded.value().catalog, empty_tables);
+                expect(static_cast<bool>(inputs), "inherited faction reaches startup census");
+                if (inputs) {
+                    const auto derived = std::find_if(inputs.value().factions.begin(), inputs.value().factions.end(),
+                        [](const auto& item) { return item.name == "Derived_Fleet"; });
+                    const auto pirates = std::find_if(inputs.value().factions.begin(), inputs.value().factions.end(),
+                        [](const auto& item) { return item.name == "Pirates"; });
+                    expect(derived != inputs.value().factions.end() && derived->playable,
+                        "startup census retains the inherited playable flag");
+                    expect(pirates != inputs.value().factions.end() && !pirates->playable && pirates->multiplayer_player,
+                        "startup census retains nonplayable multiplayer owners");
+                }
+            }
+            selection.slots->front().faction = "Unmarked";
+            expect(!skirmish::fixture_from_options(selection, filesystem.value(), loaded.value().catalog),
+                "a faction without a playable flag is not admitted to a selectable seat");
+            {
+                // Stock names stay right: with the text the stock game ships, the online/LAN list shows exactly what
+                // single-player setup shows (its Text_ID text), and the identities behind the list do not change.
+                eawr::data::ui::TextDatabase database;
+                database.entries.push_back({eawr::data::ui::text_key_crc("TEXT_REBEL"), "TEXT_REBEL", u"Rebel Alliance"});
+                database.entries.push_back({eawr::data::ui::text_key_crc("TEXT_ALPHA"), "TEXT_ALPHA", u"Alpha Fleet"});
+                database.crc_order = database.entries[0].crc < database.entries[1].crc
+                    ? std::vector<std::uint32_t>{0, 1} : std::vector<std::uint32_t>{1, 0};
+                eawr::data::ui::TextLookup lookup(database);
+                std::vector<std::string> captions;
+                for (const auto& entry : factions) {
+                    const auto caption = eawr::presentation::ui::faction_display_name(loaded.value().catalog, &lookup, entry.name);
+                    captions.push_back(caption);
+                    if (!entry.text_id.empty())
+                        expect(caption == eawr::data::ui::to_utf8(lookup.text(entry.text_id)),
+                            "stock list caption equals the single-player setup caption");
+                }
+                expect(captions == std::vector<std::string>{"Rebel Alliance", "Empire", "Alpha Fleet", "Alpha Fleet", "Zed_Fleet"},
+                    "stock names stay right: a faction without text keeps its identity, the rest show their text");
+                expect(names == std::vector<std::string>{"Rebel", "Empire", "Alpha_Fleet", "Derived_Fleet", "Zed_Fleet"},
+                    "faction identities behind the list are unchanged");
+            }
             // WSS-LAN: host and peers key the roster on the catalog ordinals of scene::faction_order.
             const auto ordinals = eawr::scene::faction_order(loaded.value().catalog);
             std::size_t previous{};
@@ -964,7 +1241,13 @@ void setup_contract(const std::filesystem::path& fixtures) {
         && roster.slots[1].slot == 2 && roster.slots[1].team == 1,
         "WSS-08/09: map change drops excess rows, relocates survivor and clamps excessive team to last authored start");
     auto legacy = maps; legacy[0].metadata.new_markers = false;
-    expect(!skirmish::setup_options(selection, legacy), "WSS-19: legacy branch reports unsupported instead of guessing new-marker validation");
+    legacy[0].legacy_factions = {"Rebel", "Empire"};
+    expect(static_cast<bool>(skirmish::setup_options(selection, legacy)), "WSS-19: legacy validation uses authored factions without new-marker start positions");
+    auto legacy_selection = selection;
+    for (auto& slot : legacy_selection.slots) { slot.faction = "Rebel"; slot.team = 0; }
+    const auto legacy_denied = skirmish::setup_options(legacy_selection, legacy);
+    expect(!legacy_denied && legacy_denied.error().logical_path == legacy[0].path,
+        "WSS-19: missing second authored faction refuses with a map-located diagnostic");
     auto colours = selection;
     expect(static_cast<bool>(skirmish::select_setup_colour(colours, 1, 4)), "WSS-20: host can select a faction-independent palette entry");
     expect(static_cast<bool>(skirmish::select_setup_colour(colours, 2, 4)) && colours.slots[1].colour_index == 0U
@@ -1077,8 +1360,13 @@ void setup_contract(const std::filesystem::path& fixtures) {
         }), "WSS-52/WPR-02: selected cash and tech bind every player independently of default constants");
         auto missing_difficulty = policy_tables;
         missing_difficulty.ai_credit_multiplier.reset();
-        expect(!skirmish::economy_rules(policy_start.value(), policy_inputs, missing_difficulty),
-            "WPR-12: missing selected AI credit data cannot silently use a neutral multiplier");
+        auto defaulted_economy = skirmish::economy_rules(policy_start.value(), policy_inputs, missing_difficulty);
+        expect(static_cast<bool>(defaulted_economy), "LSA-P5: missing selected AI credit data retains the default");
+        if (defaulted_economy) expect(std::any_of(defaulted_economy.value().load_notes.pending.begin(),
+            defaulted_economy.value().load_notes.pending.end(), [](const auto& note) {
+                return note.code == "EAWR-LOAD-0353" && note.tag == "Credit_Multiplier"
+                    && note.classification == eawr::core::LoadCategory::retail_accepts;
+            }), "missing selected AI credit data retains its class B diagnostic");
         const auto recorded_setup = skirmish::recording_setup(policy_fixture, policy_start.value());
         expect(recorded_setup.skirmish && recorded_setup.skirmish->match.credits == defaults.credits,
             "WSS-52: recording retains selected credits independently of default constants");

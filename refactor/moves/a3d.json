@@ -28,10 +28,6 @@
     "new": "include/eawr/core/text.hpp#to_lower"
   },
   {
-    "old": "apps/viewer/src/loading_screen.cpp#loading_owner_text_key",
-    "new": "include/eawr/core/text.hpp#trim_view"
-  },
-  {
     "old": "src/presentation/godot/legacy/bindings.hpp#same_texture",
     "new": "include/eawr/core/text.hpp#iequals"
   }

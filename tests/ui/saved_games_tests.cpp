@@ -4,6 +4,7 @@
 // reserved label, then the local date and time), and the directory store's list and scoped delete.
 
 #include "../../apps/viewer/src/saved_games.hpp"
+#include "../../apps/viewer/src/checkpoint_lobby_model.hpp"
 
 #include "eawr/checkpoint/checkpoint.hpp"
 #include "eawr/platform/saved_games.hpp"
@@ -11,12 +12,19 @@
 #include "../../src/platform/galactic/save_repository.hpp"
 #include "ui_test_support.hpp"
 
+#include <atomic>
+#include <array>
 #include <barrier>
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <iostream>
+#include <iterator>
+#include <optional>
+#include <regex>
+#include <stdexcept>
 #include <string>
 #include <system_error>
 #include <thread>
@@ -275,6 +283,35 @@ void campaign_admission() {
     auto store = std::make_shared<eawr::viewer::DirectorySavedGameStore>(root, fixed_clock());
     const auto rows = store->list().entries;
     expect(rows.size() == 2, "single-player rows exclude multiplayer saves");
+    write_file(root / "Broken.eawrsave", {'n', 'o', 'p', 'e'});
+    eawr::viewer::DirectorySavedGameStore multiplayer(root, fixed_clock(), eawr::viewer::SavedGameFilter::multiplayer);
+    const auto mp_rows = multiplayer.list().entries;
+    expect(mp_rows.size() == 3, "multiplayer list excludes single-player saves but retains unknown saves");
+    for (const auto& row : mp_rows) {
+        if (row.file_name == "Multiplayer") expect(row.playable, "multiplayer campaign is admitted");
+        else expect(!row.playable && !row.problem.empty(), "unreadable or unidentified saves retain their reason");
+    }
+    auto source = std::make_shared<eawr::viewer::DirectorySavedGameStore>(root, fixed_clock(), eawr::viewer::SavedGameFilter::multiplayer);
+    const auto ui_thread = std::this_thread::get_id();
+    std::size_t admissions = 0;
+    bool worker_admission = false;
+    auto listing = std::async(std::launch::async, [&] {
+        return eawr::viewer::checked_saved_game_listing(*source, [&](std::span<const std::uint8_t>) {
+            ++admissions; worker_admission = std::this_thread::get_id() != ui_thread;
+            return std::string("checkpoint: saved_campaign_or_control_unavailable");
+        });
+    }).get();
+    expect(worker_admission && admissions == 1, "only a readable multiplayer row is admitted on the worker");
+    for (const auto& row : listing.entries) if (row.file_name == "Multiplayer")
+        expect(!row.playable && row.problem == "checkpoint: saved_campaign_or_control_unavailable",
+            "an incompatible multiplayer save stays in the list with its backend refusal");
+    auto snapshot = std::make_shared<eawr::viewer::SnapshotSavedGameStore>(source, std::move(listing));
+    write_file(root / "Added after scan.eawrsave", checkpoint_bytes(100, cp::flag_galaxy));
+    ui::LoadGameModel cached({}, snapshot); cached.refresh(); cached.refresh();
+    expect(cached.visible().size() == 3 && admissions == 1,
+        "staging picker refreshes the checked snapshot without scanning disk or rerunning admission");
+    fs::remove(root / "Added after scan.eawrsave");
+    fs::remove(root / "Broken.eawrsave");
     ui::LoadGameModel model(root / "replays", store);
     model.set_saved_load_unavailable({});
     model.refresh();
@@ -381,6 +418,250 @@ void unicode_directory() {
     fs::remove_all(root);
 }
 
+void checkpoint_screen_models() {
+    namespace net = eawr::net;
+    namespace sim = eawr::sim;
+    sim::galactic::MpRoster roster;
+    roster.campaign = "Mod campaign";
+    sim::galactic::MpRosterPlayer player{};
+    player.player = 4; player.faction = "Mod faction"; roster.players.push_back(player);
+    sim::galactic::Seat seat{};
+    seat.seat_id = {11}; seat.player = 4; seat.kind = sim::SeatKind::human; seat.active = true;
+    roster.seats.push_back(seat);
+    seat.seat_id = {19}; roster.seats.push_back(seat);
+    seat.seat_id = {21}; seat.active = false; roster.seats.push_back(seat);
+    const std::vector<net::SetupSeat> bindings{{0, {19}, 4}, {1, {11}, 4}};
+    const std::vector<net::PeerIndex> peers{0, 3};
+    net::SaveTransferView progress{}; progress.total = 1024; progress.received = 512;
+    auto host = eawr::viewer::checkpoint_lobby_model(true, true, roster, 90, bindings, peers, 0,
+        progress, "Host description", "Host date", "");
+    expect(host.can_assign && !host.can_accept && host.rows[0] == "Description: Host description",
+        "host sees its metadata and can assign while acceptance waits for restore");
+    expect(host.rows[4] == "Required humans: 2", "inactive saved humans are not required and cannot be assigned");
+    auto guest = eawr::viewer::checkpoint_lobby_model(false, true, roster, 90, bindings, peers, 3,
+        progress, "", "", "");
+    auto guest_with_metadata = eawr::viewer::checkpoint_lobby_model(false, true, roster, 90, bindings, peers, 3,
+        progress, "Host description", "Host date", "");
+    expect(guest_with_metadata.rows[0] == "Description: Host description" && guest_with_metadata.rows[1] == "Date: Host date",
+        "joiner displays the host's saved-game metadata");
+    expect(!guest.can_assign && !guest.can_accept && guest.rows[0] == "Description: unavailable"
+        && guest.rows[1] == "Date: unavailable", "joiner has read-only summary with explicit unavailable host metadata");
+    expect(guest.rows[5].find("your assigned seat") != std::string::npos
+        && guest.rows[6].find("your assigned seat") == std::string::npos,
+        "joiner assignment follows stable peer mapping and sparse saved seat IDs");
+    expect(guest.progress == "Transfer: 512 / 1024 bytes", "bounded transfer progress is visible before restore");
+    progress.agreed = true; progress.restored = true;
+    guest = eawr::viewer::checkpoint_lobby_model(false, true, roster, 90, bindings, peers, 3,
+        progress, "", "", "");
+    expect(guest.can_accept, "restore agreement enables explicit acceptance");
+    eawr::core::Diagnostic refusal{}; refusal.message = "checkpoint: duplicate_saved_seat";
+    progress.refusal = refusal;
+    guest = eawr::viewer::checkpoint_lobby_model(false, true, roster, 90, bindings, peers, 3,
+        progress, "", "", "");
+    expect(!guest.can_accept && guest.refusal == refusal.message
+        && guest.rows.back() == "Refused: checkpoint: duplicate_saved_seat", "backend refusal survives intact in the summary");
+    progress.refusal.reset();
+    host = eawr::viewer::checkpoint_lobby_model(true, true, roster, 90, bindings, peers, 0,
+        progress, "", "", "Apply saved seats");
+    expect(progress.agreed && !host.can_accept, "a pending mapping problem blocks acceptance even with previous agreement");
+    progress = {};
+    host = eawr::viewer::checkpoint_lobby_model(true, true, roster, 90, bindings, peers, 0, progress, "", "", "");
+    expect(!host.can_accept, "a reset transfer cannot retain acceptance without a new restore agreement");
+    expect(eawr::viewer::checkpoint_staging_title("Host game", "Reading saved game") == "Reading saved game"
+        && eawr::viewer::checkpoint_staging_title("Host game", "") == "Host game",
+        "staging title returns to its original caption when load status clears");
+}
+
+void checkpoint_worker_keeps_frames_responsive() {
+    std::promise<void> release;
+    auto gate = release.get_future().share();
+    std::promise<bool> returned;
+    auto response = returned.get_future();
+    std::thread caller([gate, &returned] {
+        auto work = eawr::viewer::checkpoint_work([gate] { gate.wait(); return 1; });
+        bool frames = true;
+        for (int frame = 0; frame < 10; ++frame)
+            frames = frames && work.wait_for(std::chrono::seconds(0)) == std::future_status::timeout;
+        work = {}; // leaving the picker must not wait for a stuck worker
+        returned.set_value(frames);
+    });
+    const bool prompt = response.wait_for(std::chrono::seconds(2)) == std::future_status::ready;
+    release.set_value();
+    caller.join();
+    expect(prompt && response.get(), "checkpoint work permits frames and cancellation while restore is blocked");
+}
+
+// #5512: the saved-game listing reads and checks every save on a worker. The lobby abandons it after a bounded time and
+// dropping the future must neither wait for the worker nor stop the worker from finishing on its own copy.
+void checkpoint_listing_is_bounded_and_abandonable() {
+    using Clock = std::chrono::steady_clock;
+    const auto start = Clock::now();
+    expect(!eawr::viewer::checkpoint_listing_expired(start, start + std::chrono::seconds(29)), "a listing younger than the limit keeps waiting");
+    expect(eawr::viewer::checkpoint_listing_expired(start, start + eawr::viewer::checkpoint_listing_limit), "a listing at the limit is given up");
+    expect(eawr::viewer::checkpoint_listing_limit <= std::chrono::seconds(60), "the limit is a bounded, short wait");
+    expect(!eawr::viewer::checkpoint_listing_expired(start, start + std::chrono::milliseconds(1999), std::chrono::milliseconds(2000))
+               && eawr::viewer::checkpoint_listing_expired(start, start + std::chrono::milliseconds(2000), std::chrono::milliseconds(2000)),
+           "a harness can shorten the limit to milliseconds");
+    std::promise<void> release;
+    auto gate = release.get_future().share();
+    std::atomic<bool> finished{false};
+    auto listing = eawr::viewer::checkpoint_work([gate, &finished] { gate.wait(); finished = true; return 7; });
+    const auto before = Clock::now();
+    listing = {};   // what the lobby does on expiry
+    expect(Clock::now() - before < std::chrono::seconds(2) && !listing.valid(), "abandoning a blocked listing returns at once");
+    release.set_value();
+    const auto limit = Clock::now() + std::chrono::seconds(10);
+    while (!finished && Clock::now() < limit) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    expect(finished, "the abandoned worker still finishes on its own");
+}
+
+void checkpoint_restore_orchestration() {
+    using Job = eawr::viewer::CheckpointRestoreJob<int, int>;
+    using State = eawr::viewer::CheckpointRestoreState;
+    const int room = 7, changed_room = 8;
+    std::promise<void> release;
+    auto gate = release.get_future().share();
+    std::promise<bool> frame_result;
+    auto returned = frame_result.get_future();
+    std::thread caller([&] {
+        Job job;
+        const auto end = Job::Clock::now() + std::chrono::seconds(10);
+        bool frames = job.submit(1, room, end, [gate] { gate.wait(); return 42; });
+        for (int frame = 0; frame < 10; ++frame)
+            frames = frames && job.poll(1, &room, Job::Clock::now()).state == State::pending;
+        frames = frames && !job.submit(2, room, end, [] { return 0; });
+        frame_result.set_value(frames);
+        gate.wait();
+        const auto limit = Job::Clock::now() + std::chrono::seconds(5);
+        while (Job::Clock::now() < limit && job.poll(2, &room, Job::Clock::now()).state == State::pending)
+            std::this_thread::yield();
+    });
+    const bool prompt = returned.wait_for(std::chrono::seconds(2)) == std::future_status::ready;
+    release.set_value();
+    caller.join();
+    expect(prompt && returned.get(), "restore submission returns and frame polls progress while work is blocked");
+
+    const auto finish = [](Job& job, std::uint64_t request, const int* current) {
+        const auto end = Job::Clock::now() + std::chrono::seconds(5);
+        auto result = job.poll(request, current, Job::Clock::now());
+        while (result.state == State::pending && Job::Clock::now() < end) {
+            std::this_thread::yield(); result = job.poll(request, current, Job::Clock::now());
+        }
+        return result.state;
+    };
+    const auto deadline = Job::Clock::now() + std::chrono::seconds(10);
+    Job stale; expect(stale.submit(3, room, deadline, [] { return 3; }), "stale request submitted");
+    expect(finish(stale, 4, &room) == State::stale, "changed request discards completed work");
+    Job changed; expect(changed.submit(5, room, deadline, [] { return 5; }), "room test submitted");
+    expect(finish(changed, 5, &changed_room) == State::room_changed, "changed room rejects completed work");
+    Job throwing; expect(throwing.submit(6, room, deadline, []() -> int { throw std::runtime_error("restore"); }), "throwing work submitted");
+    expect(finish(throwing, 6, &room) == State::failed, "current restore exception becomes a failure");
+    Job stale_throw; expect(stale_throw.submit(7, room, deadline, []() -> int { throw std::runtime_error("restore"); }), "stale throwing work submitted");
+    expect(finish(stale_throw, 8, &room) == State::stale, "stale restore exception is consumed");
+    std::promise<void> timeout_release; auto timeout_gate = timeout_release.get_future().share();
+    Job timeout; expect(timeout.submit(9, room, Job::Clock::now(), [timeout_gate] { timeout_gate.wait(); return 9; }), "timeout work submitted");
+    expect(timeout.poll(9, &room, Job::Clock::now()).state == State::timed_out, "blocked restore times out");
+    timeout_release.set_value();
+    expect(finish(timeout, 9, &room) == State::stale, "timed-out result cannot publish");
+    std::promise<void> throw_release; auto throw_gate = throw_release.get_future().share();
+    Job timeout_throw; expect(timeout_throw.submit(10, room, Job::Clock::now(), [throw_gate]() -> int {
+        throw_gate.wait(); throw std::runtime_error("restore");
+    }), "timed-out throwing work submitted");
+    expect(timeout_throw.poll(10, &room, Job::Clock::now()).state == State::timed_out, "throwing restore can time out");
+    throw_release.set_value();
+    expect(finish(timeout_throw, 10, &room) == State::stale, "timed-out exception is consumed");
+}
+
+// A canvas-layer expression of the lobby sources: an integer, or screen_layer plus or minus an integer.
+std::optional<int> layer_value(const std::string& expression, const int screen_layer) {
+    static const std::regex form(R"(^\s*(screen_layer|[0-9]+)\s*(?:([+-])\s*([0-9]+))?\s*$)");
+    std::smatch parts;
+    if (!std::regex_match(expression, parts, form)) return std::nullopt;
+    int value = parts[1] == "screen_layer" ? screen_layer : std::stoi(parts[1]);
+    if (parts[2].matched) value += (parts[2] == "+" ? 1 : -1) * std::stoi(parts[3]);
+    return value;
+}
+
+// #5512: the Load Game list is a child canvas layer of the lobby, and both are full-viewport input-stopping modal layers.
+// Canvas layers with the same index draw and hit-test in an order nobody chose, so a list on the lobby's index can end up
+// under the lobby's modal with its dialog invisible while every click is eaten. The list must sit strictly above the
+// lobby for as long as it is open, under the message boxes (100), and the lobby must get its own index back on close.
+void load_list_layer_is_above_the_lobby() {
+    const auto read = [](const char* name) {
+        std::ifstream input(fs::path(EAWR_VIEWER_SOURCE_DIR) / name);
+        expect(input.is_open(), std::string(name) + " is readable");
+        return std::string{std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
+    };
+    const std::string internal = read("lan_lobby_screen_internal.hpp");
+    const std::string source = read("lan_lobby_screen_checkpoint.cpp");
+    std::smatch constant;
+    expect(std::regex_search(internal, constant, std::regex(R"(inline constexpr int screen_layer = ([0-9]+);)")), "the lobby layer constant is present");
+    if (constant.empty()) return;
+    const int lobby_home = std::stoi(constant[1]);
+    const auto open_start = source.find("void EawrLanLobby::open_checkpoint_list()");
+    const auto open_end = source.find("void EawrLanLobby::checkpoint_chosen", open_start);
+    const auto close_start = source.find("void EawrLanLobby::checkpoint_closed()");
+    expect(open_start != std::string::npos && open_end != std::string::npos && close_start != std::string::npos, "the list open and close functions are present");
+    if (open_start == std::string::npos || open_end == std::string::npos || close_start == std::string::npos) return;
+    const std::string open = source.substr(open_start, open_end - open_start);
+    const std::string close = source.substr(close_start, open_start - close_start);
+    std::optional<int> list_layer;
+    std::optional<int> lobby_layer;
+    const std::regex set_layer(R"((screen->)?set_layer\(([^;]*)\);)");
+    for (auto it = std::sregex_iterator(open.begin(), open.end(), set_layer); it != std::sregex_iterator(); ++it) {
+        const auto value = layer_value((*it)[2], lobby_home);
+        expect(value.has_value(), "an open-list layer assignment is an integer or screen_layer plus or minus an integer: " + (*it)[0].str());
+        if (!value) continue;
+        ((*it)[1].matched ? list_layer : lobby_layer) = value;
+    }
+    expect(list_layer.has_value(), "opening the list assigns the list's layer");
+    if (!list_layer) return;
+    expect(*list_layer < 100, "the list stays under the message boxes (layer 100)");
+    expect(*list_layer > lobby_layer.value_or(lobby_home),
+           "the list is strictly above the lobby while it is open: equal canvas layers tie in an unspecified order");
+    const auto restored = close.find("set_layer(screen_layer)");
+    expect(restored != std::string::npos, "closing the list returns the lobby to its own layer");
+}
+
+void checkpoint_apply_uses_background_restore() {
+    std::ifstream input(fs::path(EAWR_VIEWER_SOURCE_DIR) / "lan_lobby_screen_checkpoint.cpp");
+    expect(input.is_open(), "checkpoint lobby source is readable");
+    const std::string source{std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
+    const auto start = source.find("void EawrLanLobby::apply_checkpoint_selection()");
+    const auto end = source.find("void EawrLanLobby::refresh_checkpoint_staging()", start);
+    expect(start != std::string::npos && end != std::string::npos, "checkpoint Apply source is present");
+    if (start == std::string::npos || end == std::string::npos) return;
+    const auto apply = source.substr(start, end - start);
+    expect(apply.find("select_checkpoint(") == std::string::npos, "Apply must not restore synchronously");
+    expect(apply.find("checkpoint_prepare.submit(") != std::string::npos, "Apply submits background restore");
+}
+
+void saved_mod_details() {
+    namespace mods = eawr::mods;
+    mods::DescriptionEntry a; a.kind = mods::DescriptionKeyKind::workshop; a.key = "workshop:a"; a.name = "Alpha";
+    a.version = "1"; a.checksum = std::array<std::uint8_t, 32>{};
+    auto b = a; b.key = "workshop:b"; b.name = "Beta";
+    const mods::ModDescription saved{true, {a, b}};
+    const auto encoded = mods::encode_description(saved);
+    expect(encoded.has_value(), "mod description encodes");
+    if (!encoded) return;
+    cp::Checkpoint checkpoint;
+    checkpoint.sections.push_back({static_cast<std::uint16_t>(cp::SectionId::mod_list), 1, false, *encoded});
+    const auto bytes = cp::write_checkpoint(checkpoint);
+    expect(static_cast<bool>(bytes), "checkpoint encodes");
+    if (!bytes) return;
+    const auto same = eawr::viewer::saved_game_mod_details(bytes.value(), saved);
+    expect(same == "Mods: Alpha, Beta\nMatches mounted mods", "names retain load order and a complete match is shown");
+    const auto different = eawr::viewer::saved_game_mod_details(bytes.value(), {true, {b, a}});
+    expect(different.find("Different from mounted mods") != std::string::npos, "reordering is reported");
+    const auto unknown = eawr::viewer::saved_game_mod_details(bytes.value(), {});
+    expect(unknown.find("Match could not be fully checked") != std::string::npos, "incomplete mounted information is not a match");
+    const auto stored = eawr::viewer::saved_game_mod_description(bytes.value());
+    expect(eawr::viewer::saved_game_mod_details(stored, saved) == same,
+        "a previously read description can be compared again when mounted details finish loading");
+    expect(eawr::viewer::saved_game_mod_details(std::span<const std::uint8_t>{}, saved) == "Mods: unavailable", "invalid saves do not invent mod details");
+}
+
 } // namespace
 
 int main() {
@@ -392,6 +673,13 @@ int main() {
     directory_store();
     unicode_directory();
     campaign_admission();
+    checkpoint_screen_models();
+    checkpoint_worker_keeps_frames_responsive();
+    checkpoint_restore_orchestration();
+    checkpoint_listing_is_bounded_and_abandonable();
+    load_list_layer_is_above_the_lobby();
+    checkpoint_apply_uses_background_restore();
+    saved_mod_details();
     concurrent_repository_access();
     if (eawr::test::ui::failures() != 0) {
         std::cerr << eawr::test::ui::failures() << " saved game contract(s) failed\n";

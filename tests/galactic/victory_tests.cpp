@@ -345,6 +345,8 @@ void pending_and_parity() {
         expect(gc::campaign_result(s, 1, false, false)->local_won, "WGS-82 exact local winner heading");
         s.context.relations[3].allied = true;
         expect(!gc::campaign_result(s, 2, false, false)->local_won, "WGS-82 allied winner is still defeat heading");
+        expect(gc::campaign_result(s, 2, true, true, true)->route == gc::CampaignResultRoute::multiplayer_quit,
+            "networked SP rules ignore seat-local dialog state and use the transport ending route");
         s.context.multiplayer = true;
         expect(gc::campaign_result(s, 2, true, true)->route == gc::CampaignResultRoute::multiplayer_quit,
             "WGS-82 multiplayer bypasses dialog/movie gates and projects quit intent");

@@ -373,7 +373,7 @@ bool OptionsMode::ready(Node3D& host) {
     }
     EawrOptionsScreen::Page start{};
     if (!EawrOptionsScreen::parse_page(state.options.page, start)) {
-        state.failure = "--eawr-options-page must be hub, audio, video, performance, advanced, gameplay, keyboard or network";
+        state.failure = "--eawr-options-page must be hub, audio, video, performance, tweaks, advanced, gameplay, keyboard or network";
         return fail();
     }
     const Vector2 size = host.get_viewport()->get_visible_rect().size;

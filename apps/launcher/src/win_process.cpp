@@ -1,3 +1,4 @@
+#include "instance.hpp"
 #include "launch_plan.hpp"
 #include "win_platform.hpp"
 
@@ -19,9 +20,25 @@ std::string last_error_text(DWORD code) {
     return utf8_from_wide(text) + " (error " + std::to_string(code) + ")";
 }
 
+std::vector<std::wstring> current_environment() {
+    std::vector<std::wstring> entries;
+    wchar_t* block = GetEnvironmentStringsW();
+    if (block == nullptr) return entries;
+    for (const wchar_t* entry = block; *entry != L'\0'; entry += wcslen(entry) + 1) entries.emplace_back(entry);
+    FreeEnvironmentStringsW(block);
+    return entries;
+}
+
 class WindowsProcessRunner final : public ProcessRunner {
 public:
+    void set_appdata(const std::optional<fs::path>& folder) override { appdata_ = folder; }
+
     ChildResult run(const fs::path& exe, const std::vector<std::wstring>& args, const fs::path& working_directory) override {
+        return run_monitored(exe, args, working_directory, {}, {});
+    }
+
+    ChildResult run_monitored(const fs::path& exe, const std::vector<std::wstring>& args, const fs::path& working_directory,
+                              const std::function<void()>& poll, const std::function<bool(unsigned)>& started) override {
         ChildResult result;
         std::wstring command_line = quote_command_line(exe.wstring(), args);
         STARTUPINFOW startup{};
@@ -30,16 +47,40 @@ public:
         const auto begin = std::chrono::steady_clock::now();
         // CREATE_NO_WINDOW: a console-subsystem child (the console Godot runtime, a script) gets no
         // visible console. The GUI runtime has none anyway. No handles are inherited.
+        // Instance n >= 2: the child gets the inherited environment with only APPDATA replaced.
+        std::wstring environment;
+        if (appdata_) environment = build_environment_block(current_environment(), L"APPDATA", appdata_->wstring());
         const BOOL created = CreateProcessW(exe.c_str(), command_line.data(), nullptr, nullptr, FALSE,
-                                            CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT, nullptr,
+                                            CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT | (started ? CREATE_SUSPENDED : 0),
+                                            appdata_ ? environment.data() : nullptr,
                                             working_directory.empty() ? nullptr : working_directory.c_str(), &startup, &process);
         if (!created) {
             result.error = last_error_text(GetLastError());
             return result;
         }
         result.started = true;
+        if (started && !started(process.dwProcessId)) {
+            TerminateProcess(process.hProcess, 1);
+            WaitForSingleObject(process.hProcess, INFINITE);
+            CloseHandle(process.hThread);
+            CloseHandle(process.hProcess);
+            result.started = false;
+            result.error = "could not publish the running game state";
+            return result;
+        }
+        if (started && ResumeThread(process.hThread) == static_cast<DWORD>(-1)) {
+            result.error = "could not resume the game: " + last_error_text(GetLastError());
+            TerminateProcess(process.hProcess, 1);
+            WaitForSingleObject(process.hProcess, INFINITE);
+            CloseHandle(process.hThread);
+            CloseHandle(process.hProcess);
+            result.started = false;
+            return result;
+        }
         CloseHandle(process.hThread);
-        WaitForSingleObject(process.hProcess, INFINITE);
+        while (WaitForSingleObject(process.hProcess, poll ? 100 : INFINITE) == WAIT_TIMEOUT) {
+            if (poll) poll();
+        }
         DWORD code = 0;
         if (!GetExitCodeProcess(process.hProcess, &code)) code = 1;
         CloseHandle(process.hProcess);
@@ -47,6 +88,9 @@ public:
         result.seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - begin).count();
         return result;
     }
+
+private:
+    std::optional<fs::path> appdata_;
 };
 
 } // namespace

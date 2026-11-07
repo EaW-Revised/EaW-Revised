@@ -81,9 +81,15 @@ struct ScriptEvaluators::Impl {
     std::shared_ptr<const detail::WorldView> memo_view;
     std::map<std::string, Outcome> memo;
     Stats stats;
+    PhaseSavepoint::Saved* phase{};
+    bool phase_abandoned{};
+    void retain_module(const std::string&, const Module&);
+    void retain_memo_clear();
+    void ensure_phase_scheduler();
 
     core::Result<void> ensure_instance(Module& module) {
         if (module.created) return core::Result<void>::success();
+        retain_module(module.path, module);
         auto created = scheduler->create_instance(module.instance, module.adapter);
         if (!created) return created;
         module.created = true;
@@ -92,6 +98,72 @@ struct ScriptEvaluators::Impl {
     }
 };
 
+struct ScriptEvaluators::PhaseSavepoint::Saved {
+    Impl* owner{};
+    const sim::PartitionExecutor* executor{};
+    std::unique_ptr<authoritative::ScriptScheduler::PhaseSavepoint> scheduler;
+    std::map<std::string, Impl::Module> modules;
+    std::optional<std::map<std::string, Outcome>> memo;
+    std::vector<std::string> inserted_memos;
+    std::shared_ptr<const detail::WorldView> view;
+    Stats stats;
+    std::uint64_t last_time{}, sequence{};
+    bool settled{};
+};
+namespace {
+core::Diagnostic evaluator_phase_error(std::string text) {
+    core::Diagnostic error; error.code = "EAWR-GCAI-EVALUATOR-PHASE"; error.message = std::move(text); return error;
+}
+}
+ScriptEvaluators::PhaseSavepoint::PhaseSavepoint(std::unique_ptr<Saved> saved) : saved_(std::move(saved)) {}
+ScriptEvaluators::PhaseSavepoint::~PhaseSavepoint() {
+    if (!saved_->settled) { saved_->owner->phase = nullptr; saved_->owner->phase_abandoned = true; }
+}
+std::size_t ScriptEvaluators::PhaseSavepoint::retained_modules() const noexcept { return saved_->modules.size(); }
+core::Result<std::unique_ptr<ScriptEvaluators::PhaseSavepoint>> ScriptEvaluators::begin_phase(const sim::PartitionExecutor& executor) {
+    if (impl_->phase || impl_->phase_abandoned || impl_->busy.load())
+        return core::Result<std::unique_ptr<PhaseSavepoint>>::failure(evaluator_phase_error("evaluator phase needs its healthy idle owner"));
+    auto saved = std::make_unique<PhaseSavepoint::Saved>(); saved->owner = impl_.get(); saved->executor = &executor;
+    saved->view = impl_->memo_view; saved->stats = impl_->stats; saved->last_time = impl_->last_time_tick; saved->sequence = impl_->sequence;
+    auto token = std::unique_ptr<PhaseSavepoint>(new PhaseSavepoint(std::move(saved))); impl_->phase = token->saved_.get();
+    return core::Result<std::unique_ptr<PhaseSavepoint>>::success(std::move(token));
+}
+void ScriptEvaluators::Impl::retain_module(const std::string& path, const Module& module) {
+    if (phase) phase->modules.try_emplace(path, module);
+}
+void ScriptEvaluators::Impl::retain_memo_clear() {
+    if (!phase || phase->memo) return;
+    phase->memo.emplace(std::move(memo));
+    for (const auto& key : phase->inserted_memos) phase->memo->erase(key);
+    phase->inserted_memos.clear();
+}
+void ScriptEvaluators::Impl::ensure_phase_scheduler() {
+    if (!phase || phase->scheduler || !scheduler) return;
+    auto begun = scheduler->begin_phase(*phase->executor);
+    if (!begun) throw EvaluatorInfrastructureError(begun.error().message);
+    phase->scheduler = std::move(begun).value();
+}
+core::Result<void> ScriptEvaluators::PhaseSavepoint::commit() {
+    if (saved_->settled || saved_->owner->phase != saved_.get() || saved_->owner->busy.load())
+        return core::Result<void>::failure(evaluator_phase_error("evaluator phase is not idle and active"));
+    if (saved_->scheduler) if (auto committed = saved_->scheduler->commit(); !committed) return committed;
+    saved_->owner->phase = nullptr; saved_->settled = true; return core::Result<void>::success();
+}
+core::Result<void> ScriptEvaluators::PhaseSavepoint::rollback() {
+    auto& owner = *saved_->owner;
+    if (saved_->settled || owner.phase != saved_.get() || owner.busy.load())
+        return core::Result<void>::failure(evaluator_phase_error("evaluator phase is not idle and active"));
+    if (saved_->scheduler) if (auto restored = saved_->scheduler->rollback(); !restored) return restored;
+    for (auto& [name, module] : owner.catalogue) {
+        static_cast<void>(name);
+        if (const auto old = saved_->modules.find(module.path); old != saved_->modules.end()) module = std::move(old->second);
+    }
+    if (saved_->memo) owner.memo = std::move(*saved_->memo);
+    else for (const auto& key : saved_->inserted_memos) owner.memo.erase(key);
+    owner.memo_view = std::move(saved_->view); owner.stats = saved_->stats;
+    owner.last_time_tick = saved_->last_time; owner.sequence = saved_->sequence;
+    owner.phase = nullptr; saved_->settled = true; return core::Result<void>::success();
+}
 ScriptEvaluators::ScriptEvaluators(std::unique_ptr<Impl> impl) : impl_(std::move(impl)) {}
 ScriptEvaluators::~ScriptEvaluators() = default;
 
@@ -154,6 +226,7 @@ const ScriptEvaluators::Stats& ScriptEvaluators::stats() const noexcept { return
 ScriptEvaluators::Outcome ScriptEvaluators::evaluate(std::string_view upper_name, sim::tactical::PlayerId player,
     const ai::Target* target, const std::vector<ai::Binding>& bindings) {
     Impl& state = *impl_;
+    if (state.phase_abandoned) throw EvaluatorInfrastructureError("unsettled evaluator phase");
     ++state.stats.calls;
     const auto refuse = [&](std::string note) {
         ++state.stats.failures;
@@ -186,7 +259,7 @@ ScriptEvaluators::Outcome ScriptEvaluators::evaluate(std::string_view upper_name
         signature += key_of(binding.value);
     }
     if (state.memo_view != host.view) {
-        state.memo_view = host.view;
+        state.retain_memo_clear(); state.memo_view = host.view;
         state.memo.clear();
     }
     if (const auto memo = state.memo.find(signature); memo != state.memo.end()) {
@@ -196,14 +269,17 @@ ScriptEvaluators::Outcome ScriptEvaluators::evaluate(std::string_view upper_name
 
     const auto settle = [&](Outcome outcome) {
         if (!outcome.value) ++state.stats.failures;
+        if (state.phase && !state.phase->memo && !state.memo.contains(signature)) state.phase->inserted_memos.push_back(signature);
         state.memo.emplace(signature, outcome);
         return outcome;
     };
     const auto fault = [&](std::string message) {
+        state.retain_module(module.path, module);
         module.faulted = true;
         module.fault = message;
         return settle(Outcome{std::nullopt, "evaluator unavailable: " + std::move(message)});
     };
+    state.ensure_phase_scheduler(); state.retain_module(module.path, module);
     if (auto created = state.ensure_instance(module); !created) return fault(created.error().message);
 
     const std::uint64_t tick = state.scheduler->completed_tick() + 1;

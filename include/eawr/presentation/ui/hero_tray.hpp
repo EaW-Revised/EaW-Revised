@@ -89,8 +89,10 @@ void collect_heroes(const HeroCollectInput& input, const HeroTrayPolicy& policy,
 // `scratch` may still contain a previously drawn roster; every dispatch recollects it.
 // The provider maps a represented craft to its ordinary selection/command container
 // (identity when absent). Only validated live objects reach the existing effect paths.
+// HeroSelection: `focus` = double click (camera centre, any friendly hero); `own` = the hero belongs to the local
+// player, so only then may the callback change the selection (a teammate's hero is focused, never selected).
 using HeroEntityResolver = std::function<sim::EntityId(sim::EntityId)>;
-using HeroSelection = std::function<void(const sim::tactical::TacticalInstance&, bool focus)>;
+using HeroSelection = std::function<void(const sim::tactical::TacticalInstance&, bool focus, bool own)>;
 using HeroTarget = std::function<void(const sim::tactical::TacticalInstance&)>;
 void dispatch_hero_click(const HeroCollectInput& input, const HeroTrayPolicy& policy, HeroRoster& scratch,
                          sim::EntityId hero, bool hostile, bool right, bool double_click,

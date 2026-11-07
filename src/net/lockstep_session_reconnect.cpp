@@ -211,9 +211,10 @@ core::Result<void> LockstepSession::install_reconnect_package() {
         return refused<void>(reconnect_errors::identity, "transferred setup differs from locally verified setup");
     bytes = bytes.subspan(static_cast<std::size_t>(size));
     if (!read(bytes, delay, 8) || delay == 0 || delay > max_input_delay || !read(bytes, count, 8)
-        || count != held_->cutoff || count > bytes.size() / 20)
+        || held_->cutoff < initial_tick_ || count != held_->cutoff - initial_tick_ || count > bytes.size() / 20)
         return refused<void>(reconnect_errors::log, "invalid reconnect prefix or input delay");
-    for (std::uint64_t tick = 0; tick < count; ++tick) {
+    const auto cutoff = held_->cutoff;
+    for (std::uint64_t tick = initial_tick_; tick < cutoff; ++tick) {
         if (!read(bytes, size, 4) || size > bytes.size())
             return refused<void>(reconnect_errors::log, "truncated replay row");
         Bytes retained(bytes.begin(), bytes.begin() + static_cast<std::ptrdiff_t>(size));
@@ -259,20 +260,20 @@ core::Result<void> LockstepSession::install_reconnect_package() {
         return refused<void>(reconnect_errors::log, "transferred delay disagrees with locally replayed timing policy");
     for (PeerIndex peer = 0; peer < seats_.size(); ++peer) {
         std::uint64_t frontier{}, present{}, cursor{}, departed{};
-        if (!read(bytes, frontier, 8) || frontier > count + input_horizon()
+        if (!read(bytes, frontier, 8) || frontier < initial_tick_ || frontier > cutoff + input_horizon()
             || !read(bytes, present, 1) || present > 1 || !read(bytes, cursor, 8)
-            || !read(bytes, departed, 1) || departed > 1 || (!departed && frontier < count))
+            || !read(bytes, departed, 1) || departed > 1 || (!departed && frontier < cutoff))
             return refused<void>(reconnect_errors::log, "invalid reconnect sequence frontier");
         received_through_[peer] = frontier;
         command_cursors_[peer] = present ? std::optional<std::uint64_t>(cursor) : std::nullopt;
         departed_[peer] = departed != 0;
         // Ancient batches on a replaced stream are rejected, never accepted as
         // unverified duplicates. Only retained future batches get digest entries.
-        accepted_[peer].resize(static_cast<std::size_t>(frontier));
+        accepted_[peer].resize(static_cast<std::size_t>(frontier - initial_tick_));
     }
-    if (departed_[self_] || (!resync_staging_ && received_through_[self_] != count))
+    if (departed_[self_] || (!resync_staging_ && received_through_[self_] != cutoff))
         return refused<void>(reconnect_errors::log, "rejoining seat is not held at the barrier");
-    next_seal_ = resync_staging_ ? received_through_[self_] : count;
+    next_seal_ = resync_staging_ ? received_through_[self_] : cutoff;
     if (command_cursors_[self_] && *command_cursors_[self_] == std::numeric_limits<std::uint64_t>::max())
         return refused<void>(reconnect_errors::log, "rejoining command sequence exhausted");
     next_sequence_ = command_cursors_[self_] ? *command_cursors_[self_] + 1 : 0;
@@ -284,7 +285,7 @@ core::Result<void> LockstepSession::install_reconnect_package() {
         const auto frame = bytes.first(static_cast<std::size_t>(size)); bytes = bytes.subspan(static_cast<std::size_t>(size));
         auto decoded = decode_batch(frame); if (!decoded) return core::Result<void>::failure(decoded.error());
         auto batch = std::move(decoded).value();
-        if (batch.sender >= seats_.size() || (!resync_staging_ && batch.sender == self_) || batch.tick < count
+        if (batch.sender >= seats_.size() || (!resync_staging_ && batch.sender == self_) || batch.tick < cutoff
             || batch.tick >= received_through_[batch.sender] || ready_[batch.tick].contains(batch.sender))
             return refused<void>(reconnect_errors::log, "invalid retained future frontier");
         for (const auto& input : batch.commands) {
@@ -292,19 +293,19 @@ core::Result<void> LockstepSession::install_reconnect_package() {
                 return refused<void>(reconnect_errors::log, "future batch seat mismatch");
             auto valid = adapter_->validate(input); if (!valid) return valid;
         }
-        accepted_[batch.sender][batch.tick] = core::sha256(frame);
+        accepted_[batch.sender][batch.tick - initial_tick_] = core::sha256(frame);
         recovery_[batch.sender].emplace(batch.tick, batch);
         ready_[batch.tick].emplace(batch.sender, std::move(batch));
     }
     for (PeerIndex peer = 0; peer < seats_.size(); ++peer)
-        if ((resync_staging_ || peer != self_) && !departed_[peer]) for (auto tick = count; tick < received_through_[peer]; ++tick)
+        if ((resync_staging_ || peer != self_) && !departed_[peer]) for (auto tick = cutoff; tick < received_through_[peer]; ++tick)
             if (!ready_[tick].contains(peer)) return refused<void>(reconnect_errors::log, "gap in future sealed log");
     std::uint64_t control_ticks{};
     if (!read(bytes, control_ticks, 4) || control_ticks > bytes.size() / 17)
         return refused<void>(reconnect_errors::log, "invalid future control count");
     for (std::uint64_t index = 0; index < control_ticks; ++index) {
         std::uint64_t tick{}, controls{};
-        if (!read(bytes, tick, 8) || tick < count || tick >= options_.final_tick_count
+        if (!read(bytes, tick, 8) || tick < cutoff || tick >= options_.final_tick_count
             || reconnect_controls_.contains(tick) || !read(bytes, controls, 4) || controls == 0 || controls > bytes.size() / 5)
             return refused<void>(reconnect_errors::log, "invalid future control tick");
         for (std::uint64_t control = 0; control < controls; ++control) {

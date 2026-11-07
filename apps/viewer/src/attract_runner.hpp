@@ -78,6 +78,8 @@ public:
     // MAT-13: frees the battle and its session, then forgets the clocks. Safe to call twice.
     void stop();
     [[nodiscard]] bool running() const noexcept;
+    [[nodiscard]] bool visible() const noexcept;
+    [[nodiscard]] float reveal_fraction() const noexcept;
     [[nodiscard]] const std::string& failure() const noexcept;
 
     // MAT-04, MAT-05: one frame. `dialog_active` and `main_menu_active` say what the front end

@@ -1,3 +1,4 @@
+#include <algorithm>
 #include "../support/result.hpp"
 #include "galactic_support.hpp"
 #include "eawr/campaign/game_session.hpp"
@@ -13,6 +14,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <optional>
 #include <set>
 #include <string>
 #include <vector>
@@ -212,6 +214,127 @@ void sub_plots_and_elements() {
     expect(closed.take_triggered().empty() && !closed.triggered("Act2.xml", "LATE"), "WST-16 a suspended sub-plot's events receive nothing");
 }
 
+st::TextNotice click(std::string name) { return {st::Text::click_gui, std::move(name), std::nullopt}; }
+
+void click_gui() {
+    // WST-37: a clicked component fires the events whose Event_Param1 list names it, case-insensitively, once.
+    auto e = engine({
+        sub("P1.xml", 1, {make("C1", "STORY_CLICK_GUI", {"B_Filter_Empire", "other"}), trig("G1", {{"C1"}}, "CREDITS", {"1"}),
+            make("C2", "STORY_CLICK_GUI", {"b_filter_unit"}), make("GEN", "STORY_GENERIC", {"b_filter_empire"})}),
+        sub("P2.xml", 2, {make("C1", "STORY_CLICK_GUI", {"b_filter_empire"})}),
+    });
+    for (const auto& row : e.unavailable()) expect(row.what != "STORY_CLICK_GUI", "WST-37 STORY_CLICK_GUI has an evaluator");
+    take(e.notify(1, click("B_FILTER_EMPIRE")));
+    expect(names(e.take_triggered()) == Names{"G1"} && e.triggered("P1.xml", "C1"), "the named component fires its event and dependants");
+    expect(!e.triggered("P1.xml", "C2") && !e.triggered("P1.xml", "GEN") && !e.triggered("P2.xml", "C1"),
+        "other components, other text events and other players' plots stay quiet (WST-14)");
+    take(e.notify(1, click("b_filter_empire")));
+    expect(e.take_triggered().empty(), "a spent one-shot event does not fire again");
+    take(e.notify(2, click("b_filter_empire")));
+    expect(e.triggered("P2.xml", "C1"), "the clicking player's own plot answers");
+    take(e.notify(1, click("b_filter_unit")));
+    expect(e.triggered("P1.xml", "C2"), "a second component in the same plot");
+}
+
+void click_listeners() {
+    // #5857: the HUD raises a click only for a component some STORY_CLICK_GUI event names. The list is definition-wide
+    // (a suspended plot or a spent event still names it), upper-cased and sorted, and an Event_Param edit moves its revision.
+    auto e = engine({
+        sub("P1.xml", 1, {make("C1", "STORY_CLICK_GUI", {"b_zed", "Other_Name"}), make("GEN", "STORY_GENERIC", {"not_a_click"})}),
+        sub("P2.xml", 2, {make("C2", "STORY_CLICK_GUI", {"b_alpha"}), make("C3", "STORY_CLICK_GUI", {"B_ZED"})}, false),
+    });
+    expect(e.click_listeners() == (Names{"B_ALPHA", "B_ZED", "OTHER_NAME"}), "listeners: every named component once, upper-case, sorted");
+    const auto revision = e.click_listener_revision();
+    take(e.notify(1, click("b_zed")));
+    expect(e.click_listener_revision() == revision && e.click_listeners().size() == 3, "a click changes neither the list nor its revision");
+    st::PlotCommand edit; edit.op = st::PlotCommand::Op::event_param; edit.subplot = "P1.xml"; edit.event = "c1"; edit.index = 0; edit.values = {"b_new"};
+    take(e.apply(edit));
+    expect(e.click_listener_revision() != revision && e.click_listeners() == (Names{"B_ALPHA", "B_NEW", "B_ZED"}), "an Event_Param1 edit moves the revision and the list");
+    auto none = engine({sub("P.xml", 1, {make("GEN", "STORY_GENERIC", {"x"})})});
+    expect(none.click_listeners().empty(), "a story without click events listens to nothing");
+}
+
+void click_command_codec() {
+    // WST-37: the click command's bytes are a length byte and the printable-ASCII name; anything else is malformed.
+    const gc::CommandPayload command = gc::GuiClick{"b_Filter_Empire"};
+    expect(gc::layer_of(command) == gc::CommandLayer::session && gc::opcode_of(command) == gc::session_opcodes::gui_click,
+        "GuiClick is a session command");
+    const auto bytes = gc::encode_payload(command);
+    expect(bytes.size() == 16 && bytes[0] == 15, "one length byte and the name");
+    expect(gc::decode_payload(gc::CommandLayer::session, gc::session_opcodes::gui_click, bytes) == std::optional(command), "round trip");
+    const auto encode = [](std::string name) { return gc::encode_payload(gc::GuiClick{std::move(name)}); };
+    expect(encode("").empty() && encode(std::string(gc::max_gui_component_name + 1, 'a')).empty(), "encode rejects empty and oversized names");
+    expect(encode("a b").empty() && encode(std::string(1, '\x7f')).empty() && encode(std::string(1, '\x80')).empty(),
+        "encode rejects spaces and non-printable names");
+    const auto decode = [](std::vector<std::uint8_t> raw) { return gc::decode_payload(gc::CommandLayer::session, gc::session_opcodes::gui_click, raw); };
+    expect(!decode({}) && !decode({0}), "empty names are malformed");
+    expect(!decode({3, 'a', 'b'}) && !decode({1, 'a', 'b'}), "a length that differs from the body is malformed");
+    expect(!decode({3, 'a', ' ', 'b'}) && !decode({2, 'a', 0x7F}) && !decode({2, 'a', 0x80}), "spaces and non-ASCII bytes are malformed");
+    std::vector<std::uint8_t> long_name{static_cast<std::uint8_t>(gc::max_gui_component_name + 1)};
+    long_name.insert(long_name.end(), gc::max_gui_component_name + 1, 'a');
+    expect(!decode(long_name), "a name longer than the limit is malformed");
+}
+
+// WST-56/26 (#5495): Lua Activate / Suspend / Reset and the event edits, as plain ordered commands.
+void lua_plot_commands() {
+    using Op = st::PlotCommand::Op;
+    const auto command = [](Op op, std::string event = {}, std::uint32_t index = 0, std::vector<std::string> values = {}) {
+        st::PlotCommand c; c.op = op; c.subplot = "Intervention.xml"; c.event = std::move(event); c.index = index; c.values = std::move(values);
+        return c;
+    };
+    const auto build = [] {
+        return engine({sub("Intervention.xml", 1, {make("START", "STORY_ELAPSED", {"0"}), trig("PAY", {{"START"}}, "CREDITS", {"1"})}, false)});
+    };
+    auto e = build();
+    const auto pristine = e.digest();
+    take(e.service(sec(5), false));
+    expect(e.take_triggered().empty(), "a suspended intervention plot does nothing");
+    take(e.apply(command(Op::event_param, "start", 0, {"2"})));
+    take(e.apply(command(Op::reward_param, "pay", 0, {"750"})));
+    take(e.apply(command(Op::add_dialog_text, "pay", 0, {"text:TEXT_X", "int:3"})));
+    expect(e.digest() != pristine, "an edited plot changes the digest");
+    take(e.apply(command(Op::activate)));
+    expect(e.has_subplot("Intervention.xml") && e.has_event("Intervention.xml", "Pay") && !e.has_event("Intervention.xml", "NOPE"), "lookups");
+    take(e.service(sec(6), false)); take(e.service(sec(8), false));
+    auto rows = e.take_triggered();
+    expect(names(rows) == Names{"PAY"} && rows[0].reward_params[0] == std::vector<std::string>{"750"}
+        && rows[0].dialog_text == std::vector<std::string>{"text:TEXT_X", "int:3"}, "the edited reward and dialog text are used");
+    // Checkpoint: the state with edits restores into a fresh engine to the same digest and behaviour.
+    const auto saved = e.state();
+    auto again = build();
+    take(again.restore(saved));
+    expect(again.digest() == e.digest() && again.state().edits == saved.edits, "edits round-trip through the saved state");
+    take(again.apply(command(Op::reset)));
+    take(again.apply(command(Op::suspend)));
+    expect(!again.active("Intervention.xml", "PAY") && again.state().subplots[0].active == false, "suspend");
+    // Restoring an unedited state removes the edits from a used engine.
+    auto clean = build();
+    take(e.restore(clean.state()));
+    expect(e.digest() == pristine && e.state().edits.empty(), "restoring an unedited state reverts the edits; the digest equals the old bytes");
+    take(e.apply(command(Op::activate)));
+    take(e.service(sec(0), false)); take(e.service(sec(2), false));
+    auto reverted = e.take_triggered();
+    expect(names(reverted) == Names{"PAY"} && reverted[0].reward_type == "CREDITS" && reverted[0].reward_params[0] == std::vector<std::string>{"1"}
+        && reverted[0].dialog_text.empty(), "a reverted event fires its original reward (CREDITS 1) after the restore");
+    // A restore that fails half way leaves the definitions and the state untouched (transactional).
+    auto guarded = build();
+    take(guarded.apply(command(Op::reward_param, "pay", 0, {"750"})));
+    const auto edited_digest = guarded.digest();
+    auto broken = build().state();
+    st::EventEdit ghost; ghost.subplot = "Intervention.xml"; ghost.event = "GHOST";
+    broken.edits.push_back(ghost);
+    expect(!guarded.restore(broken), "a saved edit naming an event that is not loaded is refused");
+    expect(guarded.digest() == edited_digest && guarded.state().edits.size() == 1, "a refused restore leaves the state as it was");
+    take(guarded.apply(command(Op::activate)));
+    take(guarded.service(sec(0), false)); take(guarded.service(sec(2), false));
+    auto kept = guarded.take_triggered();
+    expect(names(kept) == Names{"PAY"} && kept[0].reward_params[0] == std::vector<std::string>{"750"}, "a refused restore keeps the earlier edits live");
+    expect(!e.apply(command(Op::event_param, "start", 7, {"1"})) && !e.apply(command(Op::reward_param, "nope", 0, {"1"})),
+        "an index outside the slots and an unknown event are refused");
+    st::PlotCommand unknown = command(Op::reset); unknown.subplot = "Missing.xml";
+    expect(!e.apply(unknown), "an unknown sub-plot is refused");
+}
+
 void land_battle_seam() {
     // Tactical and land events and rewards are parsed but refused until land battles exist.
     expect(st::land_battle_refusal == "not available until land battles", "the refusal text");
@@ -277,6 +400,36 @@ void multiplayer_gate() {
     auto lan = engine({sub("S.xml", 1, {mp, plain})}, online);
     take(lan.service(sec(0), false));
     expect(lan.triggered("S.xml", "MP") && !lan.triggered("S.xml", "PLAIN"), "outside solo and skirmish only Multiplayer events are evaluated");
+}
+
+// #4588 probe (test only): the same level raise in a solo and in a multiplayer-flavour setup. The
+// available-hero set differs exactly by the hero-unlock events that lack the Multiplayer flag
+// (WST-14); an event authored with the flag fires identically in both flavours.
+std::vector<std::string> hero_unlocks_after_raise(bool solo, std::int64_t level) {
+    const auto flagged = [](st::EventDef e) { e.multiplayer = true; return e; };
+    st::Config config; config.solo = solo;
+    auto e = engine({sub("P.xml", 1, {
+        flagged(make("MP_T2", "STORY_TECH_LEVEL", {"2"})), flagged(trig("MP_G2", {{"MP_T2"}}, "SPAWN_HERO", {"HERO_FLAGGED"})),
+        make("DATA_T3", "STORY_TECH_LEVEL", {"3"}), trig("DATA_G3", {{"DATA_T3"}}, "SPAWN_HERO", {"HERO_UNFLAGGED"}),
+        flagged(make("HALF_T2", "STORY_TECH_LEVEL", {"2"})), trig("HALF_G2", {{"HALF_T2"}}, "SPAWN_HERO", {"HERO_HALF"})})}, config);
+    take(e.notify(1, tech(1)));
+    take(e.notify(1, tech(level)));
+    return names(e.take_triggered());
+}
+void hero_unlock_flavour_probe() {
+    const Names sp3{"MP_G2", "DATA_G3", "HALF_G2"};
+    const auto solo = hero_unlocks_after_raise(true, 3), online = hero_unlocks_after_raise(false, 3);
+    expect(solo.size() == 3 && std::is_permutation(solo.begin(), solo.end(), sp3.begin()), "solo flavour fires every hero unlock at level 3");
+    // A trigger reached by activation fires without its own eligibility test (activate -> trigger), so only the
+    // tech event's own Multiplayer flag decides whether the hero unlock is reachable.
+    expect(online.size() == 2 && std::is_permutation(online.begin(), online.end(), Names{"MP_G2", "HALF_G2"}.begin()),
+        "multiplayer flavour fires every hero unlock whose STORY_TECH_LEVEL event carries the Multiplayer flag");
+    Names missing;
+    for (const auto& n : solo) if (std::find(online.begin(), online.end(), n) == online.end()) missing.push_back(n);
+    std::sort(missing.begin(), missing.end());
+    expect(missing == Names{"DATA_G3"}, "the only missing hero comes from a tech event without a Multiplayer flag: a data property, not an engine skip");
+    const auto sp2 = hero_unlocks_after_raise(true, 2), mp2 = hero_unlocks_after_raise(false, 2);
+    expect(mp2.size() == 2 && sp2.size() == 2, "a raise to level 2 behaves the same way");
 }
 
 void construction_refusals() {
@@ -727,6 +880,98 @@ void holocron_goals() {
 
 // #683 part 2: the apply loop of the session. Rewards run once per step after the service, in trigger order; a reward
 // that changes the tech level triggers a further event that runs in the same step; refusals are published once.
+void published_story_fault() {
+    for (const auto workers : {1U, 2U, 4U, 8U}) for (const bool throws : {false, true}) {
+        eawr::platform::ThreadWorkerAdapter executor(workers);
+        auto game = take(eawr::campaign::GameSession::create(session_setup()));
+        take(game.install_story({}, {{1, "fault.xml"}}, {sub("fault.xml", 1, {
+            make("A", "STORY_ELAPSED", {"0"}), trig("FIRST", {{"A"}}, "SPAWN_HERO", {"First"}),
+            trig("SECOND", {{"A"}}, "SPAWN_HERO", {"Second"})})}));
+        Names order;
+        game.set_story_rewards([&](gc::GalacticSession&, const st::Triggered& record, const eawr::sim::PartitionExecutor&)
+            -> eawr::core::Result<eawr::campaign::GameSession::StoryRewardOutcome> {
+            order.push_back(record.event);
+            if (throws) throw std::runtime_error("injected published story reward exception");
+            eawr::core::Diagnostic error; error.code = "INJECTED-PUBLISHED-STORY";
+            return eawr::core::Result<eawr::campaign::GameSession::StoryRewardOutcome>::failure(std::move(error));
+        });
+        bool refused{};
+        for (unsigned frame = 0; frame < 40 && !refused; ++frame) {
+            try { refused = !game.step(executor); } catch (const std::runtime_error&) { refused = true; }
+        }
+        expect(refused && order == Names{"FIRST"} && game.galaxy().native_post_publication_faults() == 1,
+            "published story reward fault preserves first-callback order and refusal without rollback/retry or a following reward");
+    }
+}
+
+// #5857: FORCE_CLICK_GUI becomes a presentation request for the plot owner's seat, and the per-tick bound drops the
+// clicks a self-forcing loop would pile up, deterministically and without ending the match.
+void forced_clicks() {
+    const auto plots = [] {
+        auto a = make("A", "STORY_CLICK_GUI", {"b_first"}); a.perpetual = true;
+        a.reward_type = "FORCE_CLICK_GUI"; a.reward_params[0] = {"b_second"};
+        auto b = make("B", "STORY_CLICK_GUI", {"b_second"}); b.perpetual = true;
+        b.reward_type = "FORCE_CLICK_GUI"; b.reward_params[0] = {"b_first", "ignored"};
+        auto bad = make("BAD", "STORY_CLICK_GUI", {"b_bad"}); bad.perpetual = true;
+        bad.reward_type = "FORCE_CLICK_GUI";
+        return std::vector<st::SubPlotDef>{sub("F.xml", 1, {a, b, bad})};
+    };
+    const auto forced_names = [](const eawr::campaign::GameTick& tick) {
+        Names out;
+        for (const auto& row : tick.story_presentation) {
+            const auto* request = std::get_if<st::ConsumerRequest>(&row.payload);
+            if (request && request->consumer == st::Consumer::gui && request->reward_name == "FORCE_CLICK_GUI" && row.owner == 1)
+                out.push_back(request->parameters.front());
+        }
+        return out;
+    };
+    std::vector<std::string> baseline;
+    for (const auto workers : {1U, 2U, 4U, 8U}) {
+        eawr::platform::ThreadWorkerAdapter executor(workers);
+        auto game = take(eawr::campaign::GameSession::create(session_setup()));
+        take(game.install_story({}, {{1, "f.xml"}}, plots()));
+        std::uint64_t sequence{};
+        const auto click_at = [&](std::uint64_t tick, const char* name) {
+            take(game.submit(gc::GameCommand{{tick, {1}, ++sequence}, gc::GuiClick{name}}));
+        };
+        // Printed only when a check below fails, so a red run says what the step published.
+        const auto trace = [&](const char* label, const eawr::campaign::GameTick& t, const bool failed) {
+            if (!failed) return;
+            std::cerr << "forced_clicks " << label << ": workers=" << workers << " tick=" << t.completed_tick << " triggers=" << t.story_triggers.size()
+                << " presentation=" << t.story_presentation.size() << " notices=" << t.story_notices.size() << " diagnostics=" << t.diagnostics.size() << std::endl;
+            for (const auto& d : t.diagnostics) std::cerr << "  diag " << d.code << ": " << d.message << std::endl;
+            for (const auto& r : t.story_triggers) std::cerr << "  trigger " << r.event << " -> " << r.outcome << std::endl;
+        };
+        // One click, one forced request, outcome "applied", nothing hashed or recorded for the presentation.
+        click_at(game.completed_tick(), "B_FIRST");
+        auto tick = take(game.step(executor));
+        trace("first", tick, forced_names(tick) != Names{"b_second"} || tick.story_triggers.size() != 1);
+        expect(forced_names(tick) == Names{"b_second"}, "a click on a listened component forces the component its reward names");
+        expect(tick.story_triggers.size() == 1 && tick.story_triggers.front().outcome == "applied", "the forced click is an applied reward");
+        // A reward without a component is refused by name; the match goes on.
+        click_at(game.completed_tick(), "b_bad");
+        tick = take(game.step(executor));
+        trace("bad", tick, !forced_names(tick).empty() || tick.story_triggers.size() != 1);
+        expect(forced_names(tick).empty() && tick.story_triggers.size() == 1
+            && tick.story_triggers.front().outcome.starts_with("refused: FORCE_CLICK_GUI needs one component name"), "a reward without a component is refused");
+        // The bound: twelve clicks in one tick, eight reach the story, four are dropped with a diagnostic.
+        const auto at = game.completed_tick();
+        for (int i = 0; i < 12; ++i) click_at(at, "b_first");
+        tick = take(game.step(executor));
+        const auto dropped = std::count_if(tick.diagnostics.begin(), tick.diagnostics.end(),
+            [](const auto& d) { return d.message.find("GUI click dropped") != std::string::npos; });
+        expect(forced_names(tick).size() == static_cast<std::size_t>(gc::max_gui_clicks_per_tick) && dropped == static_cast<std::ptrdiff_t>(12 - gc::max_gui_clicks_per_tick),
+            "the per-tick bound lets eight clicks through and drops the rest with a diagnostic");
+        const auto after = take(game.step(executor));
+        expect(forced_names(after).empty(), "the bound is per tick: the next tick starts clean");
+        // The following tick admits clicks again (the counter restarts).
+        click_at(game.completed_tick(), "b_second");
+        expect(forced_names(take(game.step(executor))) == Names{"b_first"}, "a later tick admits clicks again");
+        baseline.push_back(game.state_sha256());
+        expect(baseline.back() == baseline.front(), "1/2/4/8 workers keep equal digests across the click loop");
+    }
+}
+
 void session_rewards() {
     const auto setup = session_setup();
     const auto plots = [] {
@@ -779,11 +1024,11 @@ int case_galactic_story_engine_tests(int argc, char** argv) {
             installed_campaign_routes(argv[2], argv[3]);
             return galactic_test::failures ? 1 : 0;
         }
-        order_and_prerequisites(); elapsed_time(); flags(); tech_levels(); perpetual_and_branches(); sub_plots_and_elements();
-        land_battle_seam(); cycles_and_tactical_triggers(); digest_covers_clocks(); multiplayer_gate(); construction_refusals(); save_and_restore();
+        order_and_prerequisites(); elapsed_time(); flags(); tech_levels(); click_gui(); click_listeners(); click_command_codec(); perpetual_and_branches(); sub_plots_and_elements(); lua_plot_commands();
+        land_battle_seam(); cycles_and_tactical_triggers(); digest_covers_clocks(); multiplayer_gate(); hero_unlock_flavour_probe(); construction_refusals(); save_and_restore();
         loader(argc > 1 ? std::filesystem::path(argv[1]) : std::filesystem::path("story-engine"));
         campaign_story_routes(argc > 1 ? std::filesystem::path(argv[1]) : std::filesystem::path("story-engine"));
-        session(); holocron_goals(); session_rewards();
+        session(); holocron_goals(); forced_clicks(); session_rewards(); published_story_fault();
     } catch (const std::exception& error) { std::cerr << "FAIL: " << error.what() << '\n'; return 1; }
     return galactic_test::failures ? 1 : 0;
 }

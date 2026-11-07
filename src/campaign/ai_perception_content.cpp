@@ -1,4 +1,6 @@
 #include "eawr/campaign/ai_perception_content.hpp"
+#include "eawr/data/xml.hpp"
+#include "eawr/vfs/vfs.hpp"
 #include "eawr/data/retail_values.hpp"
 #include "eawr/units/galactic_types.hpp"
 #include "../script/foc/galactic_ai_selection_content.hpp"
@@ -92,9 +94,10 @@ core::Result<std::shared_ptr<const script::foc::ai::GalacticPerceptionSetup>> pr
             out->players.push_back(std::move(row));
         }
         for (const auto& location : plan.locations()) if (location.planet) {
-            const auto* planet = data.planet(location.original_type);
             const auto authored = content.planets.find(location.planet->id);
-            if (authored == content.planets.end()) throw std::runtime_error("stock indigenous authoring unavailable");
+            // CGS-22: selection content leaves out a planet whose type could not be loaded (noted by space-entry preparation).
+            if (authored == content.planets.end()) continue;
+            const auto* planet = data.planet(location.original_type);
             const auto original = std::find_if(content.types.begin(), content.types.end(), [&](const auto& row) {
                 return row.second.name == ai::upper_case(location.original_type);
             });

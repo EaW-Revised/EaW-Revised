@@ -5,6 +5,15 @@ add_executable(launcher_tests launcher_tests.cpp)
 target_link_libraries(launcher_tests PRIVATE eawr_launcher_core)
 set_target_properties(launcher_tests PROPERTIES MSVC_RUNTIME_LIBRARY "${EAWR_LAUNCHER_RUNTIME}")
 eawr_target_project_warnings(launcher_tests)
+# Soak (opt-in, release-time): 8 launchers take over one stale claim at once, 100 rounds (half under CPU load,
+# claim threads at below-normal priority), exactly one winner each time; takes about 400 s. Not in the default test
+# set (the quick 8-thread variant, inside launcher_core_contracts, is). To run it:
+#   cmake -DEAWR_RUN_SOAK=ON ... && ctest -L soak        (or: launcher_tests --soak <rounds>)
+option(EAWR_RUN_SOAK "Register long soak tests (label soak)" OFF)
+if(EAWR_RUN_SOAK)
+    add_test(NAME launcher_takeover_soak COMMAND launcher_tests --soak 100)
+    set_tests_properties(launcher_takeover_soak PROPERTIES TIMEOUT 600 LABELS soak)
+endif()
 add_test(NAME launcher_core_contracts COMMAND launcher_tests "${PROJECT_SOURCE_DIR}/apps/viewer/project/project.godot")
 
 # Console-subsystem on purpose (see the file header).

@@ -1,5 +1,6 @@
 #include "galactic/planet_hud.hpp"
 #include "galactic/hud_retained.hpp"
+#include "galactic/command_control_state.hpp"
 #include "eawr/presentation/ui/encyclopedia_timing.hpp"
 
 #ifdef NDEBUG
@@ -16,6 +17,69 @@ using namespace eawr::viewer::galactic;
 
 int case_galactic_planet_hud_tests() {
     {
+        eawr::data::ui::CommandBarComponent filter;
+        filter.name = "synthetic_filter"; filter.groups = {"fIlTeR_Space"};
+        assert(is_command_filter(filter));
+        filter.groups = {"Structure Buttons"};
+        assert(!is_command_filter(filter));
+        filter.groups = {"Filter_Tab_2"};
+        assert(!is_command_filter(filter));
+        filter.groups = {"Filter_Custom"}; filter.type = eawr::data::ui::ComponentType::icon;
+        assert(!is_command_filter(filter));
+        eawr::data::ui::CommandBarCatalog catalog;
+        const std::string stock_xml = "<CommandBarComponents><CommandBarComponent Name='b_Create_00'>"
+            "<Type>Button</Type><Group>Structure Buttons</Group></CommandBarComponent></CommandBarComponents>";
+        eawr::vfs::AssetRecord record; record.canonical_path = "data/xml/synthetic.xml";
+        std::vector<eawr::core::Diagnostic> diagnostics;
+        assert(eawr::data::ui::parse_command_bar_components(std::as_bytes(std::span(stock_xml.data(), stock_xml.size())),
+            record, catalog, diagnostics));
+        assert(command_filter_names(catalog).empty());
+        const std::string mod_xml = "<CommandBarComponents><CommandBarComponent Name='synthetic_filter'>"
+            "<Type>Button</Type><Group>Filter_Custom</Group><Toggle>True</Toggle>"
+            "</CommandBarComponent></CommandBarComponents>";
+        assert(eawr::data::ui::parse_command_bar_components(std::as_bytes(std::span(mod_xml.data(), mod_xml.size())),
+            record, catalog, diagnostics));
+        assert(command_filter_names(catalog) == std::vector<std::string>{"synthetic_filter"});
+        const auto missing = unresolved_ui_texture_note("i_radar_view.tga");
+        assert(missing.code == "EAWR-LOAD-UI-TEXTURE" && missing.object == "i_radar_view.tga"
+            && missing.authored_value == "i_radar_view.tga" && missing.action == eawr::core::LoadAction::runtime_degraded
+            && missing.phase == eawr::core::LoadPhase::runtime);
+        assert(catalog.find("b_Create_00") && catalog.find("b_Create_00")->in_group("Structure Buttons"));
+    }
+    {
+        eawr::data::ui::ShellAnchor anchor;
+        anchor.rect = {80, 40, 40, 20}; anchor.origin = eawr::assets::Vec2f{100, 50};
+        const auto scaled = command_button_geometry(anchor, {3, -2}, 60, 40, 0.7F);
+        const auto near = [](float a, float b) { return a > b - 0.001F && a < b + 0.001F; };
+        assert(near(scaled.art.x, 82) && near(scaled.art.y, 34)
+            && near(scaled.art.width, 42) && near(scaled.art.height, 28));
+        assert(near(scaled.hit.x, 89) && near(scaled.hit.y, 41)
+            && near(scaled.hit.width, 28) && near(scaled.hit.height, 14));
+        const auto stock = command_button_geometry(anchor, {}, 60, 40, 1.0F);
+        assert((stock.art == eawr::data::ui::ReferenceRect{70, 30, 60, 40}));
+        assert(stock.hit == anchor.rect);
+        assert(command_button_geometry(anchor, {0, -26}, 60, 40, 1.0F, true).hit == anchor.rect);
+        assert(command_button_geometry(anchor, {0, 32}, 60, 40, 1.0F, true).hit == anchor.rect);
+    }
+    {
+        // #5490: a tab that authors Selected_Texture_Name stays drawn when selected; stock composite tabs hide.
+        const auto parse = [](const std::string& xml) {
+            eawr::data::ui::CommandBarCatalog catalog;
+            eawr::vfs::AssetRecord record; record.canonical_path = "data/xml/tabs.xml";
+            std::vector<eawr::core::Diagnostic> diagnostics;
+            assert(eawr::data::ui::parse_command_bar_components(std::as_bytes(std::span(xml.data(), xml.size())),
+                record, catalog, diagnostics));
+            return catalog;
+        };
+        const auto stock = parse("<CommandBarComponents><CommandBarComponent Name='b_space_tab'><Type>Button</Type>"
+            "<Group>Build_Tab</Group><Swap_Texture>True</Swap_Texture></CommandBarComponent></CommandBarComponents>");
+        const auto raw = parse("<CommandBarComponents><CommandBarComponent Name='b_space_tab'><Type>Button</Type>"
+            "<Group>Build_Tab</Group><Swap_Texture>True</Swap_Texture>"
+            "<Selected_Texture_Name>i_tab_space_select.tga</Selected_Texture_Name></CommandBarComponent></CommandBarComponents>");
+        assert(selected_tab_hidden(*stock.find("b_space_tab")));
+        assert(!selected_tab_hidden(*raw.find("b_space_tab")));
+    }
+    {
         // TM-03..TM-06: the galactic fast-forward button.
         using eawr::sim::math::Fixed;
         const auto normal = Fixed::from_raw(Fixed::scale);
@@ -23,8 +87,47 @@ int case_galactic_planet_hud_tests() {
         assert(factor.raw() == 4 * Fixed::scale);
         assert(live_fast_forward_factor(false, true) == factor);
         assert(!live_fast_forward_factor(true, true) && !live_fast_forward_factor(false, false)); // fixture keeps its own
-        assert(clock_controls_admitted(1, false) && clock_controls_admitted(0, false));
-        assert(!clock_controls_admitted(2, false) && clock_controls_admitted(2, true)); // TM-04: two humans disable
+        assert(clock_controls_admitted(1, false, false, false) && clock_controls_admitted(0, false, false, false));
+        assert(!clock_controls_admitted(2, false, false, false) && clock_controls_admitted(2, true, false, false));
+        assert(clock_controls_admitted(2, false, true, true)); // TP-MP01: agreed LAN pause
+        assert(!clock_controls_admitted(1, true, true, false)); // no input during LAN transitions
+        // #4552: the authored pause button drives the shared clock whenever the admission above is open; the
+        // authored fast-forward button additionally needs at most one human (TM-04), also in a LAN match.
+        assert(fast_forward_controls_admitted(true, 1, false) && fast_forward_controls_admitted(true, 0, false));
+        assert(!fast_forward_controls_admitted(true, 2, false) && fast_forward_controls_admitted(true, 2, true));
+        assert(!fast_forward_controls_admitted(false, 1, false) && !fast_forward_controls_admitted(false, 2, true));
+        {
+            // The pause button / Space decision: a LAN match with gameplay open admits pause for host, client and co-op
+            // seats (any human count); each closed gate switches it off, with or without a clock bar.
+            ClockGates lan;
+            lan.world_allowed = true; lan.lan_match = true; lan.lan_gameplay = true;
+            for (const std::size_t humans : {std::size_t{2}, std::size_t{3}, std::size_t{8}}) {
+                lan.active_humans = humans;
+                assert(clock_controls_open(lan) && pause_press_admitted(true, true, lan) && pause_press_admitted(false, false, lan));
+            }
+            lan.active_humans = 2;
+            const auto closed = [&](auto&& change) { auto g = lan; change(g); return g; };
+            for (const auto& g : {closed([](ClockGates& c) { c.tutorial_locked = true; }), closed([](ClockGates& c) { c.world_allowed = false; }),
+                     closed([](ClockGates& c) { c.lan_battle = true; }), closed([](ClockGates& c) { c.lan_gameplay = false; })}) {
+                assert(!clock_controls_open(g) && !pause_press_admitted(false, false, g)); // bar-less Space keeps the LAN gates
+                assert(!pause_press_admitted(true, false, g)); // the bar's own flag decides when a bar exists
+            }
+            ClockGates solo;
+            solo.world_allowed = true; solo.active_humans = 1;
+            assert(clock_controls_open(solo) && pause_press_admitted(false, false, solo)); // bar-less solo keeps the plain key
+            solo.active_humans = 2;
+            assert(!clock_controls_open(solo) && pause_press_admitted(false, false, solo) && !pause_press_admitted(true, false, solo));
+            solo.fixture = true;
+            assert(clock_controls_open(solo));
+        }
+        for (const std::size_t humans : {std::size_t{1}, std::size_t{2}, std::size_t{4}}) {
+            // A LAN match with gameplay open: pause is admitted for every seat count, fast forward only for one human.
+            const bool pause_enabled = clock_controls_admitted(humans, false, true, true);
+            const bool fast_enabled = fast_forward_controls_admitted(pause_enabled, humans, false)
+                && fast_forward_available(true, false, true);
+            assert(pause_enabled && fast_enabled == (humans == 1));
+            assert(!clock_controls_admitted(humans, false, true, false)); // LAN transitions admit no clock input
+        }
         assert(fast_forward_available(true, false, true));
         assert(!fast_forward_available(false, false, true) && !fast_forward_available(true, true, true)
             && !fast_forward_available(true, false, false)); // TM-06: not while paused, not without a factor
@@ -134,7 +237,13 @@ int case_galactic_planet_hud_tests() {
     observation.player = 1; observation.planet = 7; observation.discovered = true;
     eawr::sim::galactic::ObserverPlanet payload;
     payload.planet = 7; payload.ground_level = 4; payload.space_level = 2;
+    payload.landed_transports = {{1, 1, false, false}, {2, 1, false, false},
+        {3, 1, false, false}, {4, 1, true, false}, {0, 1, false, false}};
     auto discovered = observed_hud_facts(observation, &payload, nullptr, 1, 75.0, 190.0);
+    assert(!discovered.landed_companies);
+    observation.knowledge.ground_count = true;
+    assert(observed_hud_facts(observation, &payload, nullptr, 1).landed_companies == 3);
+    observation.knowledge.ground_count = false;
     assert(discovered.visible_income == 75.0 && !discovered.observed_owner);
     assert(unverified_intelligence_text(discovered).find("Income: 75") != std::string::npos);
     assert(!discovered.ground_level && !discovered.space_level && !discovered.structures);
@@ -252,7 +361,32 @@ int case_galactic_planet_hud_tests() {
         PlanetStatusIcon::build, PlanetStatusIcon::corruption_info}));
     facts.corrupted = true;
     assert(planet_status_icons(facts) == std::vector<PlanetStatusIcon>{PlanetStatusIcon::build});
+    // Filter bit 4: a corrupted planet's per-type icon shows only while the corruption layer is on.
+    facts.corruption_type = 4; // racketeering: authored icon index 3
+    assert(planet_status_icons(facts, true) == (std::vector<PlanetStatusIcon>{PlanetStatusIcon::build, PlanetStatusIcon::corruption_type}));
+    facts.corruption_type = 0; // type unpublished: nothing is guessed
+    assert(planet_status_icons(facts, true) == std::vector<PlanetStatusIcon>{PlanetStatusIcon::build});
+    facts.corruption_type = 0;
     facts.corrupted = false;
+    // Effect icons sit between build and corruption, in component order.
+    facts.siphon_smuggled = true; facts.bounty_hunter_active = true; facts.siphon_source = true;
+    assert((planet_status_icons(facts) == std::vector<PlanetStatusIcon>{PlanetStatusIcon::build,
+        PlanetStatusIcon::smuggler, PlanetStatusIcon::bounty_hunter, PlanetStatusIcon::smuggled,
+        PlanetStatusIcon::corruption_info}));
+    facts.siphon_smuggled = facts.bounty_hunter_active = facts.siphon_source = false;
+    assert(status_effect_component_name(PlanetStatusIcon::bounty_hunter) == "g_bounty_hunter");
+    assert(status_effect_icon_name(PlanetStatusIcon::smuggler, {"a", "b"}) == "a");
+    assert(status_effect_icon_name(PlanetStatusIcon::smuggler, {}).empty());
+    assert(status_effect_icon_name(PlanetStatusIcon::build, {"a"}).empty());
+    {
+        const std::vector<ObjectId> ring{ObjectId{4}, ObjectId{9}, ObjectId{2}};
+        assert(step_planet(ring, ObjectId{4}, PlanetStep::next) == ObjectId{9});
+        assert(step_planet(ring, ObjectId{2}, PlanetStep::next) == ObjectId{4});
+        assert(step_planet(ring, ObjectId{4}, PlanetStep::previous) == ObjectId{2});
+        assert(step_planet(ring, ObjectId{7}, PlanetStep::next) == ObjectId{4});
+        assert(step_planet(ring, ObjectId{7}, PlanetStep::previous) == ObjectId{2});
+        assert(step_planet({}, ObjectId{7}, PlanetStep::next) == ObjectId{7});
+    }
     facts.discovered = false;
     assert(planet_status_icons(facts).empty());
     facts.discovered = true;
@@ -265,12 +399,35 @@ int case_galactic_planet_hud_tests() {
     full_corruption[8] = "info";
     assert(status_icon_texture_name(PlanetStatusIcon::corruption_info, {}, full_corruption) == "info");
     assert(status_icon_texture_name(PlanetStatusIcon::build, {"hammer", "x"}, {}) == "hammer");
+    for (std::size_t i = 0; i < 8; ++i) full_corruption[i] = "t" + std::to_string(i);
+    assert(status_icon_texture_name(PlanetStatusIcon::corruption_type, {}, full_corruption, 4) == "t3");
+    assert(status_icon_texture_name(PlanetStatusIcon::corruption_type, {}, full_corruption, 0).empty());
+    assert(status_icon_texture_name(PlanetStatusIcon::corruption_type, {}, short_corruption, 8) == "icon");
+    assert(status_icon_texture_name(PlanetStatusIcon::corruption_type, {}, {"a"}, 8).empty());
     const auto row = status_row_origin(30, -16, std::nullopt, std::nullopt);
     assert(row.x == 30 && row.y == -16);
     const auto layered = status_row_origin(30, -16, -11.0, -26.0);
     assert(layered.x == 30 && layered.y == -53);
     const auto centres = status_row_centres(30, {16, 20});
     assert(centres.size() == 2 && centres[0] == 38 && centres[1] == 56);
+    {
+        const Rgb owner{0.2F, 0.4F, 0.8F};
+        const auto hidden = planet_bonus_icon_style(false, "custom_icon", true, 1.0F, &owner);
+        assert(!hidden.visible);
+        const auto shown = planet_bonus_icon_style(true, "custom_icon", true, 0.5F, &owner);
+        assert(shown.visible && shown.tint.r == owner.r && shown.tint.g == owner.g && shown.tint.b == owner.b);
+        const auto unknown = planet_bonus_icon_style(true, "another_icon", true, 1.0F, nullptr);
+        assert(unknown.visible && unknown.tint.r == 100.0F / 255.0F && unknown.tint.g == unknown.tint.r && unknown.tint.b == unknown.tint.r);
+        assert(!planet_bonus_icon_style(true, "", true, 1.0F, &owner).visible);
+        assert(!planet_bonus_icon_style(true, "custom_icon", true, 0.0F, &owner).visible);
+        // #6053: retail draws the icon only from the command-bar atlas; a standalone (oversized) texture draws nothing.
+        assert(!planet_bonus_icon_style(true, "Loadscreens/Large_Standalone.png", false, 1.0F, &owner).visible);
+        // GHUDL-18: authored offset (0 -34) puts the bonus icon centred 34 px below the anchor, scaled by the UI scale.
+        const auto rect = planet_bonus_icon_rect(100, 200, 0, -34, 1.0, 40, 30);
+        assert(rect.x == 80 && rect.y == 219 && rect.width == 40 && rect.height == 30);
+        const auto scaled = planet_bonus_icon_rect(100, 200, 0, -34, 2.0, 40, 30);
+        assert(scaled.x == 60 && scaled.y == 238 && scaled.width == 80 && scaled.height == 60);
+    }
     facts.local_allegiance = false;
     assert(!production_activity(facts));
     facts.locally_controlled = false;
@@ -640,6 +797,65 @@ int case_galactic_planet_hud_tests() {
         assert(readout == next_readout);
         next_readout.population = "13 / 40";
         assert(!(readout == next_readout));
+    }
+    {
+        // #5857: selected state of authored controls. Arbitrary names and groups; nothing here knows a mod.
+        ControlStates states;
+        states.add("zz_a", {"Group_One"}, true, true);   // Toggle + Tab
+        states.add("zz_b", {"group_one", "Other"}, true, true);
+        states.add("zz_c", {"Group_Two"}, true, true);   // another group
+        states.add("zz_toggle", {"Group_One"}, true, false);
+        states.add("zz_plain_tab", {"Group_One"}, false, true);
+        states.add("zz_momentary", {"Group_One"}, false, false);
+        assert(states.has("ZZ_A") && !states.has("missing") && states.holds_selection("zz_toggle") && !states.holds_selection("zz_momentary"));
+        states.press("zz_a");
+        assert(states.selected("zz_a") && !states.selected("zz_b"));
+        states.press("ZZ_B"); // names match case-insensitively; the shared group (case-insensitive) clears the mate
+        assert(states.selected("zz_b") && !states.selected("zz_a"));
+        states.press("zz_c"); // a different group is left alone
+        assert(states.selected("zz_b") && states.selected("zz_c"));
+        states.press("zz_b"); // Toggle + Tab: pressing the selected one clears it
+        assert(!states.selected("zz_b") && states.selected("zz_c"));
+        states.press("zz_plain_tab");
+        states.press("zz_plain_tab"); // a Tab that is not a Toggle stays selected
+        assert(states.selected("zz_plain_tab"));
+        states.press("zz_toggle"); // a plain toggle flips and ignores the tab exclusion
+        assert(states.selected("zz_toggle") && states.selected("zz_plain_tab"));
+        states.press("zz_toggle");
+        assert(!states.selected("zz_toggle"));
+        states.press("zz_momentary"); states.press("not_built");
+        assert(!states.selected("zz_momentary") && !states.selected("not_built"));
+        // A domain tab keeps the selections by default (the script owns its own offer list and clears its filter button
+        // itself); the clearing rule exists and can be switched on.
+        states.domain_changed();
+        assert(states.selected("zz_c") && states.selected("zz_plain_tab"));
+        ControlStateRules clearing; clearing.domain_change_clears = true;
+        ControlStates resets(clearing);
+        resets.add("zz_c", {"G"}, true, true); resets.add("zz_d", {"H"}, true, false);
+        resets.press("zz_c"); resets.press("zz_d");
+        resets.domain_changed();
+        assert(!resets.selected("zz_c") && !resets.selected("zz_d"));
+        // A forced press does not raise the story click by default (the debug build's reward calls only the click slot);
+        // a human press does. The rule can be switched on.
+        assert(!states.rules().raises_story_click(true) && states.rules().raises_story_click(false));
+        ControlStateRules raising; raising.forced_press_raises_story_click = true;
+        assert(raising.raises_story_click(true) && raising.raises_story_click(false));
+        // Rules are the one place that decides exclusion.
+        ControlStateRules open; open.tab_excludes_group_mates = false; open.selected_tab_toggles_off = false;
+        ControlStates free_tabs(open);
+        free_tabs.add("zz_a", {"G"}, true, true); free_tabs.add("zz_b", {"G"}, true, true);
+        free_tabs.press("zz_a"); free_tabs.press("zz_b"); free_tabs.press("zz_a");
+        assert(free_tabs.selected("zz_a") && free_tabs.selected("zz_b"));
+        // From an authored component.
+        eawr::data::ui::CommandBarComponent component;
+        component.name = "zz_component"; component.groups = {"Filter_Anything"};
+        ControlStates from_component;
+        from_component.add(component);
+        from_component.press("zz_component");
+        assert(from_component.has("zz_component") && !from_component.selected("zz_component"));
+        // The per-frame forced-press budget is a plain counter.
+        ForcedClickBudget budget{2};
+        assert(budget.take() && budget.take() && !budget.take());
     }
     return 0;
 }

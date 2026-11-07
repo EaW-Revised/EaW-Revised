@@ -6,6 +6,7 @@
 
 #include "ai_engine.hpp"
 #include "galactic_ai_actions.hpp"
+#include "story_plot_bindings.hpp"
 
 #include <algorithm>
 #include <limits>
@@ -888,6 +889,34 @@ void register_functions(ScriptScheduler& scripts, const HostPtr& host, std::vect
         }
         if (auto added = scripts.register_binding(name, std::move(binding)); !added) errors.push_back(added.error());
     };
+    register_story_plot_bindings(scripts, host, errors); // Get_Story_Plot (#5495)
+    add("GiveDesireBonus", [host](BindingContext& context, const ValueList& arguments) -> core::Result<ValueList> {
+        // Retail requires five arguments and returns a timed bonus block. The
+        // timed native owner is an open gap; nil lets BlockOnCommand decline
+        // the unavailable request without retiring the calling plan.
+        if (arguments.size() != 5) return fail("GiveDesireBonus expects a player, goal, target, bonus and duration");
+        const auto* player = as_handle(arguments[0], handle_player);
+        const auto* goal = std::get_if<std::string>(&arguments[1].data);
+        const auto* target = as_handle(arguments[2], ai::handle_ai_target);
+        const auto* object = as_handle(arguments[2], handle_game_object);
+        const auto* bonus = std::get_if<Real>(&arguments[3].data);
+        const auto* duration = std::get_if<Real>(&arguments[4].data);
+        if (!host->engine || !player || !goal || !bonus || !duration
+            || player->id > std::numeric_limits<tactical::PlayerId>::max()
+            || !host->players.contains(static_cast<tactical::PlayerId>(player->id))
+            || !host->engine->data().goals.contains(ai::upper_case(*goal))
+            || (!target && !object) || (target && !host->engine->target(target->id))
+            || (object && !host->engine->target_of_object(object->id)))
+            return fail("GiveDesireBonus requires a registered player, goal and live AI target");
+        const auto* plan = host->engine->plan_of_instance(context.instance());
+        if (!plan || !host->engine->galactic_goal(plan->player, plan->goal)) {
+            context.report(authoritative::codes::unsupported_api,
+                "GiveDesireBonus timed goal bonus is unavailable outside a retained galactic plan");
+            return none();
+        }
+        stage(context, "galactic_desire_unsupported", {});
+        return none();
+    });
     add("FindDeadlyEnemy", [host](BindingContext& context, const ValueList& arguments) {
         return find_deadly_enemy(*host, context, arguments);
     });
@@ -1041,18 +1070,9 @@ void register_functions(ScriptScheduler& scripts, const HostPtr& host, std::vect
         stage(context, "purge", {});
         return none();
     });
-    add("GlobalValue.Get", [host](BindingContext&, const ValueList& arguments) -> core::Result<ValueList> {
-        const std::string* name = arguments.empty() ? nullptr : as_text(arguments[0]);
-        if (name == nullptr || host->engine == nullptr) return none();
-        const auto value = host->engine->global_value(*name);
-        if (!value) return none();
-        return one(number(*value));
-    });
-    add("GlobalValue.Set", [](BindingContext& context, const ValueList& arguments) -> core::Result<ValueList> {
-        if (arguments.size() != 2 || as_text(arguments[0]) == nullptr) return fail("GlobalValue.Set expects a name and a value");
-        if (std::holds_alternative<LuaNumber>(arguments[1].data)) stage(context, "global", {arguments[0], arguments[1]});
-        return none();
-    });
+    if (auto added = authoritative::register_shared_global_values(scripts, [host](const std::string& name) {
+            return host->engine ? host->engine->global_value(name) : std::nullopt;
+        }); !added) errors.push_back(added.error());
 }
 
 } // namespace
@@ -1090,6 +1110,20 @@ void register_plan_bindings(ScriptScheduler& scripts, const std::shared_ptr<Host
     register_blocks(scripts, host, errors);
     register_targets(scripts, host, errors);
     register_functions(scripts, host, errors);
+    // Budget is assigned after Base_Definitions. Protecting a global Budget
+    // table would prevent stock scripts from clearing their instance variable.
+    if (auto added = scripts.register_method(ai::handle_galactic_budget, "Flush_Category",
+        [host](BindingContext& context, const ValueList& arguments) -> core::Result<ValueList> {
+            if (arguments.size() != 2) return fail("Budget.Flush_Category expects exactly one category string");
+            const auto* budget = as_handle(arguments[0], ai::handle_galactic_budget);
+            const auto* category = std::get_if<std::string>(&arguments[1].data);
+            const auto* plan = host->engine ? host->engine->plan_of_instance(context.instance()) : nullptr;
+            if (!budget || !category || !plan || budget->id != plan->id
+                || !host->engine->data().goal_categories.contains(ai::upper_case(*category)))
+                return fail("Budget.Flush_Category requires its owning plan and a registered category");
+            stage(context, "galactic_budget_flush", {Value::text(ai::upper_case(*category))});
+            return none();
+        }); !added) errors.push_back(added.error());
 }
 
 } // namespace eawr::script::foc::detail

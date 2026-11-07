@@ -60,6 +60,8 @@ struct ParsedDocument {
     pugi::xml_document document;
     pugi::xml_node root;
     SourceOffsets offsets;
+    std::string compatible_header;
+    std::size_t compatible_header_offset{};
 };
 
 std::string input_hash(std::span<const std::byte> bytes);

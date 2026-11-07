@@ -1,6 +1,8 @@
 #include "eawr/data/tag_trace.hpp"
+#include "eawr/data/xml.hpp"
 
 #include <mutex>
+#include <utility>
 #include <set>
 
 namespace eawr::data::tag_trace {

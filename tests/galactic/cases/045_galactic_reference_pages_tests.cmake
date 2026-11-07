@@ -5,7 +5,7 @@ eawr_add_test_case(
         "${PROJECT_SOURCE_DIR}/apps/viewer/src/galactic/reference_pages.cpp"
         "${PROJECT_SOURCE_DIR}/apps/viewer/src/galactic/reference_publication.cpp"
     INCLUDE_DIRS "${PROJECT_SOURCE_DIR}/apps/viewer/src"
-    LIBS eawr::sim_galactic eawr::data eawr::vfs
+    LIBS eawr::sim_galactic eawr::data eawr::vfs eawr::ui_data
     TESTS galactic_reference_pages_contracts
 )
 

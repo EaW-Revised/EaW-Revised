@@ -4,6 +4,7 @@
 #include "galactic_lan_hud.hpp"
 
 #include "eawr/platform/campaign_end_view.hpp"
+#include "eawr/mods/save_description.hpp"
 #include "eawr/presentation/ui/front_end.hpp"
 
 #include <godot_cpp/classes/input_event.hpp>
@@ -33,6 +34,7 @@ namespace eawr::presentation::godot_backend {
 // advanced-map state, Home restores overview (project bindings).
 class GalacticHudFixture;
 struct GalacticLaunch;
+struct BattleContent;
 
 class GalacticMode final {
 public:
@@ -45,12 +47,18 @@ public:
         std::optional<presentation::ui::CampaignStartRequest::Economy> custom_economy{};
         std::filesystem::path game_root;
         std::filesystem::path mod_root;
+        // Supplied by the mount owner when portable launcher records are available.
+        std::optional<mods::ModDescription> mounted_mods;
+        // The solo setup screen's already validated immutable mount/catalogue snapshot.
+        // Direct starts and restores keep their independent fresh-load path.
+        std::shared_ptr<const BattleContent> setup_content;
         // The local seat (ADR-020); 0 picks the snapshot's first active human seat.
         std::uint32_t seat{};
         bool seat_invalid{};
         bool coop_preview{}; // Explicit multi-human presentation qualification.
         std::uint32_t focus_planet{};
         std::uint32_t zoom_probe_planet{}; // Opt-in GPU continuity qualification.
+        bool zoom_timing{}; // Opt-in per-frame main-thread attribution in the report.
         std::uint32_t flight_milliseconds{};
         bool camera_options_invalid{};
         bool paused{};
@@ -62,6 +70,10 @@ public:
         bool red_green_routes{}; // Profile adapter seam; explicit in synthetic captures.
         bool native_ai{true}; // --eawr-galactic-ai on|off: fresh campaign install, default on.
         bool native_ai_invalid{};
+        bool model_cache_budget_off{}; // Hidden same-binary RAM/launch qualification control.
+        bool model_cache_budget_invalid{};
+        bool gc_prep_trim_off{}; // --eawr-gc-prep-trim on|off: trim the model LRU at the end of preparation, default on.
+        bool gc_prep_trim_invalid{};
         bool galactic_reveal{}; // --eawr-galactic-reveal on|off: draw-only fog reveal, default off (#3931).
         bool galactic_reveal_invalid{};
         // --eawr-galactic-hud-verify yes (#4331): after every publication the HUD facts are rebuilt from nothing and compared with

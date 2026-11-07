@@ -7,19 +7,16 @@
 #include "eawr/data/xml.hpp"
 #include "eawr/vfs/vfs.hpp"
 
-#include <algorithm>
 #include <array>
 #include <bit>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
-#include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <map>
 #include <memory>
 #include <optional>
-#include <sstream>
 #include <span>
 #include <string>
 #include <string_view>

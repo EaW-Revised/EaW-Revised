@@ -1,7 +1,13 @@
 #include "eawr/net/lobby_session.hpp"
+#include "eawr/vfs/vfs.hpp"
 #include "eawr/platform/sim_workers.hpp"
 #include "fake_transport.hpp"
 #include "setup_test_support.hpp"
+#include "eawr/skirmish/start.hpp"
+#include "../support/temp_dir.hpp"
+#include <chrono>
+#include <filesystem>
+#include <fstream>
 
 #include <iostream>
 #include <map>
@@ -27,6 +33,7 @@ struct Room {
     std::vector<net::MessageTransport*> streams;
     std::vector<std::pair<net::PeerIndex, net::LobbyReason>> removed;
     bool mismatch{}, perturb{}, invalid_start{}, fail_provider{}, team_rules{}, fail_credential_offer{};
+    std::optional<sim::MatchAgreement> host_identity, client_identity;
     // Online room mesh hooks (N4): the Start gate and the Lock before the commitment. Off unless `gate` is set.
     bool gate{}, mesh_ok{true}, lock_ok{true};
     unsigned contexts{}, builds{}, locks{}, lock_polls{};
@@ -79,6 +86,7 @@ struct Room {
                 initial.skirmish->slots[seat.player - 1].colour_index = seat.selection.colour;
             }
             auto selected = offer(); selected.seed = initial.seed;
+            if (host_identity) { selected.identity = *host_identity; initial.match_identity = host_identity->content; }
             selected.setup = require(net::encode_skirmish_setup(initial)); selected.seats = roster;
             return Result<net::SetupOffer>::success(std::move(selected));
         };
@@ -87,7 +95,8 @@ struct Room {
             streams[peer] = &transport;
             if (fail_provider && peer == 1) return Result<net::LobbySetupContext>::failure(net::lobby_diagnostic(net::LobbyReason::setup_failed, "provider failed"));
             auto owner = std::make_shared<ProviderOwner>(executor, transport);
-            auto local = identity(); if (mismatch && peer == 1) local.build = "different-build";
+            auto local = peer == 0 ? host_identity.value_or(identity()) : client_identity.value_or(identity());
+            if (mismatch && peer == 1) local.build = "different-build";
             auto supplied = providers(owner->monitor, *executor, std::move(local), perturb && peer == 1);
             auto build = supplied.build;
             supplied.build = [this, build = std::move(build)](const auto& selected) { ++builds; return build(selected); };
@@ -136,6 +145,38 @@ struct Room {
     }
     void inject(unsigned from, unsigned to, net::LobbyFrame frame) { require(transports[from]->send(to, require(net::encode_lobby_frame(frame)))); }
 };
+void revised_layer_join() {
+    const auto root = std::filesystem::temp_directory_path() / ("eawr-revised-lobby-"
+        + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    struct Cleanup { std::filesystem::path root; ~Cleanup() { eawr::testing::remove_temp_directory(root); } } cleanup{root};
+    const auto base = root / "base";
+    const auto revised = root / "revised";
+    std::filesystem::create_directories(base / "xml");
+    std::filesystem::create_directories(revised / "xml");
+    std::ofstream(base / "xml" / "SelectionControls.xml") << "stock";
+    std::ofstream(revised / "xml" / "SelectionControls.xml") << "presentation";
+    const eawr::vfs::MountSpec stock{"base", base, "data", {}};
+    const eawr::vfs::MountSpec layer{std::string(eawr::vfs::revised_layer_id), revised, "data", {}};
+    const auto make_identity = [&](std::vector<eawr::vfs::MountSpec> mounts) {
+        auto filesystem = require(eawr::vfs::Vfs::mount(mounts));
+        auto data = require(eawr::skirmish::read_data_identity(filesystem));
+        auto result = identity();
+        for (auto& domain : result.content.domains) {
+            if (domain.name == "ai-data") domain = sim::identity_domain("ai-data", data.ai_data_digest);
+            if (domain.name == "script-manifest") domain = sim::identity_domain("script-manifest", data.script_manifest_digest);
+        }
+        result.content = sim::compute_match_identity(std::move(result.content));
+        return result;
+    };
+    Room room;
+    room.host_identity = make_identity({layer, stock});
+    room.client_identity = make_identity({stock});
+    room.commit();
+    auto host = require(room.host().take_result());
+    auto guest = require(room.client().take_result());
+    expect(host.setup().adapter().state_hash() == guest.setup().adapter().state_hash(),
+        "host with Revised and guest without agree on the simulation digest");
+}
 void codec() {
     expect(net::sanitize_lobby_text("a\xe2\x80\x8e" "b\xe2\x80\x8f" "c\xd8\x9c" "d", 128) == "abcd", "all directional marks are stripped from room labels/chat");
     expect(net::lobby_diagnostic(net::LobbyReason::recovery_unavailable, "").code == "EAWR-NET-1615", "coordinator-reserved recovery refusal reason");
@@ -156,7 +197,7 @@ void codec() {
         bytes.push_back(0); expect(!net::decode_lobby_frame(bytes), "trailing room bytes refused");
     }
     expect(!net::decode_lobby_frame(Bytes(net::max_lobby_frame_bytes + 1)), "oversized frame rejected before allocation");
-    auto bytes = require(net::encode_lobby_frame(snapshot)); bytes[1] = 2;
+    auto bytes = require(net::encode_lobby_frame(snapshot)); bytes[1] = 1;
     expect(!net::decode_lobby_frame(bytes), "unsupported frame version");
     bytes = require(net::encode_lobby_frame(snapshot)); std::fill_n(bytes.begin() + 5, 4, std::uint8_t{255});
     expect(!net::decode_lobby_frame(bytes), "forged text length rejected");
@@ -173,6 +214,17 @@ void codec() {
     expect(repaired.text.find('\0') == std::string::npos, "embedded NUL text is sanitized at intake");
     invalid = snapshot; invalid.seats[1].selection.name = "GuEsT-0";
     expect(!net::encode_lobby_frame(invalid), "case-insensitive duplicate guest names refused");
+    invalid = snapshot; invalid.mounted_mods = {1, 1, 0, 0, 0, 0};
+    const auto with_mods = require(net::encode_lobby_frame(invalid));
+    expect(std::get<net::LobbySnapshot>(require(net::decode_lobby_frame(with_mods))).mounted_mods == invalid.mounted_mods,
+        "mounted description survives the lobby snapshot");
+    auto forged_mods = with_mods;
+    forged_mods[forged_mods.size() - 2] = 1;
+    expect(!net::decode_lobby_frame(forged_mods), "an oversized mod count in a received snapshot is refused");
+    invalid.mounted_mods = {1, 1, 1, 1, 0, 0};
+    expect(!net::encode_lobby_frame(invalid), "excessive mounted mod count is refused");
+    invalid.mounted_mods = {1, 1, 1, 0, 0, 0, 1, 255, 255, 255, 255};
+    expect(!net::encode_lobby_frame(invalid), "excessive mounted mod string is refused");
 }
 void authority_and_revisions() {
     Room room;
@@ -738,6 +790,44 @@ std::string battle(std::size_t workers) {
     expect(host.setup().adapter().state_hash() == client.setup().adapter().state_hash(), "all peers agree after battle handoff");
     return host.setup().adapter().state_hash();
 }
+void retained_transport_maps_room_peers() {
+    Room room(3);
+    require(room.host().kick(1, room.revision()));
+    room.rounds(3);
+    room.sessions.erase(room.sessions.begin() + 1);
+    room.commit();
+    auto host = require(room.host().take_result());
+    auto guest = require(room.client().take_result());
+    expect(&host.transport() == room.streams[0] && &guest.transport() == room.streams[2],
+        "transferred result exposes the same stream used by its setup core");
+    room.sessions.clear();
+    expect(host.transport().self() == 0 && guest.transport().self() == 1
+        && host.transport().peer_count() == 2, "retained stream maps sparse room peers to roster indices");
+    room.network.open[2] = false;
+    expect(host.transport().link(1) == net::LinkState::closed, "link state maps the roster index to the room peer");
+    room.network.open[2] = true;
+    const Bytes payload{0x42, 0x2a};
+    require(host.transport().send(1, payload));
+    ++room.network.round;
+    std::optional<net::Received> received;
+    for (unsigned attempt = 0; attempt < 256; ++attempt) {
+        auto frame = guest.transport().poll();
+        if (!frame) break;
+        if (frame->frame == payload) { received = std::move(frame); break; }
+    }
+    expect(received && received->from == 0 && received->frame == payload,
+        "the retained stream envelopes game frames and maps the receiving peer");
+    require(guest.transport().send(0, payload));
+    ++room.network.round;
+    received.reset();
+    for (unsigned attempt = 0; attempt < 256; ++attempt) {
+        auto frame = host.transport().poll();
+        if (!frame) break;
+        if (frame->frame == payload) { received = std::move(frame); break; }
+    }
+    expect(received && received->from == 1 && received->frame == payload,
+        "the retained stream maps the returning sender back to its roster index");
+}
 }
 void atomic_game_configuration() {
     Room room(3); room.all_ready();
@@ -828,8 +918,8 @@ void early_freeze_cancellation() {
 }
 int main() {
     try {
-        early_freeze_cancellation(); cancellation_during_roster_confirmation(); asynchronous_roster_lock(); credential_delivery_retry(); atomic_game_configuration(); codec(); authority_and_revisions(); chat_contracts(); recovery_and_budgets(); send_failures_and_envelopes();
-        admission_kick_close(); concurrent_staging_departures(); cancel_send_failure(); editable_team_rules(); start_races(); guest_waits_for_own_barrier(); committed_guest_barrier_failure_is_typed(); mesh_refusal_and_start_gate();
+        revised_layer_join(); early_freeze_cancellation(); cancellation_during_roster_confirmation(); asynchronous_roster_lock(); credential_delivery_retry(); atomic_game_configuration(); codec(); authority_and_revisions(); chat_contracts(); recovery_and_budgets(); send_failures_and_envelopes();
+        admission_kick_close(); concurrent_staging_departures(); cancel_send_failure(); editable_team_rules(); start_races(); guest_waits_for_own_barrier(); committed_guest_barrier_failure_is_typed(); mesh_refusal_and_start_gate(); retained_transport_maps_room_peers();
         std::string baseline, nine_baseline, close_three_baseline, close_nine_baseline;
         for (const auto workers : {1U, 2U, 4U, 8U}) {
             const auto close_three = close_inside_start_drain(3, workers);

@@ -7,7 +7,15 @@
 #include "eawr/platform/campaign_battle_view.hpp"
 #include "eawr/script/foc/tactical_ai.hpp"
 
+#include "eawr/data/xml.hpp"
+#include "eawr/core/load_note.hpp"
+
 #include <memory>
+#include <optional>
+#include <set>
+#include <string>
+#include <string_view>
+#include <vector>
 
 namespace eawr::sim::tactical { class TacticalSession; }
 
@@ -81,7 +89,7 @@ struct SpaceEntryInputs {
 };
 
 struct SpaceEntryPlan;
-// ADR-020: final setup only; controller policy remains explicitly opt-in.
+// ADR-020: final setup only; stage_battle derives the policy from active human seats.
 [[nodiscard]] core::Result<void> prepare_battle_controllers(sim::tactical::TacticalSetup&,
     const sim::tactical::TacticalContent&);
 // Retained rows whose type has no upgrade object in `tables` (planetary corruption markers, a mod's galactic-only
@@ -104,7 +112,10 @@ struct SpaceEntryPlan {
     std::vector<std::string> notes{};           // passengers left out of the entry because their transport is not in it
 };
 
-struct SpaceFormationResult { bool attacker_cinematic_admitted{}; };
+struct SpaceFormationResult {
+    bool attacker_cinematic_admitted{};
+    std::vector<std::string> notes{}; // form-up data that fell back instead of refusing the entry
+};
 // WGT-45..48: load-time registration/formation. Optional target coordinates do not affect poses.
 [[nodiscard]] core::Result<SpaceFormationResult> form_space_entry(battle::BattleStart&,
     const SpaceEntryInputs&, const SpaceEntryPlan&, std::optional<sim::math::Vec3> invader_target);
@@ -126,6 +137,7 @@ struct SpaceFormationResult { bool attacker_cinematic_admitted{}; };
 class StockSpaceEntry final {
 public:
     void memory_inventory(diagnostics::GcMemory&) const;
+    [[nodiscard]] std::vector<core::LoadNote> load_notes() const;
     [[nodiscard]] core::Result<ResolvedConflictEntry> resolve(const ConflictRecord&,
         const sim::galactic::GalacticSnapshot&, sim::EntityId first_free) const;
     [[nodiscard]] core::Result<sim::tactical::TacticalContent> content(const ConflictRecord&) const;
@@ -148,6 +160,20 @@ private:
         const vfs::Vfs&, const data::Catalog&, const data::galactic::GalacticData&,
         const units::GalacticTypeTable&, const CampaignSetupPlan&, std::string_view);
 };
+// CGS-22: only an absent variant base (EAWR-XML-0008) lets stock preparation skip a named object type; every other
+// resolve failure still refuses the campaign start.
+[[nodiscard]] bool stock_name_skippable(const core::Diagnostic&);
+// The names skipped under CGS-22, computed once per preparation. Resolution of a stock-content name goes through
+// resolve_stock_name: an absent variant base leaves the name out (one load note per name, however many sites ask),
+// every later site consults the same set via `contains`, and any other failure is returned unchanged.
+struct StockNameSkips {
+    std::vector<core::LoadNote> notes;
+    std::set<std::string> names; // upper-cased, trimmed
+    [[nodiscard]] bool contains(std::string_view name) const;
+};
+// Success holding nullopt means the name was skipped (noted in `skips`); failure is any other resolve error.
+[[nodiscard]] core::Result<std::optional<data::EffectiveObject>> resolve_stock_name(const data::Catalog&,
+    std::string_view name, data::Category, std::string_view tag, StockNameSkips& skips);
 [[nodiscard]] core::Result<std::shared_ptr<const StockSpaceEntry>> prepare_stock_space_entry(
     const vfs::Vfs&, const data::Catalog&, const data::galactic::GalacticData&,
     const units::GalacticTypeTable&, const CampaignSetupPlan&, std::string_view multiplayer_difficulty = {});

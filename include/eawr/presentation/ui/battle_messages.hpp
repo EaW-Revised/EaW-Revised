@@ -6,8 +6,8 @@
 
 #include "eawr/core/diagnostic.hpp"
 #include "eawr/data/ui/command_bar.hpp"
-#include "eawr/data/xml.hpp"
-#include "eawr/vfs/vfs.hpp"
+#include "eawr/data/xml_fwd.hpp"
+#include "eawr/vfs/vfs_fwd.hpp"
 
 #include <cstdint>
 #include <string>

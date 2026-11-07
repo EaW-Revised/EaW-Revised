@@ -1,4 +1,5 @@
 #include "eawr/data/ui/movie.hpp"
+#include "eawr/vfs/vfs.hpp"
 #include "eawr/core/text.hpp"
 
 #include "eawr/core/sha256.hpp"

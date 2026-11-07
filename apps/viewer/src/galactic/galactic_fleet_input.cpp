@@ -495,11 +495,11 @@ bool GalacticMode::State::fleet_drop(std::uint64_t id, Vector2 point, bool submi
                 if (std::any_of(dragged_stack.begin(), dragged_stack.end(),
                         [target](auto fleet) { return sim::galactic::holds_fleet(*target, fleet); })
                     || sim::galactic::holds_fleet(*target, id) || !local_fleet(*this, *target->fleet)) return false;
-                intent = galactic_view::DropIntent{galactic_view::DropKind::merge, id, *target->fleet, selected_planet, {}};
+                intent = galactic_view::DropIntent{galactic_view::DropKind::merge, id, *target->fleet, selected_planet, {}, {}, {}, {}};
             } else {
                 if (source->orbit_slot == orbit_slot) return false;
                 intent = galactic_view::DropIntent{galactic_view::DropKind::orbit_slot, id, 0, selected_planet, {},
-                    orbit_slot};
+                    orbit_slot, {}, {}};
             }
             break;
         }
@@ -525,7 +525,7 @@ bool GalacticMode::State::fleet_drop(std::uint64_t id, Vector2 point, bool submi
                 const auto slot = stack_icon_slot(fleet_drag_planet, static_cast<std::uint8_t>(icon));
                 if (fleet_drag_planet != source->orbit) { destination = fleet_drag_planet; destination_slot = slot; break; }
                 if (!slot || source->orbit_slot == *slot) return false;
-                intent = galactic_view::DropIntent{galactic_view::DropKind::orbit_slot, id, 0, source->orbit, {}, *slot};
+                intent = galactic_view::DropIntent{galactic_view::DropKind::orbit_slot, id, 0, source->orbit, {}, *slot, {}, {}};
                 break;
             }
             for (const auto& [key, badge] : fleet_badges) {
@@ -539,7 +539,7 @@ bool GalacticMode::State::fleet_drop(std::uint64_t id, Vector2 point, bool submi
                     const auto* roster = command_roster(key.first);
                     if (!roster || !roster->accessible || !roster->allied
                         || !galactic_view::fleet_can_land(*published_snapshot, galaxy->local.player, id, dragged_stack)) return false;
-                    intent = galactic_view::DropIntent{galactic_view::DropKind::land, id, 0, key.first, {}};
+                    intent = galactic_view::DropIntent{galactic_view::DropKind::land, id, 0, key.first, {}, {}, {}, {}};
                     break;
                 }
                 if (badge.owner != galaxy->local.player) {
@@ -561,7 +561,7 @@ bool GalacticMode::State::fleet_drop(std::uint64_t id, Vector2 point, bool submi
                 }
                 if (!target || target == id || !local_fleet(*this, target)
                     || std::find(dragged_stack.begin(), dragged_stack.end(), target) != dragged_stack.end()) return false;
-                intent = galactic_view::DropIntent{galactic_view::DropKind::merge, id, target, source->orbit, {}};
+                intent = galactic_view::DropIntent{galactic_view::DropKind::merge, id, target, source->orbit, {}, {}, {}, {}};
                 break;
             }
             if (!intent && !destination) {

@@ -4,6 +4,7 @@ namespace eawr::presentation::godot_backend {
 void EawrLanLobby::open_lobby() {
     page_ = Page::lobby;
     impl_->prompt.reset();
+    impl_->host_pending = false; impl_->load_pending = false;
     build_page(lobby_dialog);
     PageState& state = *state_;
     const BuiltDialog& dialog = *state.dialog;
@@ -163,12 +164,11 @@ void EawrLanLobby::open_lobby() {
         }
     }
     if (impl_->join_selection.source() == model::LobbySourceKind::online) {
-        // The online list keeps the sort headers; the type column shows the host. The filter and the
+        // The online list keeps the sort headers and the type column shows the game type. The filter and the
         // typed address are LAN features.
         for (const char* id : {"IDC_SET_FILTER_BUTTON", direct_button}) {
             if (auto* button = EAWR_CONTROL(EawrUiButton, id)) button->set_disabled(true);
         }
-        if (auto* host_column = EAWR_CONTROL(EawrUiButton, "IDC_INTERNET_GAME_TYPE_BUTTON")) host_column->set_text("Host");
         if (auto* host = EAWR_CONTROL(EawrUiButton, "IDC_LAN_HOST_GAME_BUTTON")) {
             host->set_text("Host Online");
             host->set_disabled(!impl_->online_rooms || resources.dialogs->script.find(host_dialog) == nullptr);
@@ -332,6 +332,9 @@ void EawrLanLobby::refresh_lobby() {
     // Online ping stays unknown ("?"): the service round trip is not the game's.
     if (match_ && !online) apply_lan_lobby_ping(impl.games, match_->view());
     impl.shown = model::arrange_games(impl.games, impl.filter, impl.sort);
+    // #5512: a listed Campaign room means a Join may follow; load its content on a worker now, not on the UI thread then.
+    if (std::any_of(impl.shown.begin(), impl.shown.end(), [](const model::LobbyGame& game) { return game.game_type == galactic_game_type; }))
+        static_cast<void>(prefetch_galactic_content());
     if (online) {
         // One page of the filtered rooms is drawn; `shown` is that page, so a row index maps straight to it.
         impl.online_rooms_total = impl.shown.size();
@@ -373,7 +376,7 @@ void EawrLanLobby::refresh_lobby() {
         const model::LobbyRowText row = online ? model::online_row_text(game) : model::lobby_row_text(game);
         EawrLobbyGameList::Row drawn;
         drawn.locked = online && game.passworded;
-        drawn.cells = {text(row.name), online ? text(row.type) : resolved(resources.text, row.type), text(row.players),
+        drawn.cells = {text(row.name), resolved(resources.text, row.type), text(row.players),
                        text(row.map), text(row.ping)};
         // Retail colours: password games yellow, another version dark orange, the rest cyan.
         drawn.colour = game.passworded ? Color(1.0F, 0.9F, 0.2F) : !game.version_matches ? Color(0.75F, 0.4F, 0.05F)
@@ -437,6 +440,7 @@ void EawrLanLobby::join_address(const std::string& address, const std::string& g
         show_failure("Choose a hosted game with two to nine human seats."); return;
     }
     if (!impl_->join_selection.begin(model::LanAddressTarget{address})) return;
+    static_cast<void>(prefetch_galactic_content());   // a direct address may be a Campaign room
     std::vector<sim::tactical::PlayerId> owners(impl_->direct_seats);
     std::iota(owners.begin(), owners.end(), 1U);
     match_->configure_seats(std::move(owners));

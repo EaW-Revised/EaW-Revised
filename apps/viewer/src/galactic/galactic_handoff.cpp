@@ -1,6 +1,8 @@
 #include "galactic_mode_internal.hpp"
+#include "bink_load_notes.hpp"
 #include "eawr/battle/start.hpp"
 #include "campaign_loading_hud.hpp"
+#include "live_session_view.hpp"
 #include "space_proof_route.hpp"
 
 #include "eawr/campaign/conflict_entry.hpp"
@@ -39,6 +41,7 @@ GalacticMode::State::~State() {
     battle_dialog.reset(); // Its root belongs to galaxy_container, deleted below.
     audio.reset();
     tactical.reset();
+    try { flush_bink_load_notes(); } catch (...) { /* Notes must not prevent returning to the galaxy. */ }
     if (tactical_host) memdelete(tactical_host);
     if (game) game->stop();
     if (loading) memdelete(loading);
@@ -57,6 +60,7 @@ void GalacticMode::State::release_battle_presentation() {
     retreat_dialog.reset(); retreat_view.reset(); retreat_snapshot.reset(); retreat_dialog_open = false; retreat_completion_sent = false;
     if (tactical) tactical->close_requested();
     tactical.reset();
+    try { flush_bink_load_notes(); } catch (...) { /* Continue the battle transition. */ }
     if (tactical_host) memdelete(tactical_host);
     tactical_host = nullptr;
     if (loading) { loading->dismiss(); memdelete(loading); }
@@ -719,7 +723,7 @@ bool GalacticMode::State::prepare_handoff() {
         battle->replay.setup = entry.tactical;
         battle->start = std::move(selected.start);
         battle->content = {tactical_content.sensors, tactical_content.durability, tactical_content.motion,
-            tactical_content.combat, tactical_content.abilities, tactical_content.fog};
+            tactical_content.combat, tactical_content.abilities, tactical_content.fog, {}, {}};
         battle->victory = tactical_content.victory;
         battle->economy = tactical_content.economy;
         battles.push_back(battle);

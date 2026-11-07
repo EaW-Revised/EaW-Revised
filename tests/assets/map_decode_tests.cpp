@@ -1,4 +1,6 @@
 #include "map_test_support.hpp"
+#include <system_error>
+#include "eawr/vfs/vfs.hpp"
 
 namespace eawr::tests::map_contracts {
 // --- Terrain semantics T1, T2 and T4 ----------------------------------------

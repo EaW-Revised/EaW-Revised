@@ -1,14 +1,17 @@
 #include "live_session_view.hpp"
 #include "live_session_internal.hpp"
+#include "eawr/platform/live_ai.hpp"
 #include "eawr/skirmish/land_content.hpp"
 #include "eawr/skirmish/land_start.hpp"
 #include "eawr/scene/scene.hpp"
 #include <godot_cpp/classes/json.hpp>
+#include <system_error>
 #include <godot_cpp/variant/dictionary.hpp>
 #include <godot_cpp/variant/array.hpp>
 #include <algorithm>
 #include <cmath>
 #include <fstream>
+#include <iostream>
 #include <iterator>
 #include <limits>
 #include <set>
@@ -116,11 +119,16 @@ bool LiveSessionView::prepare_land(const vfs::Vfs& filesystem, const data::Catal
         skirmish::Fixture fixture;
         fixture.map = map_path; fixture.slots = *options_.skirmish.slots;
         fixture.seed = options_.skirmish.seed.value_or(0); fixture.match = options_.skirmish.match;
-        if (std::any_of(fixture.slots.begin(), fixture.slots.end(), [](const auto& slot) { return !slot.human; }))
+        // #3207 G1-b: a non-human lobby slot runs the land AI (the land mode of the FoC host) unless the AI is off.
+        const bool ai_enabled = options_.ai.value_or(true);
+        if (!ai_enabled && std::any_of(fixture.slots.begin(), fixture.slots.end(), [](const auto& slot) { return !slot.human; }))
             throw std::runtime_error("land live view P1 requires human lobby slots");
+        if (std::none_of(fixture.slots.begin(), fixture.slots.end(), [](const auto& slot) { return slot.human; }))
+            throw std::runtime_error("land live view needs at least one human lobby slot");
         units::UnitTables empty;
         auto discovered = skirmish::read_land_start_inputs(fixture, filesystem, catalog, empty);
         if (!discovered) throw std::runtime_error(core::format_diagnostic(discovered.error()));
+        skirmish::set_land_vehicles_only(discovered.value(), options_.land_vehicles_only);
         fixture.map_sha256 = discovered.value().common.map_sha256;
         scene::VfsAssetCache cache(filesystem);
         units::LoadInput load;
@@ -130,7 +138,9 @@ bool LiveSessionView::prepare_land(const vfs::Vfs& filesystem, const data::Catal
         for (const auto& slot : fixture.slots) {
             const auto faction = std::find_if(discovered.value().factions.begin(), discovered.value().factions.end(),
                 [&](const auto& row) { return row.faction == slot.faction; });
-            if (faction != discovered.value().factions.end()) requested.insert(faction->forces.begin(), faction->forces.end());
+            if (faction == discovered.value().factions.end()) continue;
+            requested.insert(faction->forces.begin(), faction->forces.end());
+            requested.insert(faction->vehicle_forces.begin(), faction->vehicle_forces.end());
         }
         if (requested.empty()) throw std::runtime_error("selected land factions have no authored starting companies");
         load.types.assign(requested.begin(), requested.end());
@@ -143,6 +153,7 @@ bool LiveSessionView::prepare_land(const vfs::Vfs& filesystem, const data::Catal
         if (!tables) throw std::runtime_error(core::format_diagnostic(tables.error()));
         auto inputs = skirmish::read_land_start_inputs(fixture, filesystem, catalog, tables.value());
         if (!inputs) throw std::runtime_error(core::format_diagnostic(inputs.error()));
+        skirmish::set_land_vehicles_only(inputs.value(), options_.land_vehicles_only);
         // No bindings file (menu start): the authored adapter supplies the gates; the file is an override.
         skirmish::LandContentInputs bindings;
         if (options_.land_bindings.empty()) {
@@ -152,13 +163,25 @@ bool LiveSessionView::prepare_land(const vfs::Vfs& filesystem, const data::Catal
         } else bindings = read_bindings(options_.land_bindings);
         auto start = skirmish::build_land_start(fixture, inputs.value(), bindings);
         if (!start) throw std::runtime_error(core::format_diagnostic(start.error()));
+        // #3207 G1-b: the AI players of the land start. The scripted session wraps the land TacticalSession in the
+        // session start (LiveSession::Options::scripts); the closure, template and difficulty come from the mounted data.
+        const auto& land_start = start.value();
+        if (std::any_of(land_start.start.players.begin(), land_start.start.players.end(),
+                [](const auto& player) { return player.lobby && !player.human; })) {
+            auto ai = platform::live_land_ai(land_start, inputs.value(), tables.value(), filesystem);
+            if (!ai) throw std::runtime_error("land AI scripts: " + core::format_diagnostic(ai.error()));
+            for (const auto& note : ai.value().load_notes) std::cerr << core::format_diagnostic(note) << std::endl;
+            ai_scripts_ = std::move(ai.value().scripts);
+            ai_players_ = std::move(ai.value().players);
+        }
         start_ = std::move(start.value().start);
         setup_ = start_->setup;
         land_content_ = std::move(start.value().content);
-        content_.emplace(); // Land P1 has no combat, fog, economy UI or AI services.
+        content_.emplace(); // Land P1 has no combat, fog or economy UI; the AI (G1-b) is mounted above.
         economy_ = land_content_->economy; victory_ = land_content_->victory;
         tables_ = std::move(tables).value();
-        player_ = options_.player.value_or(fixture.slots.front().slot);
+        player_ = options_.player.value_or(std::find_if(fixture.slots.begin(), fixture.slots.end(),
+            [](const auto& slot) { return slot.human; })->slot); // the first human (one exists, checked above)
         if (std::none_of(setup_->players.begin(), setup_->players.end(), [&](const auto& p) { return p.player_id == player_; }))
             throw std::runtime_error("land local player is not in the start");
         for (const auto& player : setup_->players) team_of_player_[player.player_id] = player.team_id;

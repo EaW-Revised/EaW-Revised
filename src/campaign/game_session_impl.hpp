@@ -60,9 +60,13 @@ public:
     std::map<galactic::PlayerId, std::string> story_factions;
     std::vector<GameStoryNotice> story_notices; // current publication only, never saved/hashed
     core::Result<void> story_notice(GameStoryNotice notice);
+    // GuiClick commands executed this session tick per seat (max_gui_clicks_per_tick); a bound, never saved or hashed.
+    std::uint64_t gui_click_tick{};
+    std::map<galactic::SeatId, unsigned> gui_clicks_this_tick;
     // #683: the live plot engine; absent when the campaign names no plots. Fed by story_notice and the
     // assigned-technology notice, serviced once per galaxy step (GFS-15).
     std::optional<galactic::story::Engine> story_engine;
+    std::shared_ptr<const bool> story_plot_alive = std::make_shared<const bool>(true); // appliers hold a weak_ptr: they fail cleanly once this Impl is gone
     std::vector<galactic::story::Triggered> story_triggers; // current publication only
     // WST-58: the holocron goals per plot owner. Checkpointed after the plot state but outside the state digest on
     // purpose: a goal row exists only because a digested plot event triggered once, so it carries no state a peer
@@ -77,6 +81,7 @@ public:
     const sim::PartitionExecutor* executor{}; // the running step's, for rewards applied inside it
     std::set<std::string> story_reported;     // refusal texts already published (diagnostics only, never saved)
     core::Result<void> apply_story_rewards();
+    bool force_click_request(galactic::story::Triggered& record);
     // WST-20 (3)/55: the engine's Lua callbacks, forwarded to the story scripts before the rewards are applied.
     std::shared_ptr<const GalacticStoryScripts> story_scripts;
     std::uint64_t story_call_sequence{};
@@ -108,6 +113,8 @@ public:
     // start of the next step so a capture or recapture right after either still sees the window it belongs to.
     HistoryBase history;
     std::optional<HistoryBoundary> scheduled_base;
+    std::map<sim::SeatId, std::uint64_t> network_producer_sequences;
+    std::vector<std::uint8_t> network_resume_state;
     void rebase_history();
     struct Child {
         ConflictRecord conflict;
@@ -182,6 +189,9 @@ public:
     std::map<sim::EntityId, RecordedConflict> replay_selected;
     const galactic::Seat* seat(const galactic::SeatId id) const;
     bool human_side(const galactic::PlayerId owner) const;
+    // Co-op (owner deviation 2026-10-30): the agreed roster has at most one human side, so no human opposes another and
+    // the pre-battle vote never expires. Derived from the sealed seat control, identical on every peer; not stored.
+    bool untimed_votes() const;
     tactical::PlayerId player(const galactic::SeatId id) const;
     tactical::CampaignReserveAdmission reserve_admission(const tactical::PlayerId owner) const;
     core::Result<void> refresh_battle_seats(bool initial_policy = true);

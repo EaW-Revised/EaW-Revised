@@ -16,6 +16,89 @@ retain IEEE binary32 interchange bits; their arithmetic uses the integer-only
 authoritative backend (GREF-26), without host floating operations. Compression and chunking are transport
 details. A checkpoint over 64 MiB fails the save; nothing is ever truncated.
 
+## Capacity and continuation qualification
+
+`galactic_checkpoint_capacity` exercises distributable CPU-only checkpoints at completed
+tick 2, with eight players, two live Lua scheduler graphs and the following synthetic loads:
+
+| Planets | Fleets | Fleet members | Reachable nested Lua rows per host |
+|---:|---:|---:|---:|
+| 8 | 16 | 64 | 32 |
+| 150 | 128 | 2,048 | 256 |
+| 4,096 | 1,024 | 32,768 | 4,096 |
+
+Measured 2026-10-28 using the Windows MSVC Release area test at `c2bbbca9`
+(CPU only, alongside the other focused CTests):
+
+| Planets | Checkpoint bytes | Decoded section bytes | Capture ms | Restore ms | Working set bytes | Process peak bytes |
+|---:|---:|---:|---:|---:|---:|---:|
+| 8 | 18,645 | 18,101 | 1.934 | 4.358 | 8,003,584 | 8,138,752 |
+| 150 | 194,301 | 193,757 | 10.582 | 36.534 | 9,756,672 | 10,719,232 |
+| 4,096 | 3,270,261 | 3,269,717 | 171.788 | 9,135.867 | 32,849,920 | 48,087,040 |
+
+All three restored with zero historical simulation ticks and exact recapture. The
+largest fixture uses 3.119 MiB (4.873% of the cap), leaving 63,838,603 encoded bytes
+of headroom for this fixture. Its observed 9.136-second restore is a material cost
+despite the small byte count; the byte cap alone does not qualify a live recovery
+deadline or a main-thread restore. The 45.859 MiB process peak has the scope below.
+
+The large case reaches the current **graph-enabled** planet limit in setup validation,
+not a retail or mod planet limit. Each Lua row retains a number, a 64-byte string and
+a nested table. The test fails on capture refusal or a checkpoint exceeding 67,108,864
+bytes, verifies exact recapture/state equality, and requires zero replayed restore ticks.
+Its `CHECKPOINT_CAPACITY` observations report total encoded bytes, decoded section bytes,
+capture/restore microseconds and Windows process working-set/peak working-set bytes.
+The peak is cumulative over the three cases and includes the original owner, restored
+owner, verification recapture and parsed checkpoint; it is not an isolated allocator
+measurement of the new owner. Non-Windows runs report zero for unavailable process
+memory observations. Timings and memory observations are not regression thresholds.
+These fixtures qualify their listed state only: they do not bound every combination
+of fog, production queues, native AI caches, retained battles or mod-authored Lua graphs.
+
+Uncompressed transfer serialization time is `checkpoint_bytes * 8 / bits_per_second`.
+For the measured checkpoints the corresponding payload-only times are:
+
+| Planets | 20 Mbit/s, seconds | 100 Mbit/s, seconds |
+|---:|---:|---:|
+| 8 | 0.007458 | 0.0014916 |
+| 150 | 0.0777204 | 0.01554408 |
+| 4,096 | 1.3081044 | 0.26162088 |
+
+Eight copies of the largest checkpoint retain 26,162,088 bytes of staged payload;
+eight receivers sharing 20/100 Mbit/s host egress require at least 10.4648352/
+2.09296704 seconds of payload transmission. These are byte-based lower bounds,
+not measured transport or catch-up latency, and exclude retained command logs.
+
+At the complete 64 MiB budget this is **26.8435456 seconds at 20 Mbit/s** and
+**5.36870912 seconds at 100 Mbit/s**, per receiver, before protocol overhead, latency,
+restore or catch-up. For eight receivers sharing a single host egress link the aggregate
+payload is 512 MiB: at least 214.7483648 or 42.94967296 seconds respectively. Neither the
+old 43.75 MiB estimate nor compression savings establish capacity. A bounded transfer
+must budget its staged bytes separately from restored-owner memory and retain clean
+oversize refusal; increasing a transport queue is not a capacity qualification.
+
+The AI continuation qualification (legacy EAWR-4477) uses the real checkpoint at tick 2,
+fresh perception/usability owners, and 90 continued production-site admission decisions
+on 1/2/4/8 workers. The version-4 usability component saves policy 4's producer timestamp and ordered
+site list in both archive and record digest. The restored publication retains the same
+list before its saved ten-second deadline.
+`GalacticWorld::goal_reachable`, used by the production selector, reads that publication
+directly. Exact recapture and equal native hashes alone cannot establish decision parity.
+`galactic_ai_checkpoint_drift_qualification` now requires zero decision and hash differences;
+it is a bounded selector-admission witness, not an installed-campaign order trace.
+The measured run at `c2bbbca9` produced **90 differing decisions and zero state-hash
+differences** on each of 1, 2, 4 and 8 workers. Thus equal archive hashes demonstrably
+miss this gameplay-input divergence.
+
+The shared format freeze retains the ordered policy-4 site IDs for every retained
+player/planet row in `GALACTIC_USABILITY`, including the value in the record digest as
+well as capture/restore. Its timestamps, pending invalidations and publication revision
+already persist. Rebuilding from current inputs would refresh a historically retained
+value without proving equivalence to its pre-save producer inputs. The shared freeze updates the component/domain versions and changes
+the divergence witness into an equality assertion. Derived execution
+routes and component-size publications remain reconstruction responsibilities; this
+finding does not establish another missing persisted field.
+
 ## Header: exactly 304 bytes
 
 | Offset | Width | Field | Rule |
@@ -72,13 +155,14 @@ skipped. IDs from 0x8000 are never part of a state hash.
 | 9 | scripts | one scheduler save per Lua host ([Lua persistence](lua-persistence.md)) | galaxy sections |
 | 10 | child-log | a battle as its entry and commands | v1, below |
 | 11 | child-state | a battle's full state | v8, below |
-| 12 | mod-list | the mod load order | reserved |
+| 12 | mod-list | ordered mounted mod descriptions | v1 |
 | 13 | tactical-return | persistent hero returns, upgrades and structure markers; latest tactical result and its conflict context | v1 |
 | 14 | galactic-ai | completed boundary and versioned native AI components, including retained funding | v1 |
 | 15 | galactic-abilities | live ability preparations and lifecycle | galaxy sections |
 | 16 | campaign-scoring | ordered build, death and ownership counters | galaxy sections |
 | 17 | galactic-owner | full world/session barrier, consumed and future command/native cursors, admission queues, child owners and the story plot state | galaxy v35 |
-| 18 | land-state | terrain identity, occupancy, squad paths, movement and retained contacts | optional v6, absent for space |
+| 18 | land-state | terrain identity, occupancy, squad paths, movement and retained contacts | optional v8, absent for space |
+| 20 | tactical-host | a standalone battle's script host: Lua scheduler, routed script commands, routing cursors, native AI | skirmish saves, v1, below |
 | 0x8000 | presentation-hints | camera and selection per seat; never hashed | player saves |
 | 0x8001 | live-input | deferred local orders and future command envelopes outside the completed simulation frontier | live player saves, v3 |
 | 0x8002 | campaign-identity | authored campaign/set/difficulty, saving seat/faction and optional custom startup economy/hero values (WGP-190) | player saves of authored campaigns, v2 |
@@ -155,7 +239,7 @@ tick of the battle; `RestoreWork` counts the ticks re-simulated and the bytes re
 child-state section replaces this once a battle's full state can be restored; a reader then
 accepts both.
 
-### Land state (ID 18, version 6)
+### Land state (ID 18, version 7)
 
 Land tactical checkpoints add an optional `land-state` section; space checkpoints
 omit it entirely. A land reader requires it alongside child-state and never
@@ -163,8 +247,10 @@ reconstructs a missing land section by replaying. The section begins with its
 u16 ID/version, the terrain identity and the content-supplied Clear bit, followed
 by occupancy sources/revision/changed cells, movement and retained contacts,
 the per-squad request ledger, shared combat target/next-scan ledger and in-flight search checkpoints.
-Version 6 validates the surviving roster against the original bindings by identity, preserving member
-slots through deaths and compacted squad indices. Combat health, weapon pulses, live projectiles,
+Version 7 validates the surviving roster against the original bindings by identity (profile, mask, authored
+extents and spacing gap), preserving members through deaths and compacted squad indices. Member slots and each
+squad's rear extent are mutable: the rows layout re-maps them when the path heading leaves the last mapped axis
+(WLPA-84), so the section also stores each member's hard extents and gap and each squad's mapped axis and mapped flag. Combat health, weapon pulses, live projectiles,
 next projectile identity and delayed blast delivery remain in the existing child-state fields;
 they are included in the existing partitioned canonical encoding. Terrain/water terminals publish
 one projectile-expired event with ground-contact reason 6 at the contact and use the shared blast path.
@@ -218,7 +304,7 @@ visibility masks, reveal ranges and the derived tractor-target flag are retained
 actual publication, so reading the snapshot immediately after restore preserves the save
 barrier view before the next tick rebuilds derived effects. Other instance flags are rebuilt
 from retained components and bound content. The queued
-and executed commands are reconstructed from the sealed child log at the saved tick.
+and executed commands are reconstructed from the sealed child log at the saved tick. Each saved submitted-command cursor must equal the sealed log's or lead it only to an already executed tick: a reinforcement whose position search failed advances its issuer's cursor but is never recorded (SAE-10). The script host's routing cursors (section 20, and the campaign child host) follow the same rule: each must be at least the recorded input's and stays inside an executed tick.
 
 Sliced path searches retain their copied collision inputs and deterministic expansion cursor.
 Their derived search scratch is reconstructed by running that search to the cursor; this
@@ -231,6 +317,49 @@ The decoder enforces byte, count, nesting and decoded-memory budgets, then valid
 content bindings, collection topology and cross-references. The restored canonical state hash
 must equal the child log's saved hash, and the full state must re-encode identically before
 it can be swapped into the running session. `RestoreWork.resimulated_ticks` is zero on this path.
+
+### Skirmish battle saves: tactical host (ID 20, version 1)
+
+A skirmish battle save (`include/eawr/checkpoint/skirmish.hpp`) is a tactical checkpoint (seats,
+child-log, child-state, and land-state for a land battle) plus the required tactical-host
+section. The header's `lua_save` identity is the digest of the AI's frozen Lua/XML closure, so
+a save loads only where the same scripts and AI data are mounted; `content` binds the unit data
+as for every tactical checkpoint.
+
+The section uses the framing of the galactic script host's battle part (section 9's child
+host) without the campaign-only timeline, cursors and attribution: a u32 tag = 1, the
+completed tick u64, the scheduler save as a length-prefixed string, a u32 native presence
+(0 or 1) and, when present, the native AI continuation as length-prefixed bytes, then a u64
+count of script commands routed to the next tick (tick, issuer and sequence u64, the verb
+string, the arguments as one script value list), then a u64 count of routing cursors
+(player u32, tick u64, sequence u64) in ascending player order. Counts are bounded by the
+bytes left; the decoder refuses trailing bytes and any noncanonical encoding.
+
+Loading restores the world from child-state without re-simulating, then restores the host into
+a fresh scheduler for the saved battle and binds its engine (the campaign child's order). The
+restored host must save back to the same section bytes before the session is returned. A
+tactical checkpoint without the section is refused by the skirmish loader; the plain tactical
+loader accepts the section and ignores it.
+
+A player saves a local single-player space skirmish from the in-game menu's Save (legacy EAWR-3989): the
+simulation thread takes the battle between two ticks (also while the menu pauses it) through
+`LiveSession::request_save`, and a disk worker writes it with `platform::write_battle_save` as
+`<save folder>/<name>.eawrsave`, the folder and name rules of campaign saves (`--eawr-save-dir`).
+The file is the skirmish battle save above plus a presentation-hints section (0x8000, version 1)
+that only the viewer reads: `apps/viewer/src/skirmish_save_hints.hpp` ("EAWRSKH" v1: the camera's
+render target, zoom and yaw, and the map's name for the list). The save list shows such a file as a
+skirmish save; loading one from the list is not built yet.
+
+Saves are not kept across format changes before 1.0. The one committed save,
+`tests/skirmish/fixtures/saves/tactical-v2-host.eawr-ckp` (the content-free tactical-v2 battle
+through a host without scripts, saved two ticks after its last command), is checked by
+`skirmish_save_fixture`: a fresh save must equal it byte for byte, and it must load and continue
+with every hash equal on 1 and 8 workers. After a format change it is regenerated with
+`skirmish_save_tests --save-fixture <replay> <save> --write`, or from that test's log on a pool
+build with `tools/replay/skirmish_save_fixture.py`, and its pin in `tools/publish_scan/config.json`
+moves with it. Heavy scene saves for measurements are never committed:
+`tools/performance/remake_bench.py run --from-save` makes them per viewer build from the scene
+recipe (by default 120 ticks before the scene's measurement window) and keeps them in the ignored `out/`.
 
 ## Restore is validate-then-swap
 
@@ -285,7 +414,12 @@ writes maintain active rows; the hero-return owner supplies scheduled rows only 
 scheduling/retirement boundaries (WGS-23/24, WGCH-76). Saves restore both the monitor
 projection and return records without inferring a kill from disappearance or replaying
 the defeat callback. Older payload encodings are refused.
-Mod-list contains a zero u32 count, and nonzero mod-list identities are refused. Scripts use the
+Mod-list version 1 contains the bounded `eawr::mods` description encoding: u8 codec version 1,
+u8 completeness, u32 count, then ordered entries with key kind, u32-length UTF-8 key and name,
+optional authored version, and optional 32-byte content checksum. Unknown or manual identities
+carry no key; incomplete metadata is distinct from a known empty chain. Strings, counts, flags,
+keys and lengths are validated by the description codec. The header mod-list digest is reserved
+zero; descriptions supply notes and do not relax content or state compatibility checks. Scripts use the
 optional host payload described below. The conflict record retains force role, galactic and tactical
 type IDs, carrier identity, structure markers and returned upgrades before its tactical setup.
 
@@ -362,7 +496,7 @@ so those entries stay until then.
 
 ### Story plot state (galaxy v35)
 
-The campaign owner blob is format 5. After the auto-resolve resolver bytes it ends with an optional story state
+The campaign owner blob requires format 6. After the auto-resolve resolver bytes it ends with an optional story state
 (presence byte, then): the started flag, the story clock (Q24), the trigger sequence (u64), the sub-plots in table order
 (name, owning player, active flag, then every event by name with its triggered, active and disabled flags, start time,
 elapsed accumulator and last-seen time, tech-level primed flag and inactivity stamp) and the flag table (name to i64, names
@@ -647,6 +781,10 @@ WFR-01 selects raw domain 10 when any live unit has a nonzero fire-range bonus:
 each unit then archives seven combat bonus values rather than six. Zero fire-range
 state retains domain 9 and its exact six-slot bytes; domain 10 with all range
 values zero is noncanonical and refused. Both domains preserve checkpoint continuation.
+TL-03 adds 2 to the domain (11 without, 12 with a fire-range bonus) when any live unit has the Lua
+`Make_Invulnerable` flag: each unit then archives one extra boolean after its position history.
+A flagged domain with no flagged unit is noncanonical and refused. Sessions without the flag keep
+domain 9 or 10 and their exact earlier bytes, so no stored checkpoint or replay needs regeneration.
 It includes the retained hardpoint of each squadron's formation attack destination,
 independent of its team's explicitly ordered hardpoint. It retains waypoint/retry state, ordinary turret
 pointing, charged-shot and MC30 state, garrison birth marks, named ability locks,
@@ -654,7 +792,10 @@ radar publication, departure controllers, beacons, delayed blast amounts/mesh
 contacts, the two preceding positions of a moving target (PHST), and each squadron's accepted
 attack path with its route, member trackers and refresh state (SQAP), and each player's
 collected tactical salvage tally. Transform caches
-remain derived. The shared Lua scheduler uses tactical save-v4; its galactic clock profile uses `eawr-script-galactic-save-v2`.
+remain derived. The shared Lua scheduler uses tactical save-v4; its galactic clock profile uses `eawr-script-galactic-save-v3`.
+The GC scheduler blob retains ascending retired-provider IDs after its clock fields;
+its full and optimized hashes include those IDs. Older GC scheduler blobs are refused.
+The outer scripts section framing is unchanged; see [Lua persistence](lua-persistence.md).
 
 ### Optional tactical controller continuation
 
@@ -711,3 +852,140 @@ normal battle return discards all temporary control state.
 An unsupported takeover records passive mode without stopping the match. Live roots
 and scheduled outputs may retain an inactive seat of their own faction in this
 mode; restore validates membership, and the inactive seat grants no authority.
+
+## Agreed capture and resume metadata
+
+Galaxy sections require version 52 and GC state encoding 18 (domain `eawr-galactic-state-v11`).
+Required section 19 (`multiplayer-resume`, version 1) retains the logical player and seat
+identities, active and departed seat flags, team leads, faction control and AI configuration,
+and producer sequence cursors, independently of ephemeral transport peer indices.
+Its four u64 clocks are completed tick N, first send tick N, first seal tick N and initial
+hash-record tick N. Four SHA-256 values follow: canonical capture commitment, whole-game state digest,
+chained input frontier digest and initial network-monitor state digest. A u64-framed
+network continuation blob follows (at most 64 KiB). A u32 interactive seat is always zero; local observers
+remain outside canonical multiplayer bytes. A u32 player count and player/faction/flags u32
+triples precede a u64-framed roster archive (seats, optional control state, ordered producer cursors).
+The capture commitment hashes `eawr-gc-capture-v1`, the completed tick, galactic frame,
+header frontier and each authoritative section's ID/version/framed bytes except sections 12 and 19.
+Section 12 is descriptive and mounted descriptions can legitimately differ between peers, so it
+is excluded from cross-peer commitment on both solo and multiplayer captures. The host inserts its
+own immutable description into the published file; the container payload hash and strict codec
+still validate it independently. This changes the commitment input, not the replay wire layout.
+Optional presentation and private inbox sections never enter that commitment. Loading requires
+this commitment and an exact recapture of roster, frontier and continuation against the restored owner.
+
+The `GALACTIC_USABILITY` component requires version 4. Every policy, including policy 4,
+retains its ordered site IDs as well as its frame, pending flags and publication revision.
+The record-sync site digest uses `GALACTIC_USABILITY-v2` and includes the same ordered IDs.
+Restore performs no producer refresh and preserves the next ordinary deadline exactly.
+
+### Multiplayer player-save barrier
+
+Only the host can admit the ordinary player-save request through sealed GC input.
+After it executes, every peer stops new gameplay admission and reports the end of its
+already sealed or accepted input. The host chooses their maximum as completed barrier N.
+Peers keep servicing transport and drain all accepted commands below N; no private inbox
+becomes authoritative save input. At N each peer captures and exchanges the canonical
+capture, state and chained-frontier SHA-256 values. Only equal proofs from every peer
+allow the host's release and each peer's scheduled history-base commit.
+
+The host adds local presentation/repository hints after agreement, then queues the bytes
+to the existing atomic disk publisher. Admission resumes independently of disk success;
+a failed write reports a failed save without undoing a peer's committed capture boundary.
+A capture refusal, interrupted roster/timing transition or mismatched proof asks the
+host to release the save barrier with failure before history commit. Only the host's
+terminal release can resolve a barrier: a peer's release-0 is a refusal request sent to
+the host, not a local rollback. The host may refuse on its agreement timeout before
+commit. Once proofs match, peers retain the hold across ordinary completeness timeouts
+until the host's release arrives. A closed host stream or an existing agreed host
+departure ends the peer's session through the normal connection-loss failure route.
+A missing terminal decision is bounded to 120 seconds after matching proofs (or from
+barrier start while still awaiting proofs/refusal). Expiry ends participation with
+`save barrier unresolved: host connection lost`; it never commits or rolls back history.
+Wall-clock affects session termination only. A received terminal decision is serviced
+before expiry, and remaining participants use the existing departure handling.
+Multiplayer tactical player saves retain the existing WGS-152 refusal.
+
+The campaign owner requires version 6 and appends ordered network producer maxima and
+a byte-counted network continuation blob after the story callback sequence. These include refused wire attempts, which consume transport
+sequences even when simulation submission refuses them. Resume retains these maxima along
+with owner cursors across repeated saves, merging each seat by maximum even when absent
+from the fresh transport epoch; a fresh transport epoch starts send/seal/hash clocks at N.
+Save control kinds 86..89 carry drain frontier, host cutoff, three-digest proof and release.
+Each begins with its u8 kind and u64 triggering completed tick. Drain/cutoff append u64,
+proof appends 96 bytes, release appends u8 success. Streams authenticate all voters; only
+the host can choose a cutoff or issue a terminal release. Duplicate contradictory controls refuse.
+
+The network continuation blob is the adapter's canonical shared-clock state: u8 policy,
+u64 speed-window length, u32 maximum changes, u8 pause-actor presence and u32 seat,
+u32 history count with ascending u32 seat/u32 length/u64 tick rows, then u32 debounce
+count with ascending u32 seat/u64 tick rows. Restore checks policy, agreed limits,
+roster, ordering, bounded counts and past ticks before activation. The initial monitor
+digest uses the saved whole-game digest plus these bytes under the existing
+`eawr-galactic-lan-clock-v2` domain for limited policy; unrestricted policy uses the
+whole-game digest directly. This retains shared speed budgets and pause debounce without
+resetting admission on resume. The network continuation is covered by the capture commitment.
+
+
+### Staging distribution and restored launch
+
+GC checkpoint starts retain the format above and GCSU v2. Pre-setup message kinds
+90 through 94 carry manifest, chunk, progress, restore proof and cancellation.
+Every frame begins with u8 kind and u64 selection epoch. The manifest adds u64 file
+length, u32 peer count, u32 staging peer indices in dense setup order, then u32
+encoded-offer length and the ordinary canonical setup offer. Its GCSU payload
+carries the original saved roster, N and file/state/frontier/mapping digests.
+Installed campaign metadata and the original recording setup supply the roster;
+current active/departed seats are validated from required resume section 19.
+
+The manifest may end with one optional extension: a u8 marker, then its payload. Marker 1
+is the recovery identity of a recovery-only room. Marker 2 carries display-only metadata,
+two length-prefixed plain-text blobs: the saved-game description (at most 160 bytes) and
+the save date (at most 80 bytes), both sanitized for menu display. The metadata is
+untrusted text, excluded from the setup offer and from the restore proof. An absent
+extension is the legacy lobby form, and an unknown marker is refused. This is not a
+format bump: these are pre-setup lobby frames that never enter a save or replay, and the
+connect hello already rejects peers with a different build identity, so builds that differ
+here do not exchange manifests.
+
+A chunk adds u32 zero-based index, u8 final flag, at most 65536 file bytes, and,
+only on the final chunk, the file SHA-256 again. Progress adds u64 cumulative
+received bytes. The host permits four outstanding chunks per receiver. Proof
+adds the four 32-byte GCSU digests in file/state/frontier/terms order, after the
+receiver has privately validated its checkpoint and exact restored state.
+Cancellation adds u32 text length and bounded plain-text refusal reason. The
+whole file remains capped at 64 MiB; a silent transfer expires after 30 seconds
+without progress, and the whole transfer expires after 600 seconds. Cancellation
+retains the room and requires a fresh selection epoch for retry.
+
+The mapping commitment binds the epoch, file length, room/options, seed, delay,
+absolute final horizon and each authenticated staging peer/admitted identity to
+its assigned saved logical seat and faction. Membership or consequential choices
+invalidate selection; choosing a new campaign explicitly clears it. Every saved
+active human needs exactly one connected peer, and an inactive seat cannot be
+reactivated by assignment. A new selection clears all ready votes, and the
+ordinary setup acceptance still requires every peer after restore proofs agree.
+The frozen lobby revision supplies a fresh transport epoch. Lockstep records its
+first hash at completed N, seals from N and executes N to N+1, with producer
+sequences continued by saved logical seat. Checkpoint-based in-match recovery
+remains a separately provisioned service; this start does not enable rejoin.
+
+### History boundary and capture failure
+
+A solo SaveRequest schedules the history base at its completed command boundary.
+It does so before the local capture and disk write, so a failed capture or write
+can leave the next save referring to a history base for which no file exists;
+the replay oracle then requires that unavailable base. Multiplayer schedules its
+base only after the peers agree on the canonical capture, independently of disk
+success. Calling `save_game_checkpoint` directly does not move the history base;
+loading a checkpoint schedules the loaded boundary for the next step.
+
+## Campaign transport and rules split
+
+Galaxy sections require version 52, galactic rules 7 and state encoding 18
+(domain `eawr-galactic-state-v11`). Their recorded replay uses format 12 and keeps
+an explicit local/networked transport override independently of campaign balance.
+The setup v2 identity seals the rules flavour as well as transport. Both are
+reconstructed from the saved setup and identities; loading with a different
+flavour or an earlier format is refused. The checked-in replay corpus is upgraded
+with the C++ generators; checkpoint fixtures are produced at test runtime.

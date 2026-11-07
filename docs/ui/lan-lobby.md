@@ -272,3 +272,9 @@ local sends keep the draft and do not add a false local echo. Sender accounting 
 retain the discovery directory's existing caps and expiry; the screen keeps its bounded chat log.
 The existing lobby/game datagram scopes and discovery wire version are unchanged. UDP remains
 best effort and subnet-local; menus do not promise message delivery or persistent history.
+
+## Galactic Conquest room rows (rule LLB-18)
+
+| Rule | What it does | Evidence |
+|---|---|---|
+| LLB-18 | **Galactic Conquest room (project rules, not retail: retail has no campaign room).** The room has one row per faction of the selected campaign, drawn on the dialog's own player rows. When the dialog has fewer rows than the campaign has factions (a mod's dialog may author four), neutral rows are dropped and the rows are chosen players first, then the rows a player could still take, then AI rows, each in campaign order, so a player's row is never the cut one; when the rows, neutral ones included, fit, the campaign order is unchanged. The Advanced dialog's difficulty list holds only the entries the campaign's own AI player types map Easy, Normal and Hard to (the AI control types of the factions that are never a player; a multiplayer entry with none uses the Basic_AI of its playable factions, which must all carry the entry because the host may leave any of them to the AI; an entry mapped to two levels is left out), shown under the stock AI captions; a room starts at the Normal entry (else the middle one the campaign has) and the host's staging refuses any other with the list in the message. A campaign tab with no campaign behind it is left out and the other one selected (retail lists only the definitions whose `Is_Multiplayer` matches the requested mode, WGP-65, so it never shows an empty list; the Multiplayer and Co-op tab pair is ours). A co-op row title leads with its faction. | project rule; WGP-65 (staging list filter) |

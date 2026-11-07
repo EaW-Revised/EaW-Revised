@@ -237,6 +237,7 @@ report's `ai` lists its players, Lua load and the engine calls it could not make
 - Unit fog fade ( FW-16 to FW-21, always on except with `--eawr-live-reveal on`): the report's
   `live_session.fading_units`, `fading` (every drawn unit's opacity now) and `fading_log` (one row a tick a unit is
   below full opacity) read it.
+- `--eawr-land-vehicles-only on|off` (default `off`): a land skirmish where each human slot's free starting companies are the faction's stock vehicle companies (Rebel, Empire, Underworld) instead of the infantry defaults. AI slots, rules and `--eawr-skirmish-fleet` are unchanged; with free starting units off nothing is added.
 - `--eawr-live-ai on|off` (default `on`): the FoC AI of `m2` and `skirmish`. A `replay` session never runs it;
   the recorded AI commands replay as they are. Passing it with a session kind other than `m2` or `skirmish`
   has no effect: it prints a warning and the report's `live_session.ai_flag_ignored` is `true`.
@@ -361,8 +362,9 @@ report's `ai` lists its players, Lua load and the engine calls it could not make
   `--eawr-live-particle-heat on|off` (default on) separately admits the heat phase.
   The authored graphics presets use detail 0.4/0.6/0.8/1; the first two disable heat.
   Camera zoom does not set local LOD: a native distance producer remains unverified (PS-41).
-- `--eawr-live-particle-workers n` (default a quarter of the hardware threads below eight of them,
-  half of them from eight up, 1 to 4 in all, the main thread included): the pool the battle's particle systems (unit emitters, battle effects,
+- `--eawr-live-particle-workers n` (1 to 64; default a quarter of the hardware threads below eight of them,
+  half of them from eight up, at most 4 below twelve hardware threads and at most 6 from twelve up, at least 1,
+  the main thread included; [measurement](../../docs/performance/particle-pool-size.md)): the pool the battle's particle systems (unit emitters, battle effects,
   breakoff props) step and build their streams on; 1 runs them on the main thread alone. The
   streams are the same with any count.
 - `--eawr-live-workers n` (default hardware threads minus two), `--eawr-live-hashes <csv>`,
@@ -376,6 +378,19 @@ report's `ai` lists its players, Lua load and the engine calls it could not make
   per tick a digest of the visible units and of the drawn poses with their model slots, and at the end digests of
   the slot plan (fixed-point and quantized values, no wall clock). The console build prints `EAWR shutdown +<ms> ms <step>` lines
   for the quit path.
+- `--eawr-live-save-at <tick>:<file>`, `--eawr-live-load <file>`: skirmish battle saves
+  ([format](../../docs/checkpoint-format.md), "Skirmish battle saves") for a solo local space battle with the AI.
+  The first writes the battle once `<tick>` has completed, between two ticks on the simulation thread, and keeps
+  running; the report's `status` names a save that failed or was never reached. The second starts the prepared battle
+  from such a save at its tick, without re-running earlier ticks: give it the same scene arguments (map, lobby,
+  fleets, mods), since a save of another battle or another build's content or AI scripts is refused. After a load
+  `--eawr-live-ticks` counts from the saved tick, `--eawr-live-capture-ticks` stay absolute, the hash CSV leaves the
+  rows before the saved tick empty, `--eawr-live-verify` replays the whole recorded battle and compares the ticks after
+  it, and the first frame composes every unit present at once (no arrival budget). `--eawr-live-order`s before the
+  saved tick are already in the save and are skipped, later ones are given as the saving run held them;
+  `--eawr-live-input` is refused with a load. `tools/performance/remake_bench.py run --save-at <tick>` measures heavy
+  scenes this way on 1 and 8 workers (`save-load.md`). A fixed
+  `--eawr-map-camera-config` gives two runs the same view. Not for LAN, replays, land or campaign battles.
 - `--eawr-live-input <tick>:<click|dclick|rclick|hover>:<unit=N[+@dx,dy,dz]|@x,y,z|screen=x,y>`,
   `<tick>:<hover|click|dclick|rclick>:icon=N`, `<tick>:box:@x,y,z/@x,y,z`, `<tick>:box:screen=x,y/screen=x,y`
   or `<tick>:key:<name>`, each with optional `+shift`, `+ctrl`, `+alt` (repeatable): a player

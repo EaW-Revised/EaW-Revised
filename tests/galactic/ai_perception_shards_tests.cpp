@@ -21,6 +21,7 @@
 #include <string>
 #include <string_view>
 #include <vector>
+#include <stdexcept>
 
 namespace {
 namespace ai = s9_fixture::ai;
@@ -37,6 +38,7 @@ std::unique_ptr<ai::GalacticWorld> world(const s9_fixture::Shape& shape, const e
     auto setup = s9_fixture::setup(shape);
     setup.cache_intervals["TARGETPLAYERID"] = ai::real(30);
     setup.cache_intervals["ENEMYFORCE.SPACETOTALUNNORMALIZED"] = ai::real(30);
+    setup.cache_intervals["ISCONNECTEDTO"] = ai::real(30);
     auto result = std::make_unique<ai::GalacticWorld>(std::move(setup));
     must(result->bind(s9_fixture::snapshot(shape), {}, executor, frame, 1000));
     return result;
@@ -124,6 +126,80 @@ void round_trip_and_mutation() {
     a->visibility_changed(shape.first, 20, true); b->visibility_changed(shape.first, 20, true);
     expect(must(a->state_hash()) == must(b->state_hash()), "mutating the players in either order gives the same state");
     expect(must(a->record_sync_hash(false)) == must(a->record_sync_hash(true)), "the incremental digest still equals the cold rebuild");
+}
+std::string phase_rollback(const eawr::sim::PartitionExecutor& executor) {
+    const s9_fixture::Shape shape;
+    auto subject = world(shape, executor);
+    auto initial = rows(shape, false);
+    ai::GalacticCachedValue connected;
+    connected.key.player = shape.first; connected.key.planet = 10;
+    connected.key.tokens = {"VARIABLE_TARGET", "ISCONNECTEDTO"};
+    connected.value = ai::real(1); connected.interval = ai::real(30); connected.frame = 50;
+    initial.cache.insert(initial.cache.begin() + 1, connected);
+    must(subject->restore(initial));
+    const auto before = must(subject->capture()); const auto before_hash = must(subject->state_hash());
+    const auto mutate = [&](ai::GalacticWorld& owner) {
+        owner.set_synchronized_frame(frame + 2000);
+        for (const auto player : {shape.first, shape.second}) owner.visibility_changed(player, 20, true);
+        {
+            const auto frozen = owner.partitioned_reads();
+            const std::array players{shape.first, shape.second};
+            std::array<bool, 2> cleared{}, hinted{};
+            must(executor.execute_phase("native-phase-perception-fixture", players.size(), [&](std::size_t index) {
+                const auto reads = owner.owner_reads(players[index]);
+                owner.set_story_flag(players[index], 10, "LATE");
+                cleared[index] = owner.check_story_flag(players[index], index == 0 ? 10 : 20, index == 0 ? "FLAG_A" : "FLAG_B", true);
+                hinted[index] = owner.insert_hint({players[index], "GAMMA", "LATE", ai::real(3)});
+                owner.finish_perception_queries();
+            }));
+            expect(cleared[0] && cleared[1] && hinted[0] && hinted[1],
+                "partitioned perception writers clear real retained flags and append hints under existing owner locks");
+        }
+        ai::GalacticConnectivity connectivity; connectivity.revision = 1;
+        must(owner.bind(s9_fixture::snapshot(shape), std::move(connectivity), executor, frame + 2000, 1000));
+        auto state = owner.markup()->state();
+        const std::array targets{ai::GalacticMarkupKey{shape.first, false, 10}};
+        static_cast<void>(must(owner.markup()->apply(state, shape.first, targets, ai::real(7), {})));
+        owner.markup()->replace(std::move(state));
+        static_cast<void>(owner.take_path_coefficient_diagnostics());
+    };
+    auto oracle = world(shape, executor); must(oracle->restore(initial)); mutate(*oracle);
+    const auto after = must(oracle->capture());
+    for (const bool throws : {false, true}) for (const bool after_mutation : {false, true}) {
+        const auto encodes = subject->native_record_encodes();
+        auto phase = must(subject->begin_phase(executor));
+        expect(phase->work().player_headers == 2 && phase->work().cache_rows == 0 && phase->work().visibility_rows == 0
+            && phase->work().flag_rows == 0 && phase->work().coefficient_graphs == 0 && subject->native_record_encodes() == encodes,
+            "perception begin retains only bounded player headers and immutable inputs, without row copies or encodes");
+        expect(!subject->begin_phase(executor) && !subject->restore(before), "perception phase refuses nesting and external restore");
+        bool caught{};
+        try {
+            const auto failed = [&]() -> eawr::core::Result<void> {
+                if (after_mutation) {
+                    mutate(*subject);
+                    expect(phase->work().cache_rows > 0 && phase->work().visibility_rows > 0 && phase->work().flag_rows > 0,
+                        "perception retains first-written cache, visibility and flag rows through native mutations and compaction");
+                    expect(must(subject->capture()).components == after.components,
+                        "successful perception phase matches the unchanged normal-path oracle");
+                }
+                if (throws) throw std::runtime_error("perception phase fixture");
+                eawr::core::Diagnostic diagnostic; diagnostic.code = "perception-phase-fixture";
+                return eawr::core::Result<void>::failure(std::move(diagnostic));
+            }();
+            expect(!failed, "perception Result failure preserved");
+        } catch (const std::runtime_error& error) { caught = std::string_view(error.what()) == "perception phase fixture"; }
+        expect(caught == throws, "perception deterministic exception identity preserved");
+        must(phase->rollback());
+        expect(must(subject->capture()).components == before.components && must(subject->state_hash()) == before_hash
+            && must(subject->record_sync_hash()) == must(subject->record_sync_hash(true)) && subject->synchronized_frame() == frame,
+            "perception rollback restores exact canonical rows/markup/hash and original derived input clock");
+    }
+    auto retry = must(subject->begin_phase(executor)); mutate(*subject); must(retry->commit());
+    expect(must(subject->capture()).components == after.components && !retry->commit(), "perception retry publishes exactly once");
+    auto resumed = world(shape, executor); resumed->set_synchronized_frame(frame + 2000);
+    must(resumed->restore(must(subject->capture())));
+    expect(must(resumed->state_hash()) == must(subject->state_hash()), "committed perception retry round-trips existing checkpoint format");
+    return must(subject->state_hash());
 }
 void worker_counts_are_invisible() {
     const s9_fixture::Shape shape;
@@ -233,6 +309,12 @@ int case_galactic_ai_perception_shards_tests() {
         round_trip_and_mutation();
         worker_counts_are_invisible();
         player_scope_ownership();
+        std::string phase_reference;
+        for (const auto workers : {1U, 2U, 4U, 8U}) {
+            eawr::platform::ThreadWorkerAdapter executor(workers);
+            const auto hash = phase_rollback(executor);
+            if (phase_reference.empty()) phase_reference = hash; else expect(hash == phase_reference, "perception phase faults/retry equal on 1/2/4/8 workers");
+        }
         save_at_n_restore_at_m();
     } catch (const std::exception& error) {
         std::cerr << "FAIL: " << error.what() << '\n';

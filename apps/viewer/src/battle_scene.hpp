@@ -1,5 +1,6 @@
 #pragma once
 
+#include "eawr/core/result.hpp"
 #include "eawr/diagnostics/memory_capacity.hpp"
 
 #include "eawr/assets/map.hpp"
@@ -17,6 +18,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <span>
 #include <string>
@@ -124,6 +126,11 @@ public:
         // instances and shows this on screen. An interactive view keeps running; a capture run
         // fails with it.
         std::optional<std::string> error;
+        // N1: work this frame still owes the live step: the unit emitters' last batch is running on the particle
+        // workers while the caller did other work. The view calls it once, after its instance copy and submit and
+        // before any capture or the end of the step, then nothing else of the frame is outstanding. Empty when the
+        // frame is already complete. A failure fails the live step like a failed frame does.
+        std::function<core::Result<void>()> finish;
     };
 
     virtual ~BattleScene() = default;

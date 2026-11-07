@@ -9,6 +9,7 @@
 #include "../support/result.hpp"
 #include "production_private.hpp"
 #include "galactic_support.hpp"
+#include "eawr/core/gc_profile.hpp"
 #include "eawr/platform/sim_workers.hpp"
 #include "eawr/sim/galactic/production.hpp"
 #include "eawr/sim/galactic/replay.hpp"
@@ -16,7 +17,11 @@
 #include "eawr/sim/galactic/fleet_intelligence.hpp"
 #include "../../src/sim/galactic/checkpoint_fields_internal.hpp"
 #include <algorithm>
+#include <array>
+#include <chrono>
+#include <iostream>
 #include <limits>
+#include <tuple>
 #include <stdexcept>
 #include <utility>
 
@@ -738,6 +743,193 @@ void inactive_work_budget() {
     }
     expect(idle.work.production_producers == 0 && idle.work.production_entries == 0, "idle queues run no production phase");
     expect(idle.work.sections_reused >= 8, "idle production reuses its state digest");
+}
+
+// #5982: a Remake-sized galaxy. The chain's effective XML has about 1150 priced objects (stock about 215) and every priced
+// object is an offer on every planet; its largest campaign has 145 planets. One human front is the only producer.
+galactic::GalacticSetup scale_setup(const std::uint32_t planets, const std::uint32_t offers, const bool pay_as_you_go) {
+    galactic::SyntheticGalaxyOptions options; options.players = 1; options.planets = planets;
+    options.fleets_per_player = 1; options.members_per_fleet = 1; options.debug_commands = true;
+    auto config = galactic::synthetic_galaxy(options);
+    config.rules.maximum_fleet_movement_distance = f(10000); config.rules.fiscal_cycle_frames = 100000;
+    config.fleet_control = galactic::FleetControlSetup{{}, {{1000, false, true, false}}, {}};
+    config.player_economy = galactic::PlayerEconomySetup{{{1, f(1000000), f(10000000), 2, 5}}};
+    config.fiscal = galactic::FiscalSetup{f(2500), {{1, true, f(1)}}, {}};
+    config.production = galactic::ProductionSetup{5, {{1, true, pay_as_you_go, true, f(1000000), f(0), {}, {}, {}}}, {}};
+    galactic::ObserverSetup observer;
+    observer.human_observers = {1}; observer.solo_reference_human = 1; observer.reveal_delay_seconds = f(1);
+    observer.players = {{1, false, false, 0, 1, {}}};
+    observer.types = {{1000, false, false, false}};
+    for (const auto& planet : config.planets) {
+        config.fiscal->planets.push_back({planet.id, f(10)});
+        galactic::PlanetProduction production;
+        production.planet = planet.id; production.target_owner = 1; production.starbase_owner = 1;
+        production.ground_occupier = 1; production.space_level = 1; production.maximum_space_level = 5;
+        production.ground_slots = 3; production.space_slots = 3; production.maximum_ground_forces = 10;
+        production.enabled = true; production.surface_accessible = true;
+        for (std::uint32_t index = 0; index < offers; ++index) {
+            galactic::ProductionOffer offer; offer.type = 1000 + index; offer.price = offer.authored_price = f(100);
+            offer.seconds = f(index == 0 ? 60 : 10); offer.tech = 2; offer.population = f(1);
+            offer.affiliated = true; offer.direct_build_allowed = true;
+            if (index % 3 == 1) { offer.kind = galactic::ProductionKind::structure; offer.population = f(0); }
+            if (index % 3 == 2) offer.domain = galactic::ProductionDomain::space;
+            if (index % 4 == 3) offer.required_structures = {{1001, 1004}, {1007}};
+            if (index % 5 == 4) offer.required_orbiting_units = {1000, 1002};
+            production.offers.push_back(std::move(offer));
+        }
+        config.production->planets.push_back(std::move(production));
+        galactic::ObserverPlanet facts;
+        facts.planet = planet.id; facts.allegiance = facts.target_owner = 1;
+        facts.current_owner = facts.current_controller = 1;
+        observer.planets.push_back(facts);
+        observer.records.push_back({1, planet.id, true, 0, 0, 0, {}});
+    }
+    config.fleet_control->types.clear();
+    for (std::uint32_t index = 0; index < offers; ++index)
+        if (index % 3 != 1) config.fleet_control->types.push_back({1000 + index, false, true, false});
+    config.observer = observer;
+    return config;
+}
+
+struct ScaleRun {
+    std::uint64_t rebuilds{}, copies{}, hash_bytes{}, producers{}, credit_changes{}, offer_changes{}, unshared_offers{};
+    std::vector<std::string> hashes;
+    double wall_ms{}, compare_ms{};
+    eawr::gc_profile::Snapshot phases{};
+};
+
+ScaleRun scale_run(const galactic::GalacticSetup& config, const bool order, const std::size_t workers, const unsigned ticks) {
+    namespace gp = eawr::gc_profile;
+    eawr::platform::ThreadWorkerAdapter pool(workers);
+    ProductionCopyProbe probe(pool);
+    auto game = take(galactic::GalacticSession::create(config));
+    if (order) submit(game, buy(0, 1));
+    (void)take(game.step(probe)); // the order executes; not measured
+    probe.copies.clear();
+    ScaleRun run;
+    auto credits = game.snapshot()->player_economy()->players.front().credits;
+    gp::enabled.store(true);
+    const auto before = gp::snapshot();
+    const auto begin = std::chrono::steady_clock::now();
+    auto previous = game.snapshot();
+    for (unsigned tick = 0; tick < ticks; ++tick) {
+        const auto result = take(game.step(probe));
+        {
+            // What the async AI bind does per publication: compare each planet's rows with the previous publication's.
+            const auto compare_begin = std::chrono::steady_clock::now();
+            const auto& before_rows = previous->production()->planets;
+            const auto& after_rows = result.snapshot->production()->planets;
+            for (std::size_t index = 0; index < after_rows.size(); ++index)
+                if (before_rows[index].offers != after_rows[index].offers) ++run.offer_changes;
+                else if (!before_rows[index].offers.shares_storage_with(after_rows[index].offers)) ++run.unshared_offers;
+            run.compare_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - compare_begin).count();
+            previous = result.snapshot;
+        }
+        run.rebuilds += result.work.production_offer_rebuilds;
+        run.hash_bytes += result.work.production_hash_bytes;
+        run.hashes.push_back(result.state_hash.get());
+        run.producers += result.work.production_producers;
+        const auto now = result.snapshot->player_economy()->players.front().credits;
+        if (now != credits) ++run.credit_changes;
+        credits = now;
+    }
+    run.wall_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - begin).count() - run.compare_ms;
+    gp::enabled.store(false);
+    run.phases = gp::difference(before, gp::snapshot());
+    run.copies = probe.copies.size();
+    if (order) expect(!game.snapshot()->production()->planets.front().queues[0].empty(), "the human front is still building");
+    return run;
+}
+
+void payg_scale() {
+    namespace gp = eawr::gc_profile;
+    constexpr std::uint32_t planets = 145, offers = 1150;
+    constexpr unsigned ticks = 40;
+    const std::array<gp::Phase, 12> shown{gp::Phase::tick_game_step, gp::Phase::tick_production, gp::Phase::tick_population,
+        gp::Phase::tick_state_hash, gp::Phase::make_snapshot, gp::Phase::snap_menus, gp::Phase::snap_economy_input,
+        gp::Phase::snap_forecast, gp::Phase::snap_offers, gp::Phase::snap_construct, gp::Phase::snap_observer, gp::Phase::snap_sorted};
+    std::vector<std::string> reference;
+    for (const std::size_t workers : {std::size_t{1}, std::size_t{8}}) {
+        for (const auto& [label, payg, order] : {std::tuple{"idle (no order)", true, false},
+                std::tuple{"order, pay at purchase", false, true}, std::tuple{"order, pay as you go", true, true}}) {
+            const auto run = scale_run(scale_setup(planets, offers, payg), order, workers, ticks);
+            std::cout << "payg_scale workers=" << workers << " [" << label << "] ticks=" << ticks
+                << " wall_ms/tick=" << run.wall_ms / ticks << " offer_rebuilds=" << run.rebuilds
+                << " production_copies=" << run.copies << " credit_changes=" << run.credit_changes
+                << " active_producers/tick=" << run.producers / ticks << " hash_bytes/tick=" << run.hash_bytes / ticks
+                << " ai_offer_compare_ms/tick=" << run.compare_ms / ticks << " offer_rows_changed=" << run.offer_changes;
+            for (const auto phase : shown)
+                std::cout << ' ' << gp::names[static_cast<std::size_t>(phase)] << "_ms/tick="
+                    << static_cast<double>(run.phases[static_cast<std::size_t>(phase)].inclusive_ns) / 1e6 / ticks;
+            std::cout << '\n';
+            // A bill moves the balance every tick; neither the offer rows, nor the shared offer tables, nor the order of
+            // events may depend on it (#5982).
+            expect(run.rebuilds == 0, "an active front at any pay mode leaves the offer rows alone");
+            expect(run.offer_changes == 0 && run.unshared_offers == 0, "consecutive publications share every offer table");
+            expect(!order || run.credit_changes == (payg ? ticks : 0), "only a pay-as-you-go front bills each tick");
+            if (order && payg) {
+                if (reference.empty()) reference = run.hashes;
+                else expect(run.hashes == reference, "state hashes equal on 1 and 8 workers");
+            }
+        }
+    }
+}
+
+// #5982: the offer rows are keyed on the balance only where admission reads it (pay at purchase). A pay-as-you-go human
+// is billed every tick, so its rows must survive that, and must still agree with a fresh evaluation at every balance
+// (hash verification recomputes every reused row set and throws on a stale one).
+void payg_offer_rows() {
+    for (const bool payg : {true, false}) {
+        for (const auto workers : eawr::platform::determinism_worker_counts()) {
+            eawr::platform::ThreadWorkerAdapter pool(workers);
+            auto config = scale_setup(4, 9, payg);
+            // 10 s at 30 ticks/s; a pay-as-you-go account of 5 credits cannot pay for more than a few ticks.
+            for (auto& planet : config.production->planets) planet.offers[0].seconds = f(10);
+            config.player_economy->players[0].credits = payg ? f(5) : f(130);
+            auto game = take(galactic::GalacticSession::create(config));
+            game.set_hash_verification(true);
+            submit(game, buy(0, 1));
+            std::uint64_t rebuilds_after_order{}, credit_changes{};
+            auto previous = game.snapshot()->player_economy()->players.front().credits;
+            bool stalled{};
+            for (unsigned tick = 0; tick < 60; ++tick) {
+                const auto result = take(game.step(pool));
+                const auto credits = result.snapshot->player_economy()->players.front().credits;
+                if (tick > 0) {
+                    rebuilds_after_order += result.work.production_offer_rebuilds;
+                    if (credits != previous) ++credit_changes;
+                }
+                stalled = stalled || (payg && credits < f(1));
+                previous = credits;
+                const auto rows = result.snapshot->production_offers();
+                expect(!rows.empty(), "the human keeps its offer rows");
+                for (const auto& row : rows) {
+                    if (row.planet != 1 || row.type != 1000) continue;
+                    expect(row.already_in_production, "the queued type is flagged on every publication");
+                    // Pay as you go admits at any balance; pay at purchase listed 100 against what is left.
+                    const bool affordable = payg || credits >= f(100);
+                    expect((row.admission == galactic::ProductionAdmission::allowed) == affordable
+                        && row.price == f(100), "a row agrees with the balance at every tick");
+                }
+            }
+            if (payg) {
+                expect(credit_changes >= 3 && stalled, "the pay-as-you-go account was billed and ran dry mid-build");
+                expect(rebuilds_after_order == 0, "a pay-as-you-go bill does not rebuild the offer rows");
+            } else {
+                expect(credit_changes == 0, "pay at purchase debits once");
+                expect(rebuilds_after_order == 0, "queue progress alone does not rebuild the offer rows");
+            }
+            // Cancelling refunds the stored price: the balance moves and the rows follow it.
+            submit(game, cancel(game.completed_tick(), 2, 0));
+            const auto cancelled = take(game.step(pool));
+            expect(cancelled.work.production_offer_rebuilds == 1 && !cancelled.snapshot->production_offers().front().already_in_production,
+                "cancel rebuilds the rows once");
+            if (!payg)
+                for (const auto& row : cancelled.snapshot->production_offers())
+                    if (row.type == 1000) expect(row.admission == galactic::ProductionAdmission::allowed,
+                        "the refund re-enables the pay-at-purchase row");
+        }
+    }
 }
 
 void refund_recipient() {

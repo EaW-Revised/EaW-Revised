@@ -88,7 +88,7 @@ void TacticalHud::set_team_dock(const model::TeamResearchView& view,
             if (index == state.team_dock_cells.size()) {
                 State::TeamDockCell cell;
                 cell.button = memnew(EawrHudButton);
-                cell.button->setup_art({.portrait = HudButtonArt::Portrait{{}, false, true}});
+                cell.button->setup_art({.normal = {}, .hover = {}, .pressed = {}, .disabled = {}, .portrait = HudButtonArt::Portrait{{}, false, true}, .overlays = {}});
                 cell.button->set_action([] {}); // WPR-76: completed-row single clicks are inert.
                 cell.button->set_mouse_filter(policy.takes_pointer ? Control::MOUSE_FILTER_STOP : Control::MOUSE_FILTER_IGNORE);
                 state.team_dock_group->add_child(cell.button);
@@ -105,7 +105,7 @@ void TacticalHud::set_team_dock(const model::TeamResearchView& view,
                 cell.button->set_position({0, static_cast<float>(index) * policy.row_step * scale});
                 cell.button->set_size(size);
                 cell.button->set_hit_rect({{}, size});
-                cell.button->set_cell_state_art({.normal = state.team_dock_frames[frame]}, size * 0.5F, scale);
+                cell.button->set_cell_state_art({.normal = state.team_dock_frames[frame], .hover = {}, .pressed = {}, .disabled = {}, .portrait = {}, .overlays = {}}, size * 0.5F, scale);
             }
             const bool identity_changed = !cell.row || cell.row->type != row.type;
             if (identity_changed) {

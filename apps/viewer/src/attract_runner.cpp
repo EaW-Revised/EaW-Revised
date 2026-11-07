@@ -1,9 +1,11 @@
+#include "revised_layer.hpp"
 #include "viewer_profile_arguments.hpp"
 #include "eawr/core/json_text.hpp"
 #include "attract_runner.hpp"
 
 #include "viewer_path.hpp"
 #include "viewer_load_notes.hpp"
+#include "menu_timeline.hpp"
 
 #include "eawr/core/diagnostic.hpp"
 #include "eawr/data/xml.hpp"
@@ -24,6 +26,7 @@
 #include <godot_cpp/variant/utility_functions.hpp>
 
 #include <algorithm>
+#include <cmath>
 #include <charconv>
 #include <fstream>
 #include <sstream>
@@ -38,6 +41,12 @@ namespace {
 // positions: the battle's own warm-up (shader and asset upload) is not the menu's steady state.
 constexpr std::uint32_t warmup_frames = 30;
 constexpr std::uint32_t baseline_frame = 31;
+// MAT-21 deviation: reveal the completed scene behind the live menu using
+// the shell's MNU-01 fade interval.
+constexpr double reveal_seconds = 2.0;
+// Presentation-only selection survives runner destruction for the process lifetime.
+std::int64_t process_attract_index = -1;
+constexpr std::size_t attract_note_limit = 64;
 
 [[nodiscard]] std::string utf8(const String& value) {
     const CharString converted = value.utf8();
@@ -95,6 +104,7 @@ constexpr std::uint32_t baseline_frame = 31;
         }
         roots.emplace_back("base", base);
     }
+    mount_revised_layer(roots);
     auto chain = vfs::resolve_manifest_chain(roots);
     if (!chain) { failure = core::format_diagnostic(chain.error()); return nullptr; }
     auto content = std::make_shared<BattleContent>();
@@ -171,6 +181,12 @@ struct AttractRunner::State final {
     Node3D* host{};
     std::uint64_t host_id{};
     std::unique_ptr<MapMode> map;
+    bool loading{};
+    skirmish::AttractCandidates candidates;
+    std::vector<core::LoadNote> pending_notes;
+    std::vector<std::pair<std::string, std::string>> pending_failure_keys;
+    bool notes_suppressed{};
+    double reveal_elapsed{};
     std::string failure;
     // The map the battle shows: the settings' entry and its logical path.
     std::optional<std::size_t> map_index;
@@ -193,6 +209,10 @@ struct AttractRunner::State final {
     std::uint64_t keys_passed{};
     std::uint64_t world_events{};
     std::uint64_t failed_starts{};
+    // Input seen while the battle loads: no load callback starts within this window of it (the callbacks are
+    // indivisible and a started one holds the main thread, so the click that follows would wait for it).
+    static constexpr std::uint64_t input_quiet_ms = 250;
+    std::optional<std::uint64_t> last_input_ms;
     std::string stop_reason;
     MapMode::AttractStatus last_status;
     std::optional<MapMode::AttractStatus> final_status;
@@ -217,6 +237,8 @@ struct AttractRunner::State final {
     // MAT-08: frees the battle and its session (the host node last, after the mode's own nodes).
     void free_battle() {
         map.reset();
+        loading = false;
+        reveal_elapsed = 0.0;
         if (host != nullptr) {
             if (UtilityFunctions::is_instance_id_valid(static_cast<int64_t>(host_id))) {
                 if (Node* owner = host->get_parent()) owner->remove_child(host);
@@ -229,20 +251,65 @@ struct AttractRunner::State final {
         map_path.clear();
     }
 
-    [[nodiscard]] bool launch(const std::uint64_t now) {
+    void note_failed_candidate(const std::string& path, const std::string& authored, const std::string& reason) {
+        const auto key = std::make_pair(authored, reason);
+        if (std::find(pending_failure_keys.begin(), pending_failure_keys.end(), key)
+            != pending_failure_keys.end()) return;
+        if (pending_failure_keys.size() >= attract_note_limit) {
+            if (notes_suppressed) return;
+            notes_suppressed = true;
+            core::LoadNote note;
+            note.code = "EAWR-LOAD-1235";
+            note.tag = "Demo_Attract_Maps";
+            note.action = core::LoadAction::skipped_object;
+            note.message = "Further attract scenario failure notes suppressed";
+            pending_notes.push_back(std::move(note));
+            return;
+        }
+        pending_failure_keys.push_back(key);
+        core::LoadNote note;
+        note.code = "EAWR-LOAD-1235";
+        note.file = path;
+        note.tag = "Demo_Attract_Maps";
+        note.authored_value = authored;
+        note.action = core::LoadAction::skipped_object;
+        note.message = "Attract scenario skipped: " + reason;
+        pending_notes.push_back(std::move(note));
+    }
+
+    void flush_notes() {
+        if (pending_notes.empty() || !content) return;
+        publish_viewer_load_notes(std::move(pending_notes), content->layers, true);
+        pending_notes.clear();
+        pending_failure_keys.clear();
+        notes_suppressed = false;
+    }
+
+    [[nodiscard]] bool launch(const std::uint64_t now, const bool retry = false) {
         free_battle();
         if (!manager || parent == nullptr) return false;
-        const auto index = manager->advance(now);
-        if (!index) return false;
-        ++advances;
+        if (!retry) candidates.reset(manager->settings().maps.size());
         const auto& settings = manager->settings();
-        const std::string path = skirmish::attract_map_path(settings.maps[*index]);
-        if (path.empty()) {
+        std::optional<std::size_t> index;
+        std::string path;
+        for (;;) {
+            index = candidates.next(*manager, now);
+            if (!index) break;
+            ++advances;
+            process_attract_index = static_cast<std::int64_t>(*index);
+            path = skirmish::attract_map_path(settings.maps[*index]);
+            if (!path.empty()) break;
             failure = "Demo_Attract_Maps entry " + std::to_string(*index) + " names no map under data/art/maps";
             ++failed_starts;
+            note_failed_candidate({}, settings.maps[*index], failure);
+        }
+        if (!index) {
+            // Exhaustion leaves no battle and stops future frame retries.
+            manager->shutdown();
             return false;
         }
         host = memnew(Node3D);
+        host->hide();
         host->set_name("EawrAttractBattle");
         parent->add_child(host);
         host_id = static_cast<std::uint64_t>(host->get_instance_id());
@@ -260,13 +327,8 @@ struct AttractRunner::State final {
         map_options.shaders = options.shaders;
         map_options.attract = MapMode::Options::Attract{skirmish::attract_ai_players()};
         map = std::make_unique<MapMode>(std::move(map_options));
-        if (!map->ready(*host)) {
-            failure = map->failure().empty() ? "the attract battle could not start" : map->failure();
-            UtilityFunctions::printerr(String::utf8(("EAWR attract: " + failure).c_str()));
-            ++failed_starts;
-            free_battle();
-            return false;
-        }
+        map->begin_ready(*host);
+        loading = true;
         failure.clear();
         map_index = *index;
         map_path = path;
@@ -387,13 +449,16 @@ AttractRunner::Options AttractRunner::from_command_line() {
 AttractRunner::AttractRunner(Options options) : state_(std::make_unique<State>(std::move(options))) {}
 
 AttractRunner::~AttractRunner() {
-    stop();
+    // The owner must call stop() first; engine services may already be shutting down here.
+    if (state_->manager) state_->manager->shutdown();
+    state_->free_battle();
 }
 
 bool AttractRunner::start(Node& parent) {
     State& state = *state_;
     // MAT-01: an attract that already runs is not restarted.
     if (state.manager && state.manager->active() && state.map) return true;
+    state.flush_notes();
     state.failure.clear();
     if (!state.content) {
         state.content = state.options.content;
@@ -412,13 +477,15 @@ bool AttractRunner::start(Node& parent) {
         state.manager.reset();
         return false;
     }
-    state.manager.emplace(std::move(settings).value());
+    state.manager.emplace(std::move(settings).value(), process_attract_index);
     state.parent = &parent;
     const std::uint64_t now = now_ms();
     state.manager->init(now); // MAT-02
     ++state.starts;
     state.started_once = true;
-    return state.launch(now);
+    const bool launched = state.launch(now);
+    if (!launched) state.flush_notes();
+    return launched;
 }
 
 void AttractRunner::stop() {
@@ -429,11 +496,20 @@ void AttractRunner::stop() {
         ++state.stops;
     }
     state.free_battle();
+    state.flush_notes();
     state.parent = nullptr;
 }
 
 bool AttractRunner::running() const noexcept {
     return state_->map != nullptr;
+}
+
+bool AttractRunner::visible() const noexcept {
+    return state_->map != nullptr && !state_->loading;
+}
+
+float AttractRunner::reveal_fraction() const noexcept {
+    return visible() ? static_cast<float>(std::clamp(state_->reveal_elapsed / reveal_seconds, 0.0, 1.0)) : 0.0F;
 }
 
 const std::string& AttractRunner::failure() const noexcept {
@@ -444,6 +520,37 @@ void AttractRunner::process(const double delta, const bool dialog_active, const 
                             const bool foreground) {
     State& state = *state_;
     if (!state.manager || !state.manager->initialized()) return;
+    if (state.loading && state.map) {
+        const std::uint64_t now = now_ms();
+        const bool input_pending = state.last_input_ms && now - *state.last_input_ms < State::input_quiet_ms;
+        const auto ready = state.map->advance_ready(input_pending);
+        if (ready == MapMode::ReadyStatus::pending) return;
+        if (ready == MapMode::ReadyStatus::failed) {
+            state.failure = state.map->failure().empty() ? "the attract battle could not start" : state.map->failure();
+            UtilityFunctions::printerr(String::utf8(("EAWR attract: " + state.failure).c_str()));
+            ++state.failed_starts;
+            state.note_failed_candidate(state.map_path, state.manager->settings().maps[*state.map_index], state.failure);
+            static_cast<void>(state.launch(now_ms(), true));
+            return;
+        }
+        // Publish the complete initial snapshot before revealing the host. A zero
+        // delta keeps the load frames out of the battle's first admitted frame.
+        if (const auto code = state.map->process(0.0)) {
+            state.failure = state.map->failure().empty() ? "the attract battle could not publish its first frame"
+                                                        : state.map->failure();
+            ++state.failed_starts;
+            state.note_failed_candidate(state.map_path, state.manager->settings().maps[*state.map_index], state.failure);
+            static_cast<void>(state.launch(now_ms(), true));
+            return;
+        }
+        state.loading = false;
+        state.reveal_elapsed = 0.0;
+        state.host->show();
+        MenuTimeline::mark("attract_visible");
+        MenuTimeline::report("attract_visible");
+        return;
+    }
+    if (std::isfinite(delta)) state.reveal_elapsed += std::max(0.0, delta);
     const std::uint64_t now = now_ms();
     const auto service = state.manager->service(state.frame_at(now, dialog_active, main_menu_active, foreground));
     if (state.map) {
@@ -463,6 +570,7 @@ void AttractRunner::process(const double delta, const bool dialog_active, const 
 
 bool AttractRunner::key(const skirmish::AttractKey pressed, const bool dialog_active) {
     State& state = *state_;
+    state.last_input_ms = now_ms();
     if (!state.manager) return false;
     const auto result = state.manager->key(pressed, state.frame_at(now_ms(), dialog_active, false, true));
     if (result.action == skirmish::AttractAction::advance) static_cast<void>(state.launch(now_ms()));
@@ -474,6 +582,7 @@ bool AttractRunner::key(const skirmish::AttractKey pressed, const bool dialog_ac
 
 void AttractRunner::pointer_moved(const bool main_menu_active) {
     State& state = *state_;
+    state.last_input_ms = now_ms();
     if (state.manager) state.manager->pointer_moved(now_ms(), main_menu_active);
 }
 
@@ -490,6 +599,7 @@ void AttractRunner::window_activated() {
 void AttractRunner::input(const Ref<InputEvent>& event) {
     State& state = *state_;
     if (event.is_null()) return;
+    state.last_input_ms = now_ms(); // clicks and wheel too, not only motion and keys
     if (const auto* pressed = Object::cast_to<InputEventKey>(event.ptr());
         pressed != nullptr && pressed->is_pressed() && !pressed->is_echo()) {
         const Key code = pressed->get_physical_keycode() != KEY_NONE ? pressed->get_physical_keycode()
@@ -529,6 +639,16 @@ std::optional<int> AttractRunner::standalone_frame(const double delta, Node& par
             state.write_report(true);
             return 2;
         }
+    }
+    // The standalone evidence script counts presented battle frames, as it did
+    // when ready() blocked before frame zero. Front-end frames remain interactive.
+    if (state.loading) {
+        process(delta, state.dialog, state.main_menu, true);
+        if (!state.map && !state.failure.empty()) {
+            state.write_report(true);
+            return 2;
+        }
+        return std::nullopt;
     }
     for (const Step& step : state.steps) {
         if (step.frame != state.frame) continue;

@@ -3,7 +3,7 @@
 #include "eawr/diagnostics/memory_capacity.hpp"
 
 #include "eawr/core/diagnostic.hpp"
-#include "eawr/data/xml.hpp"
+#include "eawr/data/xml_fwd.hpp"
 
 #include <array>
 #include <cstddef>
@@ -97,7 +97,8 @@ public:
     // reinforcement zone. With it on the plane keeps the fog's own shape but draws every fogged
     // cell, the outermost ring (the unplayable border) included, in the reinforcement colour, and
     // `blocked` (may be empty) turns any clear cell whose centre it reports blocked into the same
-    // colour. Redraws the texture at once.
+    // colour. The predicate must remain stable until this method is called again; its answers
+    // are cached by cell. Redraws the texture at once.
     void set_deployment_overlay(bool on, FogBlockedPoint blocked = {});
     [[nodiscard]] bool deployment_overlay() const noexcept { return overlay_; }
     // The plane's texture: RGBA8, wide x tall texels, row 0 the top row (largest Y).
@@ -119,6 +120,7 @@ public:
         result.vector("world_fog", "held", held_);
         result.vector("world_fog", "intensities", intensities_);
         result.vector("world_fog", "next_intensities", next_intensities_);
+        result.vector("world_fog", "blocked_mask", blocked_mask_);
         result.vector("world_fog", "blurred", blurred_);
         result.vector("world_fog", "rgba_texels", texels_);
         return result;
@@ -135,6 +137,8 @@ private:
     std::array<std::array<std::uint8_t, 4>, 256> overlay_ramp_{};
     bool overlay_{};
     FogBlockedPoint blocked_;
+    // 0 = not evaluated, 1 = clear, 2 = blocked. Invalidated with the predicate.
+    std::vector<std::uint8_t> blocked_mask_;
     double fade_step_{};
     std::vector<double> values_;
     std::vector<std::uint8_t> held_;

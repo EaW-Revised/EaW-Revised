@@ -6,6 +6,12 @@ eawr_target_project_warnings(data_tests)
 
 add_test(NAME data_contracts COMMAND data_tests)
 
+add_executable(record_index_tests record_index_tests.cpp)
+target_link_libraries(record_index_tests PRIVATE eawr::data)
+target_compile_features(record_index_tests PRIVATE cxx_std_20)
+eawr_target_project_warnings(record_index_tests)
+add_test(NAME record_index_contracts COMMAND record_index_tests)
+
 # ML-24 (#3631): the stock variants whose blank or TBD values inherit (installed game).
 add_executable(xml_installed_ml24_tests xml_installed_ml24_tests.cpp)
 target_link_libraries(xml_installed_ml24_tests PRIVATE eawr::data eawr::vfs)
@@ -39,3 +45,10 @@ add_test(NAME xml_scanner_acceptance_contract
 add_subdirectory(galactic)
 
 eawr_label_tests()
+
+# Load-check attribution (opt-in recorder): zero allocations off, expected phases and counts on.
+add_executable(load_profile_tests load_profile_tests.cpp)
+target_link_libraries(load_profile_tests PRIVATE eawr::data eawr::vfs)
+target_compile_features(load_profile_tests PRIVATE cxx_std_20)
+eawr_target_project_warnings(load_profile_tests)
+add_test(NAME load_profile_contracts COMMAND load_profile_tests)

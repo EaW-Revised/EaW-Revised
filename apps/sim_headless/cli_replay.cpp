@@ -2,7 +2,9 @@
 #include "eawr/battle/start.hpp"
 #include "eawr/campaign/conflict_entry.hpp"
 #include "eawr/skirmish/roster_gate.hpp"
+#include <algorithm>
 #include <cctype>
+#include <fstream>
 #include <set>
 
 namespace sim_headless::cli {

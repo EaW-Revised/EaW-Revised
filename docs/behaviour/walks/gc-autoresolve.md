@@ -56,6 +56,8 @@ or invasion state (land). "Instant" means the solver is run to completion inside
 | WAR-09 | The auto-resolve dialog's choice callback: choice **1** starts auto-resolve (the dialog stays as the progress screen, WAR-66); choice **3** loads the space tactical battle for the planet with the current starbase owner, or the land tactical battle with the defender. In multiplayer the dialog is not created and auto-resolve starts directly. | debug build EAR-25, EAR-45 | missing |
 | WAR-10 | A unit type flag `Prevents_Story_Campaign_Autoresolve` is evaluated over the conflicting fleets of a space conflict (defender list then invader list): a non-fleet object's type flag, a fleet's own flag, or any fleet-breakdown member's type or fleet flag makes the scan true. Stock: 4 authored entries. Only story campaigns consult it: it removes the auto-resolve button from the pending-battle alert (WAR-08) and makes the tactical retreat button retreat directly instead of opening the retreat dialog (WAR-65). A fleet also inherits the flag when such a unit joins it (WGM-09). | debug build EAR-43, EAR-54, EAR-55, EAR-56; XML EAR-X1 | missing |
 
+Follow-up (legacy EAWR-6035): WAR-08 pending-battle alerts do not yet enforce story location exclusions.
+
 ## Gathering the sides
 
 Integration: **new auto-resolve solver**, persistent GC identities from E3-1 and the WGM conflict records.

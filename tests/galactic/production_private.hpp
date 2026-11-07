@@ -24,6 +24,8 @@ void technology_price_production();
 void cancel_identity();
 void timing_and_cancel();
 void inactive_work_budget();
+void payg_scale();
+void payg_offer_rows();
 void refund_recipient();
 void finish_task_behind_front();
 void queue_policies();

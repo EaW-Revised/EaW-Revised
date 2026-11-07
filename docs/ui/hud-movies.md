@@ -2,6 +2,55 @@
 
 # HUD movies (G12)
 
+## Runtime playback and validation, 2026-10-30
+
+The viewer can play Bink 1 HUD movies using the player's installed `bink2w64.dll`
+in a bounded helper process. It validates inputs before handing them to the helper,
+keeps decoding off the render thread, and falls back to the converted Theora cache
+when direct playback fails. Failure leaves the portrait empty without stopping
+speech or gameplay and records load note `EAWR-LOAD-1237`. The tested DLL exposes
+the current one-based selected frame in the fourth 32-bit word of its handle prefix;
+the helper checks that field after decoding against the admitted frame count.
+`EAWR_BINK_TRACE=1` enables selected-frame diagnostics for validation captures.
+The project does not
+redistribute the DLL or movie data. The owner's licence-risk decision and the
+compatibility limitation for other installed DLL versions remain as described below.
+
+Empty-cache Galactic Conquest space-battle checks on the separate render thread
+showed animated advisor portraits for stock FoC, Republic at War and BFC. Frame
+readback was used to count distinct images and synchronizes rendering, so these
+checks establish visual playback rather than performance. Paired LAN and actual
+cooperative-seat hologram playback have not been verified; the paired setup was
+withdrawn before either peer started. The existing paired harness uses safe
+rendering and opposing factions, so it would not establish cooperative-seat or
+separate-render performance behaviour.
+
+The following decision update records the earlier investigation; the direct path
+above is now implemented and the converted cache remains available as fallback.
+
+## Decision update, 2026-10-29
+
+The owner has selected a feasibility spike using the player's own installed
+Bink DLL at runtime. The project will not bundle or redistribute that DLL or
+game movie data. The owner accepts the licensing risk for this investigation on
+the basis that it uses the same game with a new engine; this is the owner's
+decision, not a legal conclusion. The route is reversible, and the converted
+Theora cache below remains a fallback. The spike must verify the actual installed
+DLL's compatibility, decoding, alpha and performance before this route can be
+called supported. Missing or failed decoding must leave speech and gameplay
+running, with a load note; the implementation must not decode on the render thread.
+The original movies come from a Bink 1 product over 20 years old. The owner's
+reported installation inspection found three copies of `bink2w64.dll` and no
+`binkw32.dll` within three directory levels. A remote isolated probe confirmed
+that one installed `bink2w64.dll` can decode Bink 1 portrait and non-alpha
+movies; that does not establish compatibility with every version of the DLL.
+Malformed input also caused native crashes and timeouts, so the decoder must run
+in a bounded child process, not in the viewer. The bundled-FFmpeg conversion
+alternative remains under consideration if that route cannot be delivered.
+
+The conversion decision and implementation described below document the fallback
+that preceded the direct playback implementation.
+
 Decision, 2026-09-26: FoC's HUD movies are Bink 1. The player converts them once
 with **their own FFmpeg** into a local Theora cache, and the viewer plays that cache
 with Godot's built-in `VideoStreamTheora`. The project ships and downloads no FFmpeg,

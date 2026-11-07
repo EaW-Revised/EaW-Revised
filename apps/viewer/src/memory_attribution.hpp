@@ -42,7 +42,9 @@ public:
         return os && os->get_cmdline_user_args().has("--eawr-memory-attribution");
     }
     // Load-phase timeline: one log line with the process private bytes. Census runs only.
-    static void load_mark(const char* label, const std::uint64_t cache_retained_bytes = 0) {
+    // live_model_bytes: payload capacity of every live decoded model, including the pins and renderer owners the
+    // cache does not retain (VfsAssetCache::model_stats().capacity.total_bytes()); 0 when the caller has none.
+    static void load_mark(const char* label, const std::uint64_t cache_retained_bytes = 0, const std::uint64_t live_model_bytes = 0) {
         if (!enabled()) return;
         std::uint64_t private_bytes = 0;
 #if defined(_WIN32)
@@ -53,7 +55,40 @@ public:
 #endif
         godot::UtilityFunctions::print("EAWR load_mark ", label, " private_bytes=", static_cast<std::int64_t>(private_bytes),
             " cache_retained_bytes=", static_cast<std::int64_t>(cache_retained_bytes),
+            " live_model_bytes=", static_cast<std::int64_t>(live_model_bytes),
             " unix_us=", static_cast<std::int64_t>(unix_us()));
+    }
+    // Sub-phase sample inside a long load phase: process private bytes, the caller's own retained bytes,
+    // the Windows heap totals and the Godot monitors. No render-thread work; census runs only.
+    static void load_detail(const char* label, const std::uint64_t models_done, const std::uint64_t local_texture_bytes) {
+        if (!enabled()) return;
+        std::uint64_t private_bytes = 0, heap_allocated = 0, heap_committed = 0, heap_count = 0;
+#if defined(_WIN32)
+        PROCESS_MEMORY_COUNTERS_EX counters{};
+        counters.cb = sizeof(counters);
+        if (GetProcessMemoryInfo(GetCurrentProcess(), reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&counters), sizeof(counters)))
+            private_bytes = static_cast<std::uint64_t>(counters.PrivateUsage);
+        MemoryAttribution heaps;
+        heaps.capture_heaps();
+        heap_count = heaps.heaps_captured_;
+        for (std::size_t index = 0; index < heaps.heaps_captured_; ++index) {
+            heap_allocated += heaps.heaps_[index].allocated;
+            heap_committed += heaps.heaps_[index].committed;
+        }
+#endif
+        std::int64_t static_bytes = 0, video_bytes = 0, texture_bytes = 0, buffer_bytes = 0;
+        if (auto* performance = godot::Performance::get_singleton()) {
+            static_bytes = static_cast<std::int64_t>(performance->get_monitor(godot::Performance::MEMORY_STATIC));
+            video_bytes = static_cast<std::int64_t>(performance->get_monitor(godot::Performance::RENDER_VIDEO_MEM_USED));
+            texture_bytes = static_cast<std::int64_t>(performance->get_monitor(godot::Performance::RENDER_TEXTURE_MEM_USED));
+            buffer_bytes = static_cast<std::int64_t>(performance->get_monitor(godot::Performance::RENDER_BUFFER_MEM_USED));
+        }
+        godot::UtilityFunctions::print("EAWR load_detail ", label, " models_done=", static_cast<std::int64_t>(models_done),
+            " private_bytes=", static_cast<std::int64_t>(private_bytes),
+            " local_texture_bytes=", static_cast<std::int64_t>(local_texture_bytes),
+            " heap_allocated=", static_cast<std::int64_t>(heap_allocated), " heap_committed=", static_cast<std::int64_t>(heap_committed),
+            " heaps=", static_cast<std::int64_t>(heap_count), " godot_static=", static_bytes, " render_video=", video_bytes,
+            " render_texture=", texture_bytes, " render_buffer=", buffer_bytes, " unix_us=", static_cast<std::int64_t>(unix_us()));
     }
     void capture() {
         if (!enabled()) return;
@@ -120,9 +155,98 @@ public:
                 << ",\"summary_error\":" << heap.error << ",\"allocated\":" << heap.allocated
                 << ",\"committed\":" << heap.committed << ",\"reserved\":" << heap.reserved << '}';
         }
-        output << "]}}";
+        output << ']';
+        write_size_classes(output);
+        output << "}}";
+    }
+    // Opt-in, once per run (the first-frame snapshot): bytes and counts of busy heap blocks by
+    // floor(log2(block size)), per heap. Walks every block under the heap lock, so other threads
+    // stall for the walk; the walk stops at a time budget and says so. No per-frame cost.
+    void capture_size_classes() {
+#if defined(_WIN32)
+        if (!enabled() || !captured_ || size_classes_requested_) return;
+        size_classes_requested_ = true;
+        size_class_rows_.assign(heaps_captured_, SizeBucketRow{});
+        const auto began = std::chrono::steady_clock::now();
+        for (std::size_t index = 0; index < heaps_captured_; ++index) {
+            auto& row = size_class_rows_[index];
+            row.handle = heaps_[index].handle;
+            const auto heap = reinterpret_cast<HANDLE>(static_cast<std::uintptr_t>(row.handle));
+            if (std::chrono::steady_clock::now() - began > kSizeBucketBudget) { row.truncated = true; continue; }
+            if (!HeapLock(heap)) { row.error = GetLastError(); continue; }
+            // Nothing below may allocate or log: the heap is locked for every other thread.
+            PROCESS_HEAP_ENTRY entry{};
+            std::uint64_t visited = 0;
+            bool walked_to_end = true;
+            while (HeapWalk(heap, &entry)) {
+                if ((++visited & 0xFFFF) == 0 && std::chrono::steady_clock::now() - began > kSizeBucketBudget) {
+                    walked_to_end = false;
+                    break;
+                }
+                if (entry.wFlags & (PROCESS_HEAP_REGION | PROCESS_HEAP_UNCOMMITTED_RANGE)) continue;
+                if (entry.wFlags & PROCESS_HEAP_ENTRY_BUSY) {
+                    auto& bin = row.bins[size_class_bin(entry.cbData)];
+                    ++bin.count;
+                    bin.bytes += entry.cbData;
+                    row.overhead_bytes += entry.cbOverhead;
+                } else {
+                    ++row.free_count;
+                    row.free_bytes += entry.cbData;
+                }
+            }
+            const auto last_error = GetLastError();
+            HeapUnlock(heap);
+            row.truncated = !walked_to_end;
+            // ERROR_NO_MORE_ITEMS is the normal end of a walk.
+            if (walked_to_end && last_error != ERROR_NO_MORE_ITEMS) row.error = last_error;
+            row.walked = true;
+        }
+        size_class_walk_us_ = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - began).count());
+#endif
     }
 private:
+    static constexpr std::size_t kSizeBuckets = 48;
+    static constexpr std::chrono::seconds kSizeBucketBudget{20};
+    // floor(log2(bytes)); 0 and 1 byte share bin 0; the last bin takes everything larger.
+    static constexpr std::size_t size_class_bin(std::uint64_t bytes) {
+        std::size_t bin = 0;
+        while (bytes > 1 && bin + 1 < kSizeBuckets) { bytes >>= 1; ++bin; }
+        return bin;
+    }
+    struct SizeBucket final {
+        std::uint64_t count{}, bytes{};
+    };
+    struct SizeBucketRow final {
+        std::uint64_t handle{}, free_count{}, free_bytes{}, overhead_bytes{};
+        std::array<SizeBucket, kSizeBuckets> bins{};
+        std::uint32_t error{};
+        bool walked{}, truncated{};
+    };
+    void write_size_classes(std::ostream& output) const {
+        if (!size_classes_requested_) return;
+        output << ",\"size_classes\":{\"scope\":\"busy_blocks_by_floor_log2_of_user_bytes\""
+            << ",\"walk_us\":" << size_class_walk_us_ << ",\"heaps\":[";
+        for (std::size_t index = 0; index < size_class_rows_.size(); ++index) {
+            const auto& row = size_class_rows_[index];
+            output << (index ? "," : "") << "{\"handle\":" << row.handle << ",\"walked\":" << (row.walked ? "true" : "false")
+                << ",\"truncated\":" << (row.truncated ? "true" : "false") << ",\"error\":" << row.error
+                << ",\"free_blocks\":" << row.free_count << ",\"free_bytes\":" << row.free_bytes
+                << ",\"overhead_bytes\":" << row.overhead_bytes << ",\"bins\":[";
+            bool first = true;
+            for (std::size_t bin = 0; bin < row.bins.size(); ++bin) {
+                if (!row.bins[bin].count) continue;
+                output << (first ? "" : ",") << "{\"log2\":" << bin << ",\"count\":" << row.bins[bin].count
+                    << ",\"bytes\":" << row.bins[bin].bytes << '}';
+                first = false;
+            }
+            output << "]}";
+        }
+        output << "]}";
+    }
+    std::vector<SizeBucketRow> size_class_rows_;
+    std::uint64_t size_class_walk_us_{};
+    bool size_classes_requested_{};
     struct Object final {
         std::string name;
         std::uint64_t driver_host{}, device{};

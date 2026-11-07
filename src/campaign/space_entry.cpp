@@ -45,6 +45,7 @@ std::vector<const battle::MapPlacement*> markers(const skirmish::StartInputs& ma
     for (const auto& p : map.placements) if (p.marker && folded(p.type) == folded(name)) result.push_back(&p);
     return result;
 }
+bool complete(const battle::MapPlacement& p) { return p.position && p.orientation_degrees; }
 bool usable(const battle::MapPlacement& p) {
     return p.position && p.orientation_degrees && p.orientation_degrees->x == Fixed{}
         && p.orientation_degrees->y == Fixed{};
@@ -58,11 +59,22 @@ core::Result<Fixed> distance(Vec3 a, Vec3 b) {
 // WGT-07/08: stable type-identifier buckets, last-listed member first. This load-time
 // pass is serial because each admission consumes the same population budget.
 core::Result<std::vector<sim::EntityId>> select_initial_force_ids(const ConflictRecord& record,
-    const SpaceEntryInputs& input, const SpaceEntrySide& side) {
-    if (side.cap < Fixed{}) return fail<std::vector<sim::EntityId>>("negative faction cap");
+    const SpaceEntryInputs& input, const SpaceEntrySide& side, std::vector<std::string>& notes) {
+    // Authored values, not an invariant: a negative cap or population reads as zero, once noted (no retail source for
+    // refusing the battle over it).
+    const auto note_once = [&notes](std::string note) {
+        if (std::find(notes.begin(), notes.end(), note) == notes.end()) notes.push_back(std::move(note));
+    };
+    const auto side_cap = side.cap < Fixed{} ? Fixed{} : side.cap;
+    if (side_cap != side.cap) note_once("space entry: a negative faction tactical cap is used as zero");
+    const auto population_of = [&](const SpaceEntryType& type) {
+        if (type.population >= Fixed{}) return type.population;
+        note_once("space entry: " + type.tactical + " has a negative population; it is used as zero");
+        return Fixed{};
+    };
     std::vector<sim::EntityId> selected;
     std::map<gc::TypeId, std::vector<const ConflictForce*>> buckets;
-    auto cap = side.cap;
+    auto cap = side_cap;
     std::int64_t transports{};
     std::vector<const ConflictForce*> roster;
     for (const auto id : input.roster_order) {
@@ -81,9 +93,9 @@ core::Result<std::vector<sim::EntityId>> select_initial_force_ids(const Conflict
         for (const auto* row : roster) {
             if (row->owner != side.player || row->id == record.station || row->role == ForceRole::escort) continue;
             const auto* type = type_of(input, row->type);
-            if (!type || type->population < Fixed{}) return fail<std::vector<sim::EntityId>>("missing type or negative population");
+            if (!type) return fail<std::vector<sim::EntityId>>("missing current fleet type binding");
             if (!type->space_allowed) continue;
-            AdmissionForce force; force.force = *row; force.population = type->population;
+            AdmissionForce force; force.force = *row; force.population = population_of(*type);
             force.transport = type->transport; force.superweapon = type->superweapon;
             force.pathfinder = pathfinders.contains(row->id);
             selected_pathfinder = selected_pathfinder || (input.preferred_pathfinder_type
@@ -91,7 +103,7 @@ core::Result<std::vector<sim::EntityId>> select_initial_force_ids(const Conflict
             candidates.push_back(force);
         }
         if (selected_pathfinder) {
-            auto split = select_conflict_forces(candidates, side.cap, input.preferred_pathfinder_type, input.use_pathfinder);
+            auto split = select_conflict_forces(candidates, side_cap, input.preferred_pathfinder_type, input.use_pathfinder);
             if (!split) return core::Result<std::vector<sim::EntityId>>::failure(split.error());
             for (const auto& force : split.value().initial) selected.push_back(force.id);
             return core::Result<std::vector<sim::EntityId>>::success(std::move(selected));
@@ -101,18 +113,18 @@ core::Result<std::vector<sim::EntityId>> select_initial_force_ids(const Conflict
         const auto& force = *row;
         if (force.owner != side.player || force.id == record.station || force.role == ForceRole::escort) continue;
         const auto* type = type_of(input, force.type);
-        if (!type || type->population < Fixed{}) return fail<std::vector<sim::EntityId>>("missing type or negative population");
+        if (!type) return fail<std::vector<sim::EntityId>>("missing current fleet type binding");
         if (!type->space_allowed) continue;
         if (type->superweapon) { selected.push_back(force.id); continue; }
         if (type->transport) {
-            if (transports < side.cap.trunc_to_integer()) { selected.push_back(force.id); ++transports; }
+            if (transports < side_cap.trunc_to_integer()) { selected.push_back(force.id); ++transports; }
         } else buckets[force.type].push_back(&force);
     }
     const auto take = [&](auto& bucket) {
         selected.push_back(bucket.back()->id); bucket.pop_back();
     };
     for (auto& [id, bucket] : buckets) {
-        const auto population = type_of(input, id)->population;
+        const auto population = population_of(*type_of(input, id));
         if (population < Fixed::from_raw(Fixed::scale)) while (!bucket.empty()) take(bucket);
         else if (population <= cap) { take(bucket); cap = sim::math::subtract(cap, population).value(); }
     }
@@ -122,7 +134,7 @@ core::Result<std::vector<sim::EntityId>> select_initial_force_ids(const Conflict
         Fixed used{};
         for (auto& [id, bucket] : buckets) {
             if (bucket.empty()) continue;
-            const auto population = type_of(input, id)->population;
+            const auto population = population_of(*type_of(input, id));
             // Round the exact rational once. Quantizing size/remaining before multiplying
             // would turn an exact half point into less than a half for some bucket sizes.
             const auto denominator = static_cast<std::int64_t>(remaining) * Fixed::scale;
@@ -142,7 +154,7 @@ core::Result<std::vector<sim::EntityId>> select_initial_force_ids(const Conflict
         if (!sim::math::try_subtract(cap, used, cap)) return fail<std::vector<sim::EntityId>>("population budget overflow");
     }
     for (auto& [id, bucket] : buckets) {
-        const auto population = type_of(input, id)->population;
+        const auto population = population_of(*type_of(input, id));
         while (!bucket.empty() && population <= cap) { take(bucket); cap = sim::math::subtract(cap, population).value(); }
     }
     return core::Result<std::vector<sim::EntityId>>::success(std::move(selected));
@@ -216,17 +228,17 @@ core::Result<void> SpaceEntryPreparation::validate_and_select_markers() {
     }
     defenders = markers(input.map, "Defending Forces Position");
     attackers = markers(input.map, "Attacker Entry Position");
-    for (const auto* p : defenders) if (!usable(*p)) return fail<void>("invalid defender marker pose");
-    for (const auto* p : attackers) if (!usable(*p)) return fail<void>("invalid attacker marker pose");
+    std::erase_if(defenders, [](const auto* p) { return !complete(*p); });
+    std::erase_if(attackers, [](const auto* p) { return !complete(*p); });
     // WGT-18/42: ordinary closest-defender branch. The prevention-source qualification
     // is retained explicitly; no ground-scene lookup is guessed from galactic structures.
     attack = attackers.empty() ? nullptr : attackers.front();
     if (attack && !defenders.empty()) {
         auto nearest = distance(*attack->position, *defenders.front()->position);
-        if (!nearest) return core::Result<void>::failure(nearest.error());
+        if (!nearest) { attack = nullptr; return core::Result<void>::success(); }
         for (const auto* p : attackers) {
             auto d = distance(*p->position, *defenders.front()->position);
-            if (!d) return core::Result<void>::failure(d.error());
+            if (!d) continue;
             if (d.value() < nearest.value()) { nearest = d; attack = p; }
         }
     }
@@ -235,6 +247,7 @@ core::Result<void> SpaceEntryPreparation::validate_and_select_markers() {
 
 core::Result<void> SpaceEntryPreparation::place_station_and_structures() {
     auto stations = markers(input.map, "Space Station Position");
+    std::erase_if(stations, [](const auto* p) { return !p->position || !p->orientation_degrees; });
     script::authoritative::RandomStream random(child_seed(session_seed, record.id), 0, 0);
     // WGT-09: one draw only for multiple station markers, even if no station exists.
     const auto station_index = stations.size() > 1 ? random.next_below(stations.size()) : 0;
@@ -242,8 +255,6 @@ core::Result<void> SpaceEntryPreparation::place_station_and_structures() {
     if (stations.empty()) { plan.conflict.station = 0; plan.conflict.station_type = 0; }
     if (record.station_level && !stations.empty()) {
         const auto& source = *stations[station_index];
-        if (!source.position || !source.orientation_degrees)
-            return fail<void>("invalid station marker pose: " + input.map.map + " record " + std::to_string(source.record));
         const auto* station = type_of(input, input.station_galactic_type);
         if (!station || station->tactical != input.station_type || !input.map.tables->find(station->tactical)
             || input.map.tables->find(station->tactical)->kind != units::UnitKind::station)
@@ -294,24 +305,24 @@ core::Result<void> SpaceEntryPreparation::place_station_and_structures() {
             if (type->orbital) {
                 std::vector<const battle::MapPlacement*> candidates;
                 for (const auto& p : input.map.placements) if (p.marker && !used.contains(p.record)
+                    && p.position && p.orientation_degrees
                     && std::any_of(p.marker_for.begin(), p.marker_for.end(), [&](const auto& c) {
                         return folded(c.type) == folded(type->every_marker_type.empty() ? type->tactical : type->every_marker_type);
                     })) candidates.push_back(&p);
                 if (type->every_marker_type.empty()) {
                     if (s.remembered_marker) {
                         const auto remembered = std::find_if(input.map.placements.begin(), input.map.placements.end(), [&](const auto& p) {
-                            return p.record == *s.remembered_marker && p.marker && !used.contains(p.record);
+                            return p.record == *s.remembered_marker && p.marker && p.position && p.orientation_degrees && !used.contains(p.record);
                         });
                         if (remembered != input.map.placements.end()) candidates.insert(candidates.begin(), &*remembered);
                     }
                     if (candidates.empty() && folded(type->base_position) == "ORBITAL")
-                        for (const auto* p : orbitals) if (!used.contains(p->record)) candidates.push_back(p);
+                        for (const auto* p : orbitals) if (p->position && p->orientation_degrees && !used.contains(p->record)) candidates.push_back(p);
                     if (candidates.size() > 1) candidates.resize(1);
                 }
                 const auto* placed = type->every_marker_type.empty() ? type : named_type(input, type->every_marker_type);
                 if (!placed) return fail<void>("missing every-marker type");
                 for (const auto* p : candidates) {
-                    if (!usable(*p)) return fail<void>("invalid orbital marker pose");
                     const auto id = allocate(); if (!id) return fail<void>("structure allocator exhausted");
                     append(*placed, type->every_marker_type.empty() ? record.defender : s.owner, p->record, *id, !s.id);
                     if (s.id) {
@@ -319,6 +330,12 @@ core::Result<void> SpaceEntryPreparation::place_station_and_structures() {
                         copy.role = ForceRole::orbital; copy.parent = s.id;
                     }
                     plan.fixed_poses.emplace_back(*id, *p);
+                    auto staged = std::find_if(plan.map.placements.begin(), plan.map.placements.end(), [&](const auto& marker) {
+                        return marker.marker && marker.record == p->record;
+                    });
+                    if (staged != plan.map.placements.end()) {
+                        staged->orientation_degrees->x = {}; staged->orientation_degrees->y = {};
+                    }
                     if (s.id && type->every_marker_type.empty()) plan.structure_markers.emplace_back(s.id, p->record);
                     used.insert(p->record);
                 }
@@ -336,7 +353,7 @@ core::Result<void> SpaceEntryPreparation::place_station_and_structures() {
                     if (p.record == std::numeric_limits<std::uint32_t>::max()) return fail<void>("map marker ordinal exhausted");
                     source.record = std::max(source.record, p.record + 1);
                 }
-                if (!source.position || !source.orientation_degrees) return fail<void>("invalid weapon source pose");
+                if (!source.position || !source.orientation_degrees) continue;
                 // The shared selected-force builder accepts yaw-only marker poses.
                 auto yaw_only = source;
                 yaw_only.orientation_degrees->x = {}; yaw_only.orientation_degrees->y = {};
@@ -352,10 +369,15 @@ core::Result<void> SpaceEntryPreparation::place_station_and_structures() {
 }
 
 core::Result<void> SpaceEntryPreparation::select_initial_forces() {
-    auto durability_table = units::durability_table(*input.map.tables);
+    core::LoadNoteBuffer load_notes;
+    auto durability_table = units::durability_table(*input.map.tables, nullptr, &load_notes);
     if (!durability_table) return core::Result<void>::failure(durability_table.error());
+    core::LoadNoteCollector collector;
+    collector.merge(load_notes);
+    for (const auto& note : collector.snapshot())
+        plan.notes.push_back(core::format_diagnostic(core::load_note_diagnostic(note)));
     for (const auto owner : {record.defender, record.invader}) {
-        auto initial = select_initial_force_ids(record, input, *sides.at(owner));
+        auto initial = select_initial_force_ids(record, input, *sides.at(owner), plan.notes);
         if (!initial) return core::Result<void>::failure(initial.error());
         initial_forces.emplace(owner, std::move(initial).value());
     }
@@ -370,7 +392,15 @@ core::Result<void> SpaceEntryPreparation::select_initial_forces() {
         const auto& initial = initial_forces.at(force->owner);
         if (type->transport || type->superweapon || std::find(initial.begin(), initial.end(), force->id) == initial.end()) continue;
         const auto* profile = durability_table.value().find(type->purchase_type ? type->purchase_type : battle::type_id(type->tactical));
-        if (!type->source_flagship_rating && !profile) return fail<void>("flagship source durability profile is absent for " + type->tactical);
+        if (!type->source_flagship_rating && !profile) {
+            // Project rule, not a retail rule: retail rates a type with the tag absent by its default hull, but a type
+            // with no positive Tactical_Health builds no durability row here. It rates zero, so it is never the combat
+            // flagship (a side whose ratings are all zero has none, WGT-119), and the entry says so once.
+            auto note = "space entry: " + type->tactical + " has no durability profile (no positive Tactical_Health "
+                "in the effective data); it is not considered for combat flagship";
+            if (std::find(plan.notes.begin(), plan.notes.end(), note) == plan.notes.end()) plan.notes.push_back(std::move(note));
+            continue;
+        }
         auto rating = type->source_flagship_rating ? core::Result<Fixed>::success(*type->source_flagship_rating)
             : sim::math::add(profile ? profile->max_hull : Fixed{}, profile ? profile->max_shields : Fixed{});
         if (!rating) return core::Result<void>::failure(rating.error());
@@ -406,7 +436,11 @@ core::Result<void> SpaceEntryPreparation::deploy_initial_forces() {
             auto selected_marker = marker;
             if (type->superweapon) {
                 const auto death_star = markers(input.map, "Death_Star_Position");
-                if (death_star.empty() || !usable(*death_star.front())) return fail<void>("superweapon marker unavailable");
+                if (death_star.empty() || !complete(*death_star.front())) {
+                    auto retained = std::find_if(plan.conflict.forces.begin(), plan.conflict.forces.end(), [id](const auto& f) { return f.id == id; });
+                    retained->role = ForceRole::retained;
+                    continue;
+                }
                 selected_marker = death_star.front()->record; plan.conflict.superweapon = id;
             }
             plan.placements.push_back({id, selected_marker, true, ++creation});
@@ -732,9 +766,30 @@ core::Result<void> position_tactical_super_weapons(std::vector<battle::StartUnit
 }
 
 }
+namespace {
+// EGT-S3-Q01 (debug build): Ship_Class is read by a case-insensitive scan of eleven words; the land words share the
+// space values (infantry = fighter, tank = frigate, artillery = transport, walker = capital). Any other word, and an
+// empty one, leaves the class unset. Returns the form-up class name, or empty for an unset class.
+std::string_view ship_group(const std::string& word) {
+    const auto name = folded(word);
+    if (name == "FIGHTER" || name == "INFANTRY") return "FIGHTER";
+    if (name == "BOMBER") return "BOMBER";
+    if (name == "TRANSPORT" || name == "ARTILLERY") return "TRANSPORT";
+    if (name == "CORVETTE") return "CORVETTE";
+    if (name == "FRIGATE" || name == "TANK") return "FRIGATE";
+    if (name == "CAPITAL" || name == "WALKER") return "CAPITAL";
+    if (name == "SUPER") return "SUPER";
+    return {};
+}
+} // namespace
+
 core::Result<SpaceFormationResult> form_space_entry(battle::BattleStart& scene,
     const SpaceEntryInputs& input, const SpaceEntryPlan& plan, std::optional<Vec3> invader_target) {
     using Result = core::Result<SpaceFormationResult>;
+    SpaceFormationResult result;
+    const auto add_note = [&result](std::string note) {
+        if (std::find(result.notes.begin(), result.notes.end(), note) == result.notes.end()) result.notes.push_back(std::move(note));
+    };
     SceneMath math;
     auto staged = scene.units;
     const auto find = [&](sim::EntityId id) -> battle::StartUnit* {
@@ -764,7 +819,7 @@ core::Result<SpaceFormationResult> form_space_entry(battle::BattleStart& scene,
                 const auto team=std::find_if(scene.setup.squadrons.begin(),scene.setup.squadrons.end(),[&](const auto& binding){return binding.container==object->state.entity_id;});
                 for (std::size_t i=0; i<type->members.size(); ++i) {
                     const auto& member=type->members[i]; const auto* craft=input.map.tables->find(member.craft);
-                    if (!craft) { if (!math.error) math.error=fail<void>("formation craft absent").error(); continue; }
+                    if (!craft) { add_note("space entry: " + type->id + " names a squadron craft that is not loaded; its bounds leave it out"); continue; }
                     const auto* live=team!=scene.setup.squadrons.end() && i<team->members.size() ? find(team->members[i]) : nullptr;
                     const auto member_box=extent(*craft,live?live->state.rotation:object->state.rotation);
                     const auto offset=member.offset.value_or(Vec3{});
@@ -795,11 +850,19 @@ core::Result<SpaceFormationResult> form_space_entry(battle::BattleStart& scene,
             if (!binding || !type) return fail<SpaceFormationResult>("formation registration is unbound");
             const auto* leader = type;
             if (type->kind == units::UnitKind::squadron && !type->members.empty()) leader = input.map.tables->find(type->members.front().craft);
-            if (!leader) return fail<SpaceFormationResult>("formation team leader is absent");
-            const auto ship_class = folded(leader->campaign_ship_class);
-            if (ship_class != "CAPITAL" && ship_class != "SUPER" && ship_class != "FRIGATE" && ship_class != "CORVETTE"
-                && ship_class != "FIGHTER" && ship_class != "BOMBER" && ship_class != "TRANSPORT")
-                return fail<SpaceFormationResult>("initial force Ship_Class is not qualified: " + leader->id);
+            if (!leader) {
+                // A squadron naming a craft that did not load: it has no leader to class it, so it joins no bucket.
+                add_note("space entry: " + type->id + " names a squadron craft that is not loaded; form-up does not move it");
+                continue;
+            }
+            const auto ship_class = ship_group(leader->campaign_ship_class);
+            if (ship_class.empty()) {
+                // EGT-S3-Q01 (debug build): a Ship_Class word outside the table leaves the class unset; form-up gives an
+                // unset class no bucket, so the object keeps the pose it was created with.
+                add_note("space entry: " + leader->id + " has Ship_Class '" + leader->campaign_ship_class
+                    + "', which is not a ship class word; form-up does not move it");
+                continue;
+            }
             const auto bucket = ship_class == "SUPER" ? 5U : ship_class == "TRANSPORT" ? 4U
                 : ship_class == "CAPITAL" ? 0U
                 : ship_class == "FIGHTER" || ship_class == "BOMBER" ? 3U : 1U;
@@ -812,7 +875,7 @@ core::Result<SpaceFormationResult> form_space_entry(battle::BattleStart& scene,
         for (auto* object : small) {
             const auto* type = input.map.tables->find(object->type);
             if (type->kind == units::UnitKind::squadron && !type->members.empty()) type = input.map.tables->find(type->members.front().craft);
-            (folded(type->campaign_ship_class) == "FIGHTER" ? fighters : bombers).push_back(object);
+            (ship_group(type->campaign_ship_class) == "FIGHTER" ? fighters : bombers).push_back(object);
         }
         if (!fighters.empty() && !bombers.empty()) {
             small.clear();
@@ -878,8 +941,13 @@ core::Result<SpaceFormationResult> form_space_entry(battle::BattleStart& scene,
         auto radius = math.take(sim::math::length(footprint));
         for (std::size_t bucket = central + 1; bucket < 4; ++bucket) {
             auto& objects = buckets[bucket]; if (objects.empty()) continue;
-            const auto D = math.take(sim::math::length(bounds(objects)));
-            if (D <= Fixed{}) return fail<SpaceFormationResult>("formation ring has zero model bounds");
+            auto D = math.take(sim::math::length(bounds(objects)));
+            if (D <= Fixed{}) {
+                // Model bounds of zero size leave the ring capacity undefined (unverified in retail). Use one unit of
+                // spacing so the ships are still placed, and say so.
+                add_note("space entry: the formation ring has zero model bounds; it uses a spacing of one unit (unverified)");
+                D = math.number(1);
+            }
             const bool screen = bucket == central + 1;
             auto ring = math.add(radius, math.half(D)); auto capacity_radius = ring; std::size_t index{};
             while (index < objects.size()) {
@@ -917,7 +985,8 @@ core::Result<SpaceFormationResult> form_space_entry(battle::BattleStart& scene,
     if (!positioned) return Result::failure(positioned.error());
     if (math.error) return Result::failure(*math.error);
     scene.units = std::move(staged);
-    return Result::success({attacker && invader_target.has_value()});
+    result.attacker_cinematic_admitted = attacker && invader_target.has_value();
+    return Result::success(std::move(result));
 }
 
 std::vector<ReturnedUpgrade> space_entry_unbound_upgrades(const ConflictRecord& record, const units::UnitTables& tables) {
@@ -1115,6 +1184,7 @@ core::Result<ConflictEntry> build_space_entry(const ConflictRecord& record, cons
     auto formed = form_space_entry(entry.start, input, plan, input.invader_target);
     if (!formed) return core::Result<ConflictEntry>::failure(formed.error());
     entry.start.campaign_intro_admitted = formed.value().attacker_cinematic_admitted;
+    entry.notes.insert(entry.notes.end(), formed.value().notes.begin(), formed.value().notes.end());
     entry.start.setup.units.clear();
     for (const auto& u : entry.start.units) entry.start.setup.units.push_back(u.state);
     entry.conflict.tactical = entry.start.setup;

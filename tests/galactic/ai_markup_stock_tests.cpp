@@ -11,6 +11,7 @@
 #include <string_view>
 #include <vector>
 #include "../support/env.hpp"
+#include "eawr/vfs/vfs.hpp"
 #include "../support/result.hpp"
 #include "galactic_support.hpp"
 #include "galactic_ai_markup.hpp"

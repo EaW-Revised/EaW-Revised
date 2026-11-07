@@ -87,7 +87,7 @@ void dispatch(Instance& instance, const ScriptEvent& event) {
         if (record_fault(instance)) return;
         if (status != 0) {
             const ::std::string text = error_text(state);
-            add_diagnostic(instance, error_code(text), "dispatch " + event.name + ": " + text);
+            add_lua_error(instance, error_code(text), "dispatch " + event.name + ": " + text);
             lua_settop(state, 0);
             instance.rollback(mark);
             return;
@@ -133,7 +133,7 @@ void call_global(Instance& instance, const ScriptEvent& event) {
     if (record_fault(instance)) return;
     if (status != 0) {
         const ::std::string text = error_text(state);
-        add_diagnostic(instance, error_code(text), "call " + event.name + ": " + text);
+        add_lua_error(instance, error_code(text), "call " + event.name + ": " + text);
         instance.rollback(mark);
     }
     lua_settop(state, 0);
@@ -148,7 +148,7 @@ void start_thread(Instance& instance, const ScriptEvent& event) {
     lua_pushlstring(state, event.name.data(), event.name.size());
     const int status = lua_pcall(state, 1, 0, 0);
     if (record_fault(instance)) return;
-    if (status != 0) add_diagnostic(instance, codes::script_error, "start thread " + event.name + ": " + error_text(state));
+    if (status != 0) add_lua_error(instance, codes::script_error, "start thread " + event.name + ": " + error_text(state));
     lua_settop(state, 0);
 }
 
@@ -201,7 +201,7 @@ void pump_threads(Instance& instance) {
         bool live = false;
         if (status != 0) {
             const ::std::string text = error_text(thread);
-            add_diagnostic(instance, error_code(text), text);
+            add_lua_error(instance, error_code(text), text);
             instance.rollback(mark);
         } else {
             lua_Debug activation;
@@ -213,13 +213,14 @@ void pump_threads(Instance& instance) {
         lua_settop(thread, 0);
         instance.current_thread = -1;
         if (!live) end_slot(instance, index);
-        if (instance.exit_requested) return;
+        if (instance.exit_requested || instance.outcome == InstanceOutcome::faulted) return;
     }
 }
 
 void service_instance(Instance& instance, ::std::uint64_t tick, bool host_paced, ::std::uint64_t time_tick) {
     if (!instance.inbox.empty() || !host_paced) instance.sync_graph_dirty = true;
     instance.rolled_back = false;
+    instance.fault_diagnostic.reset();
     InstanceScope scope(instance);
     instance.sandbox->set_budget(instance.shared->config.quotas.instructions_per_service);
     if (instance.tick != tick) {
@@ -564,8 +565,8 @@ core::Result<void> ScriptScheduler::create_instance(const ::std::uint64_t id, ::
     if (initial_syntax_error) *initial_syntax_error = false;
     using namespace ::eawr::script::sflua;
     if (auto usable = impl_->check_usable(); !usable) return usable;
-    if (id == 0 || impl_->instances.contains(id)) {
-        return core::Result<void>::failure(detail::make_error(codes::invalid_request, "instance IDs are unique and nonzero"));
+    if (id == 0 || impl_->instances.contains(id) || impl_->retired.contains(id)) {
+        return core::Result<void>::failure(detail::make_error(codes::invalid_request, "instance IDs are unique, nonzero and not retired"));
     }
     if (impl_->immediate_host && impl_->instances.size() >= impl_->immediate_instance_limit)
         return core::Result<void>::failure(detail::make_error(codes::invalid_request, "ordered native instance bound exceeded"));
@@ -740,6 +741,9 @@ core::Result<void> ScriptScheduler::submit_event(ScriptEvent event) {
     if (impl_->pending.contains(event.key)) {
         return core::Result<void>::failure(detail::make_error(codes::invalid_request, "duplicate event key"));
     }
+    // Notifications to disabled providers are harmless. Do not retain events
+    // that could revive a retired identity after a checkpoint round trip.
+    if (impl_->retired.contains(event.target)) return core::Result<void>::success();
     impl_->pending.emplace(event.key, ::std::move(event));
     return core::Result<void>::success();
 }
@@ -838,7 +842,9 @@ core::Result<ServiceReport> ScriptScheduler::service(
             for (::std::size_t index = range.begin; index < range.end; ++index) {
                 core::tick_profile::JobScope instance_job_scope("job.script-instance", ordered[index]->id);
                 detail::service_instance(*ordered[index], tick, paced[index] != 0, time_tick);
-                if (impl_->objects.contains(ordered[index]->id) && ::std::any_of(
+                // GC policy: report() diagnoses and continues, irrespective of
+                // code; only an uncaught Lua failure retires the provider.
+                if (!config.galactic_clock && impl_->objects.contains(ordered[index]->id) && ::std::any_of(
                         ordered[index]->staging.diagnostics.begin(), ordered[index]->staging.diagnostics.end(),
                         [](const auto& diagnostic) { return diagnostic.code != codes::unsupported_api
                             && diagnostic.code != codes::script_warning; })) {
@@ -1030,6 +1036,21 @@ core::Result<ServiceReport> ScriptScheduler::service(
     }
     for (detail::Instance* instance : ordered) {
         detail::Staging& staging = instance->staging;
+        if (config.galactic_clock && instance->outcome == InstanceOutcome::faulted) {
+            impl_->retired.insert(instance->id);
+            core::LoadNote note;
+            note.code = "EAWR-LOAD-1400";
+            note.object = ::std::to_string(instance->id);
+            note.action = core::LoadAction::runtime_degraded;
+            note.phase = core::LoadPhase::runtime;
+            note.effective_value = "Lua instance retired; uncommitted effects discarded";
+            if (!staging.diagnostics.empty()) {
+                const auto index = instance->fault_diagnostic.value_or(staging.diagnostics.size() - 1);
+                note.diagnostic_code = staging.diagnostics[index].code;
+                note.message = staging.diagnostics[index].message;
+            }
+            report.load_notes.push_back(::std::move(note));
+        }
         for (ScriptDiagnostic& diagnostic : staging.diagnostics) report.diagnostics.push_back(::std::move(diagnostic));
         if (instance->outcome != InstanceOutcome::faulted) {
             for (ScriptCommand& command : staging.commands) report.commands.push_back(::std::move(command));
@@ -1273,6 +1294,10 @@ core::Result<::std::vector<bool>> ScriptScheduler::thread_slots(const ::std::uin
     return SlotsResult::success(::std::move(slots));
 }
 
+::std::vector<::std::uint64_t> ScriptScheduler::retired_instances() const {
+    return {impl_->retired.begin(), impl_->retired.end()};
+}
+
 core::Result<void> ScriptScheduler::remove_instance(const ::std::uint64_t instance) {
     if (auto usable = impl_->check_usable(); !usable) return usable;
     if (impl_->instances.erase(instance) == 0) {
@@ -1298,6 +1323,8 @@ core::Result<void> ScriptScheduler::remove_instance(const ::std::uint64_t instan
     if (uses_galactic_clock()) {
         out.append(galactic_save_format_identity);
         detail::append_u64(out, impl_->galactic_frame);
+        detail::append_u64(out, impl_->retired.size());
+        for (const auto id : impl_->retired) detail::append_u64(out, id);
     } else if (impl_->shared->config.query_clock) {
         out.append(query_save_format_identity);
         detail::append_u64(out, impl_->galactic_frame);

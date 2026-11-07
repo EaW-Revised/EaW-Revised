@@ -1,4 +1,8 @@
 #include "unit_tables_decode.hpp"
+#include "eawr/vfs/vfs.hpp"
+#include "eawr/core/load_profile.hpp"
+
+#include <algorithm>
 
 namespace eawr::units::unit_tables_detail {
 
@@ -14,13 +18,17 @@ void Loader::run(const std::vector<std::string>& types, const std::vector<std::s
         load_enums(*input_.filesystem, tables_, report_);
         if (input_.domain == sim::tactical::BattleDomain::land) load_land_movement_classes();
         for (const auto& id : types) enqueue(id, UnitKind::ship);
+        core::load_profile::count(core::load_profile::Counter::queue_initial, queue_.size());
         std::size_t loaded = 0;
         for (; loaded < queue_.size(); ++loaded) {
+            if (cancelled()) return;
             const auto [id, kind] = queue_[loaded];
             load_unit(id, kind);
+            release_hint(id);
         }
         // WSW-01/02: expand active faction mappings after the pinned fleet; do not
         // guess source names from purchase menus or instantiate a ground model.
+        core::load_profile::count(core::load_profile::Counter::definition_scan_steps, input_.catalog->definitions().size());
         for (const auto& definition : input_.catalog->definitions()) {
             if (!definition.namespace_winner || definition.category != data::Category::faction) continue;
             auto faction = resolve(*input_.catalog, definition.id, data::Category::faction,
@@ -50,12 +58,18 @@ void Loader::run(const std::vector<std::string>& types, const std::vector<std::s
                 for (const auto& name : pending) enqueue(name, UnitKind::ship);
                 if (loaded == queue_.size()) break;
             }
+            if (cancelled()) return;
             const auto [id, kind] = queue_[loaded++];
             load_unit(id, kind);
+            release_hint(id);
         }
-        for (const auto& id : projectile_ids_) load_projectile(id);
-        for (const auto& id : obstacle_ids_) load_obstacle(id);
-        load_priority_sets(*input_.filesystem, priority_ids_, tables_, report_);
+        core::load_profile::count(core::load_profile::Counter::queue_final, queue_.size());
+        {
+            core::load_profile::Scope projectile_scope(core::load_profile::Phase::unit_projectile_load);
+            for (const auto& id : projectile_ids_) load_projectile(id);
+            for (const auto& id : obstacle_ids_) load_obstacle(id);
+            load_priority_sets(*input_.filesystem, priority_ids_, tables_, report_);
+        }
         link();
         {
             // WRB-05: an Enable_Ability matters only for a nested handler some loaded unit authors; the rest
@@ -92,6 +106,7 @@ void Loader::run(const std::vector<std::string>& types, const std::vector<std::s
         load_constants(*input_.filesystem, damage, armor, tables_, report_);
         {
             // WHZ-51: every combat session needs the authored neutral relationship, including props.
+            core::load_profile::count(core::load_profile::Counter::definition_scan_steps, input_.catalog->definitions().size());
             for (const auto& definition : input_.catalog->definitions()) {
                 if (!definition.namespace_winner || !iequals(definition.type_name, "Faction")) continue;
                 auto faction = resolve(*input_.catalog, definition.id, data::Category::faction, definition.id, "faction", report_);
@@ -143,18 +158,34 @@ void Loader::run(const std::vector<std::string>& types, const std::vector<std::s
 
     // Resolve cross-table references to indices once every table is loaded.
 void Loader::link() {
+        namespace profile = core::load_profile;
+        profile::Scope link_scope(profile::Phase::unit_link);
         const auto unit_index = [&](const std::string& id) {
+            std::size_t steps = 0;
             for (std::size_t index = 0; index < tables_.units.size(); ++index) {
+                ++steps;
                 if (iequals(tables_.units[index].id, id) && !tables_.units[index].xml_type.empty()) {
+                    profile::count(profile::Counter::unit_index_scans);
+                    profile::count(profile::Counter::unit_index_steps, steps);
                     return static_cast<std::uint32_t>(index);
                 }
             }
+            profile::count(profile::Counter::unit_index_scans);
+            profile::count(profile::Counter::unit_index_steps, steps);
             return no_index;
         };
         const auto projectile_index = [&](const std::string& id) {
+            std::size_t steps = 0;
             for (std::size_t index = 0; index < tables_.projectiles.size(); ++index) {
-                if (iequals(tables_.projectiles[index].id, id)) return static_cast<std::uint32_t>(index);
+                ++steps;
+                if (iequals(tables_.projectiles[index].id, id)) {
+                    profile::count(profile::Counter::projectile_index_scans);
+                    profile::count(profile::Counter::projectile_index_steps, steps);
+                    return static_cast<std::uint32_t>(index);
+                }
             }
+            profile::count(profile::Counter::projectile_index_scans);
+            profile::count(profile::Counter::projectile_index_steps, steps);
             return no_index;
         };
         for (auto& unit : tables_.units) {
@@ -180,6 +211,7 @@ void Loader::link() {
                     hardpoint.weapon->charged_projectile_index = projectile_index(hardpoint.weapon->charged_projectile);
                 }
             }
+            profile::count(profile::Counter::priority_set_steps, tables_.priority_sets.size());
             for (std::size_t index = 0; index < tables_.priority_sets.size(); ++index) {
                 if (!unit.targeting_priority_set.empty() && iequals(tables_.priority_sets[index].id, unit.targeting_priority_set)) {
                     unit.targeting_priority_set_index = static_cast<std::uint32_t>(index);
@@ -280,7 +312,7 @@ core::Result<UnitTables> load_unit_tables(const LoadInput& input) {
         obstacles.clear();
         std::set<std::string> seen;
         for (const auto& placement : map.value().placements) {
-            if (placement.type_resolution != assets::TypeResolution::unique || placement.type_candidates.size() != 1) {
+            if (placement.type_candidates.empty()) {
                 report.missing(input.space_map, "placed type", std::to_string(placement.key.record_ordinal),
                                "object checksum does not resolve uniquely");
                 continue;
@@ -293,6 +325,12 @@ core::Result<UnitTables> load_unit_tables(const LoadInput& input) {
         }
     }
     Loader(input, tables, report).run(types, obstacles);
+    if (input.cancel != nullptr && input.cancel->load(std::memory_order_acquire)) {
+        core::Diagnostic diagnostic;
+        diagnostic.code = std::string(diagnostic_codes::missing_input);
+        diagnostic.message = "unit tables load cancelled";
+        return core::Result<UnitTables>::failure(std::move(diagnostic));
+    }
     for (auto& unit : tables.units) {
         // WAB-36: a named target handler is resolved when activated; an unresolved row
         // must not reject its whole unit. Keep every independently valid handler/profile.
@@ -304,6 +342,7 @@ core::Result<UnitTables> load_unit_tables(const LoadInput& input) {
             case Kind::energy_weapon: expected = Special::energy_weapon; break;
             case Kind::tractor_beam: expected = Special::tractor_beam; break;
             case Kind::leech_shields: expected = Special::leech_shields; break;
+            case Kind::super_laser: expected = Special::super_laser; break;
             case Kind::concentrate_fire: expected = Special::concentrate_fire; break;
             default: return false;
             }

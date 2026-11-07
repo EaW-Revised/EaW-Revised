@@ -1,9 +1,14 @@
 #include "galactic_ai_runtime.hpp"
+#include "eawr/vfs/vfs.hpp"
+#include "galactic_ai_usability.hpp"
+#include "../script/foc/ai_script_evaluators.hpp"
+#include "eawr/sim/replay.hpp"
 #include "eawr/campaign/story_plots.hpp"
 #include "eawr/core/gc_profile.hpp"
 #include "../script/foc/galactic_ai.hpp"
 #include "eawr/script/foc/galactic_ai_pass.hpp"
 #include "../script/foc/tactical_ai_internal.hpp"
+#include "eawr/campaign/space_entry.hpp"
 #include "eawr/campaign/ai_selection_content.hpp"
 #include "eawr/campaign/ai_perception_content.hpp"
 #include "eawr/core/sha256.hpp"
@@ -12,6 +17,8 @@
 #include <exception>
 #include <cstring>
 #include <chrono>
+#include <new>
+#include <system_error>
 
 namespace eawr::campaign {
 namespace ga = script::foc::galactic_ai;
@@ -83,13 +90,16 @@ public:
     std::shared_ptr<foc::detail::Host> host = std::make_shared<foc::detail::Host>();
     std::shared_ptr<ai::GalacticWorld> world;
     std::shared_ptr<ai::Engine> engine;
+    std::shared_ptr<ai::GoalStateContributor> goals;
+    bool phase_active{};
+    std::optional<ga::gc::PlayerId> tail_fault_provider;
     std::shared_ptr<ai::GalacticFunding> funding = std::make_shared<ai::GalacticFunding>();
     std::weak_ptr<ga::Manager> manager;
     std::weak_ptr<ComposedGalacticAiState> native_state;
     std::shared_ptr<ga::NativeActions> actions;
     std::unique_ptr<ga::gc::GalacticSession::NativeActionBarrier> native_actions_barrier;
     template<class T> core::Result<T> checked_native(core::Result<T> result) {
-        if (!result) native_actions_barrier.reset();
+        if (!result && !phase_active) native_actions_barrier.reset();
         return result;
     }
     core::Result<void> begin_native_actions_barrier() {
@@ -115,6 +125,9 @@ public:
     ga::gc::GalacticSession* galaxy{};
     std::uint64_t sequence{};
     auth::ScriptScheduler* active_scripts{};
+    // Borrowed from the installed GameSession parent. Native listeners die with
+    // that session; fresh install and checkpoint reconstruction both rebind it.
+    auth::ScriptScheduler* retained_scripts{}; // Survives native phase cleanup.
     const sim::PartitionExecutor* active_executor{};
     // S9b: a player's decision chain (run()) is handed pass_executor, never the pool: bulk work it needs and
     // can share is built before the first player by prepare_path_tables(), the rest is player-owned and
@@ -463,14 +476,15 @@ public:
         }
         const bool offered = prepared != path_tables.end() && prepared->second.frame == frame;
         const bool prebuilt = offered && same_input(prepared->second.input, input);
-        const auto producer = [&, previous = routes[player].memo](const sim::PartitionExecutor& workers_) -> core::Result<std::optional<ga::ExecutionRouteBuild>> {
+        const auto existing = routes.find(player);
+        auto staged = existing == routes.end() ? ga::ExecutionRoutes{} : existing->second;
+        const auto producer = [&, previous = staged.memo](const sim::PartitionExecutor& workers_) -> core::Result<std::optional<ga::ExecutionRouteBuild>> {
             using Built = core::Result<std::optional<ga::ExecutionRouteBuild>>;
             if (prebuilt) return Built::success(std::move(prepared->second.build));
             auto built = ga::build_execution_routes(input, workers_, previous);
             if (!built) return Built::failure(built.error());
             return Built::success(std::move(built).value());
         };
-        auto staged = routes[player];
         if (initialize) {
             const auto& players = setup->perception.players;
             const auto found = std::find_if(players.begin(), players.end(), [player](const auto& p) { return p.player == player; });
@@ -487,7 +501,7 @@ public:
         }
         row.next_refresh = staged.next_refresh;
         if (auto replaced = execution->replace_retained(std::move(state)); !replaced) return replaced;
-        routes[player] = std::move(staged);
+        execution->replace_route(player, std::move(staged));
         if (prepared != path_tables.end()) path_tables.erase(prepared);
         return publish_refreshed_routes(executor);
     }
@@ -643,12 +657,14 @@ public:
         kept.reserve(report.commands.size());
         for (auto& command : report.commands) {
             if (command.verb != ga::verb_freestore_move) { kept.push_back(std::move(command)); continue; }
+            tail_fault_provider = static_cast<ga::gc::PlayerId>(engine->galactic_chain_owner(command.issuer));
             auto committed = actions->commit_freestore_move(command);
             if (!committed) return core::Result<void>::failure(committed.error());
         }
+        tail_fault_provider.reset();
         report.commands = std::move(kept);
         if (auto synchronized = synchronize_reservations(); !synchronized) return synchronized;
-        if (native_actions_barrier) {
+        if (native_actions_barrier && !phase_active) {
             auto committed = native_actions_barrier->commit(); native_actions_barrier.reset();
             if (!committed) return committed;
         }
@@ -693,6 +709,128 @@ public:
 private:
     std::shared_ptr<Runtime> owner_;
 };
+// One service attempt retains changed rows inside their actual owning writers.
+// No native archive or entity-domain inventory is captured here.
+struct NativePhaseAttempt {
+    Runtime& owner;
+    std::shared_ptr<ga::Manager> manager;
+    std::unique_ptr<ga::gc::GalacticSession::NativeOutputPhase> output;
+    std::unique_ptr<auth::ScriptScheduler::PhaseSavepoint> scripts;
+    std::unique_ptr<ga::Manager::PhaseSavepoint> lifecycle;
+    std::unique_ptr<ai::GalacticWorld::PhaseSavepoint> perception;
+    std::unique_ptr<ai::GoalStateContributor::PhaseSavepoint> goals;
+    std::unique_ptr<ai::GalacticFunding::PhaseSavepoint> funding;
+    std::unique_ptr<ga::NativeActions::PhaseSavepoint> actions;
+    std::unique_ptr<ga::LiveExecutionStateContributor::PhaseSavepoint> execution;
+    std::unique_ptr<foc::AiJournal::PhaseSavepoint> journal;
+    std::unique_ptr<foc::tactical_ai_detail::ScriptEvaluators::PhaseSavepoint> evaluators;
+    std::vector<std::pair<std::shared_ptr<GalacticAiUsabilityProvider>, std::unique_ptr<GalacticAiUsabilityProvider::PhaseSavepoint>>> usability;
+    decltype(Runtime::connectivity) connectivity, route_source, combined;
+    decltype(Runtime::route_publications) route_publications;
+    std::map<ga::gc::PlayerId, decltype(Runtime::PlayerRuntimeState::initial)> initial;
+    std::uint64_t sequence{};
+    std::size_t diagnostics{};
+    bool build_tasks{}, recoverable_external{true};
+
+    NativePhaseAttempt(Runtime& runtime, std::shared_ptr<ga::Manager> retained_manager)
+        : owner(runtime), manager(std::move(retained_manager)), connectivity(runtime.connectivity), route_source(runtime.route_source),
+          combined(runtime.combined_routes), route_publications(runtime.route_publications), sequence(runtime.sequence),
+          diagnostics(runtime.setup->load_diagnostics.size()), build_tasks(runtime.build_tasks_ready) {
+        // Mod/player coordination headers, never a world-entity domain.
+        for (const auto& [player, slice] : owner.player_runtime) initial.emplace(player, slice.initial);
+        owner.phase_active = true; owner.tail_fault_provider.reset(); owner.engine->reset_native_fault_context();
+    }
+    ~NativePhaseAttempt() {
+        owner.native_actions_barrier.reset(); // unsettled attempts preserve the existing terminal refusal
+        owner.phase_active = false; owner.active_scripts = nullptr; owner.active_executor = nullptr;
+        owner.actions->set_executor(owner.setup->executor.get()); owner.clear_path_tables();
+    }
+    core::Result<void> begin(auth::ScriptScheduler& scheduler, const sim::PartitionExecutor& executor) {
+        const auto enlist = [](auto& token, auto begun) -> core::Result<void> {
+            if (!begun) return core::Result<void>::failure(begun.error());
+            token = std::move(begun).value(); return core::Result<void>::success();
+        };
+        if (auto result = enlist(output, owner.galaxy->begin_native_output_phase()); !result) return result;
+        if (auto result = enlist(scripts, scheduler.begin_phase(executor)); !result) return result;
+        if (auto result = enlist(lifecycle, manager->begin_phase()); !result) return result;
+        if (auto result = enlist(perception, owner.world->begin_phase(executor)); !result) return result;
+        if (auto result = enlist(goals, owner.goals->begin_phase()); !result) return result;
+        if (auto result = enlist(funding, owner.funding->begin_phase()); !result) return result;
+        if (auto result = enlist(actions, owner.actions->begin_phase()); !result) return result;
+        // Custom providers may retain legacy external execution writers. Their
+        // healthy path remains supported, but no sparse rollback can account
+        // for writes that bypass this participant's owned mutators.
+        if (owner.providers.execution_writers_tracked) {
+            if (auto result = enlist(execution, owner.execution->begin_phase()); !result) return result;
+        } else recoverable_external = false;
+        if (owner.host->setup.journal) journal = owner.host->setup.journal->begin_phase();
+        if (auto* evaluator = owner.engine->script_evaluators())
+            if (auto result = enlist(evaluators, evaluator->begin_phase(executor)); !result) return result;
+        for (const auto& [name, contributor] : owner.providers.external) {
+            static_cast<void>(name);
+            auto stock = std::dynamic_pointer_cast<GalacticAiUsabilityProvider>(contributor);
+            if (!stock) { recoverable_external = false; continue; }
+            auto begun = stock->begin_phase(); if (!begun) return core::Result<void>::failure(begun.error());
+            usability.emplace_back(std::move(stock), std::move(begun).value());
+        }
+        for (auto& [provider, token] : usability) {
+            static_cast<void>(token);
+            if (auto rebuilt = provider->rebuild_phase_inputs(*owner.engine, executor); !rebuilt) return rebuilt;
+        }
+        return core::Result<void>::success();
+    }
+    core::Result<void> commit() {
+        // All deterministic service callbacks have completed. The ordered
+        // world publication may itself call external observers; failure here
+        // remains infrastructure refusal and never retries.
+        if (owner.native_actions_barrier) {
+            auto committed = owner.native_actions_barrier->commit();
+            if (!committed) { output->record_fault(); return committed; }
+            owner.native_actions_barrier.reset();
+        }
+        if (auto result = scripts->commit(); !result) return result;
+        if (auto result = funding->commit(); !result) return result;
+        if (auto result = actions->commit(); !result) return result;
+        if (execution) if (auto result = execution->commit(); !result) return result;
+        if (auto result = perception->commit(); !result) return result;
+        for (auto& [provider, token] : usability) { static_cast<void>(provider); if (auto result = token->commit(); !result) return result; }
+        if (evaluators) if (auto result = evaluators->commit(); !result) return result;
+        if (auto result = goals->commit(); !result) return result;
+        if (auto result = lifecycle->commit(); !result) return result;
+        if (journal) journal->commit();
+        return core::Result<void>::success();
+    }
+    core::Result<void> rollback() {
+        if (output->published() || !recoverable_external) return absent<void>("unpublished complete native rollback ownership");
+        if (owner.native_actions_barrier) {
+            if (auto result = owner.native_actions_barrier->discard(); !result) return result;
+            owner.native_actions_barrier.reset();
+        }
+        if (auto result = funding->rollback(); !result) return result;
+        if (auto result = actions->rollback(); !result) return result;
+        if (execution) if (auto result = execution->rollback(); !result) return result;
+        if (auto result = perception->rollback(); !result) return result;
+        owner.host->view = owner.world->view();
+        if (auto result = goals->rollback(); !result) return result;
+        if (auto result = lifecycle->rollback(); !result) return result;
+        if (evaluators) if (auto result = evaluators->rollback(); !result) return result;
+        for (auto& [provider, token] : usability) { static_cast<void>(provider); if (auto result = token->rollback(); !result) return result; }
+        if (auto result = scripts->rollback(); !result) return result;
+        if (journal) journal->rollback();
+        owner.connectivity = std::move(connectivity); owner.route_source = std::move(route_source); owner.combined_routes = std::move(combined);
+        owner.route_publications = std::move(route_publications); owner.sequence = sequence; owner.build_tasks_ready = build_tasks;
+        owner.setup->load_diagnostics.resize(diagnostics);
+        for (auto& [player, slice] : owner.player_runtime) {
+            slice.initial = std::move(initial.at(player)); slice.path_tables.clear();
+            for (auto& [reader, memo] : slice.economy) {
+                static_cast<void>(reader); memo.budget_players.reset(); memo.budget_players_revision.reset();
+                memo.last_economy.reset(); memo.build_budgets_cached = false;
+            }
+        }
+        return core::Result<void>::success();
+    }
+};
+
 class ScriptEngine final : public auth::GalacticScriptEngine {
 public:
     ScriptEngine(std::shared_ptr<Runtime> owner, std::shared_ptr<ga::Manager> manager)
@@ -703,6 +841,56 @@ public:
         return state && state->full_verification_enabled();
     }
     bool admits_service(const ga::gc::GalacticTick& tick) const noexcept override { return manager_->admits_service(tick); }
+    core::Result<auth::ServiceReport> service_phase(const sim::PartitionExecutor& executor,
+        ga::gc::GalacticSession& parent, const ga::gc::GalacticTick&, auth::ScriptScheduler& scripts,
+        const std::function<core::Result<auth::ServiceReport>()>& run) override {
+        using Result = core::Result<auth::ServiceReport>;
+        if (owner_->phase_active || owner_->galaxy != &parent) return absent<auth::ServiceReport>("idle native service phase owner");
+        std::vector<core::LoadNote> notes;
+        for (std::size_t attempt_index = 0; attempt_index <= owner_->setup->lifecycle.players.size(); ++attempt_index) {
+            NativePhaseAttempt attempt(*owner_, manager_);
+            if (auto begun = attempt.begin(scripts, executor); !begun) return Result::failure(begun.error());
+            bool infrastructure{};
+            auto reason = ga::NativeProviderFault::result;
+            const auto failure = [](std::string message) {
+                core::Diagnostic diagnostic; diagnostic.code = auth::codes::session_abort; diagnostic.message = std::move(message);
+                return Result::failure(std::move(diagnostic));
+            };
+            auto result = [&]() -> Result {
+                try { return run(); }
+                catch (const foc::tactical_ai_detail::EvaluatorInfrastructureError& error) { infrastructure = true; return failure(error.what()); }
+                catch (const std::bad_alloc& error) { infrastructure = true; return failure(error.what()); }
+                catch (const std::system_error& error) { infrastructure = true; return failure(error.what()); }
+                catch (const std::exception& error) { reason = ga::NativeProviderFault::deterministic_exception; return failure(error.what()); }
+                catch (...) { infrastructure = true; return failure("unknown native service infrastructure exception"); }
+            }();
+            if (result) {
+                if (auto committed = attempt.commit(); !committed) { attempt.output->record_fault(); return Result::failure(committed.error()); }
+                result.value().load_notes.insert(result.value().load_notes.end(), notes.begin(), notes.end());
+                return result;
+            }
+            // A callback is publication even when it fails or throws. Nothing
+            // rolls back or reruns once that output is observable.
+            if (attempt.output->published()) { attempt.output->record_fault(); return result; }
+            const auto& diagnostic = result.error();
+            infrastructure = infrastructure || diagnostic.code == sim::diagnostic_codes::worker_failure
+                || diagnostic.code == ga::gc::diagnostic_codes::worker_failure || diagnostic.code == sim::tactical::diagnostic_codes::worker_failure
+                || diagnostic.code == auth::codes::save_refused || diagnostic.code == auth::codes::load_rejected;
+            auto faulted = manager_->faulted_provider();
+            if (!faulted) faulted = owner_->engine->native_fault_provider();
+            if (!faulted) faulted = owner_->tail_fault_provider;
+            if (infrastructure || !attempt.recoverable_external || !faulted || !*faulted || manager_->provider_retired(*faulted)) return result;
+            if (manager_->provider_threw() || owner_->engine->native_provider_threw()) reason = ga::NativeProviderFault::deterministic_exception;
+            if (auto restored = attempt.rollback(); !restored) return Result::failure(restored.error());
+            if (auto retired = manager_->retire_provider(*faulted, reason); !retired) return Result::failure(retired.error());
+            if (auto retired = owner_->engine->retire_galactic_provider(*faulted, scripts); !retired) return Result::failure(retired.error());
+            for (auto& note : manager_->retirement_notes())
+                if (note.object == "native galactic player " + std::to_string(*faulted)) notes.push_back(std::move(note));
+            // The completed attempt goes out of scope before any participant
+            // begins again. Successful siblings recompute from the same root.
+        }
+        return absent<auth::ServiceReport>("bounded native provider retirement progress");
+    }
     core::Result<auth::ServiceOptions> before_service(const sim::PartitionExecutor& executor,
         const ga::gc::GalacticSession& parent, const ga::gc::GalacticTick& tick, auth::ScriptScheduler& scripts) override {
         const auto reads = owner_->world->owner_reads();
@@ -722,7 +910,7 @@ public:
                 owner_->setup->lifecycle.players, &owner_->pass_executor);
         }();
         if (!begun) {
-            owner_->native_actions_barrier.reset();
+            if (!owner_->phase_active) owner_->native_actions_barrier.reset();
             return core::Result<auth::ServiceOptions>::failure(begun.error());
         }
         owner_->engine->set_galactic_funding(owner_->funding);
@@ -750,8 +938,11 @@ public:
     core::Result<void> after_service(auth::ServiceReport& report) override {
         const auto native_record_write = owner_->engine->native_record_scope();
         auto result = owner_->checked_native(manager_->after_service(report));
-        owner_->clear_path_tables();
-        owner_->active_executor = nullptr; owner_->actions->set_executor(owner_->setup->executor.get()); return result;
+        if (!owner_->phase_active) {
+            owner_->clear_path_tables();
+            owner_->active_executor = nullptr; owner_->actions->set_executor(owner_->setup->executor.get());
+        }
+        return result;
     }
 private:
     struct NativeBarrierCleanup {
@@ -759,6 +950,7 @@ private:
         const ga::gc::GalacticSession::NativeActionBarrier* barrier{};
         explicit NativeBarrierCleanup(std::shared_ptr<Runtime> runtime) : owner(std::move(runtime)) {}
         ~NativeBarrierCleanup() {
+            if (owner->phase_active) return;
             if (owner->native_actions_barrier && owner->native_actions_barrier.get() != barrier) return;
             owner->native_actions_barrier.reset();
             owner->clear_path_tables();
@@ -816,6 +1008,13 @@ core::Result<ga::ExecutionRouteInput> copy_stock_execution_input(const GalacticA
     return Result::success(std::move(out));
 }
 
+std::optional<sim::galactic::PlayerId> shared_story_local_player(const CampaignSetupPlan& plan) {
+    if (plan.mode() == CampaignSetupMode::multiplayer && plan.rules_flavour() == CampaignRulesFlavour::single_player
+        && plan.human_observers().size() == 1)
+        return plan.human_observers().front();
+    return std::nullopt;
+}
+
 core::Result<std::vector<ga::PlayerSelection>> select_live_galactic_ai_players(
     const data::galactic::GalacticData& data, const CampaignSetupPlan& plan, const ai::AiData& loaded,
     std::string_view authored_difficulty) {
@@ -847,7 +1046,7 @@ core::Result<std::vector<ga::PlayerSelection>> select_live_galactic_ai_players(
         // existing native goal checkpoint contract excludes neutral players.
         if (faction->is_neutral.value_or(false)) continue;
         std::string_view player_type;
-        if (plan.mode() == CampaignSetupMode::multiplayer && faction->is_playable.value_or(false)) {
+        if (plan.rules_flavour() == CampaignRulesFlavour::multiplayer && faction->is_playable.value_or(false)) {
             player_type = faction->basic_ai;
             if (player_type.empty()) return absent<std::vector<ga::PlayerSelection>>("multiplayer playable faction Basic_AI");
         } else {
@@ -942,9 +1141,18 @@ core::Result<std::shared_ptr<const GalacticAiRuntimeSetup>> prepare_stock_galact
         out->multiplayer = plan.mode() == CampaignSetupMode::multiplayer;
         // WST-91/92: all loaded factions, all registered players, and only the recorded canonical observer.
         for (const auto& faction : data.factions) out->story_players.factions.push_back(faction.name);
-        for (const auto& binding : plan.player_bindings())
-            out->story_players.players.push_back({binding.player.player_id, binding.faction});
+        for (const auto& binding : plan.player_bindings()) {
+            const auto story_selection = std::find_if(out->lifecycle.players.begin(), out->lifecycle.players.end(),
+                [&](const auto& row) { return row.player == binding.player.player_id; });
+            out->story_players.players.push_back({binding.player.player_id, binding.faction,
+                story_selection == out->lifecycle.players.end() ? "Normal" : story_selection->difficulty});
+        }
+        for (const auto& [id, type] : out->content->types) out->story_players.types.emplace_back(type.name, id);
         out->story_players.local_player = plan.solo_reference_human();
+        out->story_players.shared_local_player = shared_story_local_player(plan);
+        for (const auto& location : plan.locations()) {
+            if (location.planet) out->story_players.planets.emplace_back(location.original_type, location.planet->id);
+        }
         {
             // The scripts follow the plots: a campaign whose plots cannot be listed here simply runs none.
             auto plots = load_story_plots(files, data, plan);
@@ -982,7 +1190,11 @@ core::Result<std::shared_ptr<const GalacticAiRuntimeSetup>> prepare_stock_galact
             if (player.ai) player.difficulty = chosen->difficulty;
         }
         for (const auto& location : plan.locations()) if (location.planet) {
-            const auto original = require(catalog.resolve(location.original_type, data::Category::game_object));
+            // CGS-22: a planet type with no loadable base is skipped (noted once by space-entry preparation) and keeps the
+            // constructor default adjustment; any other resolve failure still refuses.
+            const auto resolved_original = catalog.resolve(location.original_type, data::Category::game_object);
+            if (!resolved_original && stock_name_skippable(resolved_original.error())) { out->route_z_adjust.emplace(location.planet->id, ai::Real{}); continue; }
+            const auto original = require(resolved_original);
             if (const auto* value = original.value("Layer_Z_Adjust")) {
                 const auto z = ai::parse_real(value->value.raw_text);
                 if (!z) return absent<std::shared_ptr<const GalacticAiRuntimeSetup>>("source planet Layer_Z_Adjust number");
@@ -998,20 +1210,27 @@ core::Result<std::shared_ptr<const GalacticAiRuntimeSetup>> prepare_stock_galact
             for (const auto& child : value.children) self(self, child);
         };
         for (const auto& binding : plan.type_bindings()) if (const auto* type = plan.original_type(binding.id)) {
+            auto resolved = catalog.resolve(type->name, data::Category::game_object);
+            if (!resolved && stock_name_skippable(resolved.error())) continue;
+            const auto object = require(std::move(resolved));
             field(std::to_string(binding.id)); field(binding.original_type);
-            const auto object = require(catalog.resolve(type->name, data::Category::game_object));
             for (const auto& value : object.values) node(node, value.value);
         }
         for (const auto& [path, bytes] : out->lifecycle.xml) { field(path); field(bytes); }
         for (const auto& [path, bytes] : out->modules) { field(path); field(bytes); }
         field(out->story_scripts->fingerprint());
         if (!out->story_scripts->entries().empty()) {
-            field("story-player-lookup-v1");
+            field("story-player-lookup-v3");
             field(std::to_string(out->story_players.factions.size()));
             for (const auto& faction : out->story_players.factions) field(faction);
             field(std::to_string(out->story_players.players.size()));
-            for (const auto& player : out->story_players.players) { field(std::to_string(player.id)); field(player.faction); }
+            for (const auto& player : out->story_players.players) { field(std::to_string(player.id)); field(player.faction); field(player.difficulty); }
+            field(std::to_string(out->story_players.types.size()));
+            for (const auto& [name, id] : out->story_players.types) { field(name); field(std::to_string(id)); }
             field(out->story_players.local_player ? std::to_string(*out->story_players.local_player) : "no-local-player");
+            if (out->story_players.shared_local_player) field("shared-local-" + std::to_string(*out->story_players.shared_local_player));
+            field(std::to_string(out->story_players.planets.size()));
+            for (const auto& [name, id] : out->story_players.planets) { field(name); field(std::to_string(id)); }
         }
         if (out->multiplayer) field("multiplayer-story-random");
         for (const auto& registry : catalog.registry_files()) if (registry.loaded && registry.input_sha256) { field(registry.included_path); field(*registry.input_sha256); }
@@ -1131,16 +1350,33 @@ core::Result<checkpoint::GameLoadOptions::PreparedGalacticScripts> prepare_galac
         }
         // WST-53: sub-plot scripts live in the story scheduler; a campaign whose plots name none keeps it empty. (`setup` was moved into the runtime above.)
         auto story = runtime->setup->story_scripts ? create_galactic_story_scheduler(*runtime->setup->story_scripts, config,
-            runtime->setup->multiplayer, runtime->setup->story_players) : auth::ScriptScheduler::create(config, {});
+            runtime->setup->multiplayer, runtime->setup->story_players,
+            [weak = std::weak_ptr<Runtime>(runtime)]() -> std::shared_ptr<const ga::gc::GalacticSnapshot> {
+                const auto owner = weak.lock();
+                return owner && owner->galaxy ? owner->galaxy->snapshot() : nullptr;
+            }, [weak = std::weak_ptr<Runtime>(runtime)](const std::string& key) -> std::optional<auth::Value> {
+                const auto owner = weak.lock();
+                return owner ? owner->engine->global_value(key) : std::nullopt;
+            }) : auth::ScriptScheduler::create(config, {});
         if (!story) return Result::failure(story.error());
         auto install = [runtime, birth](GameSession& game) -> core::Result<void> {
             if (!game.galactic_scripts()) return absent<void>("reconstructed galactic schedulers");
+            game.galactic_scripts()->set_global_value_committer([weak = std::weak_ptr<Runtime>(runtime)](auth::ServiceReport& report) {
+                if (const auto owner = weak.lock()) owner->engine->commit_global_values(report);
+            });
             runtime->world->bind_timeline_reader(game.active_timeline_reader());
             runtime->child_timeline_factory = game.child_timeline_reader_factory();
             for (const auto& [mode, reader] : runtime->pending_child_timelines)
                 *reader = runtime->child_timeline_factory(mode);
             runtime->pending_child_timelines.clear();
             runtime->active_scripts = &game.galactic_scripts()->ai_scheduler();
+            runtime->retained_scripts = runtime->active_scripts;
+            // Story chunks may query live objects before their main thread starts.
+            runtime->galaxy = &game.galactic_scripts()->parent_world();
+            // WST-56: plan scripts (the retail interventions) reach the campaign's plots through Get_Story_Plot.
+            if (const auto* plots = game.story_engine())
+                runtime->host->story_plots = foc::StoryPlotLink::from(plots->definitions(),
+                    game.story_plot_applier()); // bound to the session's heap state, not to the movable handle
             if (runtime->setup->story_scripts && !runtime->setup->story_scripts->entries().empty()) {
                 game.bind_story_scripts(runtime->setup->story_scripts);
                 if (birth == GalacticAiRuntimeBirth::fresh_campaign) {
@@ -1222,7 +1458,7 @@ core::Result<checkpoint::GameLoadOptions::PreparedGalacticScripts> prepare_galac
                     if (auto published = runtime->providers.publish_freestore(*runtime->actions, *runtime->pool, *galaxy.snapshot(), *runtime->setup->executor); !published)
                         return core::Result<GalacticAiContributors>::failure(published.error());
                 runtime->battle = runtime->providers.prepare_battle(runtime->actions, runtime->engine, [weak] {
-                    const auto owner = weak.lock(); return owner ? owner->active_scripts : nullptr;
+                    const auto owner = weak.lock(); return owner ? owner->retained_scripts : nullptr;
                 });
                 if (!runtime->battle) return absent<GalacticAiContributors>("retained battle listener");
                 runtime->actions->bind_handlers(); runtime->host->galactic_execution = runtime->actions;
@@ -1253,10 +1489,25 @@ core::Result<checkpoint::GameLoadOptions::PreparedGalacticScripts> prepare_galac
                     runtime->actions->immediate_host(runtime->providers.shadow_placement, runtime->setup->immediate_requests),
                     runtime->world->markup(), runtime->world, runtime->engine);
                 capabilities.immediate_instance_limit = runtime->setup->immediate_instances;
+                // RGC-176..178: the scripted story's Spawn_Unit and Prevent_AI_Usage write through the same ordered native
+                // shadow as the AI's forced production. Only a campaign whose story scripts name one of them gives its story
+                // scheduler the host (its instances then run in ID order); every other campaign keeps the partitioned story
+                // service, so its hashes do not move. The bound is the story instance count, not the AI's.
+                if (runtime->setup->story_scripts && runtime->setup->story_scripts->uses_immediate_effects() && game.galactic_scripts()) {
+                    if (auto bound = game.galactic_scripts()->story_scheduler().set_immediate_effect_host(
+                            runtime->actions->immediate_host(runtime->providers.shadow_placement, runtime->setup->immediate_requests),
+                            std::max<std::size_t>(runtime->setup->story_scripts->entries().size(), 1)); !bound)
+                        return core::Result<GalacticAiContributors>::failure(bound.error());
+                }
                 auto manager = ga::Manager::create(std::move(lifecycle), std::move(capabilities));
                 if (!manager) return core::Result<GalacticAiContributors>::failure(manager.error());
                 runtime->manager = manager.value();
-                auto goals = std::make_shared<ai::GoalStateContributor>(runtime->engine, runtime->setup->content_identity);
+                runtime->goals = std::make_shared<ai::GoalStateContributor>(runtime->engine, runtime->setup->content_identity);
+                runtime->engine->set_galactic_retirement_reader([weak](auto player) {
+                    const auto owner = weak.lock(); const auto lifecycle_owner = owner ? owner->manager.lock() : nullptr;
+                    return lifecycle_owner && lifecycle_owner->provider_retired(player);
+                });
+                const auto goals = runtime->goals;
                 return core::Result<GalacticAiContributors>::success({manager.value(), runtime->world, goals, runtime->funding, runtime->execution, runtime->actions,
                     [weak](const auto& ledgers) -> core::Result<void> {
                         auto owner = weak.lock(); if (!owner) return absent<void>("funding identity owner");
@@ -1276,6 +1527,7 @@ core::Result<checkpoint::GameLoadOptions::PreparedGalacticScripts> prepare_galac
                         if (const auto manager = owner->manager.lock())
                             owner->world->set_perception_period(manager->service_periods()[static_cast<std::size_t>(ga::Service::perception)]);
                         owner->build_tasks_ready = true;
+                        if (const auto manager = owner->manager.lock()) owner->galaxy->add_runtime_load_notes(manager->retirement_notes());
                         if (auto published = owner->publish_economy(); !published) return published;
                         if (owner->providers.publish_freestore)
                             if (auto published = owner->providers.publish_freestore(*owner->actions, *owner->pool, *owner->galaxy->snapshot(), *owner->setup->executor); !published)

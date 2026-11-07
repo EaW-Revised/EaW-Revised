@@ -85,7 +85,15 @@ void load_planets(const Catalog& catalog, GalacticData& data) {
         planet.planet_ability_name = record.text("Planet_Ability_Name");
         planet.planet_ability_description = record.text("Planet_Ability_Description");
         planet.planet_ability_icon = record.text("Planet_Ability_Icon");
+        planet.planet_weather_icon = record.text("Encyclopedia_Weather_Icon");
+        planet.planet_weather_name = record.text("Encyclopedia_Weather_Name");
+        planet.planet_weather_info = record.text("Encyclopedia_Weather_Info");
         planet.describe_advantage = record.text("Describe_Advantage");
+        planet.describe_tactical = record.text("Describe_Tactical");
+        planet.describe_history = record.text("Describe_History");
+        planet.describe_weather = record.text("Describe_Weather");
+        planet.describe_terrain = record.text("Describe_Terrain");
+        planet.describe_population = record.text("Describe_Population");
         planet.encyclopedia_text = record.names("Encyclopedia_Text");
         planet.scale_factor = record.number("Scale_Factor");
         planet.destroyed_galactic_model_name = record.text("Destroyed_Galactic_Model_Name");
@@ -465,7 +473,8 @@ void check_references(const Catalog& catalog, GalacticData& data) {
         for (const auto& name : campaign.human_victory_planet_names) {
             if (!contains(planets, name)) issue(IssueKind::dangling_reference, "Human_Victory_Planet_Names", name, "not a planet");
         }
-        for (const auto& name : campaign.autoresolve_exclusion_locations) location("Autoresolve_Exclusion_Locations", name);
+        for (std::size_t i = 0; i + 1 < campaign.autoresolve_exclusion_locations.size(); i += 2)
+            location("Autoresolve_Exclusion_Locations", campaign.autoresolve_exclusion_locations[i]);
         for (const auto& value : campaign.corruption_level_overrides) location("Corruption_Level_Override", value.location);
     }
 }

@@ -5,8 +5,11 @@
 
 #include "eawr/assets/map.hpp"
 #include "eawr/sim/tactical/abilities.hpp"
+#include "eawr/vfs/vfs.hpp"
 
 #include <algorithm>
+#include <array>
+#include <cstdint>
 #include <filesystem>
 #include <optional>
 #include <string>
@@ -273,6 +276,379 @@ void bad_entry_skips_only_its_type() {
     expect(static_cast<bool>(t::validate_abilities(lenient.value())), "#4666: the lenient table validates");
 }
 
+// #5696: a bare SELF_DESTRUCT row (no Expiration_Seconds) never starts in retail (WSD-01): the type loads
+// without the row and says so; strict keeps refusing it.
+void bare_stub_rows_are_inert() {
+    for (const auto kind : {"SELF_DESTRUCT"}) {
+        TempTree tree;
+        auto xml = with_second_frigate(layer_xml("15", "0.8"));
+        const auto ship = xml.find("<SpaceUnit Name=\"Test_Frigate\">");
+        const auto begin = xml.find("<Unit_Abilities_Data", ship);
+        const auto end = xml.find("</Unit_Abilities_Data>", begin);
+        xml.replace(begin, end + std::string_view("</Unit_Abilities_Data>").size() - begin,
+            "<Unit_Abilities_Data><Unit_Ability><Type>" + std::string(kind) + "</Type></Unit_Ability>"
+            "<Unit_Ability><Type>TURBO</Type><Recharge_Seconds>1</Recharge_Seconds></Unit_Ability></Unit_Abilities_Data>");
+        write_fixture(tree.root, xml);
+        const auto tables = load_layers({tree.root});
+        expect(tables.has_value(), "#5696: the stub row fixture loads");
+        if (!tables) continue;
+        expect(!eawr::units::ability_table(*tables, {}, nullptr, true, eawr::units::ContentErrors::strict),
+            "#5696: strict still refuses a row with no expiration");
+        std::vector<eawr::core::Diagnostic> diagnostics;
+        const auto lenient = eawr::units::ability_table(*tables, {}, nullptr, true,
+            eawr::units::ContentErrors::skip_object, &diagnostics);
+        expect(static_cast<bool>(lenient), "#5696: a lenient load builds the table");
+        if (!lenient) continue;
+        expect(ability_of(lenient.value(), "Test_Frigate", t::ability_kind(kind)) == nullptr,
+            "#5696: the inert row is dropped");
+        expect(ability_of(lenient.value(), "Test_Frigate", t::AbilityKind::turbo) != nullptr,
+            "#5696: the type keeps its other abilities");
+        expect(std::any_of(diagnostics.begin(), diagnostics.end(), [](const auto& row) {
+            return row.severity == eawr::core::Severity::warning && row.message.find("Expiration_Seconds") != std::string::npos;
+        }) && std::none_of(diagnostics.begin(), diagnostics.end(), [](const auto& row) {
+            return row.message.find("skipped unit type") != std::string::npos;
+        }), "#5696: a load note, never a type skip");
+        expect(static_cast<bool>(t::validate_abilities(lenient.value())), "#5696: the lenient table validates");
+    }
+}
+
+bool has_warning(const std::vector<eawr::core::Diagnostic>& rows, const std::string_view text) {
+    return std::any_of(rows.begin(), rows.end(), [&](const auto& row) {
+        return row.severity == eawr::core::Severity::warning && row.message.find(text) != std::string::npos;
+    });
+}
+
+bool has_type_skip(const std::vector<eawr::core::Diagnostic>& rows) {
+    return std::any_of(rows.begin(), rows.end(), [](const auto& row) {
+        return row.message.find("skipped unit type") != std::string::npos;
+    });
+}
+
+// #5696: a SELF_DESTRUCT naming an object that is no area blast (the stock contamination objects name the particle
+// Small_Steam_Ground; effective miscobjects.xml l.75-87, l.149-157) keeps the ability and creates nothing; strict refuses.
+void non_blast_self_destruct_is_kept() {
+    TempTree tree;
+    auto xml = with_second_frigate(layer_xml("15", "0.8"));
+    const auto ship = xml.find("<SpaceUnit Name=\"Test_Frigate\">");
+    const auto begin = xml.find("<Unit_Abilities_Data", ship);
+    const auto end = xml.find("</Unit_Abilities_Data>", begin);
+    xml.replace(begin, end + std::string_view("</Unit_Abilities_Data>").size() - begin,
+        "<Unit_Abilities_Data><Unit_Ability><Type>SELF_DESTRUCT</Type><Expiration_Seconds>3</Expiration_Seconds>"
+        "<Spawned_Object_Type>Proj_Test_Turbo</Spawned_Object_Type></Unit_Ability>"
+        "<Unit_Ability><Type>TURBO</Type><Recharge_Seconds>1</Recharge_Seconds></Unit_Ability></Unit_Abilities_Data>");
+    write_fixture(tree.root, xml);
+    const auto tables = load_layers({tree.root});
+    expect(tables.has_value(), "#5696: the non-blast self destruct fixture loads");
+    if (!tables) return;
+    const auto strict = eawr::units::ability_table(*tables, {}, nullptr, true, eawr::units::ContentErrors::strict);
+    expect(!strict || !t::validate_abilities(strict.value()), "#5696: strict still refuses a non-blast self destruct object");
+    std::vector<eawr::core::Diagnostic> diagnostics;
+    const auto lenient = eawr::units::ability_table(*tables, {}, nullptr, true,
+        eawr::units::ContentErrors::skip_object, &diagnostics);
+    expect(lenient.has_value(), "#5696: a lenient load builds the table");
+    if (!lenient) return;
+    const auto* ability = ability_of(lenient.value(), "Test_Frigate", t::AbilityKind::self_destruct);
+    expect(ability && !ability->spawned && ability->unresolved_spawn && *ability->unresolved_spawn == "Proj_Test_Turbo",
+        "#5696: the self destruct is kept with its creation skipped");
+    expect(ability_of(lenient.value(), "Test_Frigate", t::AbilityKind::turbo) != nullptr, "#5696: other abilities stay");
+    expect(has_warning(diagnostics, "no area-blast projectile") && !has_type_skip(diagnostics),
+        "#5696: a load note, never a type skip");
+    expect(static_cast<bool>(t::validate_abilities(lenient.value())), "#5696: the lenient table validates");
+}
+
+// #5704: retail multiplies SPEED_MULTIPLIER unchecked, so an authored 0.0 (a mod freezes the unit) loads, even strict.
+void zero_speed_multiplier_loads() {
+    TempTree tree;
+    write_fixture(tree.root, with_second_frigate(layer_xml("15", "0.0")));
+    const auto tables = load_layers({tree.root});
+    expect(tables.has_value(), "#5704: the zero speed multiplier fixture loads");
+    if (!tables) return;
+    const auto abilities = eawr::units::ability_table(*tables, std::vector<t::PlayerId>{1});
+    expect(static_cast<bool>(abilities), "#5704: a zero speed multiplier no longer refuses the table");
+    if (!abilities) return;
+    const auto* defend = ability_of(abilities.value(), "Test_Frigate", t::AbilityKind::defend);
+    expect(defend != nullptr && defend->modifiers.speed.raw() == 0, "#5704: the zero multiplier is kept as authored");
+}
+
+void concentrate_fire_large_damage_loads() {
+    TempTree tree;
+    auto xml = with_second_frigate(layer_xml("15", "0.8"));
+    const auto begin = xml.find("<Unit_Abilities_Data");
+    const auto end = xml.find("</Unit_Abilities_Data>", begin);
+    expect(begin != std::string::npos && end != std::string::npos, "#5704: ability fixture exists");
+    if (begin == std::string::npos || end == std::string::npos) return;
+    xml.replace(begin, end + std::string_view("</Unit_Abilities_Data>").size() - begin, R"(
+      <Unit_Abilities_Data><Unit_Ability><Type>CONCENTRATE_FIRE</Type><Effective_Radius>6000</Effective_Radius>
+        <Expiration_Seconds>15</Expiration_Seconds><Recharge_Seconds>20</Recharge_Seconds>
+        <GUI_Activated_Ability_Name>focus</GUI_Activated_Ability_Name></Unit_Ability></Unit_Abilities_Data>
+      <Abilities><Concentrate_Fire_Attack_Ability Name="focus"><Activation_Style>User_Input</Activation_Style>
+        <Applicable_Unit_Categories>Frigate</Applicable_Unit_Categories><Applicable_Unit_Types/>
+        <Stacking_Category>0</Stacking_Category><Target_Damage_Increase_Percent>5</Target_Damage_Increase_Percent>
+        <Target_Speed_Decrease_Percent>0</Target_Speed_Decrease_Percent>
+      </Concentrate_Fire_Attack_Ability></Abilities>)");
+    write_fixture(tree.root, xml);
+    const auto tables = load_layers({tree.root});
+    if (!tables) return;
+    const auto abilities = eawr::units::ability_table(*tables);
+    const auto* profile = abilities ? abilities.value().find(eawr::assets::object_type_crc("Test_Frigate")) : nullptr;
+    expect(profile && !profile->special.empty() && profile->special.front().target_damage_increase == Fixed::from_decimal("5").value(),
+        "#5704: concentrate-fire damage above four is retained");
+}
+
+void oversized_collision_loads_with_warning() {
+    TempTree tree;
+    write_fixture(tree.root, with_second_frigate(layer_xml("15", "0.8")));
+    auto tables = load_layers({tree.root});
+    if (!tables) return;
+    auto unit = std::find_if(tables->units.begin(), tables->units.end(), [](const auto& row) { return row.id == "Test_Frigate"; });
+    expect(unit != tables->units.end(), "#5704: collision fixture has a frigate");
+    if (unit == tables->units.end()) return;
+    unit->scale_factor = Fixed::from_raw(Fixed::scale);
+    unit->collision = eawr::units::CollisionBounds{point(raw(-300000), raw(-1), raw(-1)), point(raw(300000), raw(1), raw(1))};
+    unit->collision_meshes.clear();
+    std::vector<eawr::core::Diagnostic> diagnostics;
+    const auto combat = eawr::units::combat_table(*tables, eawr::units::ContentErrors::skip_object, &diagnostics);
+    const auto* profile = combat ? combat.value().find(eawr::assets::object_type_crc("Test_Frigate")) : nullptr;
+    expect(profile && !profile->collision && profile->meshes.empty() && !profile->mesh_bounds,
+        "#5704: oversized collision geometry is omitted while the type remains");
+    expect(has_warning(diagnostics, "collision box exceeds") && !has_type_skip(diagnostics),
+        "#5704: oversized collision produces a warning without skipping the type");
+}
+
+// #5696: retail reads Projectile_Max_Lifetime unchecked; a lenient load keeps a 5000 s projectile, strict keeps 3600 s.
+void long_projectile_lifetime_loads_leniently() {
+    TempTree tree;
+    auto xml = with_second_frigate(layer_xml("15", "0.8"));
+    expect(replace_once(xml, "<Max_Speed>25.0</Max_Speed>",
+        "<Max_Speed>25.0</Max_Speed><Projectile_Max_Lifetime>5000</Projectile_Max_Lifetime>"),
+        "#5696: the fixture authors a 5000 s lifetime on the frigate's projectile");
+    write_fixture(tree.root, xml);
+    const auto tables = load_layers({tree.root});
+    expect(tables.has_value(), "#5696: the long lifetime fixture loads");
+    if (!tables) return;
+    expect(!eawr::units::combat_table(*tables, eawr::units::ContentErrors::strict),
+        "#5696: strict still refuses a lifetime above 3600 s");
+    std::vector<eawr::core::Diagnostic> diagnostics;
+    const auto lenient = eawr::units::combat_table(*tables, eawr::units::ContentErrors::skip_object, &diagnostics);
+    expect(lenient.has_value() && !has_type_skip(diagnostics), "#5696: a lenient load keeps the type");
+    if (!lenient) return;
+    const auto* profile = lenient.value().find(eawr::assets::object_type_crc("Test_Frigate"));
+    expect(profile != nullptr && !profile->weapons.empty(), "#5696: the frigate's weapons load");
+    bool kept = false;
+    if (profile != nullptr) for (const auto& weapon : profile->weapons)
+        if (weapon.shot && weapon.shot->flight && weapon.shot->flight->lifetime
+            && weapon.shot->flight->lifetime->raw() == 5000 * eawr::sim::math::Fixed::scale) kept = true;
+    expect(kept, "#5696: the 5000 s lifetime is kept as authored");
+}
+
+// #5696 + WAR-108: a Death_Projectiles name that answers no projectile is dropped with a note in a lenient load, but
+// the death draw still covers every authored entry; the table records the authored count and kept slots.
+void unresolved_death_projectile_is_dropped() {
+    for (const bool first : {false, true}) {
+        TempTree tree;
+        auto xml = with_second_frigate(layer_xml("15", "0.8"));
+        const std::string_view marker = "<SpaceUnit Name=\"Test_Frigate\">";
+        xml.insert(xml.find(marker) + marker.size(), first
+            ? "<Death_Projectiles>Missing_Test_Projectile, Proj_Test_Small</Death_Projectiles>"
+            : "<Death_Projectiles>Proj_Test_Small, Missing_Test_Projectile</Death_Projectiles>");
+        write_fixture(tree.root, xml);
+        const auto tables = load_layers({tree.root});
+        expect(tables.has_value(), "#5696: the death projectile fixture loads");
+        if (!tables) continue;
+        expect(!eawr::units::combat_table(*tables, eawr::units::ContentErrors::strict),
+            "#5696: strict still refuses an unresolved Death_Projectiles entry");
+        std::vector<eawr::core::Diagnostic> diagnostics;
+        const auto lenient = eawr::units::combat_table(*tables, eawr::units::ContentErrors::skip_object, &diagnostics);
+        expect(lenient.has_value() && !has_type_skip(diagnostics) && has_warning(diagnostics, "Death_Projectiles"),
+            "#5696: a lenient load keeps the type and notes the dropped entry");
+        if (!lenient) continue;
+        const auto* profile = lenient.value().find(eawr::assets::object_type_crc("Test_Frigate"));
+        expect(profile && profile->death_projectiles.size() == 1 && profile->death_projectile_authored == 2
+            && profile->death_projectile_slots == std::vector<std::uint32_t>{first ? 1U : 0U},
+            "WAR-108: the draw still covers both authored entries and the kept one remembers its slot");
+    }
+    // A fully resolved list keeps the plain draw over its size (stock content is unchanged).
+    TempTree tree;
+    auto xml = with_second_frigate(layer_xml("15", "0.8"));
+    const std::string_view marker = "<SpaceUnit Name=\"Test_Frigate\">";
+    xml.insert(xml.find(marker) + marker.size(), "<Death_Projectiles>Proj_Test_Small, Proj_Test_Turbo</Death_Projectiles>");
+    write_fixture(tree.root, xml);
+    const auto tables = load_layers({tree.root});
+    expect(tables.has_value(), "#5696: the resolved death projectile fixture loads");
+    if (!tables) return;
+    std::vector<eawr::core::Diagnostic> diagnostics;
+    const auto lenient = eawr::units::combat_table(*tables, eawr::units::ContentErrors::skip_object, &diagnostics);
+    const auto* profile = lenient ? lenient.value().find(eawr::assets::object_type_crc("Test_Frigate")) : nullptr;
+    expect(profile && profile->death_projectiles.size() == 2 && profile->death_projectile_authored == 0
+        && profile->death_projectile_slots.empty(), "WAR-108: a fully resolved list is unchanged");
+}
+
+// Replaces the frigate's ability block with `abilities` (and its nested handlers `handlers`, if any).
+std::string with_abilities(std::string xml, const std::string_view abilities, const std::string_view handlers = {}) {
+    const auto ship = xml.find("<SpaceUnit Name=\"Test_Frigate\">");
+    const auto begin = xml.find("<Unit_Abilities_Data", ship);
+    const auto end = xml.find("</Unit_Abilities_Data>", begin);
+    expect(ship != std::string::npos && begin != std::string::npos && end != std::string::npos,
+        "#5704: the fixture has a frigate ability block");
+    xml.replace(begin, end + std::string_view("</Unit_Abilities_Data>").size() - begin,
+        std::string(handlers) + "<Unit_Abilities_Data>" + std::string(abilities) + "</Unit_Abilities_Data>");
+    return xml;
+}
+
+// WSPL-01/03/06: load the nested handler, bind it to the unit ability, and preserve retail colour defaults.
+void super_laser_loading() {
+    for (const bool authored_colour : {false, true}) {
+        TempTree tree;
+        const std::string colour = authored_colour ? "<Line_Color>12,34,56,78</Line_Color>" : "<Beam_Color>1,2,3,4</Beam_Color>";
+        const std::string handler = "<Abilities SubObjectList=\"Yes\"><Super_Laser_Ability Name=\"Test_Beam\">"
+            "<Activation_Style>User_Input</Activation_Style><Activation_Max_Range>300</Activation_Max_Range>"
+            "<Damage_Per_Frame>20</Damage_Per_Frame><Fire_Delay>0.15</Fire_Delay>" + colour
+            + "</Super_Laser_Ability></Abilities>";
+        write_fixture(tree.root, with_second_frigate(with_abilities(layer_xml("15", "0.8"),
+            "<Unit_Ability><Type>SUPER_LASER</Type><GUI_Activated_Ability_Name>Test_Beam</GUI_Activated_Ability_Name>"
+            "<Expiration_Seconds>2</Expiration_Seconds><Recharge_Seconds>4</Recharge_Seconds></Unit_Ability>", handler)));
+        const auto tables = load_layers({tree.root});
+        if (!tables) continue;
+        const auto abilities = eawr::units::ability_table(*tables, std::vector<t::PlayerId>{1});
+        expect(static_cast<bool>(abilities), "WSPL-01: authored super laser binds");
+        if (!abilities) continue;
+        const auto* profile = abilities.value().find(eawr::assets::object_type_crc("Test_Frigate"));
+        expect(profile && t::ability_slot(*profile, t::AbilityKind::super_laser).has_value(), "WSPL-01: ability kind loads");
+        if (!profile || profile->special.empty()) continue;
+        const auto& special = profile->special.front();
+        expect(special.kind == t::SpecialAbilityKind::super_laser && special.fire_delay_frames == 4,
+            "WSPL-03: delay seconds convert to truncated logical frames");
+        const std::array<std::uint8_t, 4> expected = authored_colour ? std::array<std::uint8_t, 4>{12, 34, 56, 78}
+                                                                     : std::array<std::uint8_t, 4>{255, 255, 255, 255};
+        expect(special.leech_colour == expected, "WSPL-06: Line_Color applies and Beam_Color does not override white");
+    }
+}
+
+// WSH-04 (#5696): Heal_Amount below 0 together with a Heal_Percent loads leniently (retail adds percent x maximum and
+// amount); strict keeps refusing the combination.
+void healing_negative_amount_with_percent() {
+    TempTree tree;
+    write_fixture(tree.root, with_second_frigate(with_abilities(layer_xml("15", "0.8"),
+        "",
+        "<Abilities SubObjectList=\"Yes\"><Force_Healing_Ability Name=\"Test_Heal\"><Activation_Style>Space_Automatic</Activation_Style>"
+        "<Heal_Range>100.0</Heal_Range><Heal_Amount>-0.5</Heal_Amount><Heal_Percent>0.005</Heal_Percent>"
+        "<Heal_Interval_In_Secs>0.1</Heal_Interval_In_Secs><Applicable_Unit_Categories>Corvette, Frigate, Capital</Applicable_Unit_Categories>"
+        "</Force_Healing_Ability></Abilities>")));
+    const auto tables = load_layers({tree.root});
+    expect(tables.has_value(), "WSH-04: the healing fixture loads");
+    if (!tables) return;
+    const auto strict = eawr::units::ability_table(*tables, {}, nullptr, true, eawr::units::ContentErrors::strict);
+    expect(!strict || !t::validate_abilities(strict.value()), "WSH-09: strict still refuses a negative amount with a percent");
+    std::vector<eawr::core::Diagnostic> diagnostics;
+    const auto lenient = eawr::units::ability_table(*tables, {}, nullptr, true,
+        eawr::units::ContentErrors::skip_object, &diagnostics);
+    expect(lenient.has_value() && !has_type_skip(diagnostics), "WSH-04: a lenient load keeps the type");
+    if (!lenient) return;
+    const auto* profile = lenient.value().find(eawr::assets::object_type_crc("Test_Frigate"));
+    bool heal = false;
+    if (profile != nullptr) for (const auto& special : profile->special)
+        if (special.kind == t::SpecialAbilityKind::force_healing)
+            heal = special.heal_amount.raw() < 0 && special.heal_percent.raw() > 0;
+    expect(heal, "WSH-04: the negative amount and the percent both stay");
+    expect(static_cast<bool>(t::validate_abilities(lenient.value())), "WSH-04: the table validates");
+}
+
+// WAR-108 (#5696): when every Death_Projectiles entry is dropped the table keeps no projectile, only the authored count;
+// the death service must read nothing from the empty list.
+void all_death_projectiles_dropped() {
+    TempTree tree;
+    auto xml = with_second_frigate(layer_xml("15", "0.8"));
+    const std::string_view marker = "<SpaceUnit Name=\"Test_Frigate\">";
+    xml.insert(xml.find(marker) + marker.size(), "<Death_Projectiles>Missing_Test_A, Missing_Test_B</Death_Projectiles>");
+    write_fixture(tree.root, xml);
+    const auto tables = load_layers({tree.root});
+    expect(tables.has_value(), "#5696: the all-dropped fixture loads");
+    if (!tables) return;
+    std::vector<eawr::core::Diagnostic> diagnostics;
+    const auto lenient = eawr::units::combat_table(*tables, eawr::units::ContentErrors::skip_object, &diagnostics);
+    expect(lenient.has_value() && !has_type_skip(diagnostics), "#5696: a lenient load keeps the type");
+    if (!lenient) return;
+    const auto* profile = lenient.value().find(eawr::assets::object_type_crc("Test_Frigate"));
+    expect(profile && profile->death_projectiles.empty() && profile->death_projectile_authored == 2
+        && profile->death_projectile_slots.empty(),
+        "WAR-108: no projectile kept, authored count 2; the death service gates on the authored count, so nothing spawns");
+}
+
+// #5696 rule: Retreat_Self_Destruct_Explosion naming no projectile (FotR templates, 71 types) has no retail load check;
+// strict refuses, a lenient load keeps the type with a note and no retreat blast. A resolved name still binds.
+void unresolved_retreat_explosion_is_dropped() {
+    for (const bool resolved : {false, true}) {
+        TempTree tree;
+        auto xml = with_second_frigate(layer_xml("15", "0.8"));
+        const std::string_view marker = "<SpaceUnit Name=\"Test_Frigate\">";
+        xml.insert(xml.find(marker) + marker.size(), resolved
+            ? "<Retreat_Self_Destruct_Explosion>Proj_Test_Small</Retreat_Self_Destruct_Explosion>"
+            : "<Retreat_Self_Destruct_Explosion>Missing_Test_Projectile</Retreat_Self_Destruct_Explosion>");
+        write_fixture(tree.root, xml);
+        const auto tables = load_layers({tree.root});
+        expect(tables.has_value(), "#5696: the retreat explosion fixture loads");
+        if (!tables) continue;
+        if (!resolved)
+            expect(!eawr::units::combat_table(*tables, eawr::units::ContentErrors::strict),
+                "#5696: strict still refuses an unresolved Retreat_Self_Destruct_Explosion");
+        std::vector<eawr::core::Diagnostic> diagnostics;
+        const auto lenient = eawr::units::combat_table(*tables, eawr::units::ContentErrors::skip_object, &diagnostics);
+        expect(lenient.has_value() && !has_type_skip(diagnostics), "#5696: a lenient load keeps the type");
+        if (!lenient) continue;
+        const auto* profile = lenient.value().find(eawr::assets::object_type_crc("Test_Frigate"));
+        expect(profile && profile->retreat_explosion.has_value() == resolved
+            && has_warning(diagnostics, "Retreat_Self_Destruct_Explosion") == !resolved,
+            "#5696: the retreat blast binds only when the name resolves; otherwise a load note");
+    }
+}
+
+// #5724: Proj_Ancient_Superlaser_Strong authors Projectile_Damage 9999999 (above the sim's hit damage bound). Strict still
+// refuses; a lenient load keeps the type, saturates the damage at the bound and notes it.
+void oversized_projectile_damage_saturates() {
+    TempTree tree;
+    auto xml = with_second_frigate(layer_xml("15", "0.8"));
+    const auto projectile = xml.find("<Projectile Name=\"Proj_Test_Small\">");
+    const std::string_view authored = "<Projectile_Damage>5.0</Projectile_Damage>";
+    const auto at = xml.find(authored, projectile);
+    expect(projectile != std::string::npos && at != std::string::npos, "#5724: the fixture projectile is found");
+    if (at == std::string::npos) return;
+    xml.replace(at, authored.size(), "<Projectile_Damage>9999999.0</Projectile_Damage>");
+    write_fixture(tree.root, xml);
+    const auto tables = load_layers({tree.root});
+    expect(tables.has_value(), "#5724: the oversized damage fixture loads");
+    if (!tables) return;
+    expect(!eawr::units::combat_table(*tables, eawr::units::ContentErrors::strict),
+        "#5724: strict still refuses a hit damage above the bound");
+    std::vector<eawr::core::Diagnostic> diagnostics;
+    const auto lenient = eawr::units::combat_table(*tables, eawr::units::ContentErrors::skip_object, &diagnostics);
+    expect(lenient.has_value() && !has_type_skip(diagnostics), "#5724: a lenient load keeps the type");
+    expect(has_warning(diagnostics, "Projectile_Damage"), "#5724: the saturation is noted");
+}
+
+// #5702: a sub-frame Expiration_Seconds (0.01) is an authored expiration above 0: the row stays, one frame long.
+void sub_frame_expiration_is_one_frame() {
+    for (const auto kind : {"SELF_DESTRUCT", "BARRAGE"}) {
+        TempTree tree;
+        auto xml = with_second_frigate(layer_xml("15", "0.8"));
+        const auto ship = xml.find("<SpaceUnit Name=\"Test_Frigate\">");
+        const auto begin = xml.find("<Unit_Abilities_Data", ship);
+        const auto end = xml.find("</Unit_Abilities_Data>", begin);
+        xml.replace(begin, end + std::string_view("</Unit_Abilities_Data>").size() - begin,
+            "<Unit_Abilities_Data><Unit_Ability><Type>" + std::string(kind)
+            + "</Type><Expiration_Seconds>0.01</Expiration_Seconds></Unit_Ability></Unit_Abilities_Data>");
+        write_fixture(tree.root, xml);
+        const auto tables = load_layers({tree.root});
+        expect(static_cast<bool>(tables), "#5702: the fixture loads");
+        if (!tables) continue;
+        const auto lenient = eawr::units::ability_table(*tables, {}, nullptr, true, eawr::units::ContentErrors::skip_object);
+        expect(static_cast<bool>(lenient), "#5702: a lenient load builds the table");
+        if (!lenient) continue;
+        const auto* row = ability_of(lenient.value(), "Test_Frigate", t::ability_kind(kind));
+        expect(row != nullptr && row->expiration_frames == 1, "#5702: a 0.01 s expiration is one frame, not dropped");
+        expect(static_cast<bool>(t::validate_abilities(lenient.value())), "#5702: the table validates");
+    }
+}
+
 } // namespace
 
 void ability_limits() {
@@ -422,9 +798,22 @@ void ability_limits() {
             && profile->special.front().heal_percent.raw() == 0 && profile->special.front().heal_interval_frames == 15,
             "WSH-09: the signed amount reaches the profile; a negative percent resets to 0");
     }
+    super_laser_loading();
     leaf_values_reach_the_table();
     three_abilities_are_kept();
     bad_entry_skips_only_its_type();
+    bare_stub_rows_are_inert();
+    non_blast_self_destruct_is_kept();
+    zero_speed_multiplier_loads();
+    concentrate_fire_large_damage_loads();
+    oversized_collision_loads_with_warning();
+    long_projectile_lifetime_loads_leniently();
+    unresolved_death_projectile_is_dropped();
+    healing_negative_amount_with_percent();
+    all_death_projectiles_dropped();
+    unresolved_retreat_explosion_is_dropped();
+    oversized_projectile_damage_saturates();
+    sub_frame_expiration_is_one_frame();
 }
 
 } // namespace unit_tables_test_support

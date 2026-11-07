@@ -173,6 +173,10 @@ bool MeshIncident::removal_confirmed(PeerIndex seat) const {
     return phase_ == Phase::settling && (removed_ & mesh_seat(seat)) != 0;
 }
 
+bool MeshIncident::restore_counter(std::uint64_t counter) {
+    if (!counter || phase_ != Phase::quiet || incident_ != 1 || revision_ || have_report_) return false;
+    incident_ = counter; return true;
+}
 void MeshIncident::set_active(MeshSeats active) {
     active = static_cast<MeshSeats>(active & all_seats);
     if (active == active_) return;

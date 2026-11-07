@@ -412,6 +412,7 @@ core::Result<AiData> load_ai_data_files(
                 if (const auto value = number(element.child_text("Shield_Multiplier"))) difficulty.shield_multiplier = *value;
                 if (const auto value = number(element.child_text("Damage_Multiplier"))) difficulty.damage_multiplier = *value;
                 if (const auto value = number(element.child_text("Space_Build_Time_Multiplier"))) difficulty.space_build_time_multiplier = *value;
+                difficulty.name = element.name_attribute;
                 data.difficulties.emplace(upper_case(element.name_attribute), difficulty);
             }
         }
@@ -450,6 +451,21 @@ core::Result<AiDifficultyTable> AiDifficultyTable::load(const std::map<std::stri
     data->data = std::move(loaded).value();
     table.data_ = std::move(data);
     return core::Result<AiDifficultyTable>::success(std::move(table));
+}
+
+std::array<std::string, 3> AiDifficultyTable::level_entries(std::string_view player_type) const {
+    std::array<std::string, 3> out;
+    if (!data_) return out;
+    const auto type = data_->data.players.find(ai::upper_case(player_type));
+    if (type == data_->data.players.end()) return out;
+    std::size_t slot = 0;
+    for (const char* level : {"EASY", "NORMAL", "HARD"}) {
+        const auto named = type->second.difficulty.find(level);
+        const auto entry = named == type->second.difficulty.end() ? data_->data.difficulties.end() : data_->data.difficulties.find(named->second);
+        if (entry != data_->data.difficulties.end()) out[slot] = entry->second.name;
+        ++slot;
+    }
+    return out;
 }
 
 AiDifficultyAdjustment AiDifficultyTable::resolve(std::string_view player_type, sim::tactical::AiLevel level) const {

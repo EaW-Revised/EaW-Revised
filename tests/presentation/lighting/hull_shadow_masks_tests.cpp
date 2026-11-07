@@ -9,6 +9,7 @@
 // classifications for the sun rotated +-20 degrees (diagnostic only).
 
 #include "../../support/check.hpp"
+#include "eawr/vfs/vfs.hpp"
 #include "hull_asset_fixture.hpp"
 #include "hull_shadow_masks.hpp"
 

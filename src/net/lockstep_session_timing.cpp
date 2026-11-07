@@ -54,6 +54,7 @@ bool LockstepSession::timing_voter(PeerIndex peer) const noexcept {
 
 bool LockstepSession::timing_frozen() const noexcept {
     if (!options_.adaptive_timing) return false;
+    if (checkpoint_) return true;
     const auto host = options_.adaptive_timing->host;
     const auto link = host == self_ ? LinkState::open : transport_->link(host);
     return mesh_timing_frozen(mesh_voters(), link) || (mesh_ && mesh_->running());

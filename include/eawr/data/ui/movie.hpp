@@ -10,7 +10,7 @@
 // presentation layer plays. Engine-free.
 
 #include "eawr/core/result.hpp"
-#include "eawr/vfs/vfs.hpp"
+#include "eawr/vfs/vfs_fwd.hpp"
 
 #include <cstddef>
 #include <array>

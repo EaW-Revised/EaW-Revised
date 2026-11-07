@@ -41,6 +41,14 @@ gc::ActorCombatRole combat_role(const units::GalacticType& type) {
     if (behaves(type, "SQUADRON") || behaves(type, "DUMMY_SPACE_FIGHTER_SQUADRON")) return gc::ActorCombatRole::squadron;
     return gc::ActorCombatRole::ordinary;
 }
+bool omitted_composite(const StartingForceInputs& inputs, const gc::NestedCreationSetup& creation, gc::TypeId id) {
+    const auto* source = original(inputs, id);
+    if (!source || (!behaves(*source, "DUMMY_GROUND_COMPANY") && !behaves(*source, "DUMMY_SPACE_FIGHTER_SQUADRON")))
+        return false;
+    const auto row = std::lower_bound(creation.types.begin(), creation.types.end(), id,
+        [](const auto& value, auto key) { return value.type < key; });
+    return row != creation.types.end() && row->type == id && row->role == gc::NestedCreationRole::other;
+}
 } // namespace
 
 core::Result<gc::NestedCreationSetup> prepare_nested_creation(const StartingForceInputs& inputs,
@@ -146,7 +154,7 @@ core::Result<StartingForceInputs> prepare_initial_starting_force_inputs(const un
 }
 
 core::Result<MovementInputs> prepare_initial_movement_inputs(const StartingForceInputs& inputs,
-    const data::galactic::GalacticData& data, std::span<const MovementPlayerBinding> players) {
+    const data::galactic::GalacticData& data, std::span<const MovementPlayerBinding> players, core::LoadNoteBuffer* notes) {
     std::vector<MovementTypeBinding> bindings;
     for (const auto& binding : inputs.bindings) {
         const auto* type = original(inputs, binding.id);
@@ -156,7 +164,7 @@ core::Result<MovementInputs> prepare_initial_movement_inputs(const StartingForce
             transport = behaves(*type, "TRANSPORT");
         bindings.push_back({binding.id, binding.original_type, *type->hyperspace_capable, squadron, fleet, live->skips_combat, transport});
     }
-    return build_movement_inputs(inputs.types, data, bindings, players);
+    return build_movement_inputs(inputs.types, data, bindings, players, notes);
 }
 
 static core::Result<StartingForcePlacement> place_starting_force_once(const StartingForceInputs& inputs,
@@ -282,6 +290,10 @@ sim::galactic::GalacticSession::NativeForceBuilder stock_native_force_builder(
         using Result = core::Result<gc::GalacticSession::NativeForcePlacement>;
         if (!inputs || !snapshot.control() || !snapshot.movement() || !snapshot.production())
             return refuse<gc::GalacticSession::NativeForcePlacement>("native placement requires rebuilt original inputs and live presence");
+        if (snapshot.production()->nested_creation && omitted_composite(*inputs, *snapshot.production()->nested_creation, request.type)) {
+            gc::GalacticSession::NativeForcePlacement skipped{}; skipped.next_id = frontier;
+            return core::Result<gc::GalacticSession::NativeForcePlacement>::success(std::move(skipped));
+        }
         const auto binding = std::find_if(inputs->bindings.begin(), inputs->bindings.end(),
             [&](const auto& row) { return row.id == request.type; });
         if (binding == inputs->bindings.end()) return refuse<gc::GalacticSession::NativeForcePlacement>("native placement original type is unbound");
@@ -307,6 +319,10 @@ static core::Result<gc::GalacticSession::NativeForcePlacement> stock_native_shad
     using Result = core::Result<gc::GalacticSession::NativeForcePlacement>;
     if (!inputs || view.planet.id != request.planet)
         return refuse<gc::GalacticSession::NativeForcePlacement>("native shadow placement requires its original inputs and staging planet");
+    if (omitted_composite(*inputs, view.creation, request.type)) {
+        gc::GalacticSession::NativeForcePlacement skipped{}; skipped.next_id = frontier;
+        return Result::success(std::move(skipped));
+    }
     const auto binding = std::find_if(inputs->bindings.begin(), inputs->bindings.end(),
         [&](const auto& row) { return row.id == request.type; });
     if (binding == inputs->bindings.end()) return refuse<gc::GalacticSession::NativeForcePlacement>("native shadow original type is unbound");
@@ -352,6 +368,8 @@ static core::Result<StartingForcePlacement> place_starting_force_checked(const S
     std::set<gc::TypeId> chain;
     auto current = request;
     for (unsigned depth = 0; ; ++depth) {
+        if (presence.production.nested_creation && omitted_composite(inputs, *presence.production.nested_creation, current.type))
+            break;
         if (depth >= 32 || !chain.insert(current.type).second)
             return refuse<StartingForcePlacement>("cyclic or excessive additional creation chain");
         const auto reader = [&](const gc::Fleet& fleet) -> core::Result<bool> {

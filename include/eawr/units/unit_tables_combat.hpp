@@ -198,6 +198,7 @@ struct ObstacleType final {
     bool mouse_sensitive{}; // WSU-13: map props use the same admission as live units
     bool last_state_visible_under_fow{};
     bool initial_state_visible_under_fow{};
+    std::uint64_t table_order{};
     bool operator==(const ObstacleType&) const = default;
 };
 

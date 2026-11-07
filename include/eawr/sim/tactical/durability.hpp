@@ -151,16 +151,19 @@ struct DurabilityTable {
     friend bool operator==(const DurabilityTable&, const DurabilityTable&) = default;
 };
 
-inline constexpr std::size_t max_hardpoints_per_type = 255;
+// Our safety bound, not a retail limit: FoC keeps hardpoints in a growable list indexed by a 32-bit
+// int. The old 255 cap rejected or clamped Remake's >255-hardpoint capital ships.
+inline constexpr std::size_t max_hardpoints_per_type = 65535;
+// Sums of hardpoint health saturate here so the int64 Q24 totals cannot wrap (2^37 whole units).
+// The old 255 x 2^28 whole-unit bound was below it, so every previously loadable type sums exactly as before.
+inline constexpr std::int64_t max_hardpoint_health_total_raw = std::int64_t{1} << 61;
 // Health bound in whole source units. FoC keeps health in floats with no cap (SKI-64); mods
 // author up to 9,999,999 before the Object_Max_Health_Multiplier_* scale (Stargate's build pad;
-// AaW's Arc_Hammer 960000 x 1.5). 2^28 keeps the int64 Q24 sums of 255 hardpoints and the
+// AaW's Arc_Hammer 960000 x 1.5). 2^28 keeps a hull times the
 // x256 difficulty scale below 2^61, and the service rules' exact products below 2^165 of 192 bits.
 inline constexpr std::int64_t max_durability_health = std::int64_t{1} << 28;
-// The int64 budget the comment above states: 255 hardpoint maxima, and a hull times the largest
-// difficulty health scale (256), in Q24.
-static_assert(max_durability_health * static_cast<std::int64_t>(max_hardpoints_per_type) * math::Fixed::scale
-        < (std::int64_t{1} << 61), "255 hardpoint healths must sum in int64 Q24");
+// The int64 budget the comment above states: a hull times the largest difficulty health scale
+// (256), in Q24. Hardpoint sums are saturated at max_hardpoint_health_total_raw instead.
 static_assert(max_durability_health * 256 * math::Fixed::scale < (std::int64_t{1} << 61),
     "a difficulty-scaled hull must stay in int64 Q24");
 // Bound of one projectile's or blast's authored damage: the damage pipeline's products stay in
@@ -168,7 +171,7 @@ static_assert(max_durability_health * 256 * math::Fixed::scale < (std::int64_t{1
 inline constexpr std::int64_t max_hit_damage = std::int64_t{1} << 20;
 
 // Fails with EAWR-SIM-0305 unless type IDs strictly increase, every hull is in
-// (0, max_durability_health], a type has at most 255 hardpoints, a destroyable hardpoint's
+// (0, max_durability_health], a type has at most max_hardpoints_per_type (65535) hardpoints, a destroyable hardpoint's
 // health is in (0, max_durability_health] and any other hardpoint's is zero, repair values,
 // speeds and the three rules are >= 0 and bounded by max_durability_health, and the speed
 // modifier and the damaged fraction are at most 1.

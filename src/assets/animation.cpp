@@ -1,4 +1,5 @@
 #include "asset_internal.hpp"
+#include "eawr/vfs/vfs.hpp"
 
 #include <algorithm>
 #include <cmath>

@@ -32,6 +32,7 @@ struct SetupMap final {
     std::optional<std::string> context_name;
     // #3776 L3: land_setup_maps lists land maps; setup_maps lists space maps.
     sim::tactical::BattleDomain domain{sim::tactical::BattleDomain::space};
+    std::vector<std::string> legacy_factions{}; // WSS-19: complete authored faction order.
 };
 
 // WSS-03/04: ordinary space staging leaves owner/terrain/game type unrestricted.

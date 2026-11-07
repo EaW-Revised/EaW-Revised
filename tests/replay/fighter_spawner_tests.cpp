@@ -1242,4 +1242,44 @@ void test_staged_flight_rollback() {
 }
 
 
+// #5559: a big carrier (a Lucrehulk-class complement: 14 squadrons of 16 craft over 6 bays) launches
+// every authored squadron. No count in the launch path caps a complement below its authored size.
+void test_large_complement() {
+    constexpr std::uint32_t squadrons = 14;
+    constexpr std::uint32_t members = 16;
+    auto table = motion();
+    auto& squadron = table.squadrons.squadrons[0];
+    squadron.members.assign(members, craft_type);
+    squadron.offsets.assign(members, at(0, 0));
+    squadron.max_squad_size = members;
+    auto& hangar = table.squadrons.spawners[0];
+    hangar.entries = {{squadron_a, static_cast<std::int32_t>(squadrons), 0}};
+    hangar.delay_frames = 1;
+    hangar.bays.assign(6, hangar.bays.front());
+    expect(static_cast<bool>(tactical::validate_squadron_table(table.squadrons)), "#5559: the large complement table is valid");
+    tactical::TacticalSetup setup;
+    setup.seed = seed;
+    setup.players = players();
+    setup.units = {unit(1, carrier_type, empire, at(0, 0))};
+    auto created = tactical::TacticalSession::create(setup, sensors(), durability(), table);
+    expect(static_cast<bool>(created), "#5559: the large carrier session builds");
+    if (!created) return;
+    auto session = std::move(created).value();
+    const eawr::platform::ThreadWorkerAdapter executor(2);
+    // One launch per 30-frame service at most; 14 squadrons need under 14 * 30 + 30 frames.
+    for (std::uint64_t tick = 0; tick < 600; ++tick) {
+        const auto stepped = session.step(executor);
+        expect(static_cast<bool>(stepped), "#5559: steps");
+        if (!stepped) return;
+    }
+    const auto snapshot = session.snapshot();
+    std::size_t listed = 0;
+    for (const auto& entry : snapshot->instances()) {
+        static_cast<void>(entry);
+        ++listed;
+    }
+    // The carrier, then per squadron its 16 craft and one container.
+    expect(listed == 1 + squadrons * (members + 1), "#5559: all 14 squadrons of 16 craft launched from the carrier");
+}
+
 } // namespace fighter_test_support

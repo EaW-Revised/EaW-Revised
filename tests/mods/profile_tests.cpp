@@ -53,6 +53,7 @@ int main(int argc, char* argv[]) {
     }
     FakeSteamReader steam_reader;
     Profile profile;
+    CHECK(profile.launch.render_thread == "separate");
     profile.id = "sample";
     profile.name = "A profile \"with quotes\"";
     profile.order_source = "player";
@@ -67,6 +68,7 @@ int main(int argc, char* argv[]) {
     CHECK(roundtrip.profile && *roundtrip.profile == profile);
     const auto create = profile_from_json(R"({"id":"fresh","name":"Fresh","layers":[]})");
     CHECK(create.profile && create.profile->launch == ProfileLaunch{} && create.profile->order_source == "chain");
+    CHECK(create.profile && create.profile->launch.render_thread == "separate");
     CHECK(create.profile && !create.profile->launch.frame_rate_limit);
     const auto inherit = profile_from_json(R"({"id":"x","name":"x","layers":[],"launch":{"frame_rate_limit":null}})");
     CHECK(inherit.profile && !inherit.profile->launch.frame_rate_limit);
@@ -89,6 +91,14 @@ int main(int argc, char* argv[]) {
     duplicate.layers.push_back(duplicate.layers.front());
     CHECK(validate_profile(duplicate)->code == codes::profile_layer);
     const auto user = scratch / "user";
+    write(user / "mods/profiles/legacy.json", R"({"format":"eawr-mod-profile","version":1,"id":"legacy","name":"Legacy","layers":[],"launch":{"render_thread":"safe"}})");
+    const auto legacy = load_profile(user / "mods/profiles/legacy.json");
+    CHECK(legacy.profile && legacy.profile->launch.render_thread == "safe");
+    if (legacy.profile) {
+        CHECK(!save_profile(user, *legacy.profile));
+        const auto saved_legacy = load_profile(user / "mods/profiles/legacy.json");
+        CHECK(saved_legacy.profile && saved_legacy.profile->launch.render_thread == "safe");
+    }
     CHECK(!save_profile(user, profile));
     const auto file = user / "mods/profiles/sample.json";
     CHECK(load_profile(file).profile == roundtrip.profile);

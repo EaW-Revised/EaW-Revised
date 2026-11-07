@@ -126,6 +126,9 @@ struct LiveSessionView {
     struct { SpacePopulation* population{}; GodotRenderer* renderer{}; std::vector<sim::EntityId> undrawn;
              std::string failure; } arrival_slots_;
     std::optional<std::size_t> grow_launch_slot(sim::EntityId, tactical::TypeId, tactical::PlayerId) { return std::nullopt; }
+    std::set<tactical::TypeId> launch_slot_types_;
+    bool container_without_slot(tactical::TypeId) const { return false; }
+    void note_spawned(tactical::TypeId) const {}
     LaunchSlot& bind_slot_identity(sim::EntityId entity, LaunchSlot& real, tactical::TypeId type, tactical::PlayerId owner);
     void release_dead_slots(const tactical::TacticalSnapshot& latest);
     std::optional<std::size_t> ship_of(sim::EntityId entity, tactical::TypeId type, tactical::PlayerId owner);

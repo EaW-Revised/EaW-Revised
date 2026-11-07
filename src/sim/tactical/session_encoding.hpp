@@ -33,6 +33,9 @@ inline constexpr std::array<std::uint8_t, 4> hangar_tag{'H', 'N', 'G', 'R'};
 // WU-37: independent object and team birth marks; only while any is marked.
 inline constexpr std::array<std::uint8_t, 4> garrison_tag{'G', 'R', 'S', 'N'};
 inline constexpr std::uint32_t garrison_block_version = 1;
+// TL-03: per-unit Lua Make_Invulnerable flags; only while any unit holds one, so other sessions hash as before.
+inline constexpr std::array<std::uint8_t, 4> script_invulnerable_tag{'S', 'I', 'N', 'V'};
+inline constexpr std::uint32_t script_invulnerable_block_version = 1;
 // The target scans' collection trees (#469, space-targeting CO rules), once a unit with a combat
 // profile has stepped.
 inline constexpr std::array<std::uint8_t, 4> collection_tag{'C', 'U', 'L', 'L'};

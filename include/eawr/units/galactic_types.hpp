@@ -1,7 +1,7 @@
 #pragma once
 
 #include "eawr/data/galactic/galactic_data.hpp"
-#include "eawr/data/xml.hpp"
+#include "eawr/data/xml_fwd.hpp"
 #include "eawr/units/population.hpp"
 
 #include <array>

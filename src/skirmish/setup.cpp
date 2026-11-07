@@ -1,9 +1,11 @@
 #include "eawr/skirmish/setup.hpp"
+#include "eawr/vfs/vfs.hpp"
 #include "skirmish_internal.hpp"
 #include "setup_workers.hpp"
 #include "eawr/core/load_profile.hpp"
 #include "eawr/sim/seat.hpp"
 #include "eawr/data/ui/text_database.hpp"
+#include "eawr/data/tag_trace.hpp"
 #include "eawr/scene/scene.hpp"
 
 #include <algorithm>
@@ -31,12 +33,27 @@ std::string fallback_name(const std::string& path) {
 
 } // namespace
 
+// WSS-19: ordinary legacy staging requires the first two authored factions.
+core::Result<void> detail::validate_legacy_setup(const std::span<const LobbySlot> slots,
+    const std::span<const std::string> factions, const std::string& path) {
+    for (std::size_t index = 0; index < 2; ++index) {
+        if (index < factions.size() && std::any_of(slots.begin(), slots.end(), [&](const auto& slot) {
+                return detail::iequals(slot.faction, factions[index]); })) continue;
+        auto diagnostic = detail::error(diagnostic_codes::fixture,
+            "Legacy start requires players of authored faction indices 0 and 1.");
+        diagnostic.logical_path = path;
+        return core::Result<void>::failure(std::move(diagnostic));
+    }
+    return core::Result<void>::success();
+}
+
 std::vector<SetupFaction> setup_factions(const data::Catalog& catalog) {
     std::vector<SetupFaction> result;
     for (const std::string& name : scene::faction_order(catalog)) {
         const auto resolved = catalog.resolve(name, data::Category::faction);
         if (!resolved) continue;
         const auto* playable = resolved.value().value("Is_Playable");
+        if (playable) data::tag_trace::used(playable->value);
         if (!playable || !detail::retail_flag(playable->value.raw_text, false)) continue;
         SetupFaction faction;
         faction.name = name;
@@ -71,6 +88,13 @@ core::Result<std::vector<SetupMap>> setup_maps(const vfs::Vfs& filesystem, const
     if (!records) return Result::failure(records.error());
     auto custom_records = filesystem.enumerate("data/custommaps/", ".ted");
     if (!custom_records) return Result::failure(custom_records.error());
+    // The FoC Steam debug build scans a root *.TED
+    // filespec without descending into directories (WSS-07).
+    const auto nested = [](const vfs::AssetRecord& record, const std::string_view root) {
+        return record.canonical_path.find('/', root.size()) != std::string::npos;
+    };
+    std::erase_if(records.value(), [&](const auto& record) { return nested(record, "data/art/maps/"); });
+    std::erase_if(custom_records.value(), [&](const auto& record) { return nested(record, "data/custommaps/"); });
     // WSS-07: discovery does not classify a map; its authored header does.
     // Both directories use the VFS's effective loose/archive winners.
     records.value().insert(records.value().end(), custom_records.value().begin(), custom_records.value().end());
@@ -139,9 +163,16 @@ core::Result<std::vector<SetupMap>> setup_maps(const vfs::Vfs& filesystem, const
             }
             std::sort(entry.teams.begin(), entry.teams.end(), [](const auto& a, const auto& b) { return a.team < b.team; });
             if (entry.teams.size() < 2) entry.unavailable = "This map has fewer than two supported station teams.";
-            if (entry.metadata.new_markers != true)
-                entry.unavailable = "Legacy map starts are not supported yet.";
-            else if (!entry.metadata.start_positions || entry.metadata.start_positions->size() < 2)
+            if (entry.metadata.new_markers != true) {
+                entry.legacy_factions = scene::faction_order(catalog);
+                entry.teams.clear();
+                std::vector<std::string> names;
+                for (const auto& faction : playable_factions) names.push_back(faction.name);
+                for (std::uint32_t team = 0; team < 2; ++team) entry.teams.push_back({team, names, std::nullopt});
+                entry.unavailable.clear();
+                if (entry.legacy_factions.size() < 2)
+                    entry.unavailable = "Legacy map requires at least two authored factions.";
+            } else if (!entry.metadata.start_positions || entry.metadata.start_positions->size() < 2)
                 entry.unavailable = "This map has missing or malformed authored start positions.";
         }
         return entry;
@@ -272,8 +303,7 @@ core::Result<void> validate_setup_slots(const std::span<const LobbySlot> slots,
     const auto rows = std::min(*metadata.capacity, local_controls ? local_setup_rows
         : static_cast<std::uint32_t>(sim::max_match_seats));
     if (slots.size() < (complete_teams ? 2U : 1U) || slots.size() > rows) return fail("Choose at least two players within this map's local capacity.");
-    if (metadata.new_markers != true) return fail("Legacy map starts are not supported yet.");
-    if (!metadata.start_positions || metadata.start_positions->size() < 2)
+    if (metadata.new_markers == true && (!metadata.start_positions || metadata.start_positions->size() < 2))
         return fail("This map has missing or malformed authored start positions.");
     if (local_controls && (slots.front().slot != 1 || !slots.front().human))
         return fail("The local host must occupy player row 1.");
@@ -286,12 +316,12 @@ core::Result<void> validate_setup_slots(const std::span<const LobbySlot> slots,
         if (local_controls && slot.slot != 1 && slot.human) return fail("Other local rows support AI or Open only.");
         if (static_cast<unsigned>(slot.difficulty) > static_cast<unsigned>(sim::tactical::AiLevel::hard)) return fail("Choose a valid AI difficulty level.");
         if (slot.human && slot.difficulty != sim::tactical::AiLevel::normal) return fail("A human row has no AI difficulty level.");
-        if (slot.team >= metadata.start_positions->size()) return fail("The selected team has no authored start on this map.");
+        if (metadata.new_markers == true && slot.team >= metadata.start_positions->size()) return fail("The selected team has no authored start on this map.");
         const auto [team, inserted] = factions.emplace(slot.team, slot.faction);
-        if (complete_teams && !inserted && !detail::iequals(team->second, slot.faction))
+        if (metadata.new_markers == true && complete_teams && !inserted && !detail::iequals(team->second, slot.faction))
             return fail("Players sharing a team must choose the same faction.");
     }
-    if (complete_teams && factions.size() < 2) return fail("Choose at least two different teams.");
+    if (metadata.new_markers == true && complete_teams && factions.size() < 2) return fail("Choose at least two different teams.");
     return Result::success();
 }
 
@@ -329,16 +359,20 @@ core::Result<FixtureOptions> setup_options(const SetupSelection& selection, std:
     if (map == maps.end()) return fail("Select an installed space skirmish map.");
     if (!map->unavailable.empty()) return fail(map->unavailable);
     if (auto valid = validate_setup_slots(selection.slots, map->metadata, local_controls); !valid) return Result::failure(valid.error());
+    if (map->metadata.new_markers != true) {
+        if (auto valid = detail::validate_legacy_setup(selection.slots, map->legacy_factions, map->path); !valid)
+            return Result::failure(valid.error());
+    }
     std::set<std::uint32_t> colours;
     for (const auto& slot : selection.slots) {
         const auto colour = slot.colour_index.value_or(slot.slot - 1);
         if (colour >= multiplayer_colour_count || !colours.insert(colour).second)
             return fail("Choose distinct colours from the authored multiplayer palette.");
         const auto team = std::find_if(map->teams.begin(), map->teams.end(), [&](const auto& entry) { return entry.team == slot.team; });
-        if (team == map->teams.end()) return fail("The selected team has no start on this map.");
+        if (map->metadata.new_markers == true && team == map->teams.end()) return fail("The selected team has no start on this map.");
         // WSS-54: retail validates total capacity and teams, not per-team spawn counts.
         // Project limit, not retail parity: only a faction the map's station candidates name can start here.
-        if (std::none_of(team->factions.begin(), team->factions.end(),
+        if (map->metadata.new_markers == true && std::none_of(team->factions.begin(), team->factions.end(),
                 [&](const auto& name) { return detail::iequals(name, slot.faction); }))
             return fail("Project limit: this map has no starting station for " + slot.faction + " on the selected team.");
         if (!slot.fleet.empty()) return fail("Starting fleets are not configurable in this screen.");

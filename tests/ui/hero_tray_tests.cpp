@@ -85,9 +85,9 @@ public:
                const bool double_click, const ui::HeroEntityResolver& resolve = {}) {
         ui::dispatch_hero_click({fixture.instances, fixture.players_, me, fixture.visible, &fixture.types_, nullptr},
             fixture.policy, fixture.roster, hero, hostile, right, double_click, resolve,
-            [&](const tactical::TacticalInstance& target, const bool focus) {
+            [&](const tactical::TacticalInstance& target, const bool focus, const bool own) {
                 const std::array<sim::EntityId, 1> next{target.entity_id};
-                static_cast<void>(selection.replace(next));
+                if (own) static_cast<void>(selection.replace(next));
                 if (focus) ++focuses;
             },
             [&](const tactical::TacticalInstance& target) {
@@ -180,6 +180,24 @@ void test_click_dispatch_requires_sight_of_both_craft_and_command_container() {
     ClickEffects changed_container;
     changed_container.click(f, 11, true, true, false, squadron);
     changed_container.expect_inert("an ordered container on a different side is not an enemy target");
+}
+
+void test_click_dispatch_does_not_select_a_teammates_hero() {
+    Fixture f;
+    f.instances = {instance(2, vader, me), instance(3, tyber, ally)};
+    f.collect();
+    expect(f.roster.friendly.size() == 2, "the friendly tray still lists the teammate's hero");
+    ClickEffects teammate;
+    teammate.click(f, 3, false, false, false);
+    teammate.expect_inert("a single click on a teammate's hero icon does not select it");
+    ClickEffects teammate_double;
+    teammate_double.click(f, 3, false, false, true);
+    expect(teammate_double.selection.units() == std::vector<sim::EntityId>{90} && teammate_double.orders.empty()
+            && teammate_double.focuses == 1,
+        "WHE-47: a double click on a teammate's hero icon focuses the camera but does not change the selection");
+    ClickEffects own;
+    own.click(f, 2, false, false, false);
+    expect(own.selection.units() == std::vector<sim::EntityId>{2}, "the local player's own hero icon still selects");
 }
 
 void test_standalone_heroes_by_side() {
@@ -348,6 +366,7 @@ int main() {
     test_click_dispatch_recollects_a_changed_carrier();
     test_click_dispatch_rejects_dead_and_changed_owner_carriers();
     test_click_dispatch_requires_sight_of_both_craft_and_command_container();
+    test_click_dispatch_does_not_select_a_teammates_hero();
     test_standalone_heroes_by_side();
     test_neutral_and_non_heroes_have_no_icon();
     test_carried_hero_stands_for_its_carrier();

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "eawr/assets/assets.hpp"
+#include "particle_batch_census.hpp"
 #include "particle_submission_cache.hpp"
 #include "eawr/presentation/particles/render.hpp"
 #include "eawr/presentation/renderer.hpp"
@@ -11,8 +12,10 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace godot {
@@ -57,7 +60,7 @@ public:
     [[nodiscard]] std::uint64_t create_emitter(const particles::EmitterRenderPlan& plan) override;
     // Caller-owned name remains alive until the immediately following spawn ends.
     // Used only by the opt-in backend spawn diagnostic.
-    void set_spawn_context(std::string_view effect, std::uint64_t tick) noexcept;
+    void set_spawn_context(std::string_view effect, std::uint64_t tick, bool diagnostic_fighter = false) noexcept;
     // Construction-time provenance for diagnostics only; ordinary particles are the default.
     void set_churn_owner(render_churn::Owner owner) noexcept;
     // Population-time preparation pins shared textures/shaders, then releases
@@ -125,8 +128,25 @@ public:
     [[nodiscard]] ReuseWork reuse_work() const noexcept;
     [[nodiscard]] std::string failure_cause() const override;
     [[nodiscard]] particles::CullingFrame culling_frame() const override;
+    // Lane latches (L1.2). Main snapshots what a lane thread cannot read itself and sets it before the
+    // frame's particle work; std::nullopt (the default, and the inline path) reads the live value.
+    // culling_frame() returns the latched camera planes; without a latch a second thread would read its
+    // own empty thread_local camera map and fail open (every culled group would be built).
+    void latch_culling(std::optional<particles::CullingFrame> frame) noexcept;
+    // Replaces Engine::get_process_frames() in the residency logic (expire_reuse, sample_residency,
+    // retry backoff, empty dwell).
+    void latch_frame_number(std::optional<std::uint64_t> frame) noexcept;
+    // The live values a latch snapshots; both must be called on the thread that owns the camera.
+    [[nodiscard]] particles::CullingFrame current_culling() const;
+    [[nodiscard]] static std::uint64_t current_process_frame();
+    // True when any fog callback is set. A lane backend must have none (fog registration writes
+    // renderer tables owned by the main thread).
+    [[nodiscard]] bool uses_fog_callbacks() const noexcept;
     void set_emitter_visible(std::uint64_t resource, bool visible) override;
     void record_group_work(bool visible, bool prepared, bool stepped) override;
+    [[nodiscard]] std::uint64_t incomplete_updates() const noexcept override;
+    [[nodiscard]] std::uint64_t deferred_updates() const noexcept override;
+    [[nodiscard]] bool overlapped_commit_safe() const noexcept override;
     // The scene light of bump-mapped emitters (PrimParticleBumpAlpha): light
     // 0's toward-light vector in the render (Y-up) world basis, its diffuse
     // and specular colours, and the SPH_LIGHT_FILL irradiance matrices in the
@@ -176,10 +196,68 @@ public:
         double conversion_ms{};
         double submission_ms{};
         double retirement_ms{};
+        // PF lane-serial (b) step 1: what retirement_ms paid for. destroys = destroy() calls with a live emitter, of
+        // them parked in the reuse cache; suspends = suspend() calls that retired draw state, of them terminal.
+        std::uint64_t retire_destroys{}, retire_destroys_reused{}, retire_suspends{}, retire_suspends_terminal{};
         std::uint64_t groups{}, visible_groups{}, prepared_groups{}, stepped_groups{};
+        // Opt-in (set_batch_census): merged-draw sizing, see detail::ParticleBatchCensus.
+        detail::ParticleBatchCounts census;
+        // Opt-in additive merge (set_merge_additive): groups drawn, streams and vertices in them,
+        // surfaces replaced, and the caller time of GodotParticleBackend::flush_merged.
+        std::uint64_t merged_groups{}, merged_streams{}, merged_vertices{}, merged_replacements{};
+        double merge_flush_ms{};
+        // Adds another thread's counters (the lane's thread_local FrameWork) to these. A frame that is not
+        // measuring adds nothing, so a lane that ran with measurement off cannot double count.
+        void merge(const FrameWork& other, const bool measuring) noexcept {
+            if (!measuring) return;
+            streams += other.streams;
+            uploads += other.uploads;
+            replacements += other.replacements;
+            for (const auto& [target, source] : {std::pair{&bounds_calls, &other.bounds_calls},
+                     std::pair{&visibility_calls, &other.visibility_calls}}) {
+                target->attempted += source->attempted;
+                target->sent += source->sent;
+                target->skipped += source->skipped;
+            }
+            conversion_ms += other.conversion_ms;
+            submission_ms += other.submission_ms;
+            retirement_ms += other.retirement_ms;
+            retire_destroys += other.retire_destroys;
+            retire_destroys_reused += other.retire_destroys_reused;
+            retire_suspends += other.retire_suspends;
+            retire_suspends_terminal += other.retire_suspends_terminal;
+            groups += other.groups;
+            visible_groups += other.visible_groups;
+            prepared_groups += other.prepared_groups;
+            stepped_groups += other.stepped_groups;
+            census.streams += other.census.streams;
+            census.vertices += other.census.vertices;
+            census.identical += other.census.identical;
+            for (std::size_t kind = 0; kind < census.class_streams.size(); ++kind) {
+                census.class_streams[kind] += other.census.class_streams[kind];
+                census.class_keys[kind] += other.census.class_keys[kind];
+            }
+            merged_groups += other.merged_groups;
+            merged_streams += other.merged_streams;
+            merged_vertices += other.merged_vertices;
+            merged_replacements += other.merged_replacements;
+            merge_flush_ms += other.merge_flush_ms;
+        }
     };
+    // Opt-in per backend: additive streams sharing shader, colour texture and render priority are
+    // drawn as one surface per group instead of one per emitter. The owner must call
+    // flush_merged() once per frame after every particle update, or nothing is submitted.
+    void set_merge_additive(bool enabled);
+    static void flush_merged();
+    static void set_merge_additive_default(bool enabled) noexcept;
+    [[nodiscard]] static bool merge_additive_default() noexcept;
+    // Process-wide switch for the census; off by default and free when off.
+    static void set_batch_census(bool enabled) noexcept;
     static void begin_frame_measurement(bool enabled);
     [[nodiscard]] static FrameWork frame_work();
+    // Adds counters measured on another thread (the lane's thread_local frame_work()) to the calling
+    // thread's, so the trace reads the same totals as the inline path. No-op when not measuring.
+    static void add_frame_work(const FrameWork& work);
 
 private:
     class Impl;

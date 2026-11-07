@@ -142,6 +142,7 @@ std::span<const Cause> all_causes() noexcept { return cause_order; }
 
 bool blocks_drawing(const Cause cause) noexcept {
     switch (cause) {
+    case Cause::crc_collision:
     case Cause::texture_unresolved:
     case Cause::shader_unsupported:
     case Cause::effect_unresolved:

@@ -2,7 +2,9 @@
 # player and debug archives. The zip is checked against its SHA-512 pin (the fork release's SHA512-SUMS.txt);
 # tools/release/package_release.py then checks the extracted exe's own SHA-256 and `--version`. Writes only the
 # GUI exe (never the console companion) to <Out>\ and prints its path.
-param([string]$Out = "out/godot-runtime")
+# -Console also fetches the console companion (pinned the same way) beside it: the rig/preview/perf engine folder
+# (engine guard, tools/engine_pins.json): fetch_pinned_godot.ps1 -Console -Out out\godot-eawr
+param([string]$Out = "out/godot-runtime", [switch]$Console)
 
 $ErrorActionPreference = "Stop"
 $release = "https://github.com/Thom-Ernst/godot/releases/download/eawr-4.7.2-fad06b579"
@@ -11,15 +13,21 @@ $asset = "Godot_v4.7.2-stable-eawr-fad06b579_win64.exe.zip"
 $sha512 = "16b255f4b50ebe4fca9cbb89b53ec06e1f625b905e78f6effa886359f7bbdceaa00e7ee27a4c6814c1a8ae8a11f5b5a8fab5e0e04bc9efefdc18b3f682f8d97d"
 
 New-Item -ItemType Directory -Force -Path $Out | Out-Null
-$zip = Join-Path $Out $asset
-if (-not (Test-Path -LiteralPath $zip)) { Invoke-WebRequest "$release/$asset" -OutFile $zip }
-$actual = (Get-FileHash -LiteralPath $zip -Algorithm SHA512).Hash.ToLowerInvariant()
-if ($actual -ne $sha512) { throw "SHA-512 mismatch for ${asset}: $actual" }
-
-$extract = Join-Path $Out "extract"
-Remove-Item -LiteralPath $extract -Recurse -Force -ErrorAction SilentlyContinue
-Expand-Archive -LiteralPath $zip -DestinationPath $extract -Force
-$exe = Join-Path $Out $name
-Copy-Item -LiteralPath (Join-Path $extract $name) -Destination $exe -Force
-Remove-Item -LiteralPath $extract -Recurse -Force
-(Resolve-Path -LiteralPath $exe).Path
+function Get-PinnedAsset([string]$asset, [string]$sha512, [string]$name) {
+    $zip = Join-Path $Out $asset
+    if (-not (Test-Path -LiteralPath $zip)) { Invoke-WebRequest "$release/$asset" -OutFile $zip }
+    $actual = (Get-FileHash -LiteralPath $zip -Algorithm SHA512).Hash.ToLowerInvariant()
+    if ($actual -ne $sha512) { throw "SHA-512 mismatch for ${asset}: $actual" }
+    $extract = Join-Path $Out "extract"
+    Remove-Item -LiteralPath $extract -Recurse -Force -ErrorAction SilentlyContinue
+    Expand-Archive -LiteralPath $zip -DestinationPath $extract -Force
+    $exe = Join-Path $Out $name
+    Copy-Item -LiteralPath (Join-Path $extract $name) -Destination $exe -Force
+    Remove-Item -LiteralPath $extract -Recurse -Force
+    (Resolve-Path -LiteralPath $exe).Path
+}
+$gui = Get-PinnedAsset $asset $sha512 $name
+if ($Console) {
+    $null = Get-PinnedAsset "Godot_v4.7.2-stable-eawr-fad06b579_win64_console.exe.zip" "ed74cc5bb12933aa35c1c86b52b17d4054ad9be137d011bf9162f79f0068a8794e0de6da944c0b2d226a3d89224fce0f37947ddee05c33974cf011290cba76e9" "Godot_v4.7.2-stable_win64_console.exe"
+}
+$gui

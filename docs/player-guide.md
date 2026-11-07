@@ -34,16 +34,16 @@ To reset EAWR, close it and delete that folder. Your game is untouched.
 
 ## Options
 
-Reinforcement areas only while placing is enabled by default in **Options > Gameplay**.
+Reinforcement areas only while placing is enabled by default in **Options > Tweaks**.
 The red no-drop grid appears during placement and disappears when placement ends, even with the panel open.
 Turn it off to follow the retail/mod panel-or-drag rule. Accept saves the choice; Cancel discards edits; Defaults enables it.
 This changes presentation only and takes effect without restarting.
 
 ### Render thread update
 
-Separate rendering is now the default. To switch back to Safe, start
-**`EAWR (Safe render thread).cmd`** or run `EAWR.exe --safe-render-thread`.
-You can also choose **Options > Performance > Render thread (restart)** and apply it; the saved
+Separate rendering is the default. The Safe render thread is unsupported (it may be slow or wrong) and no
+start file for it ships; `EAWR.exe --safe-render-thread` remains only as a crash fallback.
+You can choose **Options > Performance > Render thread (restart)** and apply it; the saved
 choice takes effect when you restart EAWR. An explicit launch flag overrides it.
 
 ## When something goes wrong
@@ -56,7 +56,7 @@ choice takes effect when you restart EAWR. An explicit launch flag overrides it.
 | Windows says "Windows protected your PC" | The download is not code-signed, so SmartScreen warns about it | If you downloaded it from the official release page, choose **More info**, then **Run anyway**. You can compare the zip with the `SHA256SUMS.txt` on the release page (`Get-FileHash .\<zip>`). |
 | Windows or your organisation blocks EAWR with no "Run anyway" | Smart App Control, WDAC / AppLocker or a managed-PC policy refuses unsigned programs | EAWR cannot get around that; ask whoever manages the PC, or use another PC. Never turn off security software, Smart App Control or add exclusions for EAWR. |
 | Window opens and closes at once | The graphics driver failed | Update the graphics driver; the log named above says why. |
-| Flicker, a frozen picture, a crash on start, or errors about the graphics device, and your drivers are up to date | EAWR draws on a separate render thread by default (measured faster on the tested NVIDIA GPUs); some driver and GPU combinations dislike it | Close EAWR and start **`EAWR (Safe render thread).cmd`** instead (same folder). It uses the older single-threaded drawing path. If that fixes it, tell us your GPU and driver in the bug report. |
+| Flicker, a frozen picture, a crash on start, or errors about the graphics device, and your drivers are up to date | EAWR draws on a separate render thread by default (measured faster on the tested NVIDIA GPUs); some driver and GPU combinations dislike it | Close EAWR and tell us your GPU and driver in the bug report. |
 
 ## Firewall and multiplayer
 

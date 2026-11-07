@@ -13,6 +13,7 @@
 #include <string>
 #include <optional>
 #include "../support/env.hpp"
+#include "eawr/vfs/vfs.hpp"
 #include "../support/result.hpp"
 // #3944: seeded idle-human day run of the stock Underworld AI (Sandbox_Equal_Footing_Empire, Underworld is an AI seat).
 // Observation first: per-player production by authored type, credit track, funding categories, hostile moves.

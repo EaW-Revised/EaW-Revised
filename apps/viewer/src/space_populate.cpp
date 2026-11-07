@@ -107,6 +107,13 @@ void SpacePopulation::rebuild_piece_index() {
     });
 }
 
+void SpacePopulation::append_piece_index(const std::size_t first_piece, const std::size_t first_clip) {
+    piece_index_.append(live_decisions_.size(), pieces_, first_piece, live_clip_instances_, first_clip,
+        [](const GatedInstance& piece) {
+            return !piece.shield && !piece.cloak && (!piece.gate || piece.gate->art != HardpointGate::Art::attached_model);
+        });
+}
+
 void SpacePopulation::refresh_instances(const particles::StepExecutor* workers) {
     FrameTimer timer(trace_frames_ ? &refresh_ms_ : nullptr);
     instances_.clear();

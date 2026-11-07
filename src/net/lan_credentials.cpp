@@ -1,5 +1,6 @@
 #include "eawr/net/lan_credentials.hpp"
 #include "eawr/core/sha256.hpp"
+#include "eawr/net/galactic_setup.hpp"
 #include <algorithm>
 
 namespace eawr::net {
@@ -39,15 +40,22 @@ core::Result<ReconnectTokens> LanReconnectCredentials::provide_mesh_repair(const
         return fail<ReconnectTokens>("EAWR-NET-1020", "Pair repair requires an online room mesh.");
     return provide_for_offer(offer, transport);
 }
-core::Result<ReconnectTokens> LanReconnectCredentials::provide_for_offer(const SetupOffer& offer, MessageTransport& transport) {
+core::Result<ReconnectTokens> LanReconnectCredentials::provide_galactic_recovery(const SetupOffer& offer, MessageTransport& transport, std::span<const PeerIndex> native_peers) {
+    if (offer.domain != galactic_setup_domain || offer.seats.size() < 2)
+        return fail<ReconnectTokens>("EAWR-NET-1020", "Recovery credentials require a frozen campaign offer.");
+    return provide_for_offer(offer, transport, native_peers);
+}
+core::Result<ReconnectTokens> LanReconnectCredentials::provide_for_offer(const SetupOffer& offer, MessageTransport& transport, std::span<const PeerIndex> native_peers) {
     // The transport table may be wider than the admitted roster (an online room's capacity, sparse seat peers): credentials are
     // keyed by transport slot, delivered only to the admitted seats.
     const auto slots = transport.peer_count();
     std::vector<bool> admitted(slots, false);
-    bool roster_valid = !offer.seats.empty() && offer.seats.size() <= slots;
-    for (const auto& seat : offer.seats) {
-        if (seat.peer >= slots || admitted[seat.peer]) { roster_valid = false; break; }
-        admitted[seat.peer] = true;
+    bool roster_valid = !offer.seats.empty() && offer.seats.size() <= slots
+        && (native_peers.empty() || native_peers.size() == offer.seats.size());
+    if (roster_valid) for (std::size_t index = 0; index < offer.seats.size(); ++index) {
+        const auto native = native_peers.empty() ? offer.seats[index].peer : native_peers[index];
+        if (native >= slots || admitted[native]) { roster_valid = false; break; }
+        admitted[native] = true;
     }
     if (!roster_valid || slots < 2 || slots > max_match_seats || transport.self() >= slots || !admitted[transport.self()] || !admitted[0])
         return fail<ReconnectTokens>("EAWR-NET-1020", "Reconnect credential policy or roster differs.");

@@ -53,6 +53,12 @@ struct ProjectilePose {
 [[nodiscard]] std::optional<std::uint64_t> hit_projectile(std::span<const sim::tactical::Projectile> before,
                                                           const sim::tactical::CombatEvent& event) noexcept;
 
+// WPJ-31: which detonation particle a projectile_expired event presents. A shot that met the terrain
+// (reason ground_contact, land only) uses its Projectile_Ground_Detonation_Particle and suppresses the
+// lifetime detonation; every other expiry uses Projectile_Lifetime_Detonation_Particle.
+enum class TerminalParticle : std::uint8_t { lifetime, ground };
+[[nodiscard]] TerminalParticle terminal_particle(const sim::tactical::CombatEvent& expired) noexcept;
+
 // BP-64: a stand-in key for a hit whose projectile is unknown: a mix of the event's tick,
 // shooter, weapon, target and origin. The same event always gives the same key.
 [[nodiscard]] std::uint64_t hit_event_key(const sim::tactical::CombatEvent& event) noexcept;
@@ -85,6 +91,12 @@ public:
     using Reserve = std::function<GrowthResult(GrowthRequest)>;
     // Failed growth retries use presented bind frames, never wall time.
     static constexpr std::size_t growth_retry_interval = 16;
+    // A pool at or above `growth_step_cap_from` slots grows by at most `growth_step_cap` slots beyond what the
+    // flights in hand need, so no frame creates (and no pool keeps idle) a whole doubling of proxies. Smaller
+    // pools double as before: where the render thread is the bottleneck every growth is one fixed wait, so
+    // fewer, larger growths are cheaper there, while only the big pools cost a frame in proxies created.
+    static constexpr std::size_t growth_step_cap_from = 512;
+    static constexpr std::size_t growth_step_cap = 128;
 
     // Binds the projectiles in flight this frame (`ids` ascending, no repeats) and returns, per
     // entry, its slot or nullopt when the pool is full. A projectile bound before keeps its

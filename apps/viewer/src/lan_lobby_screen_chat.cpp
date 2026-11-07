@@ -135,7 +135,7 @@ void EawrLanLobby::announce() {
     if (page_ == Page::staging && impl_->host && match_->view().phase != LanPhase::ended) {
         presence.place = model::LobbyPlace::hosting;
         presence.game = impl_->game;
-        presence.map = match_->galactic_room() ? impl_->galactic_campaign
+        presence.map = match_->galactic_room() ? campaign_display_name(impl_->galactic_campaign)
             : impl_->map_index >= 0 ? resources_->maps[static_cast<std::size_t>(impl_->map_index)].name : std::string{};
         presence.game_type = impl_->host_options.game_type;
         presence.tcp_port = match_ ? match_->view().port : 0;

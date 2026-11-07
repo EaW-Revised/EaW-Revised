@@ -12,6 +12,7 @@
 #include <deque>
 #include <map>
 #include <memory>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -78,6 +79,7 @@ struct Instance {
     bool exit_requested{};
     InstanceOutcome outcome{InstanceOutcome::running};
     bool rolled_back{}; // invocation-local; not saved or hashed
+    std::optional<std::size_t> fault_diagnostic; // service-local first fault, not a diagnostic-only report
     bool tracking_initial_syntax{};
     std::string initial_syntax_message;
     std::map<std::string, std::vector<Handler>, std::less<>> handlers;
@@ -87,6 +89,7 @@ struct Instance {
     // Derived graph digest: execution/registry writes invalidate it. Never saved.
     bool sync_graph_dirty{true};
     std::string sync_graph_digest;
+    std::shared_ptr<const std::string> sync_graph_bytes;
     std::array<std::uint64_t, 3> sync_graph_sandbox_key{};
     std::uint64_t sync_graph_encodes{};
     std::uint32_t registrations{};
@@ -165,6 +168,8 @@ int abort_session(lua_State* state);
 void install_bindings(Instance& instance);
 void push_value(lua_State* state, const Value& value);
 void add_diagnostic(Instance& instance, std::string_view code, std::string message);
+// An uncaught protected Lua call failed, rather than an API reporting a fallback.
+void add_lua_error(Instance& instance, std::string_view code, std::string message);
 void end_slot(Instance& instance, std::size_t slot);
 
 } // namespace eawr::script::authoritative::detail
@@ -176,9 +181,11 @@ struct ScriptScheduler::Impl {
     std::map<std::uint64_t, std::unique_ptr<detail::Instance>> instances;
     std::map<EventKey, ScriptEvent> pending;
     std::map<std::uint64_t, ObjectScript> objects; // instance order, includes completed attachments
+    std::set<std::uint64_t> retired; // GC deterministic fault tombstones; never live simultaneously
     std::uint64_t completed_tick{};
     std::uint64_t galactic_frame{}; // persisted only by the GC clock profile
     bool aborted{};
+    bool phase_active{}; // in-process rollback owner; never serialized or hashed
     std::shared_ptr<ImmediateEffectHost> immediate_host;
     std::size_t immediate_instance_limit{};
     std::optional<ManagedHandlePolicy> managed_handles{};

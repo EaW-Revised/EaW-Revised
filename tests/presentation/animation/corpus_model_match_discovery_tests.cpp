@@ -1,4 +1,5 @@
 #include "../../support/check.hpp"
+#include "eawr/vfs/vfs.hpp"
 #include "../../support/temp_dir.hpp"
 #include "corpus_model_match_discovery.hpp"
 

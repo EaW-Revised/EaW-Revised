@@ -13,6 +13,8 @@
 #include "ui_test_support.hpp"
 
 #include <cmath>
+#include <array>
+#include <barrier>
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
@@ -20,6 +22,7 @@
 #include <iterator>
 #include <map>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -486,6 +489,24 @@ void extraction_contracts() {
         pins.push_back({fonts::embedded_faces[index], face(names[index]).size(), face_hashes[index]});
     }
     const fonts::FontExtractPolicy policy{builds, pins};
+
+    // Several first launches can provision the same shared cache at once.
+    constexpr std::size_t concurrent_count = 4;
+    std::barrier start(static_cast<std::ptrdiff_t>(concurrent_count));
+    std::array<fonts::FontExtractStatus, concurrent_count> statuses{};
+    std::array<std::thread, concurrent_count> workers;
+    for (std::size_t i = 0; i < concurrent_count; ++i) {
+        workers[i] = std::thread([&, i] {
+            start.arrive_and_wait();
+            statuses[i] = fonts::ensure_font_cache(game, cache, false, policy).status;
+        });
+    }
+    for (auto& worker : workers) worker.join();
+    for (const auto status : statuses)
+        expect(status != fonts::FontExtractStatus::failed, "concurrent first extraction succeeds");
+    expect(fonts::ensure_font_cache(game, cache, false, policy).status == fonts::FontExtractStatus::cached,
+           "concurrent extraction leaves a valid cache");
+    fs::remove_all(cache);
 
     const auto first = fonts::ensure_font_cache(game, cache, false, policy);
     expect(first.status == fonts::FontExtractStatus::extracted && first.build == "synthetic build"

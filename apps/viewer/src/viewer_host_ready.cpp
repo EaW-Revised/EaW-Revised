@@ -1,4 +1,6 @@
 #include "viewer_profile_arguments.hpp"
+#include "viewer_mounted_mods.hpp"
+#include "engine_guard_startup.hpp"
 #include "viewer_host_internal.hpp"
 #include "audio_buses.hpp"
 #include "audio_output.hpp"
@@ -9,9 +11,12 @@
 #include "startup_trace.hpp"
 #include "galactic/gc_setup_memory.hpp"
 #include "eawr/presentation/render_categories.hpp"
+#include "ui/build_label.hpp"
 #include <chrono>
 #include <sstream>
 #include <godot_cpp/classes/display_server.hpp>
+#include <godot_cpp/classes/project_settings.hpp>
+#include <godot_cpp/classes/scene_tree.hpp>
 #include <godot_cpp/classes/rendering_server.hpp>
 
 #if defined(_MSC_VER) && !_HAS_EXCEPTIONS
@@ -84,13 +89,45 @@ void ViewerHost::record_render_categories() {
 
 // Exceptions must not escape a GDExtension callback into the engine.
 void ViewerHost::_ready() try {
+    if (!apply_engine_guard(*this)) return;  // engine guard (owner rule 11-03): engine_guard_startup.hpp
     mute_lane_audio_output();
     set_process(true);
+    // The ONE writer of the window title (the engine guard no longer appends to it). The engine titles the window
+    // "<name> (DEBUG)" when its own binary has debug support; this states the viewer and engine builds and the
+    // engine signature (red-flagged text "UNPATCHED ENGINE (...)" when the guard says unpatched) and keeps " (DEBUG)".
+    if (auto* display = DisplayServer::get_singleton()) {
+        const std::string name = ProjectSettings::get_singleton()->get_setting("application/config/name", "EAWR Viewer")
+            .operator String().utf8().get_data();
+        display->window_set_title(String::utf8(eawr::presentation::ui::window_title(name, viewer_build_type(), engine_summary(), engine_signature(), engine_debug_enabled()).c_str()));
+    }
     // UI-07: a text control taking focus cancels held world input (UI-I3).
     get_viewport()->connect("gui_focus_changed", callable_mp(this, &ViewerHost::on_gui_focus_changed));
     options_ = std::make_unique<Options>();
     const PackedStringArray arguments = viewer_profile_arguments();
-    render_categories::enabled = arguments.has("--eawr-render-counters");
+    render_categories::ablation = "off";
+    for (int64_t index = 0; index < arguments.size(); ++index) {
+        if (arguments[index] != "--eawr-drawtype-ablate") continue;
+        if (++index >= arguments.size()) {
+            UtilityFunctions::printerr("--eawr-drawtype-ablate requires a category");
+            get_tree()->quit(2);
+            return;
+        }
+        const auto value = arguments[index].utf8();
+        const std::string_view name(value.get_data());
+        render_categories::ablation = "off";
+        // Store a static name, never a view into the temporary command-line string.
+        if (name == "none" || name == "shadows") render_categories::ablation = name == "none" ? "none" : "shadows";
+        else for (const auto role : render_categories::names)
+            if (role == name && render_categories::valid_ablation(role)) render_categories::ablation = role;
+        for (const auto experiment : render_categories::experiments)
+            if (experiment == name) render_categories::ablation = experiment;
+        if (render_categories::ablation == "off") {
+            UtilityFunctions::printerr("unsupported --eawr-drawtype-ablate category");
+            get_tree()->quit(2);
+            return;
+        }
+    }
+    render_categories::enabled = arguments.has("--eawr-render-counters") || render_categories::ablation != "off";
     if (render_categories::enabled) RenderingServer::get_singleton()->connect("frame_post_draw",
         callable_mp(this, &ViewerHost::record_render_categories));
     read_host_options(arguments);
@@ -191,7 +228,13 @@ void ViewerHost::_ready() try {
         targets.texture_detail = false;
         apply_video(saved.settings.video, targets, applied);
         ActiveSettings::set(saved.settings);
-    } else if (profile_options.launch && ActiveSettings::get() == nullptr) {
+    } else if ((profile_options.launch || arguments.has("--eawr-launcher-start"))
+               && options_->capture_path.empty() && !options_->benchmark && !options_->headless_probe
+               && !options_->renderer_runtime_test && !options_->startup_metrics
+               && !options_->camera_input_selftest && !options_->window_resize_test.has_value()
+               && (!profile_options.launch || options_->report_path.empty()
+                   || arguments.has("--eawr-launcher-start"))
+               && ActiveSettings::get() == nullptr) {
         // Launcher reports do not suppress the player's inherited cap. Keep the raw record unmodified;
         // only the pacing calculation applies an explicit profile override.
         ActiveSettings::set(SettingsStore(options_->settings_file).load().settings);
@@ -279,10 +322,14 @@ void ViewerHost::_ready() try {
 void ViewerHost::ready_battle_setup() {
     // The front end draws the menus itself and takes captures of its own; the setup screen
     // behind it only captures in the stand-alone mode.
+    const bool front_end_fixture = options_->front_end && (!options_->capture_path.empty()
+        || FrontEndMode::from_command_line(options_->capture_path, options_->game_root, options_->mod_root,
+                                            options_->profile).test);
+    const bool live_front_end = options_->front_end && !front_end_fixture;
     skirmish_setup_ = std::make_unique<SkirmishSetupMode>(SkirmishSetupMode::Options{
         options_->game_root, options_->mod_root, options_->report_path,
         options_->front_end ? std::filesystem::path{} : options_->capture_path,
-        options_->profile, options_->cache_shaders});
+        options_->profile, options_->cache_shaders, live_front_end, front_end_fixture});
     MenuTimeline::mark("setup_construct");
     if (!skirmish_setup_->ready(*this)) {
         status_message_ = skirmish_setup_->failure();
@@ -298,10 +345,12 @@ void ViewerHost::ready_battle_setup() {
         auto front_options = FrontEndMode::from_command_line(
             options_->capture_path, options_->game_root, options_->mod_root, options_->profile);
         // The campaign hand-offs: a refused start owns only its own subtree and leaves the menu usable.
+        prime_mounted_mods(options_->game_root);
         const auto start_galactic = [this](GalacticMode::Options campaign_options) {
             register_gc_setup_memory(skirmish_setup_->content());
             campaign_options.game_root = options_->game_root;
             campaign_options.mod_root = options_->mod_root;
+            campaign_options.mounted_mods = mounted_mod_description();
             auto* campaign_host = memnew(Node3D);
             add_child(campaign_host);
             auto campaign = std::make_unique<GalacticMode>(std::move(campaign_options));
@@ -325,10 +374,13 @@ void ViewerHost::ready_battle_setup() {
         // faction). Faction and difficulty need no option of their own: the entry names its faction,
         // and the mode starts every campaign at the authored difficulty. Accepted technology
         // options cross the same campaign-creation boundary (WGP-190).
-        front_options.campaign_launcher = [start_galactic](const presentation::ui::CampaignStartRequest& request) {
+        front_options.campaign_launcher = [this, start_galactic](const presentation::ui::CampaignStartRequest& request) {
             auto campaign_options = GalacticMode::from_command_line();
             campaign_options.campaign = request.campaign;
             campaign_options.custom_economy = request.economy;
+            // Load-only diagnostic control: both paths run in the same binary for paired receipts.
+            if (!viewer_profile_arguments().has("--eawr-gc-fresh-content"))
+                campaign_options.setup_content = skirmish_setup_->content();
             return start_galactic(std::move(campaign_options));
         };
         front_end_ = std::make_unique<FrontEndMode>(std::move(front_options));
@@ -420,15 +472,15 @@ bool ViewerHost::ready_requested_mode() {
             .mod_root = options_->mod_root,
             .profile = options_->profile,
             .map_path = options_->map_path,
-            .report_path = options_->report_path,
+            .campaign_briefing_movie = {}, .report_path = options_->report_path,
             .capture_path = options_->capture_path,
             .warmup_frames = 30,
             .timed_frames = 120,
-            .interactive = options_->camera_interactive,
+            .populate = {}, .effect_alt = {}, .effect_lod = {}, .lighting = {}, .shadows = {}, .environment = {}, .interactive = options_->camera_interactive,
             .camera_zoom = options_->camera_zoom_requested
                 ? std::optional<float>(options_->camera_zoom) : std::nullopt,
-            .shaders = options_->cache_shaders ? std::make_shared<GodotShaderCache>() : nullptr,
-        });
+            .setup = {}, .content = {}, .shaders = options_->cache_shaders ? std::make_shared<GodotShaderCache>() : nullptr,
+         .controller_names = {}, .observer_names = {}, .borrowed_battle = {}, .borrowed_feed = {}, .lan = {}, .replay_input = {}, .attract = {}});
         if (!map_mode_->ready(*this)) {
             stop(2);
             return true;

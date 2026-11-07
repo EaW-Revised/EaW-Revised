@@ -32,6 +32,23 @@ struct FreestoreFacts {
 class QualifiedFreestore final {
     struct Operation;
 public:
+    // Serial root only; begin is constant work and never retains a whole
+    // membership Store (which would force a new full COW copy on first write).
+    class PhaseSavepoint {
+    public:
+        ~PhaseSavepoint();
+        PhaseSavepoint(const PhaseSavepoint&) = delete;
+        PhaseSavepoint& operator=(const PhaseSavepoint&) = delete;
+        [[nodiscard]] std::size_t undo_entries() const noexcept;
+        [[nodiscard]] core::Result<void> commit();
+        [[nodiscard]] core::Result<void> rollback();
+    private:
+        struct Saved;
+        explicit PhaseSavepoint(std::unique_ptr<Saved>);
+        std::unique_ptr<Saved> saved_;
+        friend class QualifiedFreestore;
+    };
+    [[nodiscard]] core::Result<std::unique_ptr<PhaseSavepoint>> begin_phase();
     using Changed = std::function<void()>;
     using Replay = std::function<core::Result<void>(QualifiedFreestore&)>;
     using IntentSink = std::function<void(Replay)>;
@@ -63,6 +80,11 @@ public:
     };
     [[nodiscard]] OperationCursor operation_cursor() const { return {operations_, overlay_base_hash_}; }
     explicit QualifiedFreestore(Changed changed = {}) : changed_(std::move(changed)) {}
+    QualifiedFreestore(const QualifiedFreestore&);
+    QualifiedFreestore& operator=(const QualifiedFreestore&);
+    QualifiedFreestore(QualifiedFreestore&&);
+    QualifiedFreestore& operator=(QualifiedFreestore&&);
+    [[nodiscard]] std::size_t store_copy_count() const noexcept { return store_copies_; }
     [[nodiscard]] core::Result<void> update(FreestoreFacts);
     [[nodiscard]] core::Result<void> initialize(gc::PlayerId, std::span<const sim::EntityId> offers);
     [[nodiscard]] core::Result<bool> offer(gc::PlayerId, sim::EntityId);
@@ -99,7 +121,7 @@ public:
     }
     [[nodiscard]] std::vector<std::uint8_t> encode() const;
     [[nodiscard]] std::string record_sync_hash(bool cold = false) const;
-    [[nodiscard]] std::size_t record_byte_upper_bound() const noexcept { return records_.byte_size() + 1024; }
+    [[nodiscard]] std::size_t record_byte_upper_bound() const noexcept { return records_dirty_ ? 0 : records_.byte_size() + 1024; }
     [[nodiscard]] core::Result<void> restore(std::span<const std::uint8_t>, sim::EntityId next_id,
         std::span<const gc::GalacticPlayer> players);
 private:
@@ -162,6 +184,24 @@ private:
     void update_store_record(gc::PlayerId);
     [[nodiscard]] core::RecordDigest rebuild_records() const;
     core::RecordDigest records_;
+    PhaseSavepoint::Saved* phase_{};
+    bool phase_abandoned_{}, records_dirty_{};
+    void retain_fact(sim::EntityId);
+    void retain_member(gc::PlayerId, sim::EntityId);
+    void retain_reservation(gc::PlayerId, sim::EntityId);
+    void retain_addition_insert(gc::PlayerId, std::size_t);
+    void retain_addition_erase(gc::PlayerId, std::size_t, sim::EntityId);
+    struct ReplacementDelta {
+        std::string base_hash;
+        std::set<sim::EntityId> facts, lost;
+        std::set<gc::PlayerId> stores;
+    };
+    std::shared_ptr<ReplacementDelta> replacement_;
+    std::size_t store_copies_{}; // observer work only; never saved/hashed
+    [[nodiscard]] ReplacementDelta* replacement_write() {
+        if (replacement_ && replacement_.use_count() != 1) replacement_ = std::make_shared<ReplacementDelta>(*replacement_);
+        return replacement_.get();
+    }
     void changed() { published_.reset(); if (changed_) changed_(); }
     void changed(gc::PlayerId player) {
         published_.reset();
@@ -169,8 +209,9 @@ private:
         if (changed_) changed_();
     }
     [[nodiscard]] Store& write_store(gc::PlayerId player) {
+        if (auto* delta = replacement_write()) delta->stores.insert(player);
         auto& store = stores_.at(player);
-        if (store.use_count() != 1) store = std::make_shared<Store>(*store);
+        if (store.use_count() != 1) { ++store_copies_; store = std::make_shared<Store>(*store); }
         return *store;
     }
     void remove(gc::PlayerId, sim::EntityId);

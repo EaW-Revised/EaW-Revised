@@ -11,6 +11,7 @@
 
 #include <godot_cpp/variant/packed_string_array.hpp>
 #include <godot_cpp/variant/rid.hpp>
+#include "battle_audio_trace.hpp"
 #include "particle_adapter.hpp"
 #include "eawr/presentation/skin_pose_profile.hpp"
 
@@ -28,6 +29,9 @@ class PerfTrace final {
 public:
     struct Frame final {
         double frame_ms{};
+        double clock_newest{}, clock_before{}, clock_after{}, clock_advance{}, clock_delta{}, clock_rate{}, clock_target_rate{};
+        bool clock_valid{}, clock_running{};
+        std::vector<std::pair<std::string, double>> sim_profile;
         std::uint64_t presented_tick{};
         std::uint64_t units{};
         std::uint64_t projectiles{};
@@ -57,10 +61,22 @@ public:
         GodotParticleBackend::FrameWork particle_work{};
         particles::RegistryTimings emitter_timing{}, effects_timing{}, debris_timing{};
         double bookkeeping_ms{};
+        // L1.3 particle lane (0 with the lane off): the job's wall time on the lane thread, kick to the job's first
+        // statement, the main thread blocked at the join, and guard hits in the window (counted, never aborting).
+        double lane_wall_ms{}, lane_start_delay_ms{}, lane_join_wait_ms{};
+        std::uint32_t lane_violations{};
+        // PF lane-serial: main's time and tasks building lane batches inside the join wait (a); the lane thread's own
+        // share of particle_retirement_ms (b step 1: the rest ran on main, e.g. retire_clones after the join).
+        double lane_main_help_ms{}, lane_retirement_ms{};
+        std::size_t lane_main_help_tasks{};
         std::size_t slots_grown{}; // This frame, not the session cumulative count.
         double slot_growth_ms{};
         double hud_ms{};
         double audio_ms{};
+        std::array<double, audio_trace::lap_count> audio_laps{};
+        std::array<std::uint64_t, audio_trace::count_count> audio_counts{};
+        double audio_play_ms{};
+        std::array<std::uint64_t, audio_trace::digest_count> audio_digests{};
         double fog_ms{};
         double pose_ms{};
         double compose_ms{};
@@ -102,6 +118,11 @@ public:
     // The path of --eawr-perf-trace, nothing without it, or an error text.
     [[nodiscard]] static std::optional<std::string> parse(const godot::PackedStringArray& arguments, std::string& error);
     [[nodiscard]] static bool fine_particle_timings() noexcept { return fine_particle_timings_; }
+    // --eawr-particle-batch-census appends the merged-draw sizing columns (counting only).
+    [[nodiscard]] static bool particle_batch_census() noexcept { return particle_batch_census_; }
+    // --eawr-sim-phase-profile adds typed jobs and callback timelines to the trace.
+    [[nodiscard]] static bool detailed_sim_profile() noexcept { return detailed_sim_profile_; }
+    [[nodiscard]] static bool sim_cadence_profile() noexcept { return sim_cadence_profile_; }
     // False with --eawr-perf-no-render-timing: the render_cpu_ms and render_gpu_ms columns are left empty and the
     // root viewport's render-time measurement is never requested (its per-frame queries stall the Separate render thread).
     [[nodiscard]] static bool render_timing() noexcept { return render_timing_; }
@@ -116,7 +137,10 @@ public:
 
 private:
     static bool fine_particle_timings_;
+    static bool particle_batch_census_;
     static bool render_timing_;
+    static bool detailed_sim_profile_;
+    static bool sim_cadence_profile_;
     std::ofstream output_;
     godot::RID viewport_;
     std::uint64_t frames_{};

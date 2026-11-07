@@ -19,6 +19,17 @@ HARNESS = r'''
 #include <utility>
 #include <vector>
 const auto caller = std::this_thread::get_id();
+namespace godot { struct Engine { static Engine* get_singleton() { static Engine engine; return &engine; }
+    std::uint64_t get_process_frames() const { return 0; } }; }
+namespace render_categories {
+inline std::string_view ablation{"off"};
+inline bool fighter_experiment() { return false; }
+struct FighterWork final { std::uint64_t idle_samples{}, clip_samples{}; double sample_cpu_ms{}, palette_cpu_ms{}; };
+inline FighterWork fighter_work;
+inline std::set<std::uint64_t> fighter_entities;
+inline void begin_fighter_frame(std::uint64_t) {}
+}
+#include <string_view>
 namespace core {
 struct Error { std::string text; };
 std::string format_diagnostic(const Error& error) { return error.text; }
@@ -104,7 +115,7 @@ template<class Visible>
 __VISIBILITY__
 }
 struct SkinPoseWork { unsigned validations{}, builds{}; double validation_ms{},build_ms{}; };
-struct FrameTimer { explicit FrameTimer(double*) {} void finish() {} };
+struct FrameTimer { explicit FrameTimer(double*, bool = false) {} void finish() {} };
 struct PerfTrace { static bool fine_particle_timings() { return true; } };
 std::vector<std::uint32_t> bytes(std::span<const animation::BonePose> bones) {
     std::vector<std::uint32_t> result;
@@ -205,6 +216,7 @@ struct SpacePopulation {
         std::optional<animation::Pose> pose;
         GodotRenderer::PreparedSkinPose palette;
         SkinPoseWork work;
+        double fighter_sample_ms{}, fighter_palette_ms{};
         bool failed{};
     };
     struct PreparedTurretBinding {
@@ -222,6 +234,8 @@ struct SpacePopulation {
 
     std::vector<std::shared_ptr<const animation::Player>> clips_;
     std::map<std::size_t,std::size_t> idle_live_ships_;
+    std::vector<std::uint8_t> diagnostic_fighters_;
+    bool diagnostic_fighter(std::size_t ship) const noexcept { return ship < diagnostic_fighters_.size() && diagnostic_fighters_[ship] != 0; }
     std::vector<bool> live_retired_;
     std::vector<AnimatedInstance> animated_instances_;
     std::vector<std::vector<animation::BonePose>> contact_bones_;

@@ -4,7 +4,7 @@
 
 #include "eawr/assets/map.hpp"
 #include "eawr/core/result.hpp"
-#include "eawr/data/xml.hpp"
+#include "eawr/data/xml_fwd.hpp"
 #include "eawr/sim/math/geometry.hpp"
 #include "eawr/sim/tactical/ai_level.hpp"
 #include "eawr/sim/tactical/economy.hpp"
@@ -13,7 +13,7 @@
 #include "eawr/sim/tactical/victory.hpp"
 #include "eawr/sim/tactical/visibility.hpp"
 #include "eawr/units/unit_tables.hpp"
-#include "eawr/vfs/vfs.hpp"
+#include "eawr/vfs/vfs_fwd.hpp"
 
 #include <array>
 #include <utility>
@@ -170,6 +170,7 @@ struct StartInputs final {
     std::string map{};
     std::string map_sha256{};
     std::vector<MapPlacement> placements{};      // TED record order
+    std::vector<core::LoadNote> placement_load_notes{}; // diagnostic sidecar
     std::vector<StartFaction> factions{};        // editor player index order (scene::faction_order)
     std::vector<FactionForces> faction_forces{}; // the fixture's lobby factions
     std::vector<LobbyColour> lobby_colours{};    // MP_Color_* in gameconstants.xml order
@@ -182,6 +183,7 @@ struct StartInputs final {
     sim::math::Fixed fog_cell_size{sim::math::Fixed::from_raw(std::int64_t{100} * sim::math::Fixed::scale)};
     sim::math::Fixed fog_regrow_seconds{sim::math::Fixed::from_raw(std::int64_t{6} * sim::math::Fixed::scale)};
     sim::tactical::VictoryCondition space_victory_condition{sim::tactical::VictoryCondition::enemy_starbase_destroyed};
+    sim::tactical::VictoryCondition land_victory_condition{sim::tactical::VictoryCondition::none};
     MatchOptions match_defaults{};
     std::vector<sim::tactical::TypeId> named_heroes{}, superweapons{};
     // Effective mounted data closure; synthetic inputs use canonical empty digests.
@@ -191,6 +193,7 @@ struct StartInputs final {
     std::shared_ptr<const script::foc::AiDifficultyTable> difficulty{};
     // RGC-112: registered names beyond the battle/render/production type closure.
     std::shared_ptr<const std::vector<std::pair<std::string, sim::tactical::TypeId>>> catalog_types{};
+    bool new_markers{true}; // WSS-19/54: authored map-header branch; synthetic team starts default to new.
 };
 
 // Rebuild lobby/faction bindings from recorded players; human ownership remains
@@ -319,13 +322,12 @@ struct SessionContent final {
 [[nodiscard]] std::string content_load_summary(std::span<const core::Diagnostic> diagnostics);
 // The same for tables loaded leniently here (a replay checks its recorded "skipped-types" identity domain).
 [[nodiscard]] std::vector<std::string> skipped_type_ids_of(const units::UnitTables& tables);
-// A start that places a skipped type (a starting unit, a squadron's craft or a launch) fails with a
-// diagnostic naming the type and why it was skipped; `skipped` are the load's diagnostics.
-[[nodiscard]] core::Result<void> refuse_skipped_starts(
-    const SkirmishStart& start, std::span<const core::Diagnostic> skipped);
-// The same check for a recorded setup (a replay): every unit of the setup must be a type that was not skipped.
-[[nodiscard]] core::Result<void> refuse_skipped_setup(
-    const sim::tactical::TacticalSetup& setup, std::span<const core::Diagnostic> skipped);
+// AG-11: omit rejected placements/launches, retaining the IDs of surviving units. A rejected
+// squadron container or member removes that whole placement; garrison references follow it.
+void drop_skipped_starts(SkirmishStart& start, std::span<const core::Diagnostic> skipped,
+    std::vector<core::LoadNote>* notes = nullptr);
+void drop_skipped_setup(sim::tactical::TacticalSetup& setup, std::span<const core::Diagnostic> skipped,
+    std::vector<core::LoadNote>* notes = nullptr);
 // Removes the menu entries of skipped types from the build menus; one line per removal goes to `log`.
 // Returns the number removed.
 std::size_t drop_skipped_menu_options(
@@ -337,6 +339,21 @@ void bind_skipped_types(SkirmishStart& start, std::span<const std::string> skipp
 // (sorted by player). Humans, Normal slots and neutral adjustments add nothing, so Normal sessions are unchanged.
 [[nodiscard]] core::Result<void> bind_difficulty(
     SessionContent& content, const SkirmishStart& start, const StartInputs& inputs);
+
+// #3207 G1-c (WLAI-56): the health, shield and damage scale of one start player, or none when the slot is a human, a
+// Normal slot, or its adjustment is neutral. `bind_difficulty` and the land start share it.
+[[nodiscard]] core::Result<std::optional<sim::tactical::DifficultyScale>> player_difficulty_scale(
+    const StartInputs& inputs, const StartPlayer& player);
+
+// #3207 G1-c (WLAI-56): a land AI player's Credit_Multiplier and Land_Build_Time_Multiplier, converted and range
+// checked as the space economy does (out-of-range values go to `notes`); neutral for a human or a player without
+// difficulty data.
+struct AiLandEconomy final {
+    sim::math::Fixed credit_multiplier;
+    sim::math::Fixed build_time_multiplier;
+};
+[[nodiscard]] core::Result<AiLandEconomy> land_ai_economy(
+    const StartInputs& inputs, const StartPlayer& player, core::LoadNoteBuffer& notes);
 
 // #495 (space-visibility V-18): FoC's fog grid of a skirmish map. It spans the map's declared
 // extents centred on the origin (Coruscant: 130 x 130 cells of 100 from (-6500, 6500), as
@@ -378,13 +395,15 @@ void bind_skipped_types(SkirmishStart& start, std::span<const std::string> skipp
 // keeps reinforcements out (PU-31); the playable bounds are the map's declared extents about the
 // origin; the queue holds 5 (PU-14); an arrival is vulnerable for
 // Space_Elevated_Vulnerability_Duration by Space_Elevated_Vulnerability_Factor (PU-38). Fails when
-// a constant it needs is missing or validate_economy rejects the rules.
+// normalized content violates an internal ordering, owner or binding invariant.
+// Missing constants use stock defaults; unsupported values produce diagnostic sidecar notes.
 [[nodiscard]] core::Result<sim::tactical::EconomyRules> economy_rules(
     const SkirmishStart& start, const StartInputs& inputs, const units::UnitTables& tables, bool campaign = false);
 // WBP-01..05/50, WGT-03: capture services are shared by skirmish and campaign battles.
 // Campaign purchasing/construction remains WGT-26's separate economy adapter.
 [[nodiscard]] core::Result<sim::tactical::PadRules> capture_rules(
-    const sim::tactical::TacticalSetup& setup, const StartInputs& inputs, const units::UnitTables& tables);
+    const sim::tactical::TacticalSetup& setup, const StartInputs& inputs, const units::UnitTables& tables,
+    core::LoadNoteBuffer* load_notes = nullptr);
 // The fixture's human slots (also the fallback for recordings without SKSU).
 [[nodiscard]] std::vector<sim::tactical::PlayerId> human_slots(const Fixture& fixture);
 

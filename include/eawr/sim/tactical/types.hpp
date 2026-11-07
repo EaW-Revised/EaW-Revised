@@ -144,6 +144,7 @@ enum class OrderKind : std::uint8_t {
     beacon = 25, // coordinator-reserved: HCB-12, replay opcode 31, no unit order.
     gift = 26, // ADR-020: controller transfer only, replay opcode 32, no unit order.
     battle_control = 27, // ADR-020: trusted departure boundary, replay opcode 33.
+    script_invulnerable = 28, // TL-03: Lua Make_Invulnerable, replay opcode 34, no unit order.
 };
 
 // The order a unit last accepted: a move or face keeps its point in `destination`, an attack its
@@ -239,6 +240,13 @@ struct DamagePayload {
     friend constexpr bool operator==(const DamagePayload&, const DamagePayload&) noexcept = default;
 };
 
+// Lua `Make_Invulnerable(enabled)` (TL-03): sets the per-unit script flag on each listed unit and,
+// for a squadron, on each of its members. Idempotent, no expiry; only the script host issues it.
+struct ScriptInvulnerablePayload {
+    bool enabled{};
+    friend constexpr bool operator==(const ScriptInvulnerablePayload&, const ScriptInvulnerablePayload&) noexcept = default;
+};
+
 // Turn in place towards `target` (#70, docs/behaviour/space-movement.md MV-20).
 struct FacePayload {
     math::Vec3 target{};
@@ -292,6 +300,7 @@ enum class AbilityKind : std::uint8_t {
     fow_reveal_ping = 27, // coordinator-reserved, WFP-01/02/03
     blast = 28, // coordinator-reserved, WHE-35/36, FS-34/35
     rocket_attack = 29, // WRA-01: modal weapon selection
+    super_laser = 30, // WSPL-01 to WSPL-06
 };
 
 // What an ability command asks (AB-10 to AB-13): switch the ability on or off, or set whether it
@@ -457,7 +466,7 @@ struct BeaconState {
 using CommandPayload = std::variant<StopPayload, MovePayload, AttackPayload, DamagePayload, FacePayload,
     AttackMovePayload, GuardPayload, AbilityPayload, BuyPayload, CancelPayload, ReinforcePayload, PadBuildPayload,
     CreditGrantPayload, QuitPayload, PadSellPayload, AreaAbilityPayload, ManualTargetPayload, RevealAllPayload,
-    RepairHardpointPayload, AiReservationDebitPayload, SpecialFirePayload, CampaignCreditReleasePayload, RetreatPayload, RetreatCinematicPayload, BeaconPayload, GiftPayload, BattleControlPayload>;
+    RepairHardpointPayload, AiReservationDebitPayload, SpecialFirePayload, CampaignCreditReleasePayload, RetreatPayload, RetreatCinematicPayload, BeaconPayload, GiftPayload, BattleControlPayload, ScriptInvulnerablePayload>;
 
 // Whether a command acts on the issuer's economy (#530) rather than on units.
 [[nodiscard]] constexpr bool economy_command(const CommandPayload& payload) noexcept {
@@ -486,6 +495,7 @@ struct PlayerCommand {
 }
 
 [[nodiscard]] constexpr OrderKind order_kind(const CommandPayload& payload) noexcept {
+    if (std::holds_alternative<ScriptInvulnerablePayload>(payload)) return OrderKind::script_invulnerable;
     if (std::holds_alternative<GiftPayload>(payload)) return OrderKind::gift;
     if (std::holds_alternative<BattleControlPayload>(payload)) return OrderKind::battle_control;
     if (std::holds_alternative<RetreatPayload>(payload) || std::holds_alternative<RetreatCinematicPayload>(payload)) return OrderKind::retreat;
@@ -571,7 +581,7 @@ struct Event {
     EntityId unit{};
     OrderKind order{OrderKind::none};
     RejectReason reason{RejectReason::none};
-    std::uint8_t hardpoint{}; // hardpoint_destroyed only
+    std::uint32_t hardpoint{}; // hardpoint_destroyed only; encoded as one byte below 255 (see append_event)
     std::uint32_t special_pulse{}; // special_weapon_fired: 0 initial, 1..N continuation.
     SeatId previous_controller{}, controller{}; // controller_changed only; faction owner stays in player.
     friend constexpr bool operator==(const Event&, const Event&) noexcept = default;

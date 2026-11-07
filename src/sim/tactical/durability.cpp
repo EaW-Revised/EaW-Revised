@@ -155,8 +155,9 @@ struct HardpointTotals {
     HardpointTotals result;
     for (std::size_t index = 0; index < profile.hardpoints.size(); ++index) {
         if (profile.hardpoints[index].destroyable) {
-            result.maximum += profile.hardpoints[index].max_health.raw();
-            result.current += state.hardpoints[index].raw();
+            result.maximum = std::min(result.maximum + profile.hardpoints[index].max_health.raw(),
+                max_hardpoint_health_total_raw);
+            result.current = std::min(result.current + state.hardpoints[index].raw(), max_hardpoint_health_total_raw);
         }
     }
     return result;
@@ -377,7 +378,8 @@ core::Result<void> validate_durability(const DurabilityTable& table) {
             return invalid(context + ": maximum speed must be in [0, " + std::to_string(max_durability_health) + "]");
         }
         if (profile.hardpoints.size() > max_hardpoints_per_type) {
-            return invalid(context + ": more than " + std::to_string(max_hardpoints_per_type) + " hardpoints");
+            return invalid(context + ": " + std::to_string(profile.hardpoints.size()) + " hardpoints, more than "
+                + std::to_string(max_hardpoints_per_type));
         }
         for (std::size_t slot = 0; slot < profile.hardpoints.size(); ++slot) {
             const auto& hardpoint = profile.hardpoints[slot];

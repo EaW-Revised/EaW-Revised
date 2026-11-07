@@ -39,6 +39,7 @@ core::Result<tactical::TacticalContent> conflict_entry_content(const tactical::T
     if (!fog) return core::Result<tactical::TacticalContent>::failure(fog.error());
     tactical::TacticalContent content;
     content.load_notes = std::move(bound.value().load_notes);
+    content.load_notes.insert(content.load_notes.end(), inputs.placement_load_notes.begin(), inputs.placement_load_notes.end());
     content.sensors = std::move(bound.value().sensors);
     content.durability = std::move(bound.value().durability);
     content.motion = std::move(bound.value().motion);

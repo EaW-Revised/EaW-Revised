@@ -59,6 +59,14 @@ namespace {
 void BattleInput::replay(const LiveSessionView::ScriptedInput& scripted, LiveSessionView& live) {
     Input* engine = Input::get_singleton();
     if (engine == nullptr) return;
+    const auto win = [&](const float x, const float y) {
+        const auto w = viewport_to_window_point(final_transform(), {x, y});
+        return Vector2(w[0], w[1]);
+    };
+    const auto win_delta = [&](const float x, const float y) {
+        const auto w = viewport_to_window_delta(final_transform(), {x, y});
+        return Vector2(w[0], w[1]);
+    };
     const auto modifiers = [&](InputEventWithModifiers& event) {
         event.set_shift_pressed(scripted.shift);
         event.set_ctrl_pressed(scripted.ctrl);
@@ -73,7 +81,7 @@ void BattleInput::replay(const LiveSessionView::ScriptedInput& scripted, LiveSes
             event->set_button_index(scripted.key == "in" ? MOUSE_BUTTON_WHEEL_UP : MOUSE_BUTTON_WHEEL_DOWN);
             event->set_pressed(pressed);
             event->set_factor(1.0F);
-            event->set_position(Vector2(viewport_[0] * 0.5F, viewport_[1] * 0.5F));
+            event->set_position(win(viewport_[0] * 0.5F, viewport_[1] * 0.5F));
             event->set_global_position(event->get_position());
             engine->parse_input_event(event);
         }
@@ -139,7 +147,7 @@ void BattleInput::replay(const LiveSessionView::ScriptedInput& scripted, LiveSes
         note(name + ": its target is not on screen");
         return;
     }
-    scripted_points_.push_back({scripted.kind, scripted.tick, *at});
+    scripted_points_.push_back({scripted.kind, scripted.tick, *at, {}});
     // One emitted click owns its producer epoch across press/release decoding.
     // This is admission state, also used without acceptance tracing enabled.
     std::optional<ui::CommandScheduler::IntentEpochScope> input_epoch;
@@ -150,8 +158,8 @@ void BattleInput::replay(const LiveSessionView::ScriptedInput& scripted, LiveSes
         event->set_button_index(index);
         event->set_pressed(pressed);
         event->set_double_click(double_click);
-        event->set_position(Vector2(where[0], where[1]));
-        event->set_global_position(Vector2(where[0], where[1]));
+        event->set_position(win(where[0], where[1]));
+        event->set_global_position(win(where[0], where[1]));
         modifiers(**event);
         if (!input_epoch) input_epoch.emplace(live.input_epoch());
         if (pressed || (live.options().lan_acceptance && scripted.kind == "release"))
@@ -164,16 +172,16 @@ void BattleInput::replay(const LiveSessionView::ScriptedInput& scripted, LiveSes
     if (!scripted.hud.empty() && scripted.kind != "hover") {
         Ref<InputEventMouseMotion> motion;
         motion.instantiate();
-        motion->set_position(Vector2((*at)[0], (*at)[1]));
-        motion->set_global_position(Vector2((*at)[0], (*at)[1]));
+        motion->set_position(win((*at)[0], (*at)[1]));
+        motion->set_global_position(win((*at)[0], (*at)[1]));
         engine->parse_input_event(motion);
     }
     if (scripted.kind == "hover") {
         // The pointer moves there and stays: a motion event, no button.
         Ref<InputEventMouseMotion> motion;
         motion.instantiate();
-        motion->set_position(Vector2((*at)[0], (*at)[1]));
-        motion->set_global_position(Vector2((*at)[0], (*at)[1]));
+        motion->set_position(win((*at)[0], (*at)[1]));
+        motion->set_global_position(win((*at)[0], (*at)[1]));
         modifiers(**motion);
         engine->parse_input_event(motion);
     } else if (scripted.kind == "press" || scripted.kind == "release") {
@@ -198,9 +206,9 @@ void BattleInput::replay(const LiveSessionView::ScriptedInput& scripted, LiveSes
         button(MOUSE_BUTTON_LEFT, true, *at, false);
         Ref<InputEventMouseMotion> motion;
         motion.instantiate();
-        motion->set_position(Vector2((*to)[0], (*to)[1]));
-        motion->set_global_position(Vector2((*to)[0], (*to)[1]));
-        motion->set_relative(Vector2((*to)[0] - (*at)[0], (*to)[1] - (*at)[1]));
+        motion->set_position(win((*to)[0], (*to)[1]));
+        motion->set_global_position(win((*to)[0], (*to)[1]));
+        motion->set_relative(win_delta((*to)[0] - (*at)[0], (*to)[1] - (*at)[1]));
         motion->set_button_mask(MOUSE_BUTTON_MASK_LEFT);
         modifiers(**motion);
         engine->parse_input_event(motion);
@@ -212,6 +220,14 @@ void BattleInput::replay(const LiveSessionView::ScriptedInput& scripted, LiveSes
 void BattleInput::replay_middle(const LiveSessionView::ScriptedInput& scripted, const std::string& name) {
     Input* engine = Input::get_singleton();
     if (engine == nullptr) return;
+    const auto win = [&](const float x, const float y) {
+        const auto w = viewport_to_window_point(final_transform(), {x, y});
+        return Vector2(w[0], w[1]);
+    };
+    const auto win_delta = [&](const float x, const float y) {
+        const auto w = viewport_to_window_delta(final_transform(), {x, y});
+        return Vector2(w[0], w[1]);
+    };
     if (!frame_ || viewport_[0] <= 0.0F || viewport_[1] <= 0.0F) {
         note(name + ": no drawn camera yet");
         return;
@@ -229,15 +245,15 @@ void BattleInput::replay_middle(const LiveSessionView::ScriptedInput& scripted, 
         event->set_ctrl_pressed(pressed);
         engine->parse_input_event(event);
     };
-    Vector2 at(viewport_[0] * 0.5F, viewport_[1] * 0.5F);
+    Vector2 at(viewport_[0] * 0.5F, viewport_[1] * 0.5F); // viewport pixels; win() on dispatch
     const auto button = [&](const bool pressed) {
         Ref<InputEventMouseButton> event;
         event.instantiate();
         event->set_button_index(MOUSE_BUTTON_MIDDLE);
         event->set_pressed(pressed);
         event->set_button_mask(BitField<MouseButtonMask>(pressed ? MOUSE_BUTTON_MASK_MIDDLE : 0));
-        event->set_position(at);
-        event->set_global_position(at);
+        event->set_position(win(at.x, at.y));
+        event->set_global_position(win(at.x, at.y));
         event->set_ctrl_pressed(scripted.ctrl);
         engine->parse_input_event(event);
     };
@@ -253,10 +269,10 @@ void BattleInput::replay_middle(const LiveSessionView::ScriptedInput& scripted, 
         at += step;
         Ref<InputEventMouseMotion> motion;
         motion.instantiate();
-        motion->set_position(at);
-        motion->set_global_position(at);
-        motion->set_relative(step);
-        motion->set_screen_relative(step);
+        motion->set_position(win(at.x, at.y));
+        motion->set_global_position(win(at.x, at.y));
+        motion->set_relative(win_delta(step.x, step.y));
+        motion->set_screen_relative(win_delta(step.x, step.y));
         motion->set_button_mask(MOUSE_BUTTON_MASK_MIDDLE);
         motion->set_ctrl_pressed(scripted.ctrl);
         engine->parse_input_event(motion);

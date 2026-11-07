@@ -6,7 +6,7 @@
 #include "eawr/core/result.hpp"
 #include "eawr/script/foc/tactical_ai.hpp"
 #include "eawr/skirmish/start.hpp"
-#include "eawr/vfs/vfs.hpp"
+#include "eawr/vfs/vfs_fwd.hpp"
 
 #include <map>
 #include <memory>
@@ -15,10 +15,19 @@
 
 namespace eawr::skirmish {
 
+struct LandStart;
+struct LandStartInputs;
+
 // Every player of the start; the lobby players that are not human run the AI (SK-10, SK-40).
 // Perception inputs are the GC context of SK-41 to SK-45; `seed` is the setup's.
 [[nodiscard]] script::foc::AiSetup ai_setup(
     const SkirmishStart& start, const StartInputs& inputs, const units::UnitTables& tables);
+
+// #3207 G1-b: the same host inputs for a land start. The domain is land (goal mode, templates, plan directory and
+// freestore come from the mode table), the players and levels are the lobby's, and the perception bounds are the
+// land terrain's playable rectangle when it has one.
+[[nodiscard]] script::foc::AiSetup land_ai_setup(
+    const LandStart& start, const LandStartInputs& inputs, const units::UnitTables& tables);
 
 // WSS-35, AI-11: the AI player type a lobby AI (or a demo map's named player) runs; empty for a human, a faction
 // without Basic_AI, or a non-AI player.

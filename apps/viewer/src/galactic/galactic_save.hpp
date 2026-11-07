@@ -45,6 +45,7 @@ private:
     void show_screen(Screen);
     void open_options();
     bool build_widgets();
+    void centre_dialogs();
     void show_modal(Modal, std::string text);
     void dismiss_modal(bool yes = false);
     void begin_progress(bool save, std::string name, bool overwrite = false, bool quick = false);

@@ -189,7 +189,7 @@ void ViewerHost::on_skirmish_start() {
 void ViewerHost::_input(const Ref<InputEvent>& event) {
     sync_modal_holds();
     if (front_end_ && !map_mode_) front_end_->input(event);
-    if (map_mode_) map_mode_->observe_pointer(event);
+    if (map_mode_) map_mode_->observe_pointer(event, input_focus(*get_viewport()));
     std::uint32_t button{};
     const auto input = input_class(event, button);
     if (!input || !presentation::ui::world_takes_before_gui(*input, button, world_capture_)) return;
@@ -303,6 +303,7 @@ void ViewerHost::_notification(const int what) {
         front_end_.reset();
         return;
     case NOTIFICATION_WM_CLOSE_REQUEST:
+        if (auto* input = Input::get_singleton()) input->set_mouse_mode(Input::MOUSE_MODE_VISIBLE);
         shutdown_trace::mark("window close requested");
         // Notification propagation locks the child map. Closing a campaign
         // deletes its tactical and loading children, so wait for traversal
@@ -311,6 +312,8 @@ void ViewerHost::_notification(const int what) {
         break;
     case NOTIFICATION_APPLICATION_FOCUS_OUT:
     case NOTIFICATION_WM_WINDOW_FOCUS_OUT:
+        if (auto* input = Input::get_singleton()) input->set_mouse_mode(Input::MOUSE_MODE_VISIBLE);
+        world_capture_.clear(); break;
     case NOTIFICATION_WM_MOUSE_EXIT: world_capture_.clear(); break;
     default: break;
     }

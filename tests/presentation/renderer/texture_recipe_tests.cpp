@@ -55,6 +55,50 @@ int main() {
     transformed.uploaded();
     check(transformed.retained() && transformed.read()->mips[0].bytes == original.mips[0].bytes,
         "transformed content must keep its exact upload snapshot");
+    // #5989: a texture whose mip chain was generated after loading is verified against its file's authored levels, and its
+    // CPU snapshot is freed like any other; a later read gives the authored levels back and never regenerates anything.
+    assets::Texture chained = original;
+    chained.width = chained.height = 4;
+    chained.mips.clear();
+    chained.mips.push_back({4, 4, 16, std::vector<std::byte>(16, std::byte{42})});
+    chained.mips.push_back({2, 2, 8, std::vector<std::byte>(8, std::byte{21})});
+    chained.mips.push_back({1, 1, 4, std::vector<std::byte>(4, std::byte{10})});
+    chained.source.authored_levels = 1;
+    assets::Texture authored = chained;
+    authored.mips.resize(1);
+    authored.source.authored_levels = 0;
+    assets::Texture file = authored;
+    unsigned chained_reads{};
+    const TextureLoader load_file = [&](const assets::Source&) -> std::optional<assets::Texture> {
+        ++chained_reads;
+        return file;
+    };
+    TextureRecipe generated_chain(chained, load_file, texture_item(chained));
+    check(generated_chain.retained() != nullptr, "before upload the chained snapshot remains");
+    generated_chain.uploaded();
+    check(!generated_chain.retained() && chained_reads == 1, "a chained texture whose authored levels match the file frees its CPU snapshot");
+    const auto readmitted = generated_chain.read();
+    check(readmitted && readmitted->mips.size() == 1 && readmitted->mips[0].bytes == authored.mips[0].bytes && chained_reads == 2,
+        "re-admission reads the authored levels alone, one file read and no generation");
+    file.mips[0].bytes[0] = std::byte{3};
+    check(!generated_chain.read(), "changed file content still fails the restore");
+    file = authored;
+    file.mips[0].bytes[0] = std::byte{3};
+    TextureRecipe changed(chained, load_file, texture_item(chained));
+    changed.uploaded();
+    check(changed.retained(), "a chained texture whose file differs in its authored levels keeps its snapshot");
+    file = authored;
+    file.mips.push_back({2, 2, 8, std::vector<std::byte>(8, std::byte{21})});
+    TextureRecipe longer(chained, load_file, texture_item(chained));
+    longer.uploaded();
+    check(longer.retained(), "a file with more levels than were authored keeps the snapshot");
+    // A generated texture that does not name its authored levels is a transformed one: it keeps its snapshot.
+    file = authored;
+    assets::Texture unmarked = chained;
+    unmarked.source.authored_levels = 0;
+    TextureRecipe plain_generated(unmarked, load_file, texture_item(unmarked));
+    plain_generated.uploaded();
+    check(plain_generated.retained(), "without the marker a texture the file does not reproduce keeps its snapshot");
     TextureRecipe generated(original, {}, texture_item(original));
     generated.uploaded();
     assets::PayloadProbe probe;

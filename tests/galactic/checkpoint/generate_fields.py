@@ -15,6 +15,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "presentation/rende
 from viewer_mode_sources import SOURCE_BUNDLES, source_text  # noqa: E402
 
 EXCLUDED = {
+    "eawr::sim::galactic::story::State": {
+        "edits": "serialized as the optional Lua-edit tail after the goals in game_session_lifecycle.cpp (WST-56); absent when nothing was edited",
+    },
     "eawr::sim::tactical::QueueEntry": {
         "controller_seat": "serialized and identity-validated by the v4 co-op controller tail in session_state.cpp; disabled policy requires the default value",
     },
@@ -57,13 +60,16 @@ OWNER_EXCLUSIONS = {
         "registry objects encoded by the world object sections": "registry planets routes fleets",
         "runtime callbacks rebound by the caller": "ability_consumption_handler ground_ability_story_handler conflict_tail control_handler corruption_completion_handler corruption_mission_handler corruption_result_handler credit_notification_handler hasher movement_access_provider native_actor_changes_handler native_movement_listener native_production_handler native_production_outcome_handler native_replayers planet_ruins_story_handler technology_notice_handler timeline_service",
         "synchronous consumption guard, zero at every checkpoint barrier": "consuming_spy",
-        "derived service inputs and indexes rebuilt on load": "ability_input_generation ability_work conflict_requests_enabled conflict_tail_outer_timer control_stealth_generation control_stealth_inputs economy_input_generation gathered_income_inputs graph income_control_generation income_edges income_forecast_cache income_gather_generation income_input_generation income_modifier_generation income_modifiers income_source_candidates movement_access_generation native_invasion_transport_count native_invasions_enabled observer_input_generation observer_neighbours    published_actor_records   published_economy_input_generation   published_production published_production_generation  published_production_originals published_sale_types snapshot technology_price_expiry victory_tail_deferred  production_generation",
+        "scoped native commit callback pointer; restored on exit and rebound from the runtime handler for each commit": "native_live_ability_actor_changes",
+        "derived service inputs and indexes rebuilt on load": "ability_input_generation ability_work conflict_requests_enabled conflict_tail_outer_timer control_stealth_generation control_stealth_inputs economy_input_generation gathered_income_inputs graph income_control_generation income_edges income_forecast_cache income_gather_generation income_input_generation income_modifier_generation income_modifiers incident_route_cache income_source_candidates movement_access_generation native_invasion_transport_count native_invasions_enabled observer_input_generation observer_neighbours    published_actor_records   published_economy_input_generation   published_production published_production_generation  published_production_originals published_sale_types snapshot technology_price_expiry victory_tail_deferred  production_generation",
         "match-local diagnostic collector; never authoritative, hashed or checkpointed": "load_note_collector load_note_count",
-        "derived hash caches and host diagnostics": "cached_hash cached_hash_present digests dirty production_offer_hashes discovery_records discovery_targets income_forecast_rebuilds income_modifier_rebuilds income_sources_gathered observer_projection_records population_objects population_producers production_entries production_offer_rebuilds production_producers verify_cached_hash",
+        "derived hash caches and host diagnostics": "cached_hash cached_hash_present digests dirty production_offer_hashes production_offer_rows exchange_scratch discovery_records discovery_targets income_forecast_rebuilds income_modifier_rebuilds income_sources_gathered observer_projection_records population_objects population_producers population_projection_cache population_projection_key production_entries production_offer_rebuilds production_producers verify_cached_hash",
+        "test-only runtime options of the population projection memo, never authoritative state": "population_memo_enabled population_memo_drop_orbit",
         "local per-player publication caches rebuilt on demand, never serialized": "view_publications",
         "immutable snapshot section copies and revision counters rebuilt on load": "published_sections section_generation",
         "immutable native setup schemas supplied with the session setup": "native_fiscal_schema native_income_schema native_population_schema",
         "native AI barrier publication state rebuilt after load": " native_barrier_active native_commit_publication native_commit_publications ",
+        "in-flight output latch and match-local refusal diagnostics, never saved or hashed": "native_output_published native_post_publication_faults",
         "runtime callbacks rebound by the caller (feedback)": "feedback_notice_handler",
         "admitted History service owner rebound by the scripted adapter": "history_service_deferred",
         "unhealthy or in-flight state cannot reach a save barrier": "failed native_applying",
@@ -76,7 +82,8 @@ OWNER_EXCLUSIONS = {
         "serialized separately by world, script, child and return owner codecs": "galaxy scripts child staged return_state live_hero_returns native_ai story_engine story_goals",
         "runtime callbacks rebound by the caller": "auto_progress auto_resolver auto_state_reader auto_state_writer auto_withdraw child_tech conflict_gate control_observer corruption_mission_service hasher hero_placement hero_resolver hero_structures layers outcome_services pending_alert story_handler story_rewards technology_handler vote_progress",
         "immutable content lookup tables rebound on load": "story_factions story_planets story_scripts",
-        "transient outcome and publication history": "latest_auto_outcome latest_context latest_result outcome_history outcome_record_index entry_notes story_notes story_notices story_reported story_triggers story_presentation",
+        "transient outcome and publication history": "latest_auto_outcome latest_context latest_result outcome_history outcome_record_index entry_notes story_notes story_notices story_reported story_triggers story_presentation gui_click_tick gui_clicks_this_tick",
+        "liveness token whose weak_ptr appliers hold so they fail cleanly once the session is gone; process-local, never saved": "story_plot_alive",
         "host-side diagnostic oracle trace session id": "native_oracle_session",
         "history rebase scheduled by a save or load and applied at the next step; a recapture before it sees the saved window (#4058)": "scheduled_base",
         "unhealthy or reconstruction-only state cannot reach a save barrier": "failure reconstructing_native_notices restoring_child",
@@ -286,10 +293,29 @@ def inventory(overrides):
     return root, types, aliases
 
 
+def indexed_coverage(name, body):
+    """Reject indexed serialization unless its complete coverage is audited.
+
+    Whole-member serialization needs no exception. The sole indexed codec uses a
+    six-slot legacy domain plus the gated seventh slot in the extended domain.
+    New indexed codecs must add an explicit, reviewed coverage contract here.
+    """
+    indexed = set(re.findall(r"\bv\.(\w+)\s*\[", body))
+    errors = []
+    for field in sorted(indexed):
+        known = name == "eawr::sim::tactical::session_detail::LiveUnit" and field == "upgrade_bonuses"
+        loop = r"for\s*\(\s*std::size_t\s+slot\s*=\s*0\s*;\s*slot\s*<\s*6\s*;\s*\+\+slot\s*\)\s*a\s*\(\s*v\.upgrade_bonuses\s*\[\s*slot\s*\]\s*\)\s*;"
+        gated = r"if\s*\(\s*a\.fire_range_bonuses\s*\)\s*a\s*\(\s*v\.upgrade_bonuses\s*\[\s*6\s*\]\s*\)\s*;"
+        if not known or not re.search(loop, body) or not re.search(gated, body):
+            errors.append(f"{name}: indexed field {field} lacks full-array coverage")
+    return errors
+
+
 def check(overrides=None):
     overrides = overrides or {}
     root, types, aliases = inventory(overrides)
     registered = {}
+    coverage_errors = []
     for path, scope in FIELD_SOURCES.items():
         source = overrides.get(path, (root / path).read_text(encoding="utf-8"))
         for match in re.finditer(r"template <> struct Fields<([^>]+)> \{(.*?)\n\};", source, re.S):
@@ -299,6 +325,7 @@ def check(overrides=None):
             name = resolve(qualified, scope, types, aliases) or qualified.lstrip(":")
             if name in CUSTOM_CODECS:
                 continue
+            coverage_errors.extend(indexed_coverage(name, body))
             # An array written slot by slot (LiveUnit::upgrade_bonuses keeps its
             # version-gated seventh slot) is one field; writing the same subscript
             # twice, or a plain field twice, is still a duplicate.
@@ -317,12 +344,13 @@ def check(overrides=None):
         match = re.search(r"void " + function + r"\(A& a, T& v\) \{(.*?)\n\}", source, re.S)
         if not match:
             raise ValueError(f"Owner field list {function} not found in {path}")
+        coverage_errors.extend(indexed_coverage(name, match[1]))
         # Nested timeline fields have a separate Fields list; audit that owner too.
         registered[name] = re.findall(r"\bv\.(\w+)(?!\w*->)", match[1])
         if "v.timelines->" in match[1]:
             registered[name].append("timelines")
             registered[name + "::TimelinePublication"] = re.findall(r"\bv\.timelines->(\w+)", match[1])
-    errors = []
+    errors = coverage_errors
     for name, fields in registered.items():
         if name not in types:
             errors.append(f"{name}: declaration not found")

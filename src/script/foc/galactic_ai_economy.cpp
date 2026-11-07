@@ -29,20 +29,6 @@ std::optional<std::int32_t> rounded(Real value) {
         || real(std::numeric_limits<std::int32_t>::max() - 1) < value) return {};
     return static_cast<std::int32_t>(value + parse_real("0.5").value());
 }
-std::optional<std::vector<tactical::TypeId>> selected_types(const GalacticPerceptionSetup& setup,
-    const std::vector<Binding>& bindings) {
-    std::vector<tactical::TypeId> types;
-    for (const auto& binding : bindings) if (binding.parameter == "PARAMETER_TYPE") {
-        const auto* text = std::get_if<std::string>(&binding.value); if (!text) return {};
-        const auto name = upper_case(*text);
-        const auto at = std::find_if(setup.types.begin(), setup.types.end(), [&](const auto& row) {
-            return upper_case(row.name) == name;
-        });
-        types.push_back(at == setup.types.end() ? 0 : at->type_id);
-    }
-    if (types.empty()) return {};
-    return types;
-}
 std::int64_t count(const std::map<tactical::TypeId, std::int64_t>& values, tactical::TypeId type) {
     const auto at = values.find(type); return at == values.end() ? 0 : at->second;
 }
@@ -53,6 +39,27 @@ Real fraction(Real a, Real b) { return b == Real{} ? Real{} : a / b; }
 core::Result<void> invalid(std::string message) {
     return core::Result<void>::failure(detail::make_error(authoritative::codes::invalid_request, std::move(message)));
 }
+}
+
+GalacticTypeNames::GalacticTypeNames(std::span<const AiType> sorted_types) {
+    by_name_.reserve(sorted_types.size());
+    for (const auto& row : sorted_types) by_name_.try_emplace(upper_case(row.name), row.type_id); // first row wins
+}
+
+tactical::TypeId GalacticTypeNames::find(std::string_view upper_cased) const {
+    const auto at = by_name_.find(upper_cased);
+    return at == by_name_.end() ? 0 : at->second;
+}
+
+std::optional<std::vector<tactical::TypeId>> selected_type_ids(const GalacticTypeNames& names,
+    const std::vector<Binding>& bindings) {
+    std::vector<tactical::TypeId> types;
+    for (const auto& binding : bindings) if (binding.parameter == "PARAMETER_TYPE") {
+        const auto* text = std::get_if<std::string>(&binding.value); if (!text) return {};
+        types.push_back(names.find(upper_case(*text)));
+    }
+    if (types.empty()) return {};
+    return types;
 }
 
 std::shared_ptr<const GalacticEconomyRuntime> fresh_economy_runtime(std::span<const GalacticPlayerFacts> players) {
@@ -306,7 +313,8 @@ std::optional<Real> GalacticWorld::target_economy_token(const GalacticQueryKey& 
         if (!level || *level < 1) return {};
         return real((token == "HASSTARBASEOFLEVEL" ? row->space : row->ground) >= *level ? 1 : 0);
     }
-    const auto types = selected_types(setup_, key.bindings); if (!types) return {};
+    const auto types = selected_type_ids(type_names_, key.bindings); if (!types) return {};
+    // WGA-286 uses exact equality here; HasUnit has a different rule (WGA-288).
     const auto complete = number(key.bindings, "PARAMETER_ONLY_CONSIDER_COMPLETE").value_or(Real{}) == real(1);
     std::int64_t total{};
     for (const auto& [type, amount] : row->structures) if (includes(*types, type)) total += amount;
@@ -400,18 +408,19 @@ std::optional<Real> GalacticWorld::player_economy_token(const GalacticQueryKey& 
         return total;
     }
     if (token == "HASUNIT") {
-        const auto types = selected_types(setup_, key.bindings); if (!types) return {};
+        const auto types = selected_type_ids(type_names_, key.bindings); if (!types) return {};
         const auto requested = number(key.bindings, "PARAMETER_COUNT").value_or(real(1));
         if (!finite(requested) || requested < real(std::numeric_limits<std::int32_t>::min())
             || real(std::numeric_limits<std::int32_t>::max()) < requested) return {};
         auto remaining = static_cast<std::int64_t>(static_cast<std::int32_t>(requested));
+        // WGA-288 accepts any positive value, unlike the structure predicates.
         const bool complete = Real{} < number(key.bindings, "PARAMETER_ONLY_CONSIDER_COMPLETE").value_or(Real{});
         for (const auto& [type, amount] : player_counts.owned) if (includes(*types, type)) remaining -= amount;
         if (!complete) for (const auto type : *types) remaining -= count(player_counts.queued, type);
         return real(remaining <= 0 ? 1 : 0);
     }
     if (token == "HASTECHTOPRODUCE") {
-        const auto types = selected_types(setup_, key.bindings); if (!types) return {};
+        const auto types = selected_type_ids(type_names_, key.bindings); if (!types) return {};
         const auto* account = this->account(owner); const auto* who = player(owner);
         if (!account || !who || !bound().snapshot_->production()) return {};
         const auto* production = find(bound().snapshot_->production()->players, owner, [](const auto& row) { return row.player; });
@@ -491,7 +500,7 @@ std::optional<Real> GalacticWorld::player_economy_token(const GalacticQueryKey& 
         }
         const auto level = rounded(number(key.bindings, "PARAMETER_LEVEL").value_or(real(1)));
         const auto requested = rounded(number(key.bindings, "PARAMETER_COUNT").value_or(real(1)));
-        const auto types = selected_types(setup_, key.bindings);
+        const auto types = selected_type_ids(type_names_, key.bindings);
         std::int64_t owned{}, matches{}, structures{};
         PlanetSlot current_slot{{"VARIABLE_TARGET", token == "MAXEDSTARBASES" ? "STARBASELEVEL" : "GROUNDBASELEVEL"}};
         PlanetSlot maximum_slot{{"VARIABLE_TARGET", token == "MAXEDSTARBASES" ? "MAXSTARBASELEVEL" : "MAXGROUNDBASELEVEL"}};
@@ -535,7 +544,7 @@ std::optional<Real> GalacticWorld::budget_fraction(const GalacticQueryKey& key, 
     if (!bound().economy_runtime_ || !bound().snapshot_ || bound().economy_runtime_->completed_tick != bound().snapshot_->completed_tick()) return {};
     const auto budget = std::find_if(bound().economy_runtime_->budget_rows().begin(), bound().economy_runtime_->budget_rows().end(),
         [&](const auto& row) { return row.player == owner; });
-    const auto types = selected_types(setup_, key.bindings);
+    const auto types = selected_type_ids(type_names_, key.bindings);
     if (budget == bound().economy_runtime_->budget_rows().end() || !types || types->size() != 1 || !types->front()) return {};
     const auto* type = find(setup_.economy_types, types->front(), [](const auto& row) { return row.type; });
     const auto* account = this->account(owner); if (!type || !account || !bound().snapshot_->production()) return {};

@@ -209,7 +209,6 @@ struct Particle final {
     Vec3 velocity{};
     Vec3 radial_velocity{}; // PS-24: retained birth-direction motion is independent of velocity.
     Vec3 motion_velocity{}; // MD-07: movement including inherited emitter motion.
-    float inherited_speed_limit{};
     Vec3 acceleration{};
     Vec4 texcoords{0.0F, 0.0F, 1.0F, 1.0F};
     Color color{0.1F, 1.0F, 0.5F, 1.0F};
@@ -282,7 +281,11 @@ public:
     // motion since the last advance or follow (its rotation as well as its translation), so a
     // frame drawn between advances shows them where the emitter stands. The next advance then
     // moves them only by what the frame changes after this call.
-    void follow_emitter();
+    // Returns how many particles it moved (zero when none lives in the emitter's frame).
+    std::size_t follow_emitter();
+    // True when the last advance or follow already carried the particles to the emitter frame
+    // as it stands now, so another follow_emitter would move nothing.
+    [[nodiscard]] bool emitter_followed() const noexcept;
     static constexpr float preroll_step = 0.1F;
     // Bounded-work project policy, separate from the native prewarm loop.
     static constexpr float max_skip_seconds = 300.0F;
@@ -411,7 +414,6 @@ private:
     float update_before_{};
     float update_delta_{};
     Vec3 emitter_velocity_{};
-    float inherited_speed_limit_{};
     bool origin_set_{};
     Basis3 basis_{};
     Basis3 previous_basis_{};

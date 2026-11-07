@@ -1,8 +1,10 @@
 #include "viewer_load_notes.hpp"
+#include "eawr/vfs/vfs.hpp"
 #include "eawr/scene/scene.hpp"
 #include "eawr/battle/start.hpp"
 #include "eawr/core/load_profile.hpp"
 #include "live_session_view.hpp"
+#include "perf_trace.hpp"
 
 #include "battle_source_internal.hpp"
 #include "battle_source_draw.hpp"
@@ -28,7 +30,10 @@
 #include <utility>
 
 #include "live_session_internal.hpp"
+#include "menu_timeline.hpp"
 #include "lan_match_internal.hpp"
+#include "offloaded_stages.hpp"
+#include <chrono>
 #include <fstream>
 #include <iterator>
 
@@ -36,10 +41,7 @@ namespace eawr::presentation::godot_backend {
 namespace tactical = sim::tactical;
 using namespace live_session_detail;
 
-bool LiveSessionView::prepare_source(const BattleSource& source, const vfs::Vfs& filesystem,
-    const data::Catalog& catalog, const std::string_view map_path, std::optional<battle::ArrivalPlan>& arrivals,
-    std::string& failure) {
-    BattlePreparation prepared(options_);
+void LiveSessionView::begin_source(BattlePreparation& prepared) {
     auto& state = prepared.state();
     state.start_ = std::move(start_);
     state.ai_scripts_ = std::move(ai_scripts_);
@@ -60,7 +62,10 @@ bool LiveSessionView::prepare_source(const BattleSource& source, const vfs::Vfs&
     state.scoring_ = std::move(scoring_);
     state.player_ = std::move(player_);
     state.colorization_enabled_ = std::move(colorization_enabled_);
-    const bool ready = source.prepare(prepared, filesystem, catalog, map_path, failure);
+}
+
+void LiveSessionView::end_source(BattlePreparation& prepared, std::optional<battle::ArrivalPlan>& arrivals) {
+    auto& state = prepared.state();
     start_ = std::move(state.start_);
     arrivals = std::move(state.arrivals_);
     ai_scripts_ = std::move(state.ai_scripts_);
@@ -81,12 +86,20 @@ bool LiveSessionView::prepare_source(const BattleSource& source, const vfs::Vfs&
     scoring_ = std::move(state.scoring_);
     player_ = std::move(state.player_);
     colorization_enabled_ = std::move(state.colorization_enabled_);
+}
+
+bool LiveSessionView::prepare_source(const BattleSource& source, const vfs::Vfs& filesystem,
+    const data::Catalog& catalog, const std::string_view map_path, std::optional<battle::ArrivalPlan>& arrivals,
+    std::string& failure) {
+    BattlePreparation prepared(options_);
+    begin_source(prepared);
+    const bool ready = source.prepare(prepared, filesystem, catalog, map_path, failure);
+    end_source(prepared, arrivals);
     return ready;
 }
 
-bool LiveSessionView::prepare(const vfs::Vfs& filesystem, const data::Catalog& catalog, const std::string_view map_path,
-                              std::string& failure) {
-    if (options_.land) return prepare_land(filesystem, catalog, map_path, failure);
+bool LiveSessionView::prepare_head(const vfs::Vfs& filesystem, const std::string_view map_path,
+                                   std::string& failure, const BattleSource*& source) {
     shield_flash_constants_ = presentation_constants::load_flash(filesystem);
     auto preview_colours = ui::reinforcement_colours(filesystem);
     // Missing mod presentation constants keep the model's ordinary light multiplier.
@@ -139,7 +152,7 @@ bool LiveSessionView::prepare(const vfs::Vfs& filesystem, const data::Catalog& c
         failure = "--eawr-live-melee and --eawr-live-melee-seed go with --eawr-live-session melee";
         return false;
     }
-    const BattleSource* source = battle_source(options_);
+    source = battle_source(options_);
     const bool configurable_ai = source && source->ai_capability() == BattleAiCapability::configurable;
     if (!configurable_ai && options_.ai.has_value()) {
         ai_flag_ignored_ = true;
@@ -147,11 +160,12 @@ bool LiveSessionView::prepare(const vfs::Vfs& filesystem, const data::Catalog& c
             ("--eawr-live-ai has no effect with --eawr-live-session " + options_.fixture + "; it only runs the AI"
              + " of m2 or skirmish starts").c_str()));
     }
-    std::optional<battle::ArrivalPlan> selected_arrivals;
-    if (!prepare_source(source ? *source : *local_battle_source("m2"), filesystem, catalog, map_path,
-                        selected_arrivals, failure)) {
-        return false;
-    }
+    return true;
+}
+
+bool LiveSessionView::prepare_tail(const vfs::Vfs& filesystem, const data::Catalog& catalog,
+                                   const std::string_view map_path, std::optional<battle::ArrivalPlan>& selected_arrivals,
+                                   std::string& failure) {
     if (!colorization_enabled_) {
         // #3076: a type's own nonzero No_Colorization_Color wins over its owner faction's.
         const auto read_type = [&](const std::string& id) {
@@ -316,6 +330,119 @@ bool LiveSessionView::prepare(const vfs::Vfs& filesystem, const data::Catalog& c
     return true;
 }
 
+bool LiveSessionView::prepare(const vfs::Vfs& filesystem, const data::Catalog& catalog, const std::string_view map_path,
+                              std::string& failure) {
+    if (options_.land) return prepare_land(filesystem, catalog, map_path, failure);
+    core::load_profile::Scope load_scope(core::load_profile::Phase::session);
+    const BattleSource* source = nullptr;
+    if (!prepare_head(filesystem, map_path, failure, source)) return false;
+    std::optional<battle::ArrivalPlan> selected_arrivals;
+    if (!prepare_source(source ? *source : *local_battle_source("m2"), filesystem, catalog, map_path,
+                        selected_arrivals, failure)) {
+        return false;
+    }
+    return prepare_tail(filesystem, catalog, map_path, selected_arrivals, failure);
+}
+
+// The same preparation, queued: the source's stages and the closing pass are load steps run in order between menu
+// frames. `fail` reports a failed step to the caller (it returns the step's result). The head and a land battle run
+// here at once. `filesystem` and `catalog` must outlive the steps.
+bool LiveSessionView::prepare_in_steps(const vfs::Vfs& filesystem, const data::Catalog& catalog,
+                                       const std::string_view map_path, std::string& failure,
+                                       const EnqueueLoadStep& queue, std::function<bool(const std::string&)> fail) {
+    if (options_.land) return prepare_land(filesystem, catalog, map_path, failure);
+    const BattleSource* source = nullptr;
+    if (!prepare_head(filesystem, map_path, failure, source)) return false;
+    struct Run final {
+        explicit Run(const live_session::Options& options) : prepared(options) {}
+        BattlePreparation prepared;
+        std::optional<battle::ArrivalPlan> arrivals;
+        std::string failure;
+        // Declared last: destroyed first, so a worker still running is stopped and joined before `prepared` and the
+        // stages' other state go away (the filesystem and catalog outlive the Run, see the contract above).
+        std::unique_ptr<OffloadedStages> offload;
+    };
+    auto run = std::make_shared<Run>(options_);
+    begin_source(run->prepared);
+    const BattleSource& chosen = source ? *source : *local_battle_source("m2");
+    auto stages = chosen.prepare_stages(run->prepared, filesystem, catalog, map_path);
+    std::size_t number = 0;
+    // The first stages run back to back on one worker thread (Separate render thread only); the main thread polls.
+    const std::size_t offloaded = options_.load_offload ? std::min(chosen.offloaded_stages(), stages.size()) : 0;
+    if (offloaded > 0) {
+        auto& channel = *run->prepared.state().load_channel_;
+        channel.defer = true;
+        std::vector<OffloadedStages::Stage> first;
+        for (std::size_t i = 0; i < offloaded; ++i) first.push_back(std::move(stages[i]));
+        stages.erase(stages.begin(), stages.begin() + static_cast<std::ptrdiff_t>(offloaded));
+        // A recording for the worker only when this thread has one; merged back after the join.
+        const auto* main_recording = core::load_profile::active;
+        run->offload = std::make_unique<OffloadedStages>(std::move(first), channel.cancel,
+            main_recording != nullptr, main_recording != nullptr && main_recording->detailed, &MenuTimeline::thread_cpu_ms);
+        number = offloaded;
+        // One load step, run again and again until the worker is done: the first call starts the worker, each call
+        // checks the worker without waiting; a call that finds it still running queues a copy of itself (it runs
+        // before the next stage) and yields the frame (yield_load_frame), so the menu is not held while the worker
+        // runs. A worker that is already done is joined at once. The stages keep their order and results.
+        struct Poll final {
+            LiveSessionView* view;
+            std::shared_ptr<Run> run;
+            EnqueueLoadStep queue;
+            std::function<bool(const std::string&)> fail;
+            bool operator()() const {
+                auto& job = *run->offload;
+                if (!job.launched()) job.launch();
+                if (!job.poll(std::chrono::microseconds(0))) {
+                    queue(LoadStep(Poll(*this)));
+                    yield_load_frame();
+                    return true;
+                }
+                // Joined: everything the worker wrote is visible to this thread.
+                if (core::load_profile::active != nullptr && job.recording() != nullptr)
+                    core::load_profile::merge(*core::load_profile::active, *job.recording());
+                for (const auto& [kind, text] : run->prepared.state().load_channel_->take())
+                    MenuTimeline::note(kind.c_str(), text);
+                if (MenuTimeline::enabled()) {
+                    for (std::size_t i = 0; i < job.times().size(); ++i) {
+                        const auto& time = job.times()[i];
+                        if (!time.ran) continue;
+                        std::ostringstream out;
+                        out << "stage=" << i << " wall_ms=" << time.wall_ms << " cpu_ms=" << time.cpu_ms;
+                        MenuTimeline::note("menu_worker", out.str());
+                        MenuTimeline::mark(("attract_load_session_stage" + std::to_string(i)).c_str());
+                    }
+                }
+                if (!job.ok()) {
+                    view->end_source(run->prepared, run->arrivals);
+                    run->failure = job.failure();
+                    return fail(run->failure);
+                }
+                return true;
+            }
+        };
+        queue(LoadStep(Poll{this, run, queue, fail}));
+    }
+    for (auto& stage : stages) {
+        queue([this, run, stage = std::move(stage), fail, number = number++]() -> bool {
+            core::load_profile::Scope load_scope(core::load_profile::Phase::session);
+            if (!OffloadedStages::run_guarded(stage, run->failure)) {
+                end_source(run->prepared, run->arrivals);
+                return fail(run->failure);
+            }
+            MenuTimeline::mark(("attract_load_session_stage" + std::to_string(number)).c_str());
+            return true;
+        });
+    }
+    queue([this, run, &filesystem, &catalog, path = std::string(map_path), fail]() -> bool {
+        core::load_profile::Scope load_scope(core::load_profile::Phase::session);
+        end_source(run->prepared, run->arrivals);
+        if (!prepare_tail(filesystem, catalog, path, run->arrivals, run->failure)) return fail(run->failure);
+        MenuTimeline::mark("attract_load_session_tail");
+        return true;
+    });
+    return true;
+}
+
 std::shared_ptr<const LiveSessionView::PreparedBattle> LiveSessionView::prepared_battle() const {
     if (!setup_ || !content_ || !tables_) return {};
     return std::make_shared<const PreparedBattle>(PreparedBattle{
@@ -328,15 +455,43 @@ bool LiveSessionView::start(std::string& failure) {
         failure = "the live session was not prepared";
         return false;
     }
+    const bool loading = !options_.load_path.empty();
+    if ((loading || options_.save_tick)
+        && (options_.lan || options_.borrowed_feed || replay_ || land_content_ || setup_->campaign || !ai_scripts_)) {
+        failure = "battle saves need a solo local space battle with the AI (not LAN, replay, land or a campaign battle)";
+        return false;
+    }
+    if (loading && !options_.inputs.empty()) {
+        // Scripted gestures fire by shown tick; those before the saved tick would all fire on the first frame.
+        failure = "--eawr-live-input is not available with --eawr-live-load";
+        return false;
+    }
+    std::vector<std::uint8_t> checkpoint;
+    if (loading) {
+        std::ifstream input(options_.load_path, std::ios::binary);
+        if (!input) {
+            failure = "could not read the battle save " + ViewerPath::utf8(options_.load_path);
+            return false;
+        }
+        checkpoint.assign(std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>());
+    }
     platform::LiveSession::Options session_options;
     session_options.load_note_sink = [](std::span<const core::LoadNote> notes) {
         if (!notes.empty()) publish_viewer_load_notes({notes.begin(), notes.end()}, {}, true);
     };
     session_options.workers = options_.workers.value_or(platform::LiveSession::game_worker_count());
-    session_options.measure_phases = trace_frames_;
+    session_options.cadence_profile = trace_frames_ && PerfTrace::sim_cadence_profile();
+    session_options.measure_phases = trace_frames_ && !session_options.cadence_profile;
+    session_options.detailed_profile = session_options.measure_phases && PerfTrace::detailed_sim_profile();
     session_options.pacing = options_.real_time ? platform::LiveSession::Pacing::real_time
                                                 : platform::LiveSession::Pacing::driven;
     session_options.target_rate = time_.target_rate(); // #459 TM-01
+    // Solo real-time play compares no tick hashes: finish() reads them only for replay verification and the
+    // hash CSV, the replay file carries none, and lockstep (options_.lan) exchanges them per tick. Without
+    // those consumers a tick skips its state encode + hash (sim::StateHashPolicy::on_demand).
+    if (options_.real_time && !options_.lan && !options_.verify.value_or(false) && options_.hashes_path.empty()
+        && options_.replay_path.empty())
+        session_options.state_hash_policy = sim::StateHashPolicy::on_demand;
     session_options.initially_paused = true;
     // SND-40: only authored bases opt into the bounded durable presentation journal.
     for (const auto& type : tables_->units) {
@@ -361,32 +516,47 @@ bool LiveSessionView::start(std::string& failure) {
         intent_epoch = [feed = std::weak_ptr(options_.borrowed_feed)] {
             const auto source = feed.lock(); return source ? source->completed_tick() : 0U;
         };
-    scheduler_ = std::make_shared<ui::CommandScheduler>(player_, 0, 0, std::move(intent_epoch), setup_->controllers ? options_.controller_seat : sim::SeatId{});
-    if (options_.lan) options_.lan->set_input_epoch_provider([scheduler = std::weak_ptr(scheduler_)] {
-        const auto producer = scheduler.lock();
-        return producer ? producer->pending_intent_epoch() : std::nullopt;
-    });
-    if (options_.lan) options_.lan->set_submission_observer([scheduler = std::weak_ptr(scheduler_)]
-        (const std::uint64_t sequence, const std::uint64_t tick) {
-        if (const auto producer = scheduler.lock()) producer->note_execution(sequence, tick);
-    });
-    if (options_.lan) options_.lan->set_discard_observer([scheduler = std::weak_ptr(scheduler_)](std::uint64_t sequence) {
-        if (const auto producer = scheduler.lock()) producer->present_result(sequence);
-    });
-    if (options_.lan_acceptance && options_.lan) scheduler_->set_issue_observer(
-        [lan = options_.lan](std::uint64_t sequence, std::uint64_t epoch) { lan->note_issue(sequence, epoch); });
-    if (options_.lan) input_sink_ = std::make_unique<LanCommandSink>(*scheduler_, options_.lan,
-        [this](const core::Diagnostic& error) { recovery_input_feedback_ = error.message; });
-    order_input_ = std::make_unique<ui::OrderInput>(input_sink_ ? *input_sink_ : *scheduler_);
+    if (!loading) {
+        scheduler_ = std::make_shared<ui::CommandScheduler>(player_, 0, 0, std::move(intent_epoch), setup_->controllers ? options_.controller_seat : sim::SeatId{});
+        if (options_.lan) options_.lan->set_input_epoch_provider([scheduler = std::weak_ptr(scheduler_)] {
+            const auto producer = scheduler.lock();
+            return producer ? producer->pending_intent_epoch() : std::nullopt;
+        });
+        if (options_.lan) options_.lan->set_submission_observer([scheduler = std::weak_ptr(scheduler_)]
+            (const std::uint64_t sequence, const std::uint64_t tick) {
+            if (const auto producer = scheduler.lock()) producer->note_execution(sequence, tick);
+        });
+        if (options_.lan) options_.lan->set_discard_observer([scheduler = std::weak_ptr(scheduler_)](std::uint64_t sequence) {
+            if (const auto producer = scheduler.lock()) producer->present_result(sequence);
+        });
+        if (options_.lan_acceptance && options_.lan) scheduler_->set_issue_observer(
+            [lan = options_.lan](std::uint64_t sequence, std::uint64_t epoch) { lan->note_issue(sequence, epoch); });
+        if (options_.lan) input_sink_ = std::make_unique<LanCommandSink>(*scheduler_, options_.lan,
+            [this](const core::Diagnostic& error) { recovery_input_feedback_ = error.message; });
+        order_input_ = std::make_unique<ui::OrderInput>(input_sink_ ? *input_sink_ : *scheduler_);
+    }
     session_options.scripts = ai_scripts_;
+    if (options_.save_tick) {
+        session_options.save_at = *options_.save_tick;
+        // The simulation thread writes the file between two ticks; finish() reads the outcome after stop().
+        save_error_ = std::make_shared<std::optional<std::string>>(std::string("the save tick was not reached"));
+        session_options.save_sink = [path = options_.save_path, outcome = save_error_](const std::uint64_t,
+            core::Result<std::vector<std::uint8_t>> bytes) {
+            if (!bytes) { *outcome = "battle save failed: " + core::format_diagnostic(bytes.error()); return; }
+            std::ofstream output(path, std::ios::binary | std::ios::trunc);
+            output.write(reinterpret_cast<const char*>(bytes.value().data()), static_cast<std::streamsize>(bytes.value().size()));
+            if (output) outcome->reset();
+            else *outcome = "could not write the battle save " + ViewerPath::utf8(path);
+        };
+    }
     if (options_.lan) session_options.step_driver = options_.lan->driver(*setup_);
     // #494: the local player's fog cells ride along with each tick for the fog in the world.
     if (content_->fog) session_options.fog_player = player_;
-    session_options.command_source = [scheduler = scheduler_.get(), fault = options_.fault_tick](const std::uint64_t next_tick) {
+    session_options.command_source = [this, fault = options_.fault_tick](const std::uint64_t next_tick) {
         if (fault && next_tick == *fault) {
             throw std::runtime_error("--eawr-live-fault-tick injected a fault before tick " + std::to_string(next_tick));
         }
-        return scheduler->take(next_tick);
+        return scheduler_->take(next_tick);
     };
     if (options_.borrowed_feed) {
         session_ = options_.borrowed_feed;
@@ -437,16 +607,31 @@ bool LiveSessionView::start(std::string& failure) {
                 std::span<const tactical::PlayerCommand> commands, std::uint64_t) { return playback->step(context, commands); };
         }
     }
-    auto live = replay_ ? platform::LiveSession::start(*replay_, content, session_options)
+    auto live = loading ? platform::LiveSession::start(checkpoint, *setup_, content, session_options)
+        : replay_ ? platform::LiveSession::start(*replay_, content, session_options)
         : platform::LiveSession::start(*setup_, content, session_options);
     if (!live) {
         failure = "live session: " + core::format_diagnostic(live.error());
         return false;
     }
+    if (loading) {
+        // The loaded battle continues at its saved tick: the local scheduler, the driven clock and
+        // --eawr-live-ticks (which counts from here) start there, and the first frame composes every arrival.
+        loaded_tick_ = live.value()->completed_tick();
+        scheduler_ = std::make_shared<ui::CommandScheduler>(player_, live.value()->next_sequence(player_), loaded_tick_,
+            std::function<std::uint64_t()>{}, setup_->controllers ? options_.controller_seat : sim::SeatId{});
+        order_input_ = std::make_unique<ui::OrderInput>(*scheduler_);
+        presented_tick_ = driven_origin_tick_ = driven_base_ = static_cast<double>(loaded_tick_);
+        if (options_.end_tick) options_.end_tick = *options_.end_tick + loaded_tick_;
+        unbounded_arrivals_ = true;
+    }
     if (land_content_) bind_land_roster(*live.value());
     session_ = std::make_shared<platform::StandaloneTacticalFeed>(std::move(live).value());
-    // The debug hook: each order as its unit's owner would give it, at its tick.
+    // The debug hook: each order as its unit's owner would give it, at its tick. A loaded battle already
+    // recorded the orders before its saved tick (the step after the save takes the saved tick's own orders),
+    // so the same scene arguments give the later orders only, as the saving run held them.
     for (const ScheduledOrder& order : options_.orders) {
+        if (loading && order.tick < loaded_tick_) continue;
         const auto owner = owner_of_entity_.find(order.unit);
         platform::LiveOrder live_order{owner != owner_of_entity_.end() ? owner->second : player_, {order.unit},
                                        tactical::StopPayload{}, order.tick};

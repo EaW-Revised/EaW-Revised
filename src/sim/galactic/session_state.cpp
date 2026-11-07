@@ -214,8 +214,23 @@ GatheredObject GalacticSession::Impl::gather(const EntityId id, const ObjectKind
     return result;
 }
 
-std::vector<std::uint8_t> GalacticSession::Impl::encode_section(const StateSection section) const {
+std::vector<std::uint8_t> GalacticSession::Impl::encode_section(const StateSection section,
+    const std::vector<Fleet>* const shared_fleets, const bool offer_cache) const {
     std::vector<std::uint8_t> bytes;
+    encode_section_into(section, bytes, shared_fleets, offer_cache);
+    return bytes;
+}
+
+// Appends the section's canonical bytes to `bytes` (empty on entry).
+void GalacticSession::Impl::encode_section_into(const StateSection section, std::vector<std::uint8_t>& bytes,
+    const std::vector<Fleet>* const shared_fleets, const bool offer_cache) const {
+    // Movement, fleet control and fleets each read the sorted fleet rows: the exchange encode supplies one copy for all three.
+    std::vector<Fleet> own_fleets;
+    const auto fleet_view = [&]() -> const std::vector<Fleet>& {
+        if (shared_fleets) return *shared_fleets;
+        own_fleets = sorted_fleets();
+        return own_fleets;
+    };
     switch (section) {
     case StateSection::history:
         detail::encode_history(bytes, history_archive);
@@ -228,6 +243,7 @@ std::vector<std::uint8_t> GalacticSession::Impl::encode_section(const StateSecti
         break;
     case StateSection::session:
         detail::put_u64(bytes, setup.seed);
+        detail::put_u8(bytes, setup.networked_transport ? (*setup.networked_transport ? 2U : 1U) : 0U);
         detail::put_bytes(bytes, setup.content_identity);
         detail::put_bytes(bytes, setup.campaign_identity);
         detail::put_u64(bytes, completed_tick);
@@ -286,17 +302,19 @@ std::vector<std::uint8_t> GalacticSession::Impl::encode_section(const StateSecti
         detail::encode_control(bytes, *control);
         break;
     case StateSection::movement:
-        if (movement_inputs) detail::encode_movement(bytes, *movement_inputs, sorted_fleets());
+        if (movement_inputs) detail::encode_movement(bytes, *movement_inputs, fleet_view());
         break;
     case StateSection::fleet_control:
-        detail::encode_fleet_control(bytes, fleet_control_state(), sorted_fleets());
+        detail::encode_fleet_control(bytes, fleet_control_state(), fleet_view());
         break;
     case StateSection::census: {
-        auto live = *setup.census;
-        live.objects.clear();
-        for (const auto& [id, row] : actor_records) { (void)id; live.objects.push_back(row); }
+        // The live census is the setup's types and players with the live actor rows: encode those rows in place
+        // instead of copying every setup object only to discard it.
+        std::vector<const CensusObject*> live_objects;
+        live_objects.reserve(actor_records.size());
+        for (const auto& [id, row] : actor_records) { (void)id; live_objects.push_back(&row); }
         std::vector<std::uint8_t> encoded;
-        detail::encode_census(encoded, live);
+        detail::encode_census(encoded, *setup.census, live_objects);
         detail::put_u32(bytes, static_cast<std::uint32_t>(encoded.size()));
         detail::put_bytes(bytes, encoded);
         detail::encode_population(bytes, population);
@@ -309,7 +327,15 @@ std::vector<std::uint8_t> GalacticSession::Impl::encode_section(const StateSecti
         detail::encode_planet_access(bytes, *planet_access);
         break;
     case StateSection::production:
-        detail::encode_production(bytes, *production);
+        if (offer_cache) {
+            // Only this section's task fills the cache: exchange_state_bytes runs one task per section and no other
+            // section reads production_offer_rows, so the lazy write below never races.
+            // Offer tables never change after the owner is built (the hash caches their digests the same way), so
+            // no dirty/generation test is needed: only the queues, objects and inputs around them are re-encoded.
+            if (!production_offer_rows || production_offer_rows->size() != production->planets.size())
+                production_offer_rows = detail::production_offer_rows(*production);
+            detail::encode_production(bytes, *production, *production_offer_rows);
+        } else detail::encode_production(bytes, *production);
         break;
     case StateSection::income:
         detail::encode_income_state(bytes, *income);
@@ -334,7 +360,7 @@ std::vector<std::uint8_t> GalacticSession::Impl::encode_section(const StateSecti
         break;
     case StateSection::fleets: {
         detail::put_u32(bytes, static_cast<std::uint32_t>(fleets.size()));
-        for (const auto& fleet : sorted_fleets()) detail::encode_fleet(bytes, fleet);
+        for (const auto& fleet : fleet_view()) detail::encode_fleet(bytes, fleet);
         break;
     }
     case StateSection::outcomes: {
@@ -348,7 +374,6 @@ std::vector<std::uint8_t> GalacticSession::Impl::encode_section(const StateSecti
         break;
     }
     }
-    return bytes;
 }
 
 std::vector<std::uint8_t> GalacticSession::Impl::encode_hash_section(StateSection section, bool reuse) const {
@@ -434,8 +459,9 @@ std::shared_ptr<const GalacticSnapshot> GalacticSession::Impl::make_snapshot(std
     const auto& live_fleets = *rows.fleets;
     part.emplace(gc_profile::Phase::snap_observer);
     if (observer && observer_projection_generation != observer_input_generation) {
-        observer_projection = std::make_shared<const std::vector<ObservedPlanet>>(
-            observed_planets(*observer, live_fleets, view, movement_inputs.get(), actor_inputs()));
+        auto observed = observed_planets(*observer, live_fleets, view, movement_inputs.get(), actor_inputs());
+        project_ground_layout(observed, control ? &*control : nullptr);
+        observer_projection = std::make_shared<const std::vector<ObservedPlanet>>(std::move(observed));
         observer_projection_generation = observer_input_generation;
         observer_projection_records += observer->records.size();
     }
@@ -713,6 +739,7 @@ std::shared_ptr<const GalacticSnapshot> GalacticSession::Impl::make_snapshot(std
         }
         projected_rows.history = cache.history;
     }
+    projected_rows.networked_transport = multiplayer_flag();
     return std::make_shared<const GalacticSnapshot>(
         completed_tick, published, std::vector<GalacticPlayer>{}, std::vector<Planet>{}, std::vector<Route>{}, std::vector<Fleet>{}, std::move(events), setup.rules.maximum_fleet_movement_distance, std::nullopt, movement_inputs, seat_control, seats, std::nullopt, std::nullopt, std::nullopt, control_effects, population, std::nullopt, std::nullopt, std::nullopt, std::vector<ObservedProductionOffer>{}, observer_projection, std::move(forecast), published_production_originals, std::nullopt, std::nullopt, std::nullopt, planet_access, observer_input_generation, economy_input_generation, published_actor_records, published_black_market_menus, published_ability_results, published_hero_action_menus, published_corruption_menu, published_sale_types, published_corruption_transitions, offers, published_production, projected_rows, view_player);
 }
@@ -1026,6 +1053,57 @@ std::vector<std::uint8_t> GalacticSession::canonical_state_bytes() const {
     return bytes;
 }
 
+std::vector<std::uint8_t> GalacticSession::exchange_state_bytes(const PartitionExecutor& executor) const {
+    // #5519: the same bytes as canonical_state_bytes(), produced without the serial walk. Sections are independent const
+    // reads of the quiescent session (the pump is single-threaded around this call), each written to its own buffer and
+    // concatenated in section order, so the result never depends on the worker count.
+    const auto ids = impl_->section_ids();
+    std::vector<Fleet> fleet_rows;
+    for (const auto section : ids) {
+        if (section == static_cast<std::size_t>(StateSection::fleets) || section == static_cast<std::size_t>(StateSection::fleet_control)
+            || section == static_cast<std::size_t>(StateSection::movement)) {
+            fleet_rows = impl_->sorted_fleets();
+            break;
+        }
+    }
+    // Per-section output buffers are reused between exchanges (capacity kept), sized and cleared serially before the fan-out.
+    auto& scratch = impl_->exchange_scratch;
+    if (scratch.size() < state_section_count) scratch.resize(state_section_count);
+    for (const auto section : ids) scratch[section].clear();
+    const auto encode_one = [&](const std::size_t index) {
+        impl_->encode_section_into(static_cast<StateSection>(ids[index]), scratch[ids[index]], &fleet_rows, true);
+    };
+    bool parallel_done = false;
+    if (executor.worker_count() > 1 && ids.size() > 1) {
+        // A failed read-only worker pass discards its buffers and falls back to the serial encode below.
+        parallel_done = static_cast<bool>(executor.execute_phase("galactic-exchange-encode", ids.size(), encode_one));
+        if (!parallel_done) for (const auto section : ids) scratch[section].clear();
+    }
+    if (!parallel_done)
+        for (std::size_t index = 0; index < ids.size(); ++index) encode_one(index);
+    constexpr std::size_t section_header_bytes = 2 + 2 + 8;
+    std::size_t total = detail::state_magic.size() + 4 + 4;
+    for (const auto section : ids) total += section_header_bytes + scratch[section].size();
+    std::vector<std::uint8_t> bytes;
+    bytes.reserve(total + 4096); // room for the adapter's child and clock tail without a second copy
+    bytes.insert(bytes.end(), detail::state_magic.begin(), detail::state_magic.end());
+    detail::put_u32(bytes, detail::state_encoding_version);
+    detail::put_u32(bytes, static_cast<std::uint32_t>(ids.size()));
+    for (std::size_t index = 0; index < ids.size(); ++index) {
+        detail::put_u16(bytes, static_cast<std::uint16_t>(ids[index]));
+        detail::put_u16(bytes, detail::section_version);
+        detail::put_u64(bytes, scratch[ids[index]].size());
+        detail::put_bytes(bytes, scratch[ids[index]]);
+    }
+    return bytes;
+}
+
+void GalacticSession::prepare_exchange_encoding() const {
+    // Build at load time what the first lockstep exchange would otherwise build mid-game (the immutable offer tables).
+    if (impl_->production && (!impl_->production_offer_rows || impl_->production_offer_rows->size() != impl_->production->planets.size()))
+        impl_->production_offer_rows = detail::production_offer_rows(*impl_->production);
+}
+
 void GalacticSession::Impl::refresh_economy_input_generation() const {
     // Section copies shared by consecutive snapshots are keyed by these counts: a dirty flag is counted here
     // (every hash and every publication) before the hash consumes it, so no write can escape a later publication.
@@ -1111,6 +1189,8 @@ void GalacticSession::Impl::verify_hash() const {
 }
 StateHash GalacticSession::cached_state_hash() const { return impl_->refresh_hash(); }
 void GalacticSession::set_hash_verification(bool enabled) noexcept { impl_->verify_cached_hash = enabled; }
+void GalacticSession::set_population_memo(bool enabled) noexcept { impl_->population_memo_enabled = enabled; }
+void GalacticSession::set_population_memo_drop_orbit(bool drop) noexcept { impl_->population_memo_drop_orbit = drop; }
 std::string GalacticSession::state_sha256() const {
     std::array<std::string, state_section_count> hex;
     for (const auto section : impl_->section_ids()) {

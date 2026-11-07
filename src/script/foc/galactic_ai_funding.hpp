@@ -46,6 +46,26 @@ public:
     using Replay = std::function<core::Result<void>(GalacticFunding&)>;
     using ReplaySink = std::function<void(sim::galactic::PlayerId, Replay)>;
     GalacticFunding();
+    // A phase retains the original ledger by move on its first replacement.
+    // Begin never scans or encodes the funding owner; functional ledger
+    // writers already construct their replacements before publication.
+    // Serial owner use only; the funding owner outlives the savepoint.
+    class PhaseSavepoint {
+    public:
+        struct Work { std::size_t retained_ledgers{}, initializations{}; };
+        ~PhaseSavepoint();
+        PhaseSavepoint(const PhaseSavepoint&) = delete;
+        PhaseSavepoint& operator=(const PhaseSavepoint&) = delete;
+        [[nodiscard]] core::Result<void> commit();
+        [[nodiscard]] core::Result<void> rollback();
+        [[nodiscard]] Work work() const noexcept;
+    private:
+        struct Saved;
+        std::unique_ptr<Saved> saved_;
+        explicit PhaseSavepoint(std::unique_ptr<Saved>);
+        friend class GalacticFunding;
+    };
+    [[nodiscard]] core::Result<std::unique_ptr<PhaseSavepoint>> begin_phase();
     [[nodiscard]] std::string record_sync_hash(bool cold = false) const;
     [[nodiscard]] std::size_t record_byte_upper_bound() const noexcept;
     [[nodiscard]] const State& state() const noexcept { return bound().state_; }
@@ -182,7 +202,13 @@ private:
     };
     [[nodiscard]] BoundState& bound() noexcept;
     [[nodiscard]] const BoundState& bound() const noexcept;
+    PhaseSavepoint::Saved* active_phase_{};
+    bool records_dirty_{};
+    void refresh_phase_records();
+    void retain_previous(sim::galactic::PlayerId, funding::Ledger&&);
+    void retain_initialization(sim::galactic::PlayerId);
     template<class Body, class Factory> auto mutate(Body body, Factory factory) {
+        refresh_phase_records();
         if (frontier_owner_ != this) return body();
         auto& selected = bound();
         const bool capture = selected.mutation_depth == 0;

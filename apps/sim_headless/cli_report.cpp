@@ -1,6 +1,9 @@
 #include "cli_internal.hpp"
 #include "eawr/battle/start.hpp"
 
+#include <algorithm>
+#include <variant>
+
 namespace sim_headless::cli {
 
 void print_help(std::ostream& output) {
@@ -11,6 +14,8 @@ void print_help(std::ostream& output) {
               "       sim_headless --skirmish m2 --game-root <install> [--mod-root <leaf;parent;...> [--map <logical .ted path>]]\n"
               "                    [--census-out <file.json>]\n"
               "                    [--replay-out <file>] [--ticks <n>] [--tag-trace-out <file.json>]\n"
+              "                    [--seat1-faction <name> --seat2-faction <name> [--seat1-team <n>] [--seat2-team <n>] [--both-ai]]\n"
+              "                    [--setup-inventory-out <file.json>]\n"
               "                    [--ai-report-out <file.json> --ticks <n> [--ai-trace-out <file.json>] [--hash-out <file>] [--workers <n>]]\n"
               "       sim_headless --scenario <S-NN.json> --game-root <install> --trace-out <file.csv>\n"
               "                    [--hash-out <file>] [--replay-out <file>] [--combat-out <file.csv>]\n"

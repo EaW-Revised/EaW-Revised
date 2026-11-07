@@ -5,6 +5,7 @@
 #include "eawr/presentation/godot/renderer.hpp"
 #include "memory_attribution.hpp"
 
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <optional>
@@ -26,15 +27,24 @@ public:
         bool captured{};
     };
     static constexpr std::array<std::string_view, 3> memory_phases{"post_load", "first_frame", "tick_1200"};
+    // Opt-in (--eawr-load-detail): upload sub-timers, per-model compose/upload cost, composed slots by source and type,
+    // and the types that stood in the battle. Off = one flag test where each would be taken; no thread, no per-frame work.
+    static bool load_detail() {
+        auto* os = godot::OS::get_singleton();
+        return os && os->get_cmdline_user_args().has("--eawr-load-detail");
+    }
     struct Run final {
         core::load_profile::Recording recording;
+        core::load_profile::Census census;
         Clock::time_point start{};
         double total_ms{}, return_ms{};
         double ready_ms{}, first_tick_ms{}, first_tick_lua_ms{}, first_tick_fog_ms{};
         std::array<double, 5> pipelines{};
         scene::VfsAssetCache::ModelStats model_cache;
         std::array<MemorySnapshot, 3> memory;
-        bool drawn{}, from_setup{};
+        // --eawr-texture-census: one JSON snapshot per phase (first_frame, tick_600); empty when off.
+        std::vector<std::string> texture_census;
+        bool drawn{}, from_setup{}, census_600{};
     };
     void begin(bool setup, Clock::time_point start = Clock::now()) {
         runs_.emplace_back();
@@ -42,12 +52,17 @@ public:
         runs_.back().from_setup = setup;
         runs_.back().pipelines = pipeline_counts();
         core::load_profile::active = &runs_.back().recording;
+        // The census outlives the first frame (spawns happen during play); the next begin() points it at the next run.
+        const bool detail = load_detail();
+        runs_.back().recording.detailed = detail;
+        core::load_profile::census = detail ? &runs_.back().census : nullptr;
     }
     void drawn() {
         if (runs_.empty() || runs_.back().drawn) return;
         runs_.back().total_ms = milliseconds(runs_.back().start);
         runs_.back().drawn = true;
         memory_snapshot(1);
+        take_texture_census("first_frame");
         if (const auto filesystem = filesystem_.lock())
             runs_.back().model_cache = scene::VfsAssetCache(*filesystem).model_stats();
         const auto counts = pipeline_counts();
@@ -68,11 +83,18 @@ public:
     void report_path(const std::filesystem::path& path) { report_path_ = path; }
     void model_cache(const std::shared_ptr<const vfs::Vfs>& filesystem) { filesystem_ = filesystem; }
     void renderer_probe(std::function<assets::RetainedPayload()> probe) { renderer_probe_ = std::move(probe); }
+    void texture_census_probe(std::function<std::string(std::string_view)> probe) { census_probe_ = std::move(probe); }
     void ready() {
         if (pending()) {
             runs_.back().ready_ms = milliseconds(runs_.back().start);
             memory_snapshot(0);
         }
+    }
+    void memory_tick_600() {
+        if (runs_.empty() || runs_.back().census_600) return;
+        runs_.back().census_600 = true;
+        take_texture_census("tick_600");
+        persist();
     }
     void memory_tick_1200() {
         if (runs_.empty() || runs_.back().memory[2].captured) return;
@@ -118,8 +140,19 @@ public:
                 output << '}';
                 comma = true;
             }
-            output << "],\"phases\":";
+            output << ']';
+            if (!run.texture_census.empty()) {
+                output << ",\"texture_census\":[";
+                for (std::size_t phase = 0; phase < run.texture_census.size(); ++phase)
+                    output << (phase ? "," : "") << run.texture_census[phase];
+                output << ']';
+            }
+            output << ",\"phases\":";
             core::load_profile::write_costs(output, run.recording);
+            if (run.recording.detailed) {
+                output << ",\"load_detail\":";
+                core::load_profile::write_detail(output, run.recording, run.census);
+            }
             output << '}';
         }
         output << "]},\n";
@@ -133,7 +166,10 @@ private:
             << ",\"failed_entries\":" << stats.failed_entries << ",\"particle_entries\":" << stats.particle_entries
             << ",\"cache_budget_bytes\":" << stats.cache_budget_bytes
             << ",\"cache_retained_bytes\":" << stats.cache_retained_bytes
-            << ",\"cache_evictions\":" << stats.cache_evictions;
+            << ",\"cache_evictions\":" << stats.cache_evictions
+            << ",\"gameplay_model_loads\":" << stats.gameplay_loads
+            << ",\"battle_load_model_loads\":" << stats.battle_loads
+            << ",\"battle_load_boundaries\":" << stats.battle_load_boundaries;
         if (!stats.budget_replay.empty()) {
             output << ",\"budget_replay\":[";
             for (std::size_t i = 0; i < stats.budget_replay.size(); ++i)
@@ -145,6 +181,12 @@ private:
         assets::write_payload_capacity(output, stats.capacity);
         output << '}';
     }
+    // One snapshot per phase and run; the probe returns "" while the switch is off.
+    void take_texture_census(const std::string_view phase) {
+        if (runs_.empty() || !census_probe_) return;
+        auto snapshot = census_probe_(phase);
+        if (!snapshot.empty()) runs_.back().texture_census.push_back(std::move(snapshot));
+    }
     void memory_snapshot(const std::size_t phase) {
         if (runs_.empty() || runs_.back().memory[phase].captured) return;
         const auto filesystem = filesystem_.lock();
@@ -153,6 +195,7 @@ private:
         snapshot.model_cache = scene::VfsAssetCache(*filesystem).model_stats();
         if (renderer_probe_) snapshot.renderer = renderer_probe_();
         snapshot.attribution.capture();
+        if (phase == 1) snapshot.attribution.capture_size_classes();  // first frame, once; opt-in
         snapshot.captured = true;
     }
     static std::array<double, 5> pipeline_counts() {
@@ -202,6 +245,7 @@ private:
                 output << '\n';
             }
         }
+        write_detail_csv();
         auto memory_path = path_;
         memory_path.replace_extension(".memory.csv");
         std::ofstream memory_output(memory_path, std::ios::trunc);
@@ -224,12 +268,34 @@ private:
             }
         }
     }
+    // <trace>.detail.csv: run,kind,key,a,b,c. kinds: slots_source (count), slots_type (count), spawned_type (count),
+    // model (composed, compose_ms, upload_ms). Written only for a detailed run.
+    void write_detail_csv() const {
+        const bool any = std::any_of(runs_.begin(), runs_.end(), [](const Run& run) { return run.recording.detailed; });
+        if (!any) return;
+        auto detail_path = path_;
+        detail_path.replace_extension(".detail.csv");
+        std::ofstream output(detail_path, std::ios::trunc);
+        output << "run,kind,key,a,b,c\n";
+        for (std::size_t i = 0; i < runs_.size(); ++i) {
+            const auto& run = runs_[i];
+            if (!run.recording.detailed) continue;
+            for (const auto& [key, count] : run.census.slots_by_source) output << i << ",slots_source," << key << ',' << count << ",,\n";
+            for (const auto& [key, count] : run.census.slots_by_type) output << i << ",slots_type," << key << ',' << count << ",,\n";
+            for (const auto& [key, count] : run.census.spawned_by_type) output << i << ",spawned_type," << key << ',' << count << ",,\n";
+            for (const auto& model : run.recording.models) {
+                if (model.composed == 0 && model.compose_ms == 0.0) continue;
+                output << i << ",model," << model.path << ',' << model.composed << ',' << model.compose_ms << ',' << model.upload_ms << '\n';
+            }
+        }
+    }
     std::vector<Run> runs_;
     std::filesystem::path path_;
     std::filesystem::path report_path_;
     std::optional<Clock::time_point> return_start_;
     std::weak_ptr<const vfs::Vfs> filesystem_;
     std::function<assets::RetainedPayload()> renderer_probe_;
+    std::function<std::string(std::string_view)> census_probe_;
 };
 inline StartupTrace startup_trace;
 // Captured at extension load, then anchored to OS process creation on Windows.

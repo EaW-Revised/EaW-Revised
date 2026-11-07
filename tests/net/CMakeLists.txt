@@ -46,7 +46,7 @@ add_test(NAME net_galactic_setup_contracts COMMAND net_galactic_setup_tests)
 # rooms through the real lobby core and the galactic offer; the skirmish options bytes pinned).
 add_executable(net_galactic_lobby_tests galactic_lobby_tests.cpp)
 target_include_directories(net_galactic_lobby_tests PRIVATE "${PROJECT_SOURCE_DIR}/apps/viewer/src/galactic")
-target_link_libraries(net_galactic_lobby_tests PRIVATE eawr::net eawr::platform eawr::campaign eawr::platform_net eawr::skirmish)
+target_link_libraries(net_galactic_lobby_tests PRIVATE eawr::net eawr::platform eawr::campaign eawr::platform_net eawr::skirmish eawr::mods)
 eawr_target_project_warnings(net_galactic_lobby_tests)
 add_test(NAME net_galactic_lobby_contracts COMMAND net_galactic_lobby_tests)
 add_test(NAME net_galactic_lobby_stock_ai COMMAND net_galactic_lobby_tests --stock-ai)
@@ -276,7 +276,7 @@ target_link_libraries(net_lan_credentials_tests PRIVATE eawr::net eawr::platform
 eawr_target_project_warnings(net_lan_credentials_tests)
 add_test(NAME net_lan_credentials_contracts COMMAND net_lan_credentials_tests)
 add_executable(net_lobby_session_tests lobby_session_tests.cpp)
-target_link_libraries(net_lobby_session_tests PRIVATE eawr::net eawr::platform)
+target_link_libraries(net_lobby_session_tests PRIVATE eawr::net eawr::platform eawr::skirmish)
 eawr_target_project_warnings(net_lobby_session_tests)
 add_test(NAME net_lobby_session_contracts COMMAND net_lobby_session_tests)
 

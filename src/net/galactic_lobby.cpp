@@ -1,6 +1,7 @@
 #include "eawr/net/galactic_lobby.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <iomanip>
 #include <limits>
 #include <locale>
@@ -114,16 +115,34 @@ std::uint64_t draw_galactic_session_seed() {
     return static_cast<std::uint32_t>(device());
 }
 
+std::optional<GalacticAiCaption> galactic_ai_caption(std::string_view difficulty) noexcept {
+    // Whole tokens only: the bare name or the stock "<name>_Default" (Easy_Default); Hardened_Mod and Normal_Brutal are a mod's own levels.
+    const auto same = [](std::string_view a, std::string_view b) {
+        return a.size() == b.size() && std::equal(a.begin(), a.end(), b.begin(),
+            [](char x, char y) { return std::tolower(static_cast<unsigned char>(x)) == std::tolower(static_cast<unsigned char>(y)); });
+    };
+    const auto starts = [&](std::string_view name) {
+        return same(difficulty, name) || (difficulty.size() == name.size() + 8 && same(difficulty.substr(0, name.size()), name)
+            && same(difficulty.substr(name.size()), "_default"));
+    };
+    if (starts("easy")) return GalacticAiCaption::easy;
+    if (starts("normal") || starts("medium")) return GalacticAiCaption::normal;
+    if (starts("hard")) return GalacticAiCaption::hard;
+    return std::nullopt;
+}
+
 core::Result<GalacticLobbyOptions> default_galactic_lobby_options(const gc::MpLobbyCampaign& campaign,
     std::string_view difficulty, std::uint64_t seed, std::uint64_t input_delay, bool two_sides) {
     if (seed > std::numeric_limits<std::uint32_t>::max()) return refuse<GalacticLobbyOptions>(std::string(galactic_seed_too_wide));
     GalacticLobbyOptions options;
-    options.campaign = campaign.name; options.difficulty = std::string(difficulty);
+    // A difficulty the campaign's AI types do not author would be refused at Start, so a room starts at one they do.
+    options.campaign = campaign.name;
+    options.difficulty = gc::lobby_difficulty_offered(campaign, difficulty) ? std::string(difficulty) : gc::lobby_default_difficulty(campaign, difficulty);
     options.seed = seed; options.input_delay = input_delay;
     std::size_t humans{};
     for (const auto& faction : campaign.factions) {
         GalacticLobbyRow row{faction.player, faction.faction_id, faction.flags, faction.name, false, galactic_lobby_default_dropout};
-        if (faction.playable && humans < (two_sides ? galactic_lobby_max_human_sides : 1U)) { row.human = true; ++humans; }
+        if (faction.playable && humans < (two_sides && !campaign.single_player_rules ? galactic_lobby_max_human_sides : 1U)) { row.human = true; ++humans; }
         options.rows.push_back(std::move(row));
     }
     if (humans == 0) return refuse<GalacticLobbyOptions>("Campaign " + campaign.name + " has no playable faction.");
@@ -136,9 +155,15 @@ namespace {
 core::Result<const gc::MpLobbyCampaign*> check_options(const LobbyGame& game, const GalacticLobbyOptions& options,
     std::span<const gc::MpLobbyCampaign> catalog) {
     const auto* campaign = find_campaign(catalog, game.map);
-    if (!campaign) return refuse<const gc::MpLobbyCampaign*>("Campaign " + game.map + " is not a multiplayer campaign installed here.");
+    if (!campaign) return refuse<const gc::MpLobbyCampaign*>("Campaign " + game.map + " is not an eligible campaign installed here.");
     if (options.difficulty.empty() || options.difficulty.size() > gc::mp_roster_max_text)
         return refuse<const gc::MpLobbyCampaign*>("Choose a difficulty.");
+    if (!gc::lobby_difficulty_offered(*campaign, options.difficulty)) {
+        std::string offered;
+        for (const auto& entry : campaign->difficulties) if (!entry.empty()) offered += (offered.empty() ? "" : ", ") + entry;
+        return refuse<const gc::MpLobbyCampaign*>("The difficulty " + options.difficulty + " does not apply to campaign " + campaign->name
+            + ". Choose one of: " + offered + ".");
+    }
     if (options.rows.size() != campaign->factions.size()
         || !std::equal(options.rows.begin(), options.rows.end(), campaign->factions.begin(), [](const auto& row, const auto& faction) {
                return row.player == faction.player && row.faction_id == faction.faction_id && row.flags == faction.flags && row.faction == faction.name; }))
@@ -163,6 +188,8 @@ core::Result<const gc::MpLobbyCampaign*> check_options(const LobbyGame& game, co
     if (human_rows == 0) return refuse<const gc::MpLobbyCampaign*>("Plan at least one player faction.");
     if (human_rows > galactic_lobby_max_human_sides)
         return refuse<const gc::MpLobbyCampaign*>("A campaign game has at most two human sides.");
+    if (campaign->single_player_rules && human_rows != 1)
+        return refuse<const gc::MpLobbyCampaign*>("A single-player campaign is played by one co-op side.");
     return core::Result<const gc::MpLobbyCampaign*>::success(campaign);
 }
 

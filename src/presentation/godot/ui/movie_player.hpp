@@ -15,15 +15,18 @@
 #include "eawr/core/result.hpp"
 #include "eawr/data/ui/movie.hpp"
 #include "eawr/presentation/ui/layout.hpp"
+#include "bink_movie.hpp"
 
 #include <godot_cpp/classes/control.hpp>
 #include <godot_cpp/classes/video_stream_player.hpp>
+#include <godot_cpp/classes/image_texture.hpp>
 #include <godot_cpp/variant/rect2.hpp>
 #include <godot_cpp/variant/string.hpp>
 #include <optional>
 #include <ostream>
 #include <cstdint>
 #include <chrono>
+#include <functional>
 
 namespace eawr::presentation::godot_backend {
 
@@ -48,19 +51,21 @@ public:
     ~CommandBarMovie();
     CommandBarMovie(const CommandBarMovie&) = delete;
     CommandBarMovie& operator=(const CommandBarMovie&) = delete;
-    void prepare(const vfs::Vfs&, std::string_view movie, presentation::ui::ReferencePoint bone, godot::Control& parent);
+    void prepare(const vfs::Vfs&, std::string_view movie, presentation::ui::ReferencePoint bone, godot::Control& parent,
+        BinkSourceFactory decoder_factory, std::function<void(std::string, std::string, std::string)> failure_sink);
     // Loading-only callback; true once two decoded frames have actually drawn.
     [[nodiscard]] bool warmup();
     [[nodiscard]] bool start(godot::Control& parent, std::string_view speech);
     void service(bool speech_present, bool paused, const presentation::ui::ShellPlacement& placement);
     void stop();
-    [[nodiscard]] bool active() const { return player() != nullptr; }
+    [[nodiscard]] bool active() const { return bink_active_ || player() != nullptr; }
     [[nodiscard]] bool playing() const;
     [[nodiscard]] const std::string& speech() const { return speech_; }
     void write_report(std::ostream&) const;
 private:
     [[nodiscard]] godot::VideoStreamPlayer* player() const;
     void release_prepared();
+    void note_failure();
     std::optional<data::ui::HudMovie> movie_;
     data::ui::CommandBarMovieStyle style_;
     presentation::ui::ReferencePoint bone_;
@@ -73,6 +78,13 @@ private:
     bool warming_{};
     godot::String cache_;
     std::string speech_, problem_, requested_movie_, requested_speech_;
+    std::unique_ptr<BinkWorker> bink_;
+    godot::Ref<godot::ImageTexture> bink_texture_;
+    std::int64_t bink_node_id_{}, bink_parent_id_{};
+    double bink_frame_seconds_{}, bink_elapsed_{};
+    bool bink_ready_{}, bink_active_{}, bink_trace_{};
+    std::function<void(std::string, std::string, std::string)> failure_sink_;
+    bool failure_noted_{};
 };
 
 } // namespace eawr::presentation::godot_backend

@@ -19,7 +19,7 @@
 
 #include "eawr/core/diagnostic.hpp"
 #include "eawr/data/ui/text_database.hpp"
-#include "eawr/vfs/vfs.hpp"
+#include "eawr/vfs/vfs_fwd.hpp"
 
 #include "eawr/presentation/ui/fonts.hpp"
 #include "eawr/presentation/ui/hud_shell.hpp"

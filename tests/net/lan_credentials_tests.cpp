@@ -1,5 +1,6 @@
 #include "setup_test_support.hpp"
 #include "eawr/net/lan_credentials.hpp"
+#include "eawr/net/galactic_setup.hpp"
 #include <array>
 #include <deque>
 #include <iostream>
@@ -140,6 +141,35 @@ void sparse_roster() {
     auto beyond = agreed; beyond.seats[2].peer = 8;
     expect(!repeated.provide_mesh_repair(beyond, host), "roster peer beyond the table refused");
 }
+void galactic_saved_seats_on_sparse_streams() {
+    net::GalacticSetupPayload payload; payload.roster.campaign = "CredentialFixture";
+    payload.roster.difficulty = "FixtureDifficulty"; payload.roster.tick_zero.fill(17);
+    for (std::uint32_t player = 1; player <= 2; ++player) {
+        sim::galactic::MpRosterPlayer row; row.player = player; row.faction_id = player;
+        row.faction = "FixtureFaction" + std::to_string(player); payload.roster.players.push_back(std::move(row));
+    }
+    payload.roster.seats = {{{7}, 1, sim::SeatKind::human, 0, true, 1}, {{11}, 2, sim::SeatKind::human, 1, true, 2}};
+    payload.roster.teams = {{1, {7}, false}, {2, {11}, false}};
+    auto agreed = offer(); agreed.domain = std::string(net::galactic_setup_domain);
+    agreed.setup = require(net::encode_galactic_setup(payload)); agreed.seats = {{0, {7}, 1}, {1, {11}, 2}};
+    agreed.identity.content.domains.push_back({std::string(net::galactic_tick_zero_domain), 1, payload.roster.tick_zero});
+    agreed.identity.content = sim::compute_match_identity(std::move(agreed.identity.content));
+    Stream host; host.count = 8; Stream guest; guest.count = 8; guest.index = 5;
+    const std::array<net::PeerIndex, 2> native{0, 5};
+    net::LanReconnectCredentials sender, receiver;
+    const auto tokens = require(sender.provide_galactic_recovery(agreed, host, native));
+    expect(host.sent.size() == 1 && host.sent.front().from == 5, "dense saved seats provision only their frozen native streams");
+    auto delivery = std::move(host.sent.front()); host.sent.pop_front(); delivery.from = 0;
+    expect(require(receiver.receive(delivery, guest)), "sparse authenticated campaign delivery is consumed");
+    const auto keys = require(receiver.provide_galactic_recovery(agreed, guest, native));
+    expect(keys[0] == tokens[5] && keys[5] == net::RejoinNonce{}, "physical slot five keeps its authenticated pair key for logical saved seat eleven");
+    auto ack = std::move(guest.sent.front()); ack.from = 5;
+    expect(require(sender.receive(ack, host)) && sender.delivered(), "campaign delivery waits only for the actual admitted saved seats");
+    const std::array<net::PeerIndex, 2> duplicate{0, 0};
+    net::LanReconnectCredentials wrong;
+    expect(!wrong.provide_galactic_recovery(agreed, host, duplicate), "duplicate native saved-seat mapping refuses");
+    expect(!wrong.provide_galactic_recovery(offer(), host, native), "campaign-only credential provider never enables tactical recovery");
+}
 void refusals() {
     auto agreed = offer(); agreed.recovery.reconnect = true;
     agreed.setup = require(net::encode_skirmish_setup(human_setup(3)));
@@ -212,7 +242,7 @@ int main() {
         Stream pair;
         net::LanReconnectCredentials pair_keys;
         expect(!pair_keys.provide_mesh_repair(offer(), pair), "mesh repair credentials require at least three room members");
-        sparse_roster();
+        sparse_roster(); galactic_saved_seats_on_sparse_streams();
         refusals();
         owned_destructor_erasure();
         std::cout << "LAN reconnect credential contracts passed\n";

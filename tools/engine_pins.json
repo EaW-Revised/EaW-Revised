@@ -1,0 +1,72 @@
+{
+  "schema": 1,
+  "about": "Owner rule 11-03: never run on the OFFICIAL Godot. Only the engines listed under 'engines' (our patched fork Thom-Ernst/godot eawr/4.7.2-stable) may run measurements, gates, rig suites, previews and packages. tools/common/engine_guard.py and tools/common/EngineGuard.ps1 enforce it; EAWR_ALLOW_UNPATCHED_ENGINE=ab-control (exact) is the only bypass: a labelled control arm of an engine A/B. The viewer checks the same commits at startup (include/eawr/presentation/engine_signature.hpp).",
+  "default": "eawr-fad06b579-ltofull",
+  "engines": {
+    "eawr-fad06b579-ltofull": {
+      "commit": "fad06b57944fbf17833fe3c65dc9ff1d7446c639",
+      "build": "MSVC target=editor production=yes lto=full (example-host-1 2026-10-25)",
+      "role": "player: the exe shipped in the player zip (fork release eawr-4.7.2-fad06b579); rig/preview/perf default",
+      "files": {
+        "Godot_v4.7.2-stable_win64.exe": "453b4ad56a8f5c64b39c1d75e77468c5227475b2483922dee44ade51cff43442",
+        "Godot_v4.7.2-stable_win64_console.exe": "194a5bbf60f76a3717aca706fb715ac6645655b3eca8e0f959b277ac1fe3cd61"
+      }
+    },
+    "eawr-fad06b579-nolto": {
+      "commit": "fad06b57944fbf17833fe3c65dc9ff1d7446c639",
+      "build": "MSVC target=editor production=yes, no LTO (first fork build, up to +5.7% slower in Safe)",
+      "role": "diagnostic only: same patches, not the shipped binary; never mix with ltofull numbers in one series",
+      "files": {
+        "Godot_v4.7.2-stable_win64.exe": "d810d6af3f68e10315e155bb9e51efd4b5850467fb96321059a1bf07ac309c77",
+        "Godot_v4.7.2-stable_win64_console.exe": "287118a263c5e01ba1ecb57ebc40e517a90a92518b917c9949e20f8e9eb42a86"
+      }
+    },
+    "eawr-fad06b579-template-release": {
+      "commit": "fad06b57944fbf17833fe3c65dc9ff1d7446c639",
+      "build": "MSVC 19.44 target=template_release production=yes lto=full (example-host-2 2026-11-03)",
+      "role": "export template: measurement only, not shipped (pf-export-build). The exe that RUNS is the exported game (template + embedded PCK, a new sha per export): pin it per export or run it as EAWR_ALLOW_UNPATCHED_ENGINE=ab-control",
+      "files": {
+        "godot.windows.template_release.x86_64.exe": "d459d6ec928e9fb62d233813f6ed48579180b95140ad0581a341342f7a399518",
+        "godot.windows.template_release.x86_64.console.exe": "36203b6d6fb960cb47efc696efdec6e99366383bd9838f407c5f27a8b5c2af15"
+      }
+    },
+    "eawr-fad06b579-template-release-pathoverrides": {
+      "commit": "fad06b57944fbf17833fe3c65dc9ff1d7446c639",
+      "build": "MSVC 19.44 target=template_release production=yes lto=full disable_path_overrides=no (example-host-1 2026-11-03)",
+      "role": "measurement only, path overrides ON, NOT SHIPPABLE (pf-export-build): the same template with --path/--script allowed so the rig harness can run an exported package (4.7 templates refuse them by default). The exported exe gets a new sha per export: pin it per export",
+      "files": {
+        "godot.windows.template_release.x86_64.exe": "9bb0cd9e2ed8b34b8d64e5abfbed7c8994c43b43f634c1be6d69c772e1753143",
+        "godot.windows.template_release.x86_64.console.exe": "32c9766b163de165cc38bd6f365a3fd34bd6963b43f47e39fe316873853b4e79"
+      }
+    }
+  },
+  "known_unpatched": {
+    "official-4.7.2-ed1daf0bf": {
+      "about": "the official godotengine.org 4.7.2-stable download (prototypes/godot/dependencies.json); REFUSED",
+      "files": {
+        "Godot_v4.7.2-stable_win64.exe": "ab1824f85bfd8e0e4128182c000c4003a3e042245b2967848d089b2a04b22424",
+        "Godot_v4.7.2-stable_win64_console.exe": "c8f0a6bc45a19b33541501e57f6f7cd972ab18453743266339d495cbbe846643"
+      }
+    },
+    "control-ed1daf0bf-msvc": {
+      "about": "our MSVC build of the UNPATCHED official source (PF engine-2 control); REFUSED",
+      "files": {
+        "Godot_v4.7.2-stable_win64.exe": "84e422f901fd82d435846cab10af6c80b9508ad23e36ee552a432a6039425b65",
+        "Godot_v4.7.2-stable_win64_console.exe": "c000787e64dbc7a1b9828ae07633f4b4f7c55833d1701f4208ec0a8225c495d4"
+      }
+    },
+    "official-4.7.2-template-release": {
+      "about": "the official 4.7.2 template_release export template (pf-export-build reference); REFUSED",
+      "files": {
+        "godot.windows.template_release.x86_64.exe": "d34d36f3be1a6c49c56525ae86469b92e4f417ddf0b43cf00dd80c385c4b0562",
+        "godot.windows.template_release.x86_64.console.exe": "52bdcae9068e8d23b840e5c63b0c1798ffe2cb66144e5c4bc7af11fb8c8600df"
+      }
+    },
+    "official-template-preview-export": {
+      "about": "pf-export-build's preview export from the OFFICIAL template (preview only); REFUSED",
+      "files": {
+        "Godot_v4.7.2-stable_win64.exe": "ddd20b0731984db136c8d478f17db95d94cc5ec1930485d47ee282d5e6938827"
+      }
+    }
+  }
+}

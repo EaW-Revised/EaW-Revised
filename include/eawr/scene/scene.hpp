@@ -4,7 +4,7 @@
 #include "eawr/assets/assets.hpp"
 #include "eawr/assets/map.hpp"
 #include "eawr/core/result.hpp"
-#include "eawr/data/xml.hpp"
+#include "eawr/data/xml_fwd.hpp"
 #include "eawr/sim/commands.hpp"
 #include "eawr/sim/math/fixed.hpp"
 #include "eawr/sim/math/geometry.hpp"
@@ -375,16 +375,27 @@ struct BuildResult final {
 [[nodiscard]] core::Result<BuildResult> build(const BuildInput& input,
                                                const sim::PartitionExecutor& executor);
 
+inline constexpr std::uint64_t default_model_cache_budget_bytes = 128ULL << 20U;
+
 // Memoising AssetAccess over a mounted VFS, for callers that build many scenes
 // against one mount. Decoded models are immutable and shared by resolved file
 // identity. Strong cache retention is unlimited until a byte budget is set;
 // explicit owners and each wrapper's raw model pointers survive cache eviction.
 class VfsAssetCache final {
+    struct ModelStore;
 public:
     struct ModelStats final {
         std::uint64_t calls{}, hits{}, misses{}, unique_loads{};
         std::uint64_t entries{}, successful_entries{}, failed_entries{}, particle_entries{};
         std::uint64_t cache_budget_bytes{}, cache_retained_bytes{}, cache_evictions{};
+        // Actual decode attempts after the GC preparation boundary, including
+        // late arrival fallbacks. Initial campaign preparation is not included.
+        // A tactical (non-GC) load counts the decodes after end_model_load the same way.
+        std::uint64_t gameplay_loads{}, battle_loads{}, battle_load_boundaries{};
+        std::string first_gameplay_model; // Empty when the zero-gameplay-decode gate passes.
+        // release_raw_pins(): calls that released this mount's wrapper pins, pins dropped, and calls refused because
+        // the load phase was over (the gate that keeps the release out of gameplay; expected 0).
+        std::uint64_t raw_pin_releases{}, raw_pins_released{}, raw_pin_release_refused{};
         // Owner-census diagnostic: decodes a fresh LRU of each budget would have done over
         // the same request sequence (no effect on the real cache). Empty when census is off.
         struct BudgetReplay final { std::uint64_t budget_bytes{}, decodes{}; };
@@ -403,11 +414,44 @@ public:
     // The returned pointer remains valid until this cache wrapper is destroyed.
     [[nodiscard]] const assets::Model* model(std::string_view logical_path);
     [[nodiscard]] core::Result<std::shared_ptr<const assets::Model>> shared_model(std::string_view logical_path);
+    // Decode-ahead (scene::ModelPrefetch): the same decode as shared_model, but the store does not admit the result to
+    // its LRU and the census does not see the request. The caller's shared_ptr is then the only owner, so a model nobody
+    // asks for is freed when the caller drops it. The first ordinary request for the path admits it, as if it had
+    // decoded it itself.
+    [[nodiscard]] core::Result<std::shared_ptr<const assets::Model>> shared_model_ahead(std::string_view logical_path);
+    // Drops this wrapper's pins from model(): every pointer model() returned earlier becomes invalid, and a model
+    // nothing else owns (no renderer recipe, no strong-LRU entry) is freed, so the load budget can bound it. For a
+    // load that composes many models one at a time, called between them. Allowed only while a battle load is open
+    // (not after end_model_load, not in galactic gameplay outside a ModelLoadScope): returns false and counts a refusal
+    // otherwise, so a gameplay frame can never pay for it.
+    bool release_raw_pins();
     [[nodiscard]] std::string sha256(std::string_view logical_path);
     [[nodiscard]] bool particle_system(std::string_view logical_path);
     // Shared by every wrapper of this mounted VFS. Bounds cache-owned vector
     // capacity, never decoding or asset size; zero disables successful retention.
     void set_model_cache_budget(std::uint64_t bytes);
+    // Tactical (non-GC) load bracket. begin bounds the strong cache from the first decode (the caller derives the byte
+    // count; this library never queries the OS) and re-opens the load phase; end applies the final budget and closes
+    // it, so a decode after it counts in ModelStats::gameplay_loads. Both are ignored inside a ModelLoadScope.
+    void begin_model_load(std::uint64_t bytes);
+    void end_model_load(std::uint64_t bytes);
+    // Call once after campaign preparation. This changes cache ownership only;
+    // renderer/shared/raw owners keep their pins. An unbounded value is the A/B control.
+    void begin_galactic_gameplay(std::uint64_t bytes);
+    // A mounted content set may survive a return to the menu. The next
+    // campaign prepares with full sharing again and starts fresh phase counters.
+    void begin_galactic_preparation();
+    // A later battle may re-read evicted models only inside its loading gate.
+    // Restore initial-load sharing there, then the budget in effect at entry.
+    class ModelLoadScope final {
+    public:
+        explicit ModelLoadScope(const vfs::Vfs& filesystem);
+        ~ModelLoadScope();
+        ModelLoadScope(const ModelLoadScope&) = delete;
+        ModelLoadScope& operator=(const ModelLoadScope&) = delete;
+    private:
+        std::shared_ptr<ModelStore> models_;
+    };
     [[nodiscard]] ModelStats model_stats() const;
     // Explicit snapshot only: shared LRU identities plus this wrapper's raw pins.
     // No decoding, cache trimming, or expired-entry removal.
@@ -416,9 +460,8 @@ public:
     static void enable_owner_census(const vfs::Vfs& filesystem, bool fresh_mount = false);
 
 private:
-    struct ModelStore;
     struct Loaded;
-    [[nodiscard]] std::shared_ptr<const Loaded> loaded_model(std::string_view logical_path);
+    [[nodiscard]] std::shared_ptr<const Loaded> loaded_model(std::string_view logical_path, bool ahead = false);
     const vfs::Vfs* filesystem_;
     std::shared_ptr<ModelStore> models_;
     // Protected by the shared model-store mutex; first use pins a raw result. Keyed by the Loaded address, so the

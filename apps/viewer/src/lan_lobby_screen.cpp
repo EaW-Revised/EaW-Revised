@@ -1,4 +1,7 @@
+#include "revised_layer.hpp"
+#include "eawr/vfs/vfs.hpp"
 #include "viewer_load_notes.hpp"
+#include "viewer_mounted_mods.hpp"
 #include "lan_lobby_screen_internal.hpp"
 #include <godot_cpp/classes/window.hpp>
 
@@ -67,6 +70,7 @@ bool EawrLanLobby::build(Options options, const skirmish::SetupMapCache* shared_
         }
         roots.emplace_back("expansion", expansion);
         roots.emplace_back("base", base);
+        mount_revised_layer(roots);
         auto chain = vfs::resolve_manifest_chain(roots);
         if (!chain) {
             failure_ = core::format_diagnostic(chain.error());
@@ -98,6 +102,7 @@ bool EawrLanLobby::build(Options options, const skirmish::SetupMapCache* shared_
             BattleContent{std::move(filesystem), std::move(catalog), profile, std::move(layers)});
     }
     const vfs::Vfs& filesystem = *resources.content->filesystem;
+    if (!options_.game_root.empty()) prime_mounted_mods(options_.game_root);
 
     auto colours = skirmish::read_lobby_colours(filesystem);
     if (!colours) {
@@ -227,6 +232,12 @@ void EawrLanLobby::clear_page() {
 void EawrLanLobby::close_screen(const bool emit) {
     if (!shown_) return;
     cancel_join();
+    ++impl_->checkpoint_request;
+    impl_->checkpoint_store.reset();
+    close_checkpoint_list();
+    impl_->checkpoint_list_note.clear();
+    impl_->checkpoint_candidate.reset(); impl_->checkpoint_bytes.reset();
+    if (impl_->galactic_backend && !match_->galactic_start()) impl_->galactic_backend->clear_checkpoint();
     if (impl_->online_rooms) impl_->online_rooms->set_menu_visible(false);
     shown_ = false;
     set_process(false);
@@ -308,6 +319,16 @@ void EawrLanLobby::layout_page() {
         impl_->box->set_scale(Vector2(layout.scale, layout.scale));
         impl_->box->set_offset(layout.offset);
     }
+    if (auto* list = impl_->list()) {
+        list->set_scale(Vector2(layout.scale, layout.scale));
+        list->set_offset(layout.offset);
+        // The list's own boxes (Delete confirm, a listing problem, a launcher refusal) are child canvas layers: a child
+        // layer does not inherit this transform, so they take it here like the lobby's own message box (#5575 review).
+        if (auto* inner = list->box()) {
+            inner->set_scale(Vector2(layout.scale, layout.scale));
+            inner->set_offset(layout.offset);
+        }
+    }
 }
 
 void EawrLanLobby::on_pressed(String id) { handle_button(utf8(id)); }
@@ -324,8 +345,19 @@ void EawrLanLobby::on_text_submitted(String typed, String id) {
     else if (gadget == prompt_edit) submit_password(value);
 }
 
-void EawrLanLobby::on_box_result(const int64_t) {
+void EawrLanLobby::on_box_result(const int64_t result) {
     impl_->box = nullptr;
+    if (std::exchange(impl_->mod_review_box, false)) {
+        const auto view = match_->view();
+        if (view.phase == LanPhase::ended) {
+            impl_->refused = true;
+            show_failure(lan_message(view));
+            return;
+        }
+        if (result == 1) match_->accept_mod_review();
+        else leave_staging();
+        return;
+    }
     // A refused or dropped connection leaves the staging for the lobby once the player read it.
     if (impl_->refused) {
         impl_->refused = false;
@@ -362,6 +394,7 @@ void EawrLanLobby::on_item_selected(const int64_t index, String id) {
         if (index >= 0 && static_cast<std::size_t>(index) < std::size(game_types)) {
             impl_->host_options.game_type = game_types[index].name;
             fill_host_seats();
+            if (impl_->host_options.game_type == galactic_game_type) static_cast<void>(prefetch_galactic_content());
             if (auto* description = EAWR_CONTROL(EawrUiLabel, "IDC_GAME_TYPE_DESCRIPTION_TEXT")) {
                 description->set_text(resolved(resources_->text, game_types[index].description));
             }
@@ -377,7 +410,11 @@ void EawrLanLobby::on_item_selected(const int64_t index, String id) {
         const auto suffix = std::to_string(local->selection.slot - 1);
         auto choice = local->selection;
         auto* combo = EAWR_CONTROL(EawrUiCombo, gadget); if (!combo) return;
-        if (gadget == "IDC_PLAYER_FACTION_" + suffix) choice.faction = utf8(combo->get_item_text(static_cast<int>(index)));
+        if (gadget == "IDC_PLAYER_FACTION_" + suffix) {
+            const auto factions = skirmish::setup_factions(*resources_->content->catalog);
+            if (index < 0 || static_cast<std::size_t>(index) >= factions.size()) return;
+            choice.faction = factions[static_cast<std::size_t>(index)].name;
+        }
         else if (gadget == "IDC_PLAYER_COLOR_" + suffix) choice.colour = static_cast<std::uint32_t>(combo->get_item_id(static_cast<int>(index)));
         else if (gadget == "IDC_PLAYER_TEAM_" + suffix) choice.team = static_cast<std::uint32_t>(combo->get_item_id(static_cast<int>(index)));
         else if (gadget == "IDC_PLAYER_NAME_" + suffix) choice.slot = static_cast<std::uint32_t>(combo->get_item_id(static_cast<int>(index)));
@@ -448,7 +485,9 @@ void EawrLanLobby::on_item_selected(const int64_t index, String id) {
         }
     } else if (record != impl.selection.slots.end()) {
         if (field == "IDC_PLAYER_FACTION") {
-            record->faction = utf8(combo->get_item_text(static_cast<int>(index)));
+            const auto factions = skirmish::setup_factions(*resources.content->catalog);
+            if (index < 0 || static_cast<std::size_t>(index) >= factions.size()) return;
+            record->faction = factions[static_cast<std::size_t>(index)].name;
         } else if (field == "IDC_PLAYER_TEAM") {
             record->team = static_cast<std::uint32_t>(id_value);
         } else if (field == "IDC_PLAYER_COLOR") {
@@ -492,24 +531,27 @@ void EawrLanLobby::_process(const double) {
             changed = true;
         }
     }
+    finish_pending_galactic();
     if (page_ == Page::lobby) {
         // Retail rebuilds the list once a second.
         if (changed || impl.dirty || now_ms() - impl.last_list_ms >= model::lan_game_list_refresh_ms) refresh_lobby();
     } else if (page_ == Page::staging) {
+        process_checkpoint_read();
         process_options();
         refresh_staging();
     }
 }
 
 void EawrLanLobby::_input(const Ref<InputEvent>& event) {
-    if (!shown_ || impl_->box != nullptr) return;
+    if (!shown_ || impl_->box != nullptr || impl_->list() != nullptr) return;
     const auto* key = Object::cast_to<InputEventKey>(event.ptr());
     if (key == nullptr || !key->is_pressed() || key->is_echo() || key->get_keycode() != KEY_ESCAPE) return;
     if (Viewport* viewport = get_viewport()) viewport->set_input_as_handled();
     if (page_ == Page::staging) {
         // Escape cancels the options copy, except the press that closes the win-condition list.
-        if (state_->editing) {
-            if (!state_->opt_win_list_was_open) close_options(false);
+        if (state_->editing || state_->galactic_editing) {
+            const bool popup = state_->galactic_editing && (state_->gc_auto_resolve->get_popup()->is_visible() || state_->gc_difficulty->get_popup()->is_visible());
+            if (!state_->opt_win_list_was_open && !popup) close_options(false);
             return;
         }
         if (auto* list = EAWR_CONTROL(EawrUiList, "EAWR_ONLINE_CONNECTIONS_LIST"); list && list->is_visible()) {
@@ -529,7 +571,9 @@ void EawrLanLobby::show_failure(const std::string& message) {
     Impl& impl = *impl_;
     if (impl.box != nullptr) return;
     model::MessageBoxRequest request;
-    request.caption = "TEXT_LAN_LOBBY_TITLE";
+    // Only the staging page carries the host/join header; the browser pages keep the lobby title.
+    request.caption = std::string(model::lobby_failure_caption(
+        page_ == Page::staging && impl.join_selection.source() == model::LobbySourceKind::online, impl.host));
     request.lines[0] = message;
     request.buttons.push_back({"TEXT_BUTTON_OK", 1, true});
     Resources& resources = *resources_;
@@ -547,6 +591,25 @@ void EawrLanLobby::show_failure(const std::string& message) {
 }
 
 void EawrLanLobby::handle_button(const std::string& id) {
+    if (page_ == Page::staging && match_->galactic_room()) {
+        if (id == "EAWR_GC_LOAD_GAME") {
+            // #5512: a Load Game press before the campaign content is in waits for it on a worker, never on this thread.
+            if (!prefetch_galactic_content()) {
+                impl_->load_pending = true;
+                impl_->checkpoint_problem = "Loading campaign content...";
+                impl_->checkpoint_signature.clear();
+                return;
+            }
+            open_checkpoint_list();
+            return;
+        }
+        if (id == "EAWR_GC_NEW_CAMPAIGN") { new_campaign(); return; }
+        if (id == "EAWR_GC_TAB_MP" || id == "EAWR_GC_TAB_COOP") {
+            impl_->coop_campaign_tab = id == "EAWR_GC_TAB_COOP";
+            impl_->rows_signature.clear();
+            return;
+        }
+    }
     if (impl_->box != nullptr) return;
     if (id == "EAWR_ONLINE_CONNECTIONS" && page_ == Page::staging) {
         if (auto* list = EAWR_CONTROL(EawrUiList, "EAWR_ONLINE_CONNECTIONS_LIST")) list->set_visible(!list->is_visible());
@@ -554,12 +617,15 @@ void EawrLanLobby::handle_button(const std::string& id) {
     }
     if (page_ == Page::staging && impl_->host && state_->options_panel != nullptr) {
         if (id == "IDC_SELECT_OPTIONS") { open_options(); return; }
-        if (state_->editing) {
+        if (state_->editing || state_->galactic_editing) {
             if (id == "EAWR_OPT_ACCEPT") close_options(true);
             else if (id == "EAWR_OPT_CANCEL") close_options(false);
             else if (id == "EAWR_OPT_DEFAULTS") {
-                skirmish::reset_setup_options(*state_->editing, resources_->defaults);
-                show_options_values();
+                if (state_->galactic_editing) reset_galactic_options();
+                else {
+                    skirmish::reset_setup_options(*state_->editing, resources_->defaults);
+                    show_options_values();
+                }
             }
             return; // the dialog is modal: nothing behind it acts
         }
@@ -651,8 +717,18 @@ void EawrLanLobby::handle_button(const std::string& id) {
         std::uint32_t row{};
         const auto suffix = id.substr(std::string("IDC_BUTTON_KICK_PLAYER").size());
         if (std::from_chars(suffix.data(), suffix.data() + suffix.size(), row).ec == std::errc{}) {
-            if (auto room = match_->lobby_state()) for (const auto& seat : room->snapshot.seats)
-                if (seat.selection.slot == row + 1 && seat.peer != room->snapshot.host) { (void)match_->lobby_kick(seat.peer); break; }
+            // A skirmish row n holds player n + 1; a campaign room draws its rows in the roster's order.
+            std::optional<std::uint32_t> player = row + 1;
+            if (match_->galactic_room()) {
+                player.reset();
+                if (impl.galactic_options) {
+                    std::vector<std::uint32_t> players;
+                    for (const auto& campaign_row : impl.galactic_options->rows) players.push_back(campaign_row.player);
+                    player = model::galactic_slot_player(impl.galactic_row_order, players, row);
+                }
+            }
+            if (player) if (auto room = match_->lobby_state()) for (const auto& seat : room->snapshot.seats)
+                if (seat.selection.slot == *player && seat.peer != room->snapshot.host) { (void)match_->lobby_kick(seat.peer); break; }
         }
     } else if (id == "IDC_LAN_START_GAME_BUTTON") {
         // Start (host) or Accept (joiner); the checks run in refresh_staging's enabled state and here.
@@ -712,8 +788,28 @@ EawrLanLobby::Snapshot EawrLanLobby::snapshot() const {
             : impl.host && impl.selection.match ? *impl.selection.match
             : impl.offered && impl.offered->match ? *impl.offered->match : resources_->defaults;
         shot.credits = match.credits.trunc_to_integer();
-        shot.options_open = state_ && state_->editing.has_value();
-        shot.credits_custom = shot.options_open ? state_->editing->custom : impl.selection.custom_options;
+        shot.options_open = state_ && (state_->editing.has_value() || state_->galactic_editing.has_value());
+        shot.credits_custom = state_ && state_->editing ? state_->editing->custom : impl.selection.custom_options;
+        shot.lobby_layer = get_layer();
+        shot.list_note = impl.checkpoint_list_note;
+        if (auto* list = impl.list()) {
+            shot.list_layer = list->get_layer();
+            shot.list_visible = list->is_visible();
+            if (const auto* inner = list->box()) {
+                shot.list_box_scale = inner->get_scale().x;
+                shot.list_scale = list->get_scale().x;
+            }
+            // Where a click on the list's Cancel button lands, in window pixels (canvas layer transform included).
+            if (auto* cancel = Object::cast_to<Control>(list->gadget("IDC_LOAD_CANCEL_BUTTON")))
+                shot.list_cancel_centre = cancel->get_global_transform_with_canvas().xform(cancel->get_size() * 0.5F);
+            shot.window = get_viewport()->get_visible_rect().size;
+        }
+        if (const auto* load_button = EAWR_CONTROL(EawrUiButton, "EAWR_GC_LOAD_GAME")) shot.load_game_disabled = load_button->is_disabled();
+        if (match_->galactic_room() && impl.galactic_options) {
+            const auto& gc = state_ && state_->galactic_editing ? *state_->galactic_editing : *impl.galactic_options;
+            shot.credits = gc.credits;
+            shot.credits_custom = gc.custom;
+        }
         if (resources_->credits_bounds) {
             shot.credits_min = resources_->credits_bounds->minimum;
             shot.credits_max = resources_->credits_bounds->maximum;
@@ -763,6 +859,10 @@ EawrLanLobby::Snapshot EawrLanLobby::snapshot() const {
     if (impl.host && impl.map_index >= 0) shot.map = resources_->maps[static_cast<std::size_t>(impl.map_index)].name;
     else if (impl.offered && impl.offered->map) shot.map = *impl.offered->map;
     if (state_ && page_ == Page::staging && match_->galactic_room()) {
+        if (const auto room = match_->lobby_state()) {
+            if (auto decoded = net::decode_galactic_lobby_game(room->snapshot.game)) shot.galactic_options = std::move(decoded).value();
+        }
+        if (state_->galactic_editing) shot.options_error = utf8(state_->gc_error->get_text());
         if (const auto* description = EAWR_CONTROL(EawrUiLabel, "EAWR_CAMPAIGN_DESCRIPTION"); description != nullptr && description->is_visible())
             shot.campaign_description = utf8(description->get_text());
         if (impl.host) {
@@ -781,6 +881,7 @@ EawrLanLobby::Snapshot EawrLanLobby::snapshot() const {
             }
         }
     }
+    shot.pointer = pointer_json();
     shot.start_caption = impl.start_caption;
     shot.start_reason = impl.start_reason;
     shot.start_enabled = impl.start_enabled;

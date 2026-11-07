@@ -1,4 +1,5 @@
 #include "galactic/route_lines.hpp"
+#include "eawr/data/xml.hpp"
 
 #ifdef NDEBUG
 #undef NDEBUG

@@ -46,6 +46,7 @@ eawr::units::UnitType unit_type(std::string id, const UnitKind kind, std::string
     const std::optional<std::int64_t> power);
 void synthetic_roster_gate();
 void synthetic_start();
+void minimap_default_evidence();
 void synthetic_placed_start();
 eawr::units::UnitTables synthetic_tables();
 skirmish::Fixture synthetic_fixture();

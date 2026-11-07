@@ -15,6 +15,12 @@
 // returns the one the agreed frontier released. Engine-side only; presentation never includes this header.
 namespace eawr::platform {
 
+struct RecoveredGameOwner {
+    std::shared_ptr<campaign::GameSession> session;
+    std::shared_ptr<const CampaignServiceConfiguration> services;
+    std::uint64_t completed_tick{};
+};
+
 // The references live for one call and belong to the simulation thread.
 struct LiveGameStepContext {
     campaign::GameSession& game;
@@ -26,11 +32,24 @@ struct LiveGameStepContext {
     std::function<std::vector<sim::galactic::GameCommand>(std::uint64_t)> command_source;
     // A refused local order, reported to rejected_orders().
     std::function<void(core::Diagnostic)> reject;
+    // Engine-only, after independent all-peer barrier proof. The driver prepares
+    // every fallible frontier object first, calls once, and returns no tick from
+    // this step: the next context borrows the new owner. No player-load prologue.
+    std::function<core::Result<void>(RecoveredGameOwner)> adopt_recovered_owner{};
+};
+
+struct AgreedGameSave {
+    sim::galactic::GalacticEvent event;
+    std::uint64_t completed_tick{};
+    std::vector<std::uint8_t> bytes;
+    std::optional<core::Diagnostic> failure;
 };
 
 class LiveGameStepDriver {
 public:
     virtual ~LiveGameStepDriver() = default;
+    [[nodiscard]] virtual bool may_save(sim::SeatId) const noexcept { return false; }
+    [[nodiscard]] virtual std::optional<AgreedGameSave> take_agreed_save() { return {}; }
     // Called once on the simulation thread when the live loop exits, including on failure.
     // No further step calls belong to this live session; release borrowed session references.
     virtual void session_ended() noexcept {}

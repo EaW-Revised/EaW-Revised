@@ -1,6 +1,8 @@
 #include "../support/result.hpp"
+#include "eawr/vfs/vfs.hpp"
 #include "space_entry_private.hpp"
 #include "galactic_support.hpp"
+#include "eawr/data/xml.hpp"
 #include "eawr/campaign/space_entry.hpp"
 #include "eawr/campaign/standalone_replay.hpp"
 #include "eawr/campaign/tactical_return.hpp"
@@ -12,6 +14,7 @@
 #include "eawr/sim/tactical/visibility.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -756,6 +759,14 @@ void admitted_cycle() {
 }
 
 void preparation_contracts() {
+    {   // CGS-22: only a missing variant base is skippable; other resolve failures still refuse prepare.
+        core::Diagnostic missing_base; missing_base.code = std::string(data::diagnostic_codes::variant_missing_base);
+        expect(campaign::stock_name_skippable(missing_base), "CGS-22: an absent variant base is skipped with a load note");
+        for (const auto code : {"EAWR-XML-0009", "EAWR-XML-0010", "EAWR-XML-0011", "EAWR-VFS-0002"}) {
+            core::Diagnostic other; other.code = code;
+            expect(!campaign::stock_name_skippable(other), "CGS-22 negative control: any other resolve failure still fails prepare");
+        }
+    }
     const auto tables = tables_for_entry(); auto input = entry_inputs(tables);
     campaign::ConflictRecord record; record.id = 90; record.invader = 1; record.defender = 2;
     record.station_level = 2; record.map_identity = input.map.map;
@@ -839,7 +850,89 @@ void preparation_contracts() {
         for (auto& p : absent.map.placements) if (p.type == "Space Station Position") {
             if (missing_position) p.position.reset(); else p.orientation_degrees.reset();
         }
-        expect(!campaign::prepare_space_entry(record, absent, 100, 17), "incomplete station pose still refuses entry");
+        expect(static_cast<bool>(campaign::build_space_entry(record, absent, 100, 17)), "incomplete station pose does not abort entry");
+    }
+    for (const auto& orbital_angles : {Vec3{whole(2), {}, whole(30)}, Vec3{{}, whole(11), whole(45)}}) {
+        auto tilted = input;
+        auto& orbital = tilted.map.placements[5];
+        orbital.marker_for.push_back({"Pad", {}});
+        orbital.orientation_degrees = orbital_angles;
+        const auto orbital_position = *orbital.position;
+        auto other = marker(8, "other orbital", 2000); other.marker_for.push_back({"Pad", {}});
+        tilted.map.placements.push_back(other);
+        const auto plan = take(campaign::prepare_space_entry(record, tilted, 100, 17));
+        expect(plan.structure_markers == std::vector<std::pair<sim::EntityId, std::uint32_t>>{{41, 6}},
+            "first matching tilted orbital remains selected among candidates");
+        const auto entry = take(campaign::build_space_entry(record, tilted, 100, 17));
+        const auto force = std::find_if(entry.conflict.forces.begin(), entry.conflict.forces.end(), [](const auto& f) { return f.parent == 41; });
+        expect(force != entry.conflict.forces.end(), "tilted orbital is created");
+        if (force != entry.conflict.forces.end()) {
+            const auto unit = std::find_if(entry.start.units.begin(), entry.start.units.end(), [&](const auto& u) { return u.state.entity_id == force->id; });
+            expect(unit != entry.start.units.end(), "tilted orbital enters the scene");
+            if (unit != entry.start.units.end()) {
+                const auto pose = std::find_if(plan.fixed_poses.begin(), plan.fixed_poses.end(), [&](const auto& p) { return p.first == force->id; });
+                expect(pose != plan.fixed_poses.end() && pose->second.orientation_degrees == orbital_angles
+                    && unit->state.position == orbital_position, "orbital retains authored position and full facing");
+                const auto frame = take(sim::math::to_matrix(unit->state.rotation, {}));
+                expect(!near(take(sim::math::transform_vector(frame, {{}, {}, whole(1)})), Vec3{{}, {}, whole(1)}),
+                    "orbital construction retains tilt");
+            }
+        }
+    }
+    for (const bool missing_position : {false, true}) {
+        auto invalid = input;
+        if (missing_position) invalid.map.placements[5].position.reset();
+        else invalid.map.placements[5].orientation_degrees.reset();
+        const auto entry = take(campaign::build_space_entry(record, invalid, 100, 17));
+        expect(std::none_of(entry.conflict.forces.begin(), entry.conflict.forces.end(), [](const auto& f) { return f.parent == 41; }),
+            "incomplete orbital pose skips the structure without aborting");
+    }
+    // A tilted force marker is a complete pose, not a missing one: the same forces deploy at the same markers.
+    for (const auto* name : {"Attacker Entry Position", "Defending Forces Position"}) {
+        for (const auto& angles_xy : {Vec3{whole(2), {}, whole(30)}, Vec3{{}, whole(11), whole(45)}}) {
+            auto tilted_force = input;
+            for (auto& p : tilted_force.map.placements) if (p.type == name) p.orientation_degrees = angles_xy;
+            const auto plan = take(campaign::prepare_space_entry(record, tilted_force, 100, 17));
+            expect(plan.conflict == prepared.conflict && plan.marker_draws == prepared.marker_draws
+                && plan.placements.size() == prepared.placements.size(),
+                "tilted force markers deploy the same forces as level markers");
+            bool same_markers = plan.placements.size() == prepared.placements.size();
+            for (std::size_t i = 0; same_markers && i < plan.placements.size(); ++i)
+                same_markers = plan.placements[i].force == prepared.placements[i].force
+                    && plan.placements[i].marker == prepared.placements[i].marker;
+            expect(same_markers, "tilted force markers are selected like level markers");
+            expect(static_cast<bool>(campaign::build_space_entry(record, tilted_force, 100, 17)), "tilted force marker does not abort entry");
+        }
+    }
+    {
+        auto tilted_all = input;
+        for (auto& p : tilted_all.map.placements) if (p.type == "Attacker Entry Position" || p.type == "Defending Forces Position")
+            p.orientation_degrees = Vec3{whole(2), whole(3), {}};
+        const auto plan = take(campaign::prepare_space_entry(record, tilted_all, 100, 17));
+        expect(plan.conflict == prepared.conflict && std::any_of(plan.conflict.forces.begin(), plan.conflict.forces.end(), [](const auto& f) {
+            return f.role == campaign::ForceRole::deployed; }), "all-tilted attacker and defender markers still deploy both sides");
+    }
+    // Death Star marker: tilt is kept, a missing or incomplete marker leaves the superweapon out without aborting.
+    {
+        auto tilted_ds = superweapon;
+        for (auto& p : tilted_ds.map.placements) if (p.type == "Death_Star_Position") p.orientation_degrees = Vec3{whole(2), whole(5), {}};
+        const auto tilted_plan = take(campaign::prepare_space_entry(record, tilted_ds, 100, 17));
+        expect(role(tilted_plan, 21) == campaign::ForceRole::deployed && tilted_plan.conflict.superweapon == 21,
+            "tilted Death Star marker still deploys the superweapon");
+        auto no_ds = flagged; no_ds.types[1].superweapon = true;
+        const auto none_plan = take(campaign::prepare_space_entry(record, no_ds, 100, 17));
+        expect(role(none_plan, 21) == campaign::ForceRole::retained && none_plan.conflict.superweapon == 0,
+            "missing Death Star marker keeps the superweapon out without aborting");
+        auto partial_ds = superweapon;
+        for (auto& p : partial_ds.map.placements) if (p.type == "Death_Star_Position") p.orientation_degrees.reset();
+        expect(role(take(campaign::prepare_space_entry(record, partial_ds, 100, 17)), 21) == campaign::ForceRole::retained,
+            "incomplete Death Star marker keeps the superweapon out without aborting");
+    }
+    for (const auto* name : {"Attacker Entry Position", "Defending Forces Position", "Weapon source"}) {
+        auto invalid = input;
+        for (auto& p : invalid.map.placements) if (p.type == name) p.position.reset();
+        expect(static_cast<bool>(campaign::build_space_entry(record, invalid, 100, 17)),
+            "incomplete entry or weapon marker does not abort the battle");
     }
     expect(std::all_of(prepared.placements.begin(), prepared.placements.end(), [](const auto& p) {
         return p.force != 20 && p.force != 22 ? true : p.marker == 4;
@@ -1081,8 +1174,24 @@ void scene_contracts() {
     const auto deferred = take(campaign::prepare_space_entry(record, transport_input, 100, 17));
     expect(marker_of(deferred, 20) == 1 && deferred.riders.front().force.carrier == 20,
         "all-deferred flagship passengers retain the same marker cursor");
-    auto absent_rating = transport_input; absent_rating.types[0].purchase_type = skirmish::type_id("Unbound_Source_Profile");
-    expect(!campaign::prepare_space_entry(record, absent_rating, 100, 17), "missing flagship source durability refuses admission");
+    {
+        // WGT-119: a type with no durability profile (no positive Tactical_Health) rates zero as a flagship. The entry
+        // starts with a note; it is not refused. It never becomes the flagship, and every other rating stands.
+        auto absent_rating = transport_input; absent_rating.types[0].purchase_type = skirmish::type_id("Unbound_Source_Profile");
+        auto unrated = campaign::prepare_space_entry(record, absent_rating, 100, 17);
+        expect(static_cast<bool>(unrated), "a flagship source with no durability profile does not refuse admission (WGT-119)");
+        expect(unrated && unrated.value().notes.size() == 1 && unrated.value().notes.front().find("no durability profile") != std::string::npos,
+            "the missing durability profile is reported once, as a note");
+        expect(stowed.notes.empty(), "an entry whose flagship sources all have profiles raises no note");
+    }
+    {
+        // A negative authored population reads as zero with a note; it does not refuse the entry.
+        auto negative = transport_input; negative.types[0].population = Fixed::from_raw(-Fixed::scale);
+        auto admitted = campaign::prepare_space_entry(record, negative, 100, 17);
+        expect(static_cast<bool>(admitted), "a negative population does not refuse admission");
+        expect(admitted && std::any_of(admitted.value().notes.begin(), admitted.value().notes.end(),
+            [](const auto& note) { return note.find("negative population") != std::string::npos; }), "a negative population is reported as a note");
+    }
     transport_input.types[0].source_flagship_rating = Fixed{};
     const auto zero = take(campaign::prepare_space_entry(record, transport_input, 100, 17));
     expect(zero.riders.front().force.carrier == 21 && marker_of(zero, 22) == 4,
@@ -1295,6 +1404,33 @@ void formation_stage_contracts() {
     const_cast<units::UnitType*>(tables.find("Ship"))->campaign_ship_class="corvette";
     auto led=make({{20,1,1,10},{21,8,1,10}});
     expect(close(sim::math::add(position(led,21).x,whole(1000)).value(),"2.82842712474619"),"corvette core preserves the intentional empty screen bucket and leads fighters");
+    {
+        // EGT-S3-Q01 (debug build): a Ship_Class word outside the table leaves the class unset and form-up gives it no bucket.
+        // The entry still starts; the object keeps the pose it was created with, the fleet's other buckets lay out as if it
+        // were absent, and the entry says so once.
+        const_cast<units::UnitType*>(tables.find("Ship"))->campaign_ship_class="Gunship";
+        const auto unclassed=make({{20,1,1,10},{22,8,1,10}});
+        const auto alone=make({{22,8,1,10}});
+        const_cast<units::UnitType*>(tables.find("Ship"))->campaign_ship_class="corvette";
+        const auto corvette=make({{20,1,1,10},{22,8,1,10}});
+        // The defender's lone ship (70) shares the unknown word, so `alone` carries that one note too.
+        expect(corvette.notes.empty(), "a valid Ship_Class word raises no form-up note");
+        expect(unclassed.notes.size()==1 && unclassed.notes.front().find("Gunship")!=std::string::npos,
+            "an unknown Ship_Class word is reported once instead of refusing the entry");
+        expect(position(unclassed,22)==position(alone,22), "the other buckets lay out as if the unclassed ship were absent");
+        expect(position(unclassed,22)!=position(corvette,22), "an unknown Ship_Class does not form up as a corvette");
+        expect(std::any_of(unclassed.start.units.begin(),unclassed.start.units.end(),[](const auto& u){return u.state.entity_id==20;}),
+            "the unclassed ship is still in the battle at its creation pose");
+        // The land words share the space values: infantry forms up as a fighter, tank as a frigate, walker as a capital.
+        for(const auto& [word,expected] : {std::pair{"infantry","fighter"},{"tank","frigate"},{"walker","capital"},{"artillery","transport"}}) {
+            const_cast<units::UnitType*>(tables.find("Ship"))->campaign_ship_class=word;
+            const auto aliased=make({{20,1,1,10},{22,8,1,10}});
+            const_cast<units::UnitType*>(tables.find("Ship"))->campaign_ship_class=expected;
+            const auto named=make({{20,1,1,10},{22,8,1,10}});
+            expect(aliased.notes.empty() && position(aliased,20)==position(named,20) && position(aliased,22)==position(named,22),
+                std::string("Ship_Class ")+word+" forms up like "+expected);
+        }
+    }
 }
 
 void mixed_class_contracts() {
@@ -1371,6 +1507,41 @@ void garrison_contracts() {
     auto legacy=tables; legacy.campaign_scene=false; legacy.campaign_ability_locks={{1,"Commander","Defense",false}};
     auto unchanged=legacy; unchanged.campaign_ability_locks.clear(); unchanged.units.back().campaign_ship_class="super"; unchanged.units.back().production.battlefield_bonuses={{"x",0,whole(1),{},true,true}};
     expect(units::canonical_encoding(legacy)==units::canonical_encoding(unchanged),"ordinary skirmish content encoding excludes every opt-in campaign extension");
+}
+
+// #5527: a spawn entry naming a FIGHTER_LOCOMOTOR type that is no Squadron (kind craft, like BFC's
+// Raider_Corvette) is one single ship, not a squadron: it takes the free-spot launch (WSL-16), so two of them
+// leave the bay side by side instead of on the same point. A real Squadron entry stays a squadron entry.
+void craft_spawn_entry_is_single_ship() {
+    auto tables = tables_for_entry();
+    auto raider = *tables.find("Craft"); raider.id = "Raider";
+    tables.units.push_back(raider);
+    auto* station = const_cast<units::UnitType*>(tables.find("Station"));
+    station->spawner->starting = {{"Squadron", units::no_index, 1}, {"Raider", units::no_index, 2}};
+    station->spawner->reserves = {};
+    const auto motion = take(units::motion_table(tables));
+    const auto* profile = motion.squadrons.find_spawner(skirmish::type_id("Station"), 2);
+    expect(profile != nullptr && profile->entries.size() == 2 && !profile->entries[0].ship
+        && profile->entries[1].ship && profile->entries[1].squadron == skirmish::type_id("Raider")
+        && profile->entries[1].starting == 2 && !profile->entries[1].arrival,
+        "#5527: a non-Squadron craft spawn entry is one single ship launched by the free-spot search");
+}
+
+// #5527: a craft-kind entry without a CraftProfile (no Max_Speed/turn rate, so it cannot fly) has no solo
+// squadron either; it stays skipped as before instead of becoming a flightless ship row.
+void craft_without_profile_stays_skipped() {
+    auto tables = tables_for_entry();
+    auto ghost = *tables.find("Craft"); ghost.id = "Ghost";
+    ghost.movement.max_speed.reset(); ghost.movement.max_rate_of_turn.reset();
+    tables.units.push_back(ghost);
+    auto* station = const_cast<units::UnitType*>(tables.find("Station"));
+    station->spawner->starting = {{"Squadron", units::no_index, 1}, {"Ghost", units::no_index, 2}};
+    station->spawner->reserves = {};
+    const auto motion = take(units::motion_table(tables));
+    const auto* profile = motion.squadrons.find_spawner(skirmish::type_id("Station"), 2);
+    expect(profile != nullptr && profile->entries.size() == 1 && !profile->entries[0].ship
+        && profile->entries[0].squadron == skirmish::type_id("Squadron"),
+        "#5527: a craft entry without a CraftProfile makes no spawn row");
 }
 
 // #3956 / WSL-16, WSL-16a, WGT-10: a campaign station also launches a ship type (no squadron members) as one
@@ -1517,6 +1688,8 @@ void station_ship_blocked_contract() {
 }
 
 void station_ship_spawn_contracts() {
+    craft_spawn_entry_is_single_ship();
+    craft_without_profile_stays_skipped();
     station_ship_spawn_scenario("Tartan", true, 2);        // level-2 station: a Hyperspace=Yes ship hyperspaces in
     station_ship_spawn_scenario("Acclamator", true, 4);    // level-4 station row: a Hyperspace=Yes ship, same rule
     station_ship_spawn_scenario("Tartan", false, 2);       // a modded Hyperspace=no flips it to the bay launch

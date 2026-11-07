@@ -1,4 +1,5 @@
 #include "eawr/battle/start.hpp"
+#include "eawr/vfs/vfs.hpp"
 #include "eawr/core/load_profile.hpp"
 #include "live_session_view.hpp"
 #include "eawr/presentation/ui/pads.hpp"
@@ -55,10 +56,25 @@ bool LiveSessionView::squadron_launched(const sim::EntityId container) const {
     return found != instances.end() && found->entity_id == container && found->garrison_unit;
 }
 
+namespace {
+// The label a composed slot is counted under in the opt-in load detail (--eawr-load-detail).
+std::string_view source_label(const battle::ArrivalSource source) {
+    switch (source) {
+        case battle::ArrivalSource::launch: return "launch";
+        case battle::ArrivalSource::purchase: return "purchase";
+        case battle::ArrivalSource::reinforcement_pool: return "reinforcement_pool";
+        case battle::ArrivalSource::station_spawn: return "station_spawn";
+        case battle::ArrivalSource::ability_object: return "ability_object";
+    }
+    return "unknown";
+}
+} // namespace
+
 void LiveSessionView::add_launch_slot(const vfs::Vfs& filesystem, const data::Catalog& catalog,
     const std::string& model, const battle::StartUnit& near,
     const std::optional<battle::LobbyColour>& colour, const tactical::TypeId required_station,
-    const bool ability_proxy_owner) {
+    const bool ability_proxy_owner, const std::string_view source) {
+    core::load_profile::slot_composed(source, model);
     constexpr sim::EntityId first_slot_entity = std::numeric_limits<sim::EntityId>::max() / 4U;
     BattleScene::PlacedUnit ship;
     ship.object_id = model;
@@ -81,6 +97,7 @@ void LiveSessionView::add_launch_slot(const vfs::Vfs& filesystem, const data::Ca
     else if (colour) ship.team_colour = colour->rgb;
     launch_slots_.push_back({battle::type_id(model), placed_ships_.size(), false, std::nullopt,
                              required_station, near.state.owner, false});
+    launch_slot_types_.insert(launch_slots_.back().type);
     placed_ships_.push_back(std::move(ship));
 }
 
@@ -90,6 +107,7 @@ void LiveSessionView::prepare_launch_slots(const vfs::Vfs& filesystem, const dat
     arrival_slots_.filesystem = &filesystem;
     arrival_slots_.catalog = &catalog;
     arrival_slots_.plan = std::move(*selected);
+    launch_demand_valid_ = false; // plan.rows changes only in this function (assign, erase_if/push_back, plan.add)
     const bool campaign = !options_.land && setup_ && setup_->campaign;
     if (campaign && motion()) {
         // The sim's selected owner-tech profiles include hangars on carriers
@@ -167,7 +185,8 @@ void LiveSessionView::prepare_launch_slots(const vfs::Vfs& filesystem, const dat
                               const battle::ArrivalSource source = battle::ArrivalSource::station_spawn) {
         arrival_slots_.plan.add(near.state.owner, model, 1, ability_proxy_owner
             ? battle::ArrivalSource::ability_object : source, near.state.entity_id);
-        add_launch_slot(filesystem, catalog, model, near, colour, required_station, ability_proxy_owner);
+        add_launch_slot(filesystem, catalog, model, near, colour, required_station, ability_proxy_owner,
+            source_label(ability_proxy_owner ? battle::ArrivalSource::ability_object : source));
     };
     // A preview belongs to a selectable reserve type, independently of purchase menus.
     std::set<tactical::TypeId> preview_types;
@@ -220,7 +239,8 @@ void LiveSessionView::prepare_launch_slots(const vfs::Vfs& filesystem, const dat
         const auto count = campaign ? std::size_t{1} : std::min(demand.simultaneous_maximum, warm_launches);
         for (std::size_t index = 0; index < count; ++index)
             add_launch_slot(filesystem, catalog, demand.type, anchor,
-                owner != start_->players.end() ? owner->colour : std::optional<battle::LobbyColour>{});
+                owner != start_->players.end() ? owner->colour : std::optional<battle::LobbyColour>{}, 0, false,
+                source_label(demand.source));
     }
     // PU-10/SAE-03: purchased units enter after tick zero, so both human and AI players get slots
     // composed with the start: per available unit of its faction's menus, as many as fit its
@@ -322,7 +342,8 @@ void LiveSessionView::prepare_launch_slots(const vfs::Vfs& filesystem, const dat
                 ? std::size_t{1} : demand.simultaneous_maximum;
             for (std::size_t index = 0; index < count; ++index)
                 add_launch_slot(filesystem, catalog, demand.type, anchor,
-                    owner != start_->players.end() ? owner->colour : std::optional<battle::LobbyColour>{});
+                    owner != start_->players.end() ? owner->colour : std::optional<battle::LobbyColour>{}, 0, false,
+                    source_label(demand.source));
         }
     }
     // WAB-71/75: ability-created units already reach the snapshot. Reserve reusable visual
@@ -431,7 +452,8 @@ bool LiveSessionView::warm_campaign_slots(BattleScene& population, GodotRenderer
         for (std::size_t count = existing->second.existing; count < row.admitted; ++count) {
             const auto ship = placed_ships_.size();
             add_launch_slot(filesystem, catalog, row.type, anchor,
-                owner != start_->players.end() ? owner->colour : std::optional<battle::LobbyColour>{});
+                owner != start_->players.end() ? owner->colour : std::optional<battle::LobbyColour>{}, 0, false,
+                "campaign_warm");
             if (auto clone = prepare_death_clone(filesystem, catalog, ship, placed_ships_[ship].live_entity)) {
                 launch_slots_.back().clone = launch_clones_.size();
                 launch_clones_.push_back(std::move(*clone));
@@ -573,6 +595,34 @@ LiveSessionView::LaunchSlot& LiveSessionView::bind_slot_identity(const sim::Enti
     return *home;
 }
 
+// Whether grow_launch_slot's `launch` test holds: some `launch` row of the plan for this owner whose type CRC equals
+// `type`. The set holds the same CRC TypeIds the original any_of compared, so a CRC collision matches exactly as before.
+bool LiveSessionView::launch_demanded(const tactical::PlayerId owner, const tactical::TypeId type) {
+    if (!launch_demand_valid_) {
+        launch_demand_.clear();
+        for (const auto& row : arrival_slots_.plan.rows) {
+            if (row.source == battle::ArrivalSource::launch) launch_demand_.emplace(row.owner, battle::type_id(row.type));
+        }
+        launch_demand_valid_ = true;
+    }
+    return launch_demand_.contains({owner, type});
+}
+
+// A squadron type with members never gets a slot (grow_launch_slot returns before add_launch_slot for it); when no slot
+// of that type exists either, the slot scan in ship_of finds nothing.
+bool LiveSessionView::container_without_slot(const tactical::TypeId type) const {
+    if (launch_slot_types_.contains(type)) return false;
+    const auto named = presentation_types_.find(type);
+    return named != presentation_types_.end() && named->second->kind == units::UnitKind::squadron && !named->second->members.empty();
+}
+
+// Opt-in load detail: the type of a unit that first got a drawn ship (initial units are noted by their battle source).
+void LiveSessionView::note_spawned(const tactical::TypeId type) const {
+    if (!core::load_profile::census) return;
+    if (const auto named = presentation_types_.find(type); named != presentation_types_.end())
+        core::load_profile::unit_spawned(named->second->id);
+}
+
 std::optional<std::size_t> LiveSessionView::ship_of(const sim::EntityId entity, const tactical::TypeId type,
                                                 const tactical::PlayerId owner) {
     const auto drawn = [&](const std::size_t ship) -> std::optional<std::size_t> {
@@ -586,6 +636,12 @@ std::optional<std::size_t> LiveSessionView::ship_of(const sim::EntityId entity, 
     };
     if (const auto found = ship_of_entity_.find(entity); found != ship_of_entity_.end()) return drawn(found->second);
     if (const auto found = launched_ship_of_entity_.find(entity); found != launched_ship_of_entity_.end()) return drawn(found->second);
+    if (container_without_slot(type)) {
+        // The original path from here: the scan finds no slot, grow_launch_slot returns nullopt before any write (a
+        // container), `container` skips the undrawn insert; the one write left is the slotless note.
+        slotless_hits_[{owner, type}].insert(entity);
+        return std::nullopt;
+    }
     for (LaunchSlot& candidate : launch_slots_) {
         // The model and its death clone were composed with this owner's lobby colour.
         if (candidate.bound || candidate.type != type || candidate.station_owner != owner || candidate.required_station != 0) continue;
@@ -599,6 +655,7 @@ std::optional<std::size_t> LiveSessionView::ship_of(const sim::EntityId entity, 
         }
         slot.bound = true;
         launched_ship_of_entity_.emplace(entity, slot.ship);
+        note_spawned(type);
         real_peak_ = std::max(real_peak_, launched_ship_of_entity_.size());
         if (slot.clone) death_clones_.emplace(entity, launch_clones_[*slot.clone]);
         return drawn(slot.ship);
@@ -607,6 +664,7 @@ std::optional<std::size_t> LiveSessionView::ship_of(const sim::EntityId entity, 
         auto& slot = launch_slots_.back();
         slot.bound = true;
         launched_ship_of_entity_.emplace(entity, *ship);
+        note_spawned(type);
         bind_slot_identity(entity, slot, type, owner);
         real_peak_ = std::max(real_peak_, launched_ship_of_entity_.size());
         if (slot.clone) death_clones_.emplace(entity, launch_clones_[*slot.clone]);
@@ -629,9 +687,7 @@ std::optional<std::size_t> LiveSessionView::grow_launch_slot(const sim::EntityId
     const tactical::TypeId type, const tactical::PlayerId owner) {
     // Planned launches may outgrow the warm pool. Purchase provenance remains
     // necessary for other skirmish types; a shared menu entry alone is insufficient.
-    const bool launch = std::any_of(arrival_slots_.plan.rows.begin(), arrival_slots_.plan.rows.end(),
-        [&](const auto& row) { return row.source == battle::ArrivalSource::launch
-            && row.owner == owner && battle::type_id(row.type) == type; });
+    const bool launch = launch_demanded(owner, type);
     // A launched craft must be drawn in the frame it launches: planned launches are exempt from the per-frame
     // arrival budget (their count is bounded by the plan's simultaneous maximum; warm_launches sets how many are
     // composed at load). Only purchases and reinforcement pools wait for the budget.
@@ -675,7 +731,9 @@ std::optional<std::size_t> LiveSessionView::grow_launch_slot(const sim::EntityId
         }
     }
     add_launch_slot(*arrival_slots_.filesystem, *arrival_slots_.catalog, named->id, anchor,
-        colour != start_->players.end() ? colour->colour : std::optional<battle::LobbyColour>{}, 0, proxy_owner);
+        colour != start_->players.end() ? colour->colour : std::optional<battle::LobbyColour>{}, 0, proxy_owner,
+        source_label(launch ? battle::ArrivalSource::launch : battle::ArrivalSource::purchase));
+    core::load_profile::slot_grown(launch ? "launch" : "purchase");
     const auto slot_index = launch_slots_.size() - 1;
     if (auto clone = prepare_death_clone(*arrival_slots_.filesystem, *arrival_slots_.catalog, first_ship, entity)) {
         launch_slots_[slot_index].clone = launch_clones_.size();

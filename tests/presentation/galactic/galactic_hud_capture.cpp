@@ -9,6 +9,7 @@
 #include "eawr/sim/galactic/victory.hpp"
 #include "black_market_hud_fixture.hpp"
 #include "capture_hud_fixture.hpp"
+#include "clock_capture_pair.hpp"
 #include "corruption_hud_fixture.hpp"
 #include "destruction_hud_fixture.hpp"
 #include "fleet_hud_fixture.hpp"
@@ -17,8 +18,10 @@
 #include "hud_clock_fixture.hpp"
 #include "history_hud_fixture.hpp"
 #include "orbit_hud_fixture.hpp"
+#include "stock_hero_place.hpp"
 #include "weapon_action_hud_fixture.hpp"
 #include "weapon_action_live_fixture.hpp"
+#include <godot_cpp/classes/engine.hpp>
 
 #include <algorithm>
 #include <array>
@@ -98,11 +101,15 @@ public:
     bool configure_score(GalacticMode::State& state, platform::LiveGameSession::Options& live) override;
     bool run_score_ledger(GalacticMode::State& state) override;
 private:
+    void stage_steal(GalacticMode::State& state);
     std::string name_;
     bool synthetic_{};
+    sim::galactic::PlanetId steal_target_{};
+    bool steal_published_{};
     double corruption_fixture_seconds{};
     galactic_view::BattleDialogView battle_dialog_fixture;
     bool score_ledger_script{};
+    std::unique_ptr<ClockCapturePair> clock_pair_;
 };
 
 bool CaptureHudFixture::enabled(Feature feature) const {
@@ -139,6 +146,18 @@ bool CaptureHudFixture::configure_scene(GalacticMode::State& state, galactic_vie
         map_input.gates.tutorial_locked = true; // Explicit runtime fixture, never live campaign permissions.
     if (options.campaign == galactic_view::synthetic_campaign && !options.synthetic_battle && !options.hud_fixture.empty())
         galactic_view::configure_synthetic_hud_clock(galaxy_setup);
+
+    if (synthetic_ && name_.starts_with("clock-mp-")) {
+        const bool coop = name_ == "clock-mp-coop";
+        const std::uint32_t other = coop ? 2U : 3U;
+        options.seat = name_ == "clock-mp-host" ? 1U : other;
+        for (auto& seat : snapshot.seats) if (seat.human && seat.id != 1U && seat.id != other) {
+            seat.human = false; seat.active = coop && seat.id == 3U;
+        }
+        for (auto& seat : galaxy_setup.seats) if (seat.kind == sim::SeatKind::human && seat.seat_id.value != 1U && seat.seat_id.value != other) {
+            seat.kind = sim::SeatKind::ai; seat.active = coop && seat.seat_id.value == 3U; seat.human_side_id = 0;
+        }
+    }
 
     return true;
 }
@@ -431,7 +450,51 @@ bool CaptureHudFixture::orbit(GalacticMode::State& state) {
     return true;
 }
 
+// "steal-stock" on a named campaign: an ordinary move stands in for the player's own drag to an Underworld planet (no
+// ability, no prepared state, nothing listed by hand). The rest of the owner's steps stay real mouse input. When the
+// team orbits there, the driver is told which icon to drag.
+void CaptureHudFixture::stage_steal(GalacticMode::State& state) {
+    if (steal_published_ || !state.game || !state.galaxy || !state.published_snapshot || !state.content) return;
+    const auto& snapshot = *state.published_snapshot;
+    const auto player = state.galaxy->local.player;
+    const auto bearer = std::find_if(state.production_names.begin(), state.production_names.end(),
+        [](const auto& row) { return row.second == "Droid_R2D2"; });
+    if (bearer == state.production_names.end()) return;
+    const auto place = eawr::testing::galactic::find_hero_place(snapshot, player, bearer->first);
+    if (!place) return;
+    if (!steal_target_) {
+        const auto owners = std::find_if(state.content->snapshot.players.begin(), state.content->snapshot.players.end(),
+            [](const auto& row) { return row.faction == "Underworld"; });
+        if (owners == state.content->snapshot.players.end()) return;
+        const auto planets = state.input_planets();
+        std::vector<sim::galactic::PlanetId> route;
+        for (const auto& planet : planets) {
+            if (planet.allegiance != owners->id) continue;
+            const auto path = galactic_view::destination_path(snapshot, player, place->planet, planet.id, planets);
+            if (path && (route.empty() || path->size() < route.size())) route = *path;
+        }
+        if (route.empty()) return; // Waits for the observer, as the map does.
+        std::optional<sim::galactic::CommandPayload> move;
+        if (place->fleet) {
+            if (const auto intent = galactic_view::fleet_destination_intent(snapshot, player, place->dragged, route.back(), planets, {}))
+                move = state.map_input.command(*intent, planets);
+        } else move = sim::galactic::LaunchFleet{{place->dragged}, route, std::nullopt, 0};
+        if (!move) return;
+        steal_target_ = route.back();
+        state.game->submit(platform::LiveGameOrder{sim::SeatId{state.galaxy->local.seat}, std::move(*move), {}});
+        return;
+    }
+    if (!place->fleet || place->transit || place->planet != steal_target_) return;
+    for (const auto& [key, badge] : state.fleet_badges) {
+        if (key.first != steal_target_ || !badge.button || badge.owner != player || !badge.button->is_visible_in_tree()) continue;
+        steal_published_ = true;
+        Engine::get_singleton()->set_meta("eawr_steal_stage", String::num_uint64(steal_target_) + " " + String(badge.button->get_name()));
+        return;
+    }
+}
+
 bool CaptureHudFixture::configure_hud(GalacticMode::State& state) {
+    if (!synthetic_ && name_ == "steal-stock") return true; // A stock campaign stays stock: no stub HUD facts.
     if (synthetic_ && name_ == "hero-map-respawn") return true; // Uses actual owner publications, not stub HUD facts.
     auto& options = state.options;
     auto& failure = state.failure;
@@ -449,12 +512,12 @@ bool CaptureHudFixture::configure_hud(GalacticMode::State& state) {
                 && options.hud_fixture != "known" && options.hud_fixture != "masked" && options.hud_fixture != "history"
                 && options.hud_fixture != "known-zero" && options.hud_fixture != "discovered-only"
                 && options.hud_fixture != "production" && options.hud_fixture != "production-unlocks"
-                && options.hud_fixture != "capture-live" && !galactic_view::fleet_hud_fixture(options.hud_fixture)
+                && options.hud_fixture != "capture-live" && !options.hud_fixture.starts_with("clock-mp-") && !galactic_view::fleet_hud_fixture(options.hud_fixture)
                 && options.hud_fixture != "radar-locked"
                 && options.hud_fixture != "corruption" && options.hud_fixture != "corruption-clean"
                 && !options.hud_fixture.starts_with("corruption-spread")
                 && options.hud_fixture != "corruption-gaps" && options.hud_fixture != "corruption-locked"
-                && options.hud_fixture != "theft" && options.hud_fixture != "theft-single"
+                && options.hud_fixture != "theft" && options.hud_fixture != "theft-single" && options.hud_fixture != "theft-many"
                 && options.hud_fixture != "neutralization" && options.hud_fixture != "hack" && options.hud_fixture != "hack-poor"
                 && options.hud_fixture != "hack-fractional"
                 && !galactic_view::weapon_action_live_fixture(options.hud_fixture)
@@ -490,6 +553,7 @@ void CaptureHudFixture::update_hud(GalacticMode::State& state) {
     auto& audio = state.audio;
     auto& command_catalog = state.command_catalog;
     auto& hud_updates = state.hud_updates;
+    if (!synthetic_ && name_ == "steal-stock") stage_steal(state);
     if (synthetic_ && name_ == "audio-mixer" && audio) {
         if (hud_updates == 5) audio->ui_sound("GUI_Dial_Switch_SFX");
         if (hud_updates == 10) audio->ui_sound("Unit_Fleet_Move_Star_Destroyer");
@@ -586,8 +650,8 @@ bool CaptureHudFixture::battle_dialog(GalacticMode::State& state) {
         }
         if (options.hud_fixture == "battle-invasion") { view.invasion_fleet = 80; view.invasion_planet = 101; }
         view.display_seconds = 10; view.elapsed_seconds = 2;
-        view.sides[0] = {"Empire", "", {0.9F, 0.2F, 0.2F}, {"Imperial Star Destroyer", "TIE Fighter", "TIE Fighter", "TIE Bomber", "TIE Scout"}};
-        view.sides[1] = {"Rebel Alliance", "", {0.2F, 0.9F, 0.2F}, {"Mon Calamari Cruiser", "X-wing"}};
+        view.sides[0] = {"Empire", "", {0.9F, 0.2F, 0.2F}, {"Imperial Star Destroyer", "TIE Fighter", "TIE Fighter", "TIE Bomber", "TIE Scout"}, {}, {}};
+        view.sides[1] = {"Rebel Alliance", "", {0.2F, 0.9F, 0.2F}, {"Mon Calamari Cruiser", "X-wing"}, {}, {}};
         view.results.losses[0] = {{"TIE_Fighter", "TIE Fighter", 2}};
         view.results.losses[1] = {{"X_Wing", "X-wing", 3}};
         view.results.totals = {2, 3}; view.results.combat_power = {20, 60};
@@ -701,6 +765,12 @@ bool CaptureHudFixture::configure_score(GalacticMode::State& state, platform::Li
 
     const auto fixture = parse_score_fixture(options.hud_fixture);
     if (options.campaign != galactic_view::synthetic_campaign) return true;
+    if (name_.starts_with("clock-mp-")) {
+        clock_pair_ = std::make_unique<ClockCapturePair>();
+        const sim::SeatId other{name_ == "clock-mp-coop" ? 2U : 3U};
+        const net::PeerIndex local = name_ == "clock-mp-host" ? 0U : 1U;
+        if (!clock_pair_->start(galaxy_setup, other, local, live, options.lan_match, failure)) return false;
+    }
     if (options.hud_fixture == "hero-map-respawn") {
         // Explicit synthetic defeat inputs; the production owner schedules and publishes them.
         // No test-only material, progress uniform or direct viewer schedule injection.

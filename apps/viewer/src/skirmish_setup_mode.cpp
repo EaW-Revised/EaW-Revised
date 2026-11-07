@@ -1,10 +1,14 @@
+#include "revised_layer.hpp"
+#include "eawr/vfs/vfs.hpp"
 #include "viewer_load_notes.hpp"
 #include "eawr/battle/start.hpp"
 #include "eawr/core/text.hpp"
 #include "skirmish_setup_mode.hpp"
 #include "menu_timeline.hpp"
+#include "setup_profile_policy.hpp"
 
 #include <cstdio>
+#include "lan_instance_options.hpp"
 #include "lan_lobby_screen.hpp"
 #include "lan_broadcast_source.hpp"
 #include "battle_content.hpp"
@@ -25,6 +29,7 @@
 #include "eawr/data/ui/dialog_catalog.hpp"
 #include "eawr/data/ui/text_database.hpp"
 #include "eawr/presentation/ui/fonts.hpp"
+#include "eawr/presentation/ui/faction_display.hpp"
 #include "eawr/presentation/ui/layout.hpp"
 #include "eawr/presentation/ui/player_profile.hpp"
 #include "eawr/presentation/ui/skirmish_setup.hpp"
@@ -63,7 +68,6 @@ namespace model = presentation::ui;
 namespace {
 // The LAN panel's address field starts on the port a hosted match listens on (src/platform/net/lan_match.hpp).
 constexpr std::string_view default_lan_endpoint = "127.0.0.1:47624";
-constexpr std::uint16_t default_lan_port = 47624;
 
 String text(std::string_view value) { return String::utf8(value.data(), static_cast<int64_t>(value.size())); }
 // The Land game type is playable only under the land skirmish build option; land control never is.
@@ -269,7 +273,7 @@ void SkirmishSetupMode::State::resolve_factions() {
     faction_captions.clear();
     for (const auto& entry : skirmish::setup_factions(*catalog)) {
         faction_names.push_back(entry.name);
-        faction_captions.push_back(entry.text_id.empty() ? entry.name : lookup(entry.text_id));
+        faction_captions.push_back(model::faction_display_name(*catalog, text_lookup ? &*text_lookup : nullptr, entry.name));
     }
     // The local player's name: the OS account stands in for the profile name until a profile page exists.
     for (const char* variable : {"USERNAME", "USER"}) {
@@ -298,6 +302,7 @@ bool SkirmishSetupMode::State::load() {
     roots.emplace_back("expansion", expansion);
     roots.emplace_back("base", base);
     MenuTimeline::mark("setup_load_begin");
+    mount_revised_layer(roots);
     auto chain = vfs::resolve_manifest_chain(roots);
     if (!chain) { failure = core::format_diagnostic(chain.error()); return false; }
     MenuTimeline::mark("manifest_chain_resolved");
@@ -321,7 +326,7 @@ bool SkirmishSetupMode::State::load() {
     }
     catalog = std::make_shared<const data::Catalog>(std::move(objects.value().catalog));
     MenuTimeline::mark("catalog_loaded");
-    content = std::make_shared<const BattleContent>(BattleContent{filesystem, catalog, profile, std::move(layers)});
+    content = std::make_shared<const BattleContent>(BattleContent{filesystem, catalog, profile, std::move(layers), options.game_root, options.mod_root});
     auto colours = skirmish::read_lobby_colours(*filesystem);
     if (!colours) { failure = colours.error().message; return false; }
     palette = std::move(colours).value();
@@ -446,10 +451,11 @@ bool SkirmishSetupMode::State::load() {
         && (!lan_acceptance || gc_acceptance_campaign.empty() || !gc_acceptance_ticks || gc_acceptance_out.empty())) {
         failure = "GC acceptance needs --eawr-lan-acceptance, an output directory and final tick"; return false;
     }
-    // The profile belongs to an interactive run: fixtures, captures, reports and LAN smoke runs keep the defaults.
-    profile_live = profile_named || (!test && !two_vs_two && !three_players && !policy_test && !layout_test && !benchmark
-        && options.report_path.empty() && options.capture_path.empty() && lan_test.empty() && !lan_smoke
-        && !lan_host_port && lan_join_endpoint.empty());
+    // The launcher always requests a report; that does not make its interactive front end a fixture.
+    const bool synthetic_profile = options.front_end_fixture || test || two_vs_two || three_players || policy_test || layout_test || benchmark
+        || !lan_test.empty() || lan_smoke || lan_host_port.has_value() || !lan_join_endpoint.empty();
+    profile_live = setup_uses_player_profile(profile_named, options.live_front_end, !options.report_path.empty(),
+                                             !options.capture_path.empty(), synthetic_profile);
     if (profile_live) {
         auto loaded = profile_store.load();
         for (const auto& note : loaded.notes) UtilityFunctions::print("EAWR setup profile note: ", text(note));
@@ -1162,8 +1168,12 @@ void SkirmishSetupMode::State::process_lan() {
             if (lan_host_port) {
                 lan->host(*lan_host_port);
                 const auto& campaigns = backend->campaigns();
+                const auto* hostable = eawr::campaign::first_hostable_lobby_campaign(campaigns);
+                if (gc_acceptance_campaign == "auto" && hostable == nullptr) {
+                    failure = "No installed campaign has a playable faction"; return;
+                }
                 const auto selected_campaign = std::find_if(campaigns.begin(), campaigns.end(), [&](const auto& row) {
-                    return gc_acceptance_campaign == "auto" || row.name == gc_acceptance_campaign;
+                    return gc_acceptance_campaign == "auto" ? &row == hostable : row.name == gc_acceptance_campaign;
                 });
                 if (selected_campaign == campaigns.end()) { failure = "GC acceptance campaign is not in the multiplayer list"; return; }
                 const std::uint64_t seed = gc_acceptance_seed.value_or(net::draw_galactic_session_seed());
@@ -1174,6 +1184,7 @@ void SkirmishSetupMode::State::process_lan() {
             } else lan->join(lan_join_endpoint);
         }
         lan->pump_setup({});
+        if (lan->view().mod_review_pending) lan->accept_mod_review(); // The scripted guest has no one to answer the prompt.
         const auto room = lan->lobby_state();
         const auto view = lan->view();
         const bool log = now >= gc_acceptance_next_log;
@@ -1265,7 +1276,7 @@ void SkirmishSetupMode::State::process_lan() {
         lan->configure_factions(scene::faction_order(*catalog));
     }
     if (lan_host->is_pressed()) {
-        lan_host->set_pressed_no_signal(false); lan->set_port_mapping(lan_port_mapping->is_pressed()); lan->host(default_lan_port);
+        lan_host->set_pressed_no_signal(false); lan->set_port_mapping(lan_port_mapping->is_pressed()); lan->host(lan_game_port_argument());
     }
     if (lan_join->is_pressed()) {
         lan_join->set_pressed_no_signal(false); editing.reset(); options_panel->hide();
@@ -1921,6 +1932,7 @@ void SkirmishSetupMode::enter_online(model::NetworkSettings settings) {
     EawrLanLobby::Options options; options.content = state.content;
     options.game_root = state.options.game_root; options.mod_root = state.options.mod_root; options.profile = state.options.profile;
     options.online_settings = std::move(settings);
+    options.game_port = lan_game_port_argument();
     options.lan_source_factory = [](std::string& failure) {
         BroadcastLobbySource::Options discovery;
         discovery.menu_chat_limits = true;

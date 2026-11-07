@@ -2,6 +2,7 @@
 // FW-14): the constants, the grid, the per-cell fade, the border ring, the blur and the ramp.
 
 #include "../../support/check.hpp"
+#include "eawr/data/xml.hpp"
 #include "eawr/presentation/space/fog_field.hpp"
 
 #include <algorithm>
@@ -253,6 +254,48 @@ void test_settled_presentation_budget() {
     expect(fog.presented_cells() > after_fade && fog.changed(), "a palette switch redraws an unchanged intensity grid");
 }
 
+void test_overlay_mask_cache() {
+    space::FogField fog = field();
+    const std::vector<space::FogFieldRevealer> all{{0.0, 0.0, 5000.0}};
+    for (int frame = 0; frame < 20; ++frame) fog.advance(all, 1.0);
+    std::vector<double> sources{0.0};
+    std::size_t queries = 0;
+    const auto install = [&] {
+        fog.set_deployment_overlay(true, [&](double x, double y) {
+            ++queries;
+            return std::any_of(sources.begin(), sources.end(), [&](double source) {
+                return (x - source) * (x - source) + y * y <= 150.0 * 150.0;
+            });
+        });
+    };
+    install();
+    const auto first = queries;
+    fog.advance(all, 0.0);
+    expect(queries == first, "unchanged overlay reuses the blocked mask");
+    expect(fog.intensity(10, 10) < 255, "source blocks its centre");
+    sources[0] = 500.0;
+    install();
+    expect(fog.intensity(10, 10) == 255 && fog.intensity(15, 10) < 255, "moving a source refreshes the mask");
+    sources.push_back(0.0);
+    install();
+    expect(fog.intensity(10, 10) < 255, "adding a source refreshes the mask");
+    sources.clear();
+    install();
+    expect(fog.intensity(10, 10) == 255 && fog.intensity(15, 10) == 255, "removing sources refreshes the mask");
+
+    // A cell that was fogged when the mask was installed must be evaluated when it clears.
+    space::FogField later = field();
+    std::size_t later_queries = 0;
+    later.set_deployment_overlay(true, [&](double x, double y) {
+        ++later_queries;
+        return x * x + y * y <= 150.0 * 150.0;
+    });
+    expect(later_queries == 0, "fogged cells defer the placement verdict");
+    for (int frame = 0; frame < 20; ++frame) later.advance(all, 1.0);
+    expect(later_queries > 0 && later.intensity(10, 10) < 255 && later.intensity(15, 10) == 255,
+           "newly revealed cells receive the current placement verdict");
+}
+
 void test_settled_shared_row_updates() {
     const space::FogFieldLayout layout{-2.0, 2.0, 1.0, 4, 4};
     space::FogField current(layout, space::FogLooks{});
@@ -303,6 +346,7 @@ int main() {
     test_shared_rows();
     test_deployment_overlay();
     test_settled_presentation_budget();
+    test_overlay_mask_cache();
     test_settled_shared_row_updates();
     if (failures != 0) {
         std::cerr << failures << " fog field contract(s) failed\n";

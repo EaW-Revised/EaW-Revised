@@ -11,6 +11,7 @@
 // A bounded host can opt into the transactional native action phase below.
 
 #include "eawr/core/result.hpp"
+#include "eawr/core/load_note.hpp"
 #include "eawr/script/authoritative/clock_rng.hpp"
 #include "eawr/script/numeric/lua_number.hpp"
 
@@ -64,7 +65,7 @@ inline constexpr std::string_view script_warning = "EAWR-SCRIPT-0217";
 // encoding rule needs a new identity.
 inline constexpr std::string_view save_format_identity = "eawr-script-save-v4";
 // Galactic clock profile plus the shared proximity and object attachment state.
-inline constexpr std::string_view galactic_save_format_identity = "eawr-script-galactic-save-v2";
+inline constexpr std::string_view galactic_save_format_identity = "eawr-script-galactic-save-v3";
 inline constexpr std::string_view query_save_format_identity = "eawr-script-query-save-v1";
 inline constexpr std::string_view state_hash_identity = "eawr-script-state-v1";
 inline constexpr std::string_view authoritative_state_identity = "eawr-authoritative-state-v1";
@@ -169,6 +170,15 @@ struct Quotas {
     std::uint64_t memory_bytes = std::uint64_t{64} << 20;
 };
 
+// Test instrumentation only. The caller owns the sink and serializes its callbacks
+// (or makes them thread safe). No observations enter saves or state hashes.
+class MissingCallSink {
+public:
+    virtual ~MissingCallSink() = default;
+    virtual bool stub_global(std::string_view name) const = 0;
+    virtual void called(std::uint64_t instance, std::string_view name) = 0;
+};
+
 struct SessionConfig {
     std::uint64_t seed{};
     TickDuration tick_duration{};
@@ -182,6 +192,7 @@ struct SessionConfig {
     // independently of invocation count. Roots read the last supplied time (0
     // before service); timers use this time. Saves have a distinct identity.
     bool query_clock{};
+    MissingCallSink* missing_call_sink{};
 };
 
 // The session's pinned effective modules. Logical paths are compared after
@@ -292,6 +303,7 @@ struct ServiceReport {
     std::vector<InstanceLoad> loads; // every serviced instance, ascending ID
     ManagedHandleWork managed_handles{};
     std::vector<Handle> managed_releases{}; // ordered observation, never saved
+    std::vector<core::LoadNote> load_notes{}; // GC instance retirement, ordered at commit
 };
 
 // Per-service choices of the host. They are inputs of the tick, like its events.
@@ -336,6 +348,29 @@ public:
     ScriptScheduler(ScriptScheduler&&) noexcept;
     ScriptScheduler& operator=(ScriptScheduler&&) noexcept;
     ~ScriptScheduler();
+
+    // GC phase rollback reuses immutable Lua graph bytes already encoded by
+    // sync_hash/save. Only missing/dirty graphs encode at capture. The phase
+    // owner also enlists native owners: this token cannot undo host effects.
+    // Explicitly commit or roll back before destruction; an unsettled token
+    // aborts the scheduler so speculative VM state cannot silently continue.
+    // The scheduler outlives the token and is not moved while it is active.
+    class PhaseSavepoint {
+    public:
+        struct Work { std::uint64_t graph_encodes{}; std::size_t shared_graphs{}, metadata_bytes{}; };
+        ~PhaseSavepoint();
+        PhaseSavepoint(const PhaseSavepoint&) = delete;
+        PhaseSavepoint& operator=(const PhaseSavepoint&) = delete;
+        [[nodiscard]] core::Result<void> commit();
+        [[nodiscard]] core::Result<void> rollback();
+        [[nodiscard]] Work work() const noexcept;
+    private:
+        struct Saved;
+        std::unique_ptr<Saved> saved_;
+        explicit PhaseSavepoint(std::unique_ptr<Saved>);
+        friend class ScriptScheduler;
+    };
+    [[nodiscard]] core::Result<std::unique_ptr<PhaseSavepoint>> begin_phase(const sim::PartitionExecutor&);
 
     // Registers a global binding (or `Table.member` on a binding object) for
     // every instance created afterwards.
@@ -422,6 +457,8 @@ public:
     // Before engine preparation/attachment so root chunks see mode time too.
     [[nodiscard]] core::Result<void> set_galactic_frame(std::uint64_t frame);
     [[nodiscard]] std::vector<std::uint64_t> instances() const;
+    // GC fault tombstones persist across barriers and restore; a retired ID cannot be reused.
+    [[nodiscard]] std::vector<std::uint64_t> retired_instances() const;
     // The thread slots of an instance at the tick barrier, in slot order: true for a live
     // thread (PL-42 reads this, #449). Reads only.
     [[nodiscard]] core::Result<std::vector<bool>> thread_slots(std::uint64_t instance) const;
@@ -474,5 +511,9 @@ private:
     std::string_view world_state_sha256,
     std::string_view script_state_sha256
 );
+
+using GlobalValueReader = std::function<std::optional<Value>(const std::string&)>;
+inline constexpr std::string_view global_value_command = "foc.global-value";
+[[nodiscard]] core::Result<void> register_shared_global_values(ScriptScheduler&, GlobalValueReader);
 
 } // namespace eawr::script::authoritative

@@ -44,9 +44,12 @@ CommandLayer layer_of(const CommandPayload& payload) noexcept {
                           [](const MoveFleet&) { return CommandLayer::galactic; },
                           [](const RecheckOrbit&) { return CommandLayer::galactic; },
                           [](const LandFleet&) { return CommandLayer::galactic; },
+                          [](const LandUnits&) { return CommandLayer::galactic; },
+                          [](const SetGroundLayout&) { return CommandLayer::galactic; },
                           [](const BattleChoice&) { return CommandLayer::session; },
                           [](const AutoResolveWithdraw&) { return CommandLayer::session; },
                           [](const InvasionAccept&) { return CommandLayer::session; },
+                          [](const GuiClick&) { return CommandLayer::session; },
                           [](const ProductionCommand&) { return CommandLayer::galactic; },
                           [](const SellObject&) { return CommandLayer::galactic; },
                           [](const ObserverCommand&) { return CommandLayer::galactic; },
@@ -90,9 +93,12 @@ std::uint16_t opcode_of(const CommandPayload& payload) noexcept {
                           [](const MoveFleet&) { return galactic_opcodes::move_fleet; },
                           [](const RecheckOrbit&) { return galactic_opcodes::recheck_orbit; },
                           [](const LandFleet&) { return galactic_opcodes::land_transports; },
+                          [](const LandUnits&) { return galactic_opcodes::land_units; },
+                          [](const SetGroundLayout&) { return galactic_opcodes::set_ground_layout; },
                           [](const BattleChoice&) { return session_opcodes::battle_choice; },
                           [](const AutoResolveWithdraw&) { return session_opcodes::auto_resolve_withdraw; },
                           [](const InvasionAccept&) { return session_opcodes::invasion_accept; },
+                          [](const GuiClick&) { return session_opcodes::gui_click; },
                           [](const ProductionCommand&) { return galactic_opcodes::production; },
                           [](const SellObject&) { return galactic_opcodes::sell_object; },
                           [](const ObserverCommand&) { return galactic_opcodes::observer_intelligence; },
@@ -139,6 +145,12 @@ std::vector<std::uint8_t> encode_payload(const CommandPayload& payload) {
                    [&](const BattleChoice& command) { detail::put_u64(bytes, command.conflict); detail::put_u8(bytes, command.tactical ? 1 : 0); },
                    [&](const AutoResolveWithdraw& command) { detail::put_u64(bytes, command.conflict); },
                    [&](const InvasionAccept& command) { detail::put_u64(bytes, command.conflict); },
+                   [&](const GuiClick& command) {
+                       if (command.component.empty() || command.component.size() > max_gui_component_name) return;
+                       for (const unsigned char c : command.component) if (c <= 0x20 || c >= 0x7F) return;
+                       detail::put_u8(bytes, static_cast<std::uint8_t>(command.component.size()));
+                       for (const char c : command.component) detail::put_u8(bytes, static_cast<std::uint8_t>(c));
+                   },
                    [](const SeatLeave&) {},
                    [](const SeatRejoin&) {},
                    [&](const AssignBattleTeamRole& command) {
@@ -152,6 +164,17 @@ std::vector<std::uint8_t> encode_payload(const CommandPayload& payload) {
                    [&](const SetFleetPathfinder& command) { detail::put_u64(bytes, command.fleet); detail::put_u64(bytes, command.member); },
                    [&](const SetFleetOrbitSlot& command) { detail::put_u64(bytes, command.fleet); detail::put_u8(bytes, command.slot); },
                    [&](const LandFleet& command) { detail::put_u64(bytes, command.fleet); detail::put_u64(bytes, command.planet); },
+                   [&](const LandUnits& command) {
+                       detail::put_u64(bytes, command.planet); detail::put_u32(bytes, static_cast<std::uint32_t>(command.units.size()));
+                       for (const auto id : command.units) detail::put_u64(bytes, id);
+                   },
+                   [&](const SetGroundLayout& command) {
+                       detail::put_u64(bytes, command.planet); detail::put_u32(bytes, static_cast<std::uint32_t>(command.entries.size()));
+                       for (const auto& row : command.entries) {
+                           detail::put_u64(bytes, row.object); detail::put_u8(bytes, row.marker ? 1 : 0);
+                           if (row.marker) detail::put_u32(bytes, *row.marker);
+                       }
+                   },
                    [&](const LaunchFromSurface& command) {
                        detail::put_u32(bytes, static_cast<std::uint32_t>(command.units.size()));
                        for (const auto id : command.units) detail::put_u64(bytes, id);
@@ -243,6 +266,16 @@ std::optional<CommandPayload> decode_payload(
             InvasionAccept command;
             if (!reader.read_u64(command.conflict) || !command.conflict || reader.remaining()) return std::nullopt;
             return CommandPayload{command};
+        }
+        if (opcode == session_opcodes::gui_click) {
+            GuiClick command; std::uint8_t length{};
+            if (!reader.read_u8(length) || length == 0 || length > max_gui_component_name || reader.remaining() != length) return std::nullopt;
+            for (std::uint8_t i = 0; i < length; ++i) {
+                std::uint8_t c{};
+                if (!reader.read_u8(c) || c <= 0x20 || c >= 0x7F) return std::nullopt; // names are printable ASCII without spaces
+                command.component.push_back(static_cast<char>(c));
+            }
+            return CommandPayload{std::move(command)};
         }
         if (opcode == session_opcodes::battle_choice) {
             BattleChoice command; std::uint8_t choice{};
@@ -384,6 +417,34 @@ std::optional<CommandPayload> decode_payload(
             }
             return true;
         };
+        if (opcode == galactic_opcodes::land_units) {
+            LandUnits c; std::uint32_t count{};
+            if (bytes.size() > galactic_replay_max_payload || !reader.read_u64(c.planet) || !c.planet
+                || !reader.read_u32(count) || !count || count > galactic_max_objects || count != reader.remaining() / 8
+                || reader.remaining() % 8) return std::nullopt;
+            std::set<EntityId> seen;
+            for (std::uint32_t i = 0; i < count; ++i) {
+                EntityId id{};
+                if (!reader.read_u64(id) || !id || !seen.insert(id).second) return std::nullopt;
+                c.units.push_back(id);
+            }
+            return CommandPayload{std::move(c)};
+        }
+        if (opcode == galactic_opcodes::set_ground_layout) {
+            SetGroundLayout c; std::uint32_t count{};
+            if (bytes.size() > galactic_replay_max_payload || !reader.read_u64(c.planet) || !c.planet
+                || !reader.read_u32(count) || !count || count > galactic_max_objects || count > reader.remaining() / 9) return std::nullopt;
+            std::set<EntityId> seen;
+            for (std::uint32_t i = 0; i < count; ++i) {
+                GroundLayoutChange row; std::uint8_t present{};
+                if (!reader.read_u64(row.object) || !row.object || !seen.insert(row.object).second
+                    || !reader.read_u8(present) || present > 1) return std::nullopt;
+                if (present) { std::uint32_t marker{}; if (!reader.read_u32(marker)) return std::nullopt; row.marker = marker; }
+                c.entries.push_back(row);
+            }
+            if (reader.remaining()) return std::nullopt;
+            return CommandPayload{std::move(c)};
+        }
         if (opcode == galactic_opcodes::land_transports) {
             LandFleet c;
             if (!reader.read_u64(c.fleet) || !reader.read_u64(c.planet) || c.fleet == 0 || c.planet == 0 || reader.remaining()) return std::nullopt;

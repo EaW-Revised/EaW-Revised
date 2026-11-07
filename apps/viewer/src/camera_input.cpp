@@ -57,6 +57,11 @@ void Adapter::clear_pending() noexcept {
     free_look_pitch_units_ = 0.0F;
 }
 
+void Adapter::sample_pointer(const float x, const float y) noexcept {
+    pointer_valid_ = eligible() && finite(x) && finite(y);
+    if (pointer_valid_) { pointer_x_ = x; pointer_y_ = y; }
+}
+
 void Adapter::pointer_left() {
     pointer_valid_ = false;
     for (auto held = pressed_.begin(); held != pressed_.end();) {

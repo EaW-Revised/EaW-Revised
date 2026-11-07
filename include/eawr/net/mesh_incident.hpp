@@ -124,6 +124,8 @@ public:
     // over the new set (same incident ID, time base and a monotonic report revision). Otherwise ignored: the incident fails
     // closed on its own deadlines. A set that can no longer hold three seats ends it.
     void set_active(MeshSeats active);
+    // Fresh private recovery only; never resets a running room incident.
+    [[nodiscard]] bool restore_counter(std::uint64_t counter);
     // This incident owns the closed link to `seat` while three or more seats are active and `seat` is one of them; a seat
     // outside the set (an ordinary quit or timeout departure) stays with the session's ordinary departure.
     [[nodiscard]] bool owns_closed_link(PeerIndex seat) const;

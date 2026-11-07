@@ -138,7 +138,7 @@ core::Result<std::vector<PathCoefficient>> build_path_coefficients(const PathCoe
 core::Result<void> GalacticWorld::publish_path_coefficients(const sim::PartitionExecutor& executor, bool force) {
     if (!setup_.path_coefficients_requested) return core::Result<void>::success();
     if (!bound().snapshot_ || !bound().snapshot_->control() || !setup_.maximum_fleet_distance || !setup_.trade_movement_factor) {
-        path_coefficients_.clear(); // missing owning data stays unavailable, never a numeric fallback
+        retain_all_path_graphs(); path_coefficients_.clear(); // missing owning data stays unavailable, never a numeric fallback
         return core::Result<void>::success();
     }
     // WGA-490: actual current allegiance must be positive as well as allied.
@@ -159,7 +159,7 @@ core::Result<void> GalacticWorld::publish_path_coefficients(const sim::Partition
         for (const auto& planet : bound().snapshot_->planets()) {
             const auto at = allegiance.find(planet.id);
             if (at == allegiance.end()) {
-                path_coefficients_.clear(); return core::Result<void>::success();
+                retain_all_path_graphs(); path_coefficients_.clear(); return core::Result<void>::success();
             }
             input.planets.push_back({planet.id, planet.position, at->second.second && allied(owner.player, at->second.first)});
         }
@@ -185,6 +185,7 @@ core::Result<void> GalacticWorld::publish_path_coefficients(const sim::Partition
     for (std::size_t i = 0; i < jobs.size(); ++i) {
         for (const auto& note : diagnostics[i]) path_coefficient_diagnostics_.push_back("player "
             + std::to_string(jobs[i].player) + (jobs[i].graph == 0 ? " internal: " : " external: ") + note);
+        retain_path_graph(jobs[i].player, jobs[i].graph);
         auto& publication = path_coefficients_[jobs[i].player];
         auto& values = publication.values[jobs[i].graph]; values.clear();
         for (const auto& row : staged[i]) values.emplace(row.planet, row.value);

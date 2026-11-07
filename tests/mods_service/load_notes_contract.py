@@ -1,5 +1,7 @@
 """Synthetic load-note JSON/listing/provenance contract; no retail assets."""
 import json
+import copy
+import hashlib
 from pathlib import Path
 import subprocess
 import struct
@@ -70,7 +72,59 @@ def main():
             client.send(contract.request(2, "game.find", hint=str(game))); assert "result" in client.receive()
             client.send(contract.request(3, "profile.save", profile=json.loads(profile.read_text())))
             assert "result" in client.receive()
-            client.send(contract.request(4, "loadcheck.result", profile="synthetic"))
+            unverified = contract.Interactive(args=["--user-data", str(user)])
+            try:
+                unverified.send(contract.hello(1)); assert "result" in unverified.receive()
+                unverified.send(contract.request(2, "loadnotes.read", profile="synthetic"))
+                result = unverified.receive()["result"]
+                assert result["report"] == envelope and result["current_chain_fingerprint"] == "", result
+            finally:
+                unverified.close(); assert unverified.wait() == 0
+            client.send(contract.request(4, "loadnotes.read", profile="synthetic"))
+            read = client.receive()["result"]
+            assert read["report"] == envelope, read
+            assert read["current_chain_fingerprint"] == envelope["chain_fingerprint"]
+            note_file = next((user / "mods/cache/loadcheck").glob("last-*/load-notes.json"))
+            chain = envelope["chain_fingerprint"]
+            chain_file = note_file.parent.parent / ("last-" + hashlib.sha256(("chain:" + chain).encode()).hexdigest()) / "load-notes.json"
+            chain_file.parent.mkdir()
+            chain_report = copy.deepcopy(envelope)
+            chain_report["profile_id"] = None
+            chain_file.write_text(json.dumps(chain_report), encoding="utf-8")
+            client.send(contract.request(40, "loadnotes.read", chain_fingerprint=chain))
+            assert client.receive()["result"]["report"] == chain_report
+            client.send(contract.request(43, "loadnotes.read", profile="synthetic", chain_fingerprint=chain))
+            assert client.receive()["error"]["code"] == "EAWR-MODS-SVC-0005"
+            client.send(contract.request(44, "loadnotes.read", chain_fingerprint="invalid"))
+            assert client.receive()["error"]["code"] == "EAWR-MODS-SVC-0005"
+            chain_report["chain_fingerprint"] = "f" * 64 if chain != "f" * 64 else "e" * 64
+            chain_file.write_text(json.dumps(chain_report), encoding="utf-8")
+            client.send(contract.request(45, "loadnotes.read", chain_fingerprint=chain))
+            assert client.receive()["error"]["code"] == "EAWR-MODS-SVC-0014"
+            chain_file.unlink()
+            chain_file.parent.rmdir()
+            for field, value in (("schema_version", 2), ("groups", {}), ("totals", {"A": -1, "B": 0, "C": 0}),
+                                 ("profile_id", None), ("profile_id", "other")):
+                bad = copy.deepcopy(envelope); bad[field] = value
+                note_file.write_text(json.dumps(bad), encoding="utf-8")
+                client.send(contract.request(41, "loadnotes.read", profile="synthetic"))
+                assert client.receive()["error"]["code"] == "EAWR-MODS-SVC-0014", field
+            for field, value in (("class", "D"), ("action", "unknown"), ("phase", "unknown"), ("line", -1)):
+                bad = copy.deepcopy(envelope); bad["groups"][0]["notes"][0][field] = value
+                note_file.write_text(json.dumps(bad), encoding="utf-8")
+                client.send(contract.request(42, "loadnotes.read", profile="synthetic"))
+                assert client.receive()["error"]["code"] == "EAWR-MODS-SVC-0014", field
+            note_file.write_bytes(b" " * (512 * 1024 + 1))
+            client.send(contract.request(46, "loadnotes.read", profile="synthetic"))
+            assert client.receive()["error"]["code"] == "EAWR-MODS-SVC-0014"
+            note_file.write_text("{invalid", encoding="utf-8")
+            client.send(contract.request(5, "loadnotes.read", profile="synthetic"))
+            assert client.receive()["error"]["code"] == "EAWR-MODS-SVC-0014"
+            note_file.unlink()
+            client.send(contract.request(6, "loadnotes.read", profile="synthetic"))
+            assert client.receive()["result"]["report"] is None
+            note_file.write_text(json.dumps(envelope), encoding="utf-8")
+            client.send(contract.request(7, "loadcheck.result", profile="synthetic"))
             service_result = client.receive()
             assert service_result["result"]["chain_fingerprint"] == envelope["chain_fingerprint"], service_result
         finally:

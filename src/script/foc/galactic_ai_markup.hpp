@@ -35,6 +35,24 @@ struct GalacticMarkupState {
 inline constexpr std::uint32_t handle_galactic_markup = 17;
 class GalacticMarkup final {
 public:
+    class PhaseSavepoint {
+    public:
+        ~PhaseSavepoint();
+        PhaseSavepoint(const PhaseSavepoint&) = delete;
+        PhaseSavepoint& operator=(const PhaseSavepoint&) = delete;
+        [[nodiscard]] bool retained_publication() const noexcept;
+        [[nodiscard]] core::Result<void> commit();
+        [[nodiscard]] core::Result<void> rollback();
+    private:
+        struct Saved;
+        explicit PhaseSavepoint(std::unique_ptr<Saved>);
+        std::unique_ptr<Saved> saved_;
+        friend class GalacticMarkup;
+    };
+    // Serial barrier owner; displaced states move at existing publication
+    // seams. Begin never copies or encodes native markup/handle targets.
+    // Markup owner must outlive the token; settle after all worker callbacks.
+    [[nodiscard]] core::Result<std::unique_ptr<PhaseSavepoint>> begin_phase();
     GalacticMarkup(std::map<tactical::PlayerId, GalacticMarkupHints>, std::set<tactical::PlayerId>,
         std::set<tactical::PlayerId>, std::set<sim::galactic::PlanetId>);
     [[nodiscard]] Real value(const GalacticMarkupKey&) const;
@@ -67,6 +85,8 @@ private:
     std::set<tactical::PlayerId> players_, ai_players_;
     std::set<sim::galactic::PlanetId> planets_;
     std::uint64_t revision_{};
+    PhaseSavepoint::Saved* phase_{};
+    bool phase_abandoned_{};
 };
 using GalacticMarkupPath = std::function<core::Result<std::vector<sim::galactic::PlanetId>>(
     tactical::PlayerId, sim::galactic::PlanetId, sim::galactic::PlanetId)>;

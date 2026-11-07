@@ -1,0 +1,240 @@
+#include "load_job.hpp"
+#include "offloaded_stages.hpp"
+
+#include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <iterator>
+#include <cstddef>
+#include <iostream>
+#include <memory>
+#include <mutex>
+#include <stdexcept>
+#include <string>
+#include <thread>
+#include <vector>
+
+using eawr::presentation::godot_backend::LoadJob;
+using eawr::presentation::godot_backend::LoadStep;
+using eawr::presentation::godot_backend::OffloadedStages;
+namespace profile = eawr::core::load_profile;
+using namespace std::chrono_literals;
+
+namespace {
+void require(const bool condition, const char* message) {
+    if (!condition) throw std::runtime_error(message);
+}
+
+bool finish(OffloadedStages& job) {
+    job.launch();
+    for (int i = 0; i < 5000; ++i) {
+        if (job.poll(2ms)) return true;
+    }
+    return false;
+}
+
+struct Context final {};
+}  // namespace
+
+int main() {
+    try {
+        const auto main_thread = std::this_thread::get_id();
+
+        // Stages run in order, back to back, all on ONE thread that is not the caller's.
+        {
+            std::vector<int> order;
+            std::vector<std::thread::id> threads;
+            std::vector<OffloadedStages::Stage> stages;
+            for (int index = 0; index < 3; ++index) {
+                stages.push_back([&, index](std::string&) {
+                    order.push_back(index);
+                    threads.push_back(std::this_thread::get_id());
+                    return true;
+                });
+            }
+            OffloadedStages job(std::move(stages), nullptr, false, false);
+            require(!job.launched(), "launched before launch()");
+            require(finish(job) && job.ok(), "worker did not finish");
+            require(order == std::vector<int>({0, 1, 2}), "stages ran out of order");
+            require(threads.size() == 3 && threads[0] != main_thread && threads[0] == threads[1] && threads[1] == threads[2],
+                    "stages did not share one worker thread");
+            require(job.times().size() == 3 && job.times()[2].ran, "stage times missing");
+        }
+
+        // poll() waits without finishing a blocked worker; a released worker finishes it.
+        {
+            std::atomic<bool> release{false};
+            std::vector<OffloadedStages::Stage> stages;
+            stages.push_back([&](std::string&) {
+                while (!release.load()) std::this_thread::sleep_for(1ms);
+                return true;
+            });
+            OffloadedStages job(std::move(stages), nullptr, false, false);
+            job.launch();
+            require(!job.poll(5ms), "poll reported a blocked worker finished");
+            release = true;
+            bool done = false;
+            for (int i = 0; i < 5000 && !done; ++i) done = job.poll(2ms);
+            require(done && job.ok(), "released worker did not finish");
+        }
+
+        // A failing stage stops the run, later stages never run, and the stage's own text is kept.
+        {
+            std::vector<int> order;
+            std::vector<OffloadedStages::Stage> stages;
+            stages.push_back([&](std::string&) { order.push_back(0); return true; });
+            stages.push_back([&](std::string& failure) { order.push_back(1); failure = "start inputs: bad map"; return false; });
+            stages.push_back([&](std::string&) { order.push_back(2); return true; });
+            OffloadedStages job(std::move(stages), nullptr, false, false);
+            require(finish(job) && !job.ok(), "failure not reported");
+            require(job.failed_stage() == 1 && job.failure() == "start inputs: bad map" && order == std::vector<int>({0, 1}),
+                    "failure stage, text or stop wrong");
+        }
+
+        // A throw is a failure, never a terminate.
+        {
+            std::vector<OffloadedStages::Stage> stages;
+            stages.push_back([](std::string&) -> bool { throw std::runtime_error("boom"); });
+            OffloadedStages job(std::move(stages), nullptr, false, false);
+            require(finish(job) && !job.ok() && job.failure().find("boom") != std::string::npos, "throw not reported as failure");
+        }
+
+        // Destroying the job while the worker runs sets the cancel flag and joins promptly.
+        {
+            auto cancel = std::make_shared<std::atomic<bool>>(false);
+            std::atomic<bool> started{false};
+            std::atomic<bool> saw_cancel{false};
+            const auto begin = std::chrono::steady_clock::now();
+            {
+                std::vector<OffloadedStages::Stage> stages;
+                stages.push_back([&](std::string&) {
+                    started = true;
+                    while (!cancel->load()) std::this_thread::sleep_for(1ms);
+                    saw_cancel = true;
+                    return false;
+                });
+                stages.push_back([](std::string&) -> bool { throw std::runtime_error("second stage must not run"); });
+                OffloadedStages job(std::move(stages), cancel, false, false);
+                job.launch();
+                while (!started.load()) std::this_thread::sleep_for(1ms);
+            }
+            require(saw_cancel.load() && cancel->load(), "destructor did not raise the cancel flag");
+            require(std::chrono::steady_clock::now() - begin < 5s, "cancel did not join promptly");
+        }
+
+        // The worker records into its own Recording; merge() adds it to the caller's.
+        {
+            std::vector<OffloadedStages::Stage> stages;
+            stages.push_back([](std::string&) {
+                require(profile::active != nullptr, "worker has no recording");
+                profile::Scope scope(profile::Phase::unit_tables);
+                profile::count(profile::Counter::sha_bytes, 40);
+                profile::model_cost("a.alo", [](profile::ModelCost& cost) { cost.decode_ms += 2.0; cost.requests += 1; });
+                return true;
+            });
+            OffloadedStages job(std::move(stages), nullptr, true, false);
+            require(profile::active == nullptr, "caller recording touched before the run");
+            require(finish(job) && job.ok() && job.recording() != nullptr, "recording run failed");
+            profile::Recording main_recording;
+            main_recording.counters[static_cast<std::size_t>(profile::Counter::sha_bytes)] = 2;
+            main_recording.model("a.alo").requests = 3;
+            profile::merge(main_recording, *job.recording());
+            require(main_recording.counters[static_cast<std::size_t>(profile::Counter::sha_bytes)] == 42, "counter not merged");
+            require(main_recording.costs[static_cast<std::size_t>(profile::Phase::unit_tables)].calls == 1, "phase not merged");
+            require(main_recording.costs[static_cast<std::size_t>(profile::Phase::session)].calls == 1, "session scope not merged");
+            require(main_recording.models.size() == 1 && main_recording.models[0].requests == 4, "model not merged by key");
+            require(main_recording.models[0].decode_ms == 2.0, "model time not merged");
+            require(main_recording.costs[static_cast<std::size_t>(profile::Phase::unit_tables)].exclusive_ms >= 0.0, "cost invalid");
+        }
+        // Without a recording the worker records nothing.
+        {
+            std::vector<OffloadedStages::Stage> stages;
+            stages.push_back([](std::string&) { require(profile::active == nullptr, "unexpected worker recording"); return true; });
+            OffloadedStages job(std::move(stages), nullptr, false, false);
+            require(finish(job) && job.ok() && job.recording() == nullptr, "unrecorded run wrong");
+        }
+
+        // The poll step as the load job runs it: it re-queues itself ahead of the stages that follow, the order of the
+        // remaining steps is kept, and a failure ends the job with that step's result.
+        {
+            std::vector<std::string> trace;
+            std::atomic<bool> release{false};
+            auto worker = std::make_shared<OffloadedStages>(
+                std::vector<OffloadedStages::Stage>{[&](std::string&) {
+                    while (!release.load()) std::this_thread::sleep_for(1ms);
+                    return true;
+                }}, nullptr, false, false);
+            using Job = LoadJob<Context>;
+            struct Poll final {
+                Job* job;
+                std::shared_ptr<OffloadedStages> worker;
+                std::vector<std::string>* trace;
+                std::atomic<bool>* release;
+                int* polls;
+                bool operator()() const {
+                    if (!worker->launched()) worker->launch();
+                    if (!worker->poll(0us)) {
+                        if (++*polls == 5) *release = true;
+                        job->append([self = *this](Context&) { return self(); });
+                        eawr::presentation::godot_backend::yield_load_frame();
+                        return true;
+                    }
+                    trace->push_back("joined");
+                    return true;
+                }
+            };
+            int polls = 0;
+            std::vector<Job::Step> steps;
+            Job* job_pointer = nullptr;
+            steps.push_back([&](Context&) {
+                trace.push_back("head");
+                job_pointer->append([&](Context&) {
+                    trace.push_back("section");
+                    job_pointer->append([self = Poll{job_pointer, worker, &trace, &release, &polls}](Context&) { return self(); });
+                    return true;
+                });
+                return true;
+            });
+            steps.push_back([&](Context&) { trace.push_back("stage3"); return true; });
+            steps.push_back([&](Context&) { trace.push_back("stage4"); return true; });
+            Job job(std::make_unique<Context>(), std::move(steps));
+            job_pointer = &job;
+            // Pumped like the menu does: a poll step that finds the worker running ends its pump at once instead of
+            // spinning until the budget, so a long budget costs one poll per pump while the worker runs.
+            Job::Status status = Job::Status::pending;
+            int pumps = 0;
+            const auto pump_begin = std::chrono::steady_clock::now();
+            while (status == Job::Status::pending && pumps < 100000) {
+                const int before = polls;
+                status = job.run_for(10s);
+                ++pumps;
+                require(polls - before <= 1 || status != Job::Status::pending || trace.size() > 2,
+                        "a pump polled the running worker more than once");
+            }
+            require(status == Job::Status::complete, "job with a poll step failed");
+            require(polls >= 5 && std::chrono::steady_clock::now() - pump_begin < 5s, "yielding pumps did not return promptly");
+            require(trace.size() >= 5 && trace[0] == "head" && trace[1] == "section" && polls >= 5,
+                    "poll step did not run first and repeatedly");
+            const auto joined = std::find(trace.begin(), trace.end(), "joined");
+            require(joined != trace.end() && std::next(joined) != trace.end() && *std::next(joined) == "stage3"
+                    && trace.back() == "stage4", "stages after the poll did not keep their order");
+        }
+
+        // An exception is the same graceful failure inline and on the worker, with the same text.
+        {
+            const OffloadedStages::Stage thrower = [](std::string&) -> bool { throw std::runtime_error("boom"); };
+            std::string inline_failure;
+            require(!OffloadedStages::run_guarded(thrower, inline_failure), "inline throw not a failure");
+            std::vector<OffloadedStages::Stage> stages;
+            stages.push_back(thrower);
+            OffloadedStages job(std::move(stages), nullptr, false, false);
+            require(finish(job) && !job.ok() && job.failure() == inline_failure
+                    && inline_failure == "load stage threw: boom", "inline and worker failures differ");
+        }
+
+        std::cout << "OffloadedStages order, failure, cancel, recording and poll PASS\n";
+    } catch (const std::exception& error) {
+        std::cerr << error.what() << '\n';
+        return 1;
+    }
+}

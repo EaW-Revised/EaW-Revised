@@ -5,6 +5,7 @@
 // order and a written-and-parsed replay. `combat_tests <fixtures> <cases.json> --update` rewrites the pin.
 
 #include "../support/self_test.hpp"
+#include "eawr/sim/tactical/fighters.hpp"
 #include "../support/check.hpp"
 #include "combat_support.hpp"
 #include "eawr/platform/sim_workers.hpp"
@@ -1137,7 +1138,7 @@ void test_manual_session_and_replay() {
     std::fill_n(malformed.begin() + static_cast<std::ptrdiff_t>(first + 24), 8, std::uint8_t{0});
     expect(!tactical::parse_replay(malformed), "MC-10: null manual enemy rejected");
     auto value = session(initial, combat);
-    expect(!value.submit({{0, 1, 4}, {1}, tactical::ManualTargetPayload{2, 255}}),
+    expect(!value.submit({{0, 1, 4}, {1}, tactical::ManualTargetPayload{2, static_cast<std::uint32_t>(tactical::max_hardpoints_per_type)}}),
         "MC-10: invalid source hardpoint rejected before queue mutation");
 }
 

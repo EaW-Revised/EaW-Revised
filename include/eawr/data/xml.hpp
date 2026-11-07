@@ -3,7 +3,7 @@
 #include "eawr/core/result.hpp"
 #include "eawr/core/load_note.hpp"
 #include "eawr/sim/math/fixed.hpp"
-#include "eawr/vfs/vfs.hpp"
+#include "eawr/vfs/vfs_fwd.hpp"
 
 #include <cstddef>
 #include <cstdint>
@@ -105,7 +105,8 @@ struct EffectiveObject {
     std::string object_id;
     // The object's class. FoC reads no class from the element name (one type class for every element), so an
     // element name that is not a FoC class is replaced by the nearest class named along the variant chain, then by
-    // the class the effective tags imply (SG-CLS-01).
+    // the class the effective tags imply (SG-CLS-01). An object that lists squadron units (and no company units)
+    // is a Squadron whatever its element is called (`tags:Squadron`).
     std::string type_name;
     // Empty when the element name was already a class; else how `type_name` was settled: `ancestor:<Name>`,
     // `tags:<Class>` or `unclassed` (the element name stays).
@@ -222,14 +223,14 @@ private:
 // What load_catalog found wrong with the ACTIVE registries (R-10, R-13, C-06; docs/xml-model.md),
 // counted apart from the physical-XML noise in `diagnostics` (an unreferenced malformed file is a
 // diagnostic and not a health problem). FoC fails a load on a registry root that cannot be read or
-// is the wrong root, and on an admitted hardpoint include that cannot be read or parsed; a missing
-// include is omitted with a warning. load_catalog keeps going and reports; the caller acts.
+// is the wrong root, and on an admitted hardpoint include that cannot be read or parsed. Our loader
+// skips unparseable XML files with a load note; other health failures retain their existing handling.
 struct LoadHealth {
     std::size_t registry_invalid{};            // a registry root missing, unreadable, malformed or the wrong root
     std::size_t include_failed{};              // an admitted include (any registry) that exists but cannot be read or parsed
-    std::size_t hardpoint_include_failed{};    // the hardpoint share of include_failed: fatal
+    std::size_t hardpoint_include_failed{};    // the hardpoint share of include_failed
     std::size_t include_missing{};             // an admitted include that is not found (warning only)
-    std::optional<core::Diagnostic> fatal;     // the first failure FoC fails the load on
+    std::optional<core::Diagnostic> fatal;     // the first still-fatal load failure
     [[nodiscard]] bool failed() const noexcept { return fatal.has_value(); }
     [[nodiscard]] bool clean() const noexcept {
         return registry_invalid == 0 && include_failed == 0 && hardpoint_include_failed == 0 && include_missing == 0;
@@ -251,10 +252,19 @@ struct LoadResult {
 [[nodiscard]] core::Result<LoadResult> load_catalog(
     const vfs::Vfs& vfs, Profile profile, const LoadOptions& options);
 // load_catalog for production callers: the same load, but a failure FoC also fails on (LoadHealth::fatal)
-// is returned as the error, so a broken registry or hardpoint include never loads silently.
+// is returned as the error; unparseable files are reported and skipped.
 [[nodiscard]] core::Result<LoadResult> load_catalog_strict(const vfs::Vfs& vfs, Profile profile);
 [[nodiscard]] core::Result<LoadResult> load_catalog_strict(
     const vfs::Vfs& vfs, Profile profile, const LoadOptions& options);
+
+// Diagnostic definitions from shadowed candidates of the active include paths.
+// These never participate in catalog winner selection or variant resolution.
+struct ShadowedDefinitions {
+    std::vector<Definition> definitions;
+    std::vector<core::Diagnostic> diagnostics;
+};
+[[nodiscard]] core::Result<ShadowedDefinitions> load_shadowed_definitions(
+    const vfs::Vfs& vfs, const Catalog& catalog, const LoadOptions& options = {});
 [[nodiscard]] core::Result<sim::math::Fixed> fixed_value(const XmlNode& node);
 
 // A catalog whose objects read as `catalog`'s, except for the overridden values. It shares the
@@ -275,6 +285,8 @@ struct XmlDocument {
 };
 
 [[nodiscard]] core::Result<XmlDocument> load_document(const vfs::Vfs& vfs, std::string_view logical_path);
+// Parse one exact candidate from this VFS with the same parser and provenance.
+[[nodiscard]] core::Result<XmlDocument> load_document(const vfs::Vfs& vfs, const vfs::AssetRecord& candidate);
 
 // The perturbation check's change to a document (docs/tag-applied-check.md). While a
 // DocumentOverrides is alive, load_document on the same thread returns `logical_path` with

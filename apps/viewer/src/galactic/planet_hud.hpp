@@ -3,8 +3,12 @@
 #include "galaxy_view.hpp"
 
 #include "eawr/sim/galactic/commands.hpp"
+#include "eawr/data/ui/shell_anchors.hpp"
+#include "eawr/core/load_note.hpp"
 
+#include <algorithm>
 #include <array>
+#include <cctype>
 #include <cstdint>
 #include <functional>
 #include <span>
@@ -14,6 +18,65 @@
 #include <vector>
 
 namespace eawr::viewer::galactic {
+
+[[nodiscard]] inline bool is_command_filter(const data::ui::CommandBarComponent& component) {
+    if (component.type != data::ui::ComponentType::button) return false;
+    for (const auto& group : component.groups) {
+        constexpr std::string_view prefix = "filter_";
+        if (group.size() <= prefix.size()) continue;
+        bool match = true;
+        for (std::size_t i = 0; i < prefix.size(); ++i)
+            if (static_cast<char>(std::tolower(static_cast<unsigned char>(group[i]))) != prefix[i]) match = false;
+        constexpr std::string_view tab = "tab_";
+        bool map_tab = group.size() >= prefix.size() + tab.size();
+        for (std::size_t i = 0; map_tab && i < tab.size(); ++i)
+            if (static_cast<char>(std::tolower(static_cast<unsigned char>(group[prefix.size() + i]))) != tab[i]) map_tab = false;
+        if (match && !map_tab) return true;
+    }
+    return false;
+}
+
+[[nodiscard]] inline std::vector<std::string> command_filter_names(const data::ui::CommandBarCatalog& catalog) {
+    std::vector<std::string> names;
+    for (const auto& component : catalog.components())
+        if (is_command_filter(component)) names.push_back(component.name);
+    return names;
+}
+
+// A UI texture that neither the mounted atlas nor a loose file supplies: the control keeps its authored data and
+// draws without the picture. Retail's handling of a missing atlas entry is unverified, so nothing stands in for it.
+[[nodiscard]] inline core::LoadNote unresolved_ui_texture_note(const std::string_view texture) {
+    core::LoadNote note; note.code = "EAWR-LOAD-UI-TEXTURE"; note.file = "command-bar mega texture";
+    note.object = std::string(texture); note.tag = "Texture_Name"; note.authored_value = std::string(texture);
+    note.action = core::LoadAction::runtime_degraded; note.phase = core::LoadPhase::runtime;
+    note.message = "UI texture is in neither the mounted atlas nor a loose file; the control draws without it";
+    return note;
+}
+
+// A production tab group draws every tab. Stock authors one composite art per tab that already depicts the
+// other tab as selected, with no Selected_Texture_Name, so the selected tab is hidden there. A mod that authors
+// Selected_Texture_Name (RaW) gets its selected tab drawn with that art instead (#5490).
+[[nodiscard]] inline bool selected_tab_hidden(const data::ui::CommandBarComponent& tab) {
+    return tab.list(data::ui::Field::selected_texture_name).empty();
+}
+
+struct CommandButtonGeometry final {
+    data::ui::ReferenceRect art, hit;
+};
+
+// Ordinary rectangles share the bone origin, offset and scale. Composite tabs
+// keep their shell-mesh hit areas, independent of their offset artwork.
+[[nodiscard]] inline CommandButtonGeometry command_button_geometry(const data::ui::ShellAnchor& anchor,
+    data::ui::Vec2 offset, float width, float height, float scale, bool composite_tab = false) noexcept {
+    const auto origin = anchor.origin.value_or(assets::Vec2f{
+        anchor.rect.x + anchor.rect.width * 0.5F, anchor.rect.y + anchor.rect.height * 0.5F});
+    width *= scale; height *= scale;
+    const data::ui::ReferenceRect hit{origin.x + offset.x + (anchor.rect.x - origin.x) * scale,
+         origin.y + offset.y + (anchor.rect.y - origin.y) * scale,
+         anchor.rect.width * scale, anchor.rect.height * scale};
+    return {{origin.x + offset.x - width * 0.5F, origin.y + offset.y - height * 0.5F, width, height},
+        composite_tab ? anchor.rect : hit};
+}
 
 // GHUD-R01..R03: nonnegative balances truncate; income previews still round.
 // Negative truncation is current EAWR policy pending the inventory's
@@ -26,7 +89,23 @@ namespace eawr::viewer::galactic {
 
 // TM-03..TM-06: the galactic clock's fast-forward button. A live single-human campaign has the factor and
 // the clock controls; the synthetic HUD fixture keeps its own.
-[[nodiscard]] bool clock_controls_admitted(std::size_t active_humans, bool fixture) noexcept; // TM-04
+[[nodiscard]] bool clock_controls_admitted(std::size_t active_humans, bool fixture, bool lan_match, bool lan_gameplay) noexcept; // TM-04, TP-MP01
+// Every input to the galactic clock's admission, read by the clock bar and by the Space key alike.
+struct ClockGates final {
+    bool tutorial_locked{}, world_allowed{}, lan_battle{};
+    std::size_t active_humans{};
+    bool fixture{}, lan_match{}, lan_gameplay{};
+};
+// The clock bar's pause button is enabled exactly when this is true: not tutorial-locked, world allowed, no LAN battle
+// child holding the clock, then the solo or LAN admission above. A LAN match never switches the pause button off by
+// itself (#4552).
+[[nodiscard]] bool clock_controls_open(const ClockGates& gates) noexcept;
+// Whether a pause/resume press is admitted: the bar's own flag when a bar exists; a bar-less view keeps the plain key
+// outside a LAN match, and a LAN match keeps every gate above.
+[[nodiscard]] bool pause_press_admitted(bool has_command_bar, bool bar_clock_enabled, const ClockGates& gates) noexcept;
+// The fast-forward button needs the clock controls open and, as in retail network play (TM-04), at most one human.
+// A LAN match shares the pause button through the agreed command; its fast forward stays off with several humans.
+[[nodiscard]] bool fast_forward_controls_admitted(bool clock_enabled, std::size_t active_humans, bool fixture) noexcept;
 [[nodiscard]] std::optional<sim::math::Fixed> live_fast_forward_factor(bool fixture, bool live_game) noexcept;
 // TM-06: the button is disabled, and its press does nothing, while paused or without a factor.
 [[nodiscard]] bool fast_forward_available(bool controls_enabled, bool paused, bool has_factor) noexcept;
@@ -91,6 +170,9 @@ struct ProductionChoice final {
 
 struct PlanetHudFacts final {
     ObjectId planet{};
+    // Active planet effects. No sim producer publishes these yet (H062), so
+    // they stay false and the icons stay absent until one does.
+    bool siphon_source{}, bounty_hunter_active{}, siphon_smuggled{};
     bool discovered{};
     std::optional<PlayerId> observed_owner;
     // WGUI-100 tooltip/trade readers are separate from current ownership tint.
@@ -111,7 +193,9 @@ struct PlanetHudFacts final {
     std::size_t maximum_queue{};
     std::optional<std::int64_t> ground_level, space_level;
     std::optional<std::int64_t> ground_capacity, space_capacity;
-    std::optional<std::size_t> structures;
+    // Authored Max_Ground_Forces_On_Planet; the advanced map's unit-cap readout (name match, uncaptured).
+    std::optional<std::int64_t> unit_capacity;
+    std::optional<std::size_t> structures, landed_companies;
     std::optional<double> political_control;
     // #680/#682: source breakdown and visible income are separate publications.
     bool political_breakdown_known{};
@@ -119,6 +203,8 @@ struct PlanetHudFacts final {
     // GHUDL-15: the planet's own corruption state and the local faction's
     // corruption benefit select the status-row corruption icon.
     bool corrupted{}, local_benefits_from_corruption{};
+    // Published corruption type of a corrupted planet: 0 none, else 1 + the authored per-type icon index.
+    std::uint8_t corruption_type{};
     friend bool operator==(const PlanetHudFacts&, const PlanetHudFacts&) = default;
 };
 
@@ -198,6 +284,29 @@ void update_object_name_colour(ObjectNameComponent& name, const Rgb* secondary, 
 // simulation queue limit. Rebuilding clears every unused component/type.
 [[nodiscard]] PlanetHudView planet_hud_view(const PlanetHudFacts* selected,
     bool space_tab, std::size_t space_components, std::size_t ground_components);
+// GPD-13: show a count only when both it and the authored maximum are known.
+[[nodiscard]] inline std::string advanced_map_capacity_text(const PlanetHudFacts* facts, const bool buildings) {
+    if (!facts) return {};
+    const auto& capacity = buildings ? facts->ground_capacity : facts->unit_capacity;
+    const auto& count = buildings ? facts->structures : facts->landed_companies;
+    if (!capacity || !count || *capacity <= 0) return {};
+    return std::to_string(*count) + "/" + std::to_string(*capacity);
+}
+// GHUD-R45: the Planet Info dialog title is "<caption> <localized planet name>"; the name is the planet
+// HUD fact (display_name), never the campaign location id. An undiscovered planet has no name: caption only.
+[[nodiscard]] inline std::string planet_info_title(const std::string& caption, const PlanetHudFacts* facts) {
+    return facts && !facts->display_name.empty() ? caption + " " + facts->display_name : caption;
+}
+// Planet Info dialog geometry (#5854): the panel is sized from the window (half its width, clamped so small windows
+// still fit it), scrolls vertically only, and CLOSE keeps a fixed size whose whole rectangle is its hit area.
+struct PlanetInfoLayout { float panel_width{}, panel_height{}, close_width{}, close_height{}, panel_x{}, panel_y{}; };
+[[nodiscard]] inline PlanetInfoLayout planet_info_layout(float window_width, float window_height) {
+    const float width = std::min(window_width, std::max(360.0F, std::min(960.0F, window_width * 0.5F)));
+    const float height = std::max(200.0F, window_height * 0.8F);
+    const float panel_height = std::min(height, window_height);
+    return {width, panel_height, 160.0F, 32.0F, (window_width - width) * 0.5F,
+        (window_height - panel_height) * 0.5F};
+}
 // GHUD-S91..92: row zero starts at slot 1, all other rows at slot 0;
 // each advances by two, preserves input order and drops overflow.
 [[nodiscard]] std::vector<std::optional<std::size_t>> production_choice_slots(
@@ -211,15 +320,29 @@ void update_object_name_colour(ObjectNameComponent& name, const Rgb* secondary, 
 // authored component order and sit left to right; only icons whose facts the
 // viewer publishes are listed (conflict, hero, smuggler and bounty icons
 // have no producer yet and are absent, never guessed).
-enum class PlanetStatusIcon : std::uint8_t { build, corruption_info };
-[[nodiscard]] std::vector<PlanetStatusIcon> planet_status_icons(const PlanetHudFacts& planet);
+enum class PlanetStatusIcon : std::uint8_t { build, corruption_info, corruption_type, smuggler, bounty_hunter, smuggled };
+// The per-type icon shows only while the corruption filter is on; the information icon is not gated by it.
+[[nodiscard]] std::vector<PlanetStatusIcon> planet_status_icons(const PlanetHudFacts& planet, bool corruption_layer = false);
 // Texture name an icon kind draws from the authored lists: the first build
 // icon token, or the corruption list entry after the per-type icons. Empty
 // when the list is shorter than authored data requires (a mod may author
 // fewer entries); the row then draws nothing for that kind.
 inline constexpr std::size_t corruption_information_icon_index = 8;
+// Effect icons (GHUD-S55 order: build, smuggler, bounty, smuggled, corruption).
+// Each draws the first icon of its own authored component (`g_smuggler`,
+// `g_bounty_hunter`, `g_smuggled`); empty when that component has no icon.
+[[nodiscard]] std::string status_effect_component_name(PlanetStatusIcon kind);
+[[nodiscard]] std::string status_effect_icon_name(PlanetStatusIcon kind, const std::vector<std::string>& component_icons);
+// Previous/next planet buttons (`b_planet_left`/`b_planet_right`): step through
+// an ordered list of planet ids with wrap-around. The list order and filter
+// are not yet confirmed against retail (#5628 Q6). Returns the current id when
+// the list is empty or has one entry, and the first (next) or last (previous)
+// entry when the current id is not in the list.
+enum class PlanetStep : std::uint8_t { previous, next };
+[[nodiscard]] ObjectId step_planet(const std::vector<ObjectId>& ordered, ObjectId current, PlanetStep step) noexcept;
 [[nodiscard]] std::string status_icon_texture_name(PlanetStatusIcon kind,
-    const std::vector<std::string>& build_tokens, const std::vector<std::string>& corruption_icons);
+    const std::vector<std::string>& build_tokens, const std::vector<std::string>& corruption_icons,
+    std::uint8_t corruption_type = 0);
 // Row anchor in HUD units, Y up, from the projected planet point: the
 // conflict component's offset X, and its offset Y shifted by the credit
 // row's offset while the credit layer is on and the base icon's default
@@ -229,6 +352,19 @@ struct StatusRowOrigin final { double x{}, y{}; };
     std::optional<double> credit_offset_y, std::optional<double> base_icon_offset_y) noexcept;
 // Centres of icons of the given widths laid out edge to edge from origin_x.
 [[nodiscard]] std::vector<double> status_row_centres(double origin_x, const std::vector<double>& widths);
+
+// GHUDL-18: the filter controls the authored icon; unknown ownership uses grey. #6053: retail builds the icon from
+// the command-bar mega texture only (debug build: no atlas entry, no quad), so a
+// name outside it draws nothing; an atlas entry keeps its own size.
+struct BonusIconStyle final { bool visible{}; Rgb tint{}; };
+[[nodiscard]] BonusIconStyle planet_bonus_icon_style(bool layer_visible, const std::string& icon, bool in_command_atlas,
+    float alpha, const Rgb* owner_colour) noexcept;
+
+// GHUDL-18: centre of a texture of the given size
+// placed at the authored offset (x right, y up) from the planet anchor, scaled by the UI scale.
+struct BonusIconRect final { double x{}, y{}, width{}, height{}; };
+[[nodiscard]] BonusIconRect planet_bonus_icon_rect(double anchor_x, double anchor_y, double offset_x, double offset_y,
+    double ui_scale, double texture_width, double texture_height) noexcept;
 
 [[nodiscard]] std::string production_denial_text(sim::galactic::ProductionAdmission admission);
 

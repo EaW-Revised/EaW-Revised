@@ -1,4 +1,6 @@
 #include "perf_trace.hpp"
+#include "particle_merge.hpp"
+#include "particle_workers.hpp"
 #include "startup_trace.hpp"
 #include "eawr/presentation/render_categories.hpp"
 #include "eawr/presentation/render_churn.hpp"
@@ -12,6 +14,7 @@
 #include <godot_cpp/variant/string.hpp>
 
 #include <iomanip>
+#include <string>
 #include <span>
 
 using namespace godot;
@@ -19,18 +22,36 @@ using namespace godot;
 namespace eawr::presentation::godot_backend {
 
 bool PerfTrace::fine_particle_timings_{};
+bool PerfTrace::particle_batch_census_{};
 bool PerfTrace::render_timing_{true};
+bool PerfTrace::detailed_sim_profile_{};
+bool PerfTrace::sim_cadence_profile_{};
 
 std::optional<std::string> PerfTrace::parse(const PackedStringArray& arguments, std::string& error) {
     fine_particle_timings_=false;
+    particle_batch_census_=false;
+    detailed_sim_profile_=false;
+    sim_cadence_profile_=false;
     render_timing_=true;
     particles::EffectRegistry::set_stream_bucketing_default(true);
+    particles::EffectRegistry::set_clean_present_default(true);
+    GodotParticleBackend::set_merge_additive_default(true);
     for (int64_t index = 0; index < arguments.size(); ++index) {
+        if (String(arguments[index]) == String("--eawr-sim-phase-profile")) detailed_sim_profile_=true;
+        if (String(arguments[index]) == String("--eawr-sim-cadence-profile")) sim_cadence_profile_=true;
         if (String(arguments[index]) == String("--eawr-particle-fine-timings")) fine_particle_timings_=true;
+        if (String(arguments[index]) == String("--eawr-particle-batch-census")) particle_batch_census_=true;
+        if (String(arguments[index]) == String("--eawr-particle-merge-additive")) {
+            const std::string next = index + 1 < arguments.size() ? String(arguments[index + 1]).utf8().get_data() : std::string{};
+            GodotParticleBackend::set_merge_additive_default(detail::merge_additive_from_argument(next));
+        }
         if (String(arguments[index]) == String("--eawr-perf-no-render-timing")) render_timing_=false;
+        if (String(arguments[index]) == String("--eawr-particle-no-clean-present"))
+            particles::EffectRegistry::set_clean_present_default(false);
         if (String(arguments[index]) == String("--eawr-particle-stream-reference"))
             particles::EffectRegistry::set_stream_bucketing_default(false);
     }
+    GodotParticleBackend::set_batch_census(particle_batch_census_);
     for (int64_t index = 0; index < arguments.size(); ++index) {
         if (String(arguments[index]) != String("--eawr-perf-trace")) continue;
         if (index + 1 >= arguments.size()) {
@@ -60,7 +81,7 @@ bool PerfTrace::open(const std::string& path, std::string& error) {
                ",emitter_owner_setup_ms,emitter_owner_fading_ms,emitter_owner_catchup_ms,emitter_owner_update_ms,emitter_owner_place_ms,emitter_owner_brightness_ms,emitter_owner_registry_ms,emitter_owner_finish_ms,clone_retire_ms"
                ",effects_owner_setup_ms,effects_owner_lookup_ms,effects_owner_abilities_ms,effects_owner_contacts_ms,effects_owner_events_ms,effects_owner_projectiles_ms,effects_owner_advance_ms,effects_owner_finish_ms,effects_shield_cast_ms"
                ",effects_combat_events,effects_hit_events,effects_lifecycle_events,particle_retirement_ms"
-               ",sim_completed_tick,presentation_lag_ticks,sim_pacing_lag_ms,sim_discarded_wall_ms,ui_accessor_lock_wait_ms,ui_accessor_lock_phases"
+               ",sim_completed_tick,presentation_lag_ticks,sim_pacing_lag_ms,sim_discarded_wall_ms,ui_accessor_lock_wait_ms,ui_accessor_lock_phases,clock_valid,clock_newest,clock_before,clock_after,clock_advance,clock_delta,clock_rate,clock_target_rate,clock_running"
                ",render_counters_enabled,render_counter_frame,render_counter_ms,visible_draws,shadow_draws,canvas_draws";
     for (const auto name : std::span{render_categories::names}.first(static_cast<std::size_t>(render_categories::Role::debris)))
         for (const auto metric : {"submitted", "retained", "eligible_casters", "retained_surfaces"})
@@ -71,7 +92,25 @@ bool PerfTrace::open(const std::string& path, std::string& error) {
         for (const auto metric : {"submitted", "retained", "eligible_casters", "retained_surfaces"})
             output_ << ',' << name << '_' << metric;
     render_churn::write_csv_header(output_);
-    output_ << ",slots_grown,slot_growth_ms,report_query_ms,report_nonquery_ms,report_render_query_ms,report_performance_query_ms,report_setup_query_ms,report_display_query_ms";
+    output_ << ",slots_grown,slot_growth_ms,report_query_ms,report_nonquery_ms,report_render_query_ms,report_performance_query_ms,report_setup_query_ms,report_display_query_ms,sim_profile,lane_wall_ms,lane_start_delay_ms,lane_join_wait_ms,lane_violations"
+               ",lane_main_help_ms,lane_main_help_tasks,lane_retirement_ms,retire_destroys,retire_destroys_reused"
+               ",retire_suspends,retire_suspends_terminal";
+    if (render_categories::fighter_experiment()) {
+        output_ << ",fighter_idle_samples,fighter_clip_samples,fighter_sample_cpu_ms,fighter_palette_cpu_ms"
+                   ",fighter_binding_cpu_ms,fighter_bindings,fighter_unit_emitters,fighter_particle_emitters"
+                   ",fighter_units,fighter_hull_surfaces,fighter_attachment_surfaces,fighter_effect_surfaces"
+                   ",fighter_requested_casters,fighter_impostor_candidates,fighter_impostor_quads";
+    }
+    if (particle_batch_census_) {
+        output_ << ",census_streams,census_vertices,census_identical_streams"
+                   ",census_additive_streams,census_alpha_streams,census_other_streams"
+                   ",census_additive_keys,census_alpha_keys,census_other_keys"
+                   ",merged_groups,merged_streams,merged_vertices,merged_replacements,merge_flush_ms";
+    }
+    for (const char* name : audio_trace::lap_names) output_ << ',' << name;
+    for (const char* name : audio_trace::count_names) output_ << ',' << name;
+    output_ << ',' << audio_trace::play_ms_name;
+    for (const char* name : audio_trace::digest_names) output_ << ',' << name;
     output_ << '\n';
     return true;
 }
@@ -173,6 +212,10 @@ void PerfTrace::frame(const Frame& frame) {
             << ',' << frame.ui_accessor_lock_wait_ms << ",\"";
     for (const auto& [name, elapsed] : frame.ui_accessor_lock_phases) output_ << name << '=' << elapsed << ';';
     output_ << '"';
+    output_ << ',' << (frame.clock_valid ? 1 : 0) << std::setprecision(17)
+            << ',' << frame.clock_newest << ',' << frame.clock_before << ',' << frame.clock_after
+            << ',' << frame.clock_advance << ',' << frame.clock_delta << ',' << frame.clock_rate
+            << ',' << frame.clock_target_rate << ',' << (frame.clock_running ? 1 : 0) << std::setprecision(3);
     const auto& categories = render_categories::latest;
     output_ << ',' << (render_categories::enabled ? 1 : 0) << ',' << categories.frame << ',' << categories.sample_ms;
     for (const auto count : categories.viewport_draws) output_ << ',' << count;
@@ -190,6 +233,40 @@ void PerfTrace::frame(const Frame& frame) {
         output_ << ',' << query_ms << ',' << report_ms - query_ms << ',' << render_query_ms
                 << ',' << performance_query_ms << ',' << setup_query_ms << ',' << display_query_ms;
     } else output_ << ",,,,,,";
+    output_ << ",\"";
+    output_ << std::setprecision(6);
+    for (const auto& [name, elapsed] : frame.sim_profile) output_ << name << '=' << elapsed << ';';
+    output_ << '\"' << std::setprecision(3);
+    output_ << ',' << frame.lane_wall_ms << ',' << frame.lane_start_delay_ms << ',' << frame.lane_join_wait_ms
+            << ',' << frame.lane_violations;
+    output_ << ',' << frame.lane_main_help_ms << ',' << frame.lane_main_help_tasks << ',' << frame.lane_retirement_ms
+            << ',' << frame.particle_work.retire_destroys << ',' << frame.particle_work.retire_destroys_reused
+            << ',' << frame.particle_work.retire_suspends << ',' << frame.particle_work.retire_suspends_terminal;
+    // The renderer already captured these values for this counter frame. Keep
+    // every trace row so the JSON logging cadence cannot alias pose updates.
+    if (render_categories::fighter_experiment()) {
+        const auto& fighter = categories.fighter_pose;
+        output_ << ',' << fighter.idle_samples << ',' << fighter.clip_samples
+                << ',' << fighter.sample_cpu_ms << ',' << fighter.palette_cpu_ms
+                << ',' << fighter.binding_cpu_ms << ',' << fighter.bindings << ',' << fighter.unit_emitters
+                << ',' << categories.fighter_particle_emitters << ',' << categories.fighter_units
+                << ',' << categories.fighter_hull_surfaces << ',' << categories.fighter_attachment_surfaces
+                << ',' << categories.fighter_effect_surfaces << ',' << categories.fighter_requested_casters
+                << ',' << categories.fighter_impostor_candidates << ',' << categories.fighter_impostor_quads;
+    }
+    if (particle_batch_census_) {
+        const auto& census = frame.particle_work.census;
+        output_ << ',' << census.streams << ',' << census.vertices << ',' << census.identical;
+        for (const auto count : census.class_streams) output_ << ',' << count;
+        for (const auto count : census.class_keys) output_ << ',' << count;
+        output_ << ',' << frame.particle_work.merged_groups << ',' << frame.particle_work.merged_streams
+                << ',' << frame.particle_work.merged_vertices << ',' << frame.particle_work.merged_replacements
+                << ',' << frame.particle_work.merge_flush_ms;
+    }
+    for (const double value : frame.audio_laps) output_ << ',' << value;
+    for (const std::uint64_t value : frame.audio_counts) output_ << ',' << value;
+    output_ << ',' << frame.audio_play_ms;
+    for (const std::uint64_t value : frame.audio_digests) output_ << ',' << value;
     output_ << '\n';
     previous_report_end_ = Clock::now();
 }

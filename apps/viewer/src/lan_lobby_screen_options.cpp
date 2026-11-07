@@ -1,11 +1,47 @@
 #include "lan_lobby_screen_internal.hpp"
 
+#include "galactic_lobby_backend.hpp"
+
+#include <charconv>
+#include <cctype>
+#include <tuple>
+
 namespace eawr::presentation::godot_backend {
 // Scripted GUI contract: edit the actual dialog controls and use the normal modal buttons.
 bool EawrLanLobby::action_options(const std::string& argument,
                                  bool (*number)(const std::string&, std::uint32_t&)) {
     if (!impl_->host || state_->options_panel == nullptr) return false;
-    if (argument == "open") { handle_button("IDC_SELECT_OPTIONS"); return state_->editing.has_value(); }
+    if (argument == "open") { handle_button("IDC_SELECT_OPTIONS"); return state_->editing.has_value() || state_->galactic_editing.has_value(); }
+    if (state_->galactic_editing) {
+        const auto equal = argument.find('=');
+        if (equal != std::string::npos) {
+            const auto key = argument.substr(0, equal), value = argument.substr(equal + 1);
+            if (key == "custom") state_->gc_custom->set_pressed_no_signal(value == "on");
+            else if (key == "heroes") state_->gc_heroes->set_pressed_no_signal(value == "on");
+            else if (key == "credits") state_->gc_credits->set_text(text(value));
+            else if (key == "start_tech") state_->gc_start_tech->set_text(text(value));
+            else if (key == "max_tech") state_->gc_max_tech->set_text(text(value));
+            else if (key == "difficulty") {
+                int picked = -1;
+                for (int item = 0; item < state_->gc_difficulty->get_item_count(); ++item)
+                    if (utf8(state_->gc_difficulty->get_item_text(item)) == value || utf8(String(state_->gc_difficulty->get_item_metadata(item))) == value) picked = item;
+                if (picked < 0) return false;
+                state_->gc_difficulty->select(picked);
+            }
+            else if (key == "auto_resolve") {
+                std::uint32_t picked{};
+                if (!number(value, picked) || picked > net::galactic_lobby_max_auto_resolve) return false;
+                state_->gc_auto_resolve->select(static_cast<int>(picked));
+            } else return false;
+            process_options();
+            return true;
+        }
+        if (argument == "accept") handle_button("EAWR_OPT_ACCEPT");
+        else if (argument == "cancel") handle_button("EAWR_OPT_CANCEL");
+        else if (argument == "defaults") handle_button("EAWR_OPT_DEFAULTS");
+        else return false;
+        return true;
+    }
     if (!state_->editing) return false;
     if (argument.starts_with("credits=")) {
         std::uint32_t value{};
@@ -114,6 +150,10 @@ void EawrLanLobby::open_host_options() {
 }
 
 void EawrLanLobby::build_options_overlay() {
+    if (match_->galactic_room()) {
+        build_galactic_options_overlay();
+        return;
+    }
     PageState& state = *state_;
     Resources& resources = *resources_;
     state.options_panel = nullptr;
@@ -178,10 +218,186 @@ void EawrLanLobby::build_options_overlay() {
     state.options_panel = panel;
 }
 
+// The skirmish dialog has no GC tech, difficulty or auto-resolve controls. Keep the GC
+// editor separate, using the same themed widgets and modal Accept/Cancel contract.
+void EawrLanLobby::build_galactic_options_overlay() {
+    auto& state = *state_;
+    auto* panel = memnew(ColorRect);
+    panel->set_name("EAWR_GALACTIC_OPTIONS");
+    panel->set_color(Color(0.0F, 0.0F, 0.0F, 0.65F));
+    panel->set_size(state.canvas->get_size());
+    panel->set_mouse_filter(Control::MOUSE_FILTER_STOP);
+    state.canvas->add_child(panel);
+    auto* frame = memnew(ColorRect);
+    frame->set_color(Color(0.04F, 0.07F, 0.11F, 1.0F));
+    frame->set_size(Vector2(920, 650));
+    frame->set_position((panel->get_size() - frame->get_size()) * 0.5F);
+    panel->add_child(frame);
+    const auto place = [frame](Control* control, const char* name, float x, float y, float width, float height) {
+        control->set_name(name);
+        frame->add_child(control);
+        control->set_position(Vector2(x, y));
+        control->set_size(Vector2(width, height));
+    };
+    const auto label = [&](const char* name, const char* caption, float y) {
+        auto* control = memnew(EawrUiLabel);
+        control->set_text(caption);
+        place(control, name, 20, y, 420, 38);
+        return control;
+    };
+    label("EAWR_GC_TITLE", "Galactic Conquest options", 16);
+    state.gc_custom = memnew(EawrUiCheck);
+    state.gc_custom->set_text("Custom campaign settings");
+    place(state.gc_custom, "EAWR_GC_CUSTOM", 20, 70, 880, 38);
+    const auto edit = [&](const char* name, const char* caption, float y) {
+        label((std::string(name) + "_LABEL").c_str(), caption, y);
+        auto* control = memnew(EawrUiEdit);
+        place(control, name, 460, y, 440, 38);
+        return control;
+    };
+    state.gc_credits = edit("EAWR_GC_CREDITS", "Starting credits", 125);
+    state.gc_start_tech = edit("EAWR_GC_START_TECH", "Starting tech level", 180);
+    state.gc_max_tech = edit("EAWR_GC_MAX_TECH", "Maximum tech level", 235);
+    state.gc_heroes = memnew(EawrUiCheck);
+    state.gc_heroes->set_text("Allow heroes");
+    place(state.gc_heroes, "EAWR_GC_HEROES", 20, 290, 880, 38);
+    label("EAWR_GC_DIFFICULTY_LABEL", "Difficulty", 345);
+    state.gc_difficulty = memnew(EawrUiCombo);
+    place(state.gc_difficulty, "EAWR_GC_DIFFICULTY", 460, 345, 440, 38);
+    // The choices are the selected campaign's own (show_galactic_options_values), not every entry of the difficulty document.
+    label("EAWR_GC_AUTO_LABEL", "Auto-resolve", 400);
+    state.gc_auto_resolve = memnew(EawrUiCombo);
+    place(state.gc_auto_resolve, "EAWR_GC_AUTO_RESOLVE", 460, 400, 440, 38);
+    // WAR-01: the four protocol values, shared with GalacticLobbyOptions.
+    for (const char* caption : {"Always", "Never", "Ask", "Overwhelming odds"}) state.gc_auto_resolve->add_item(caption);
+    state.gc_error = label("EAWR_GC_ERROR", "", 450);
+    state.gc_error->set_size(Vector2(880, 110));
+    for (const auto& [caption, id, x] : {
+            std::tuple{"Accept", "EAWR_OPT_ACCEPT", 20.0F},
+            std::tuple{"Cancel", "EAWR_OPT_CANCEL", 320.0F},
+            std::tuple{"Defaults", "EAWR_OPT_DEFAULTS", 620.0F}}) {
+        auto* button = memnew(EawrUiButton);
+        button->set_text(caption);
+        button->set_fit_to_rect(true);
+        place(button, id, x, 590, 280, 40);
+        button->connect("pressed", callable_mp(this, &EawrLanLobby::on_pressed).bind(String(id)));
+    }
+    panel->hide();
+    state.options_panel = panel;
+}
+
+void EawrLanLobby::show_galactic_options_values() {
+    auto& state = *state_;
+    const auto& edit = *state.galactic_editing;
+    state.gc_custom->set_pressed_no_signal(edit.custom);
+    state.gc_credits->set_text(text(std::to_string(edit.credits)));
+    state.gc_start_tech->set_text(text(std::to_string(edit.starting_tech)));
+    state.gc_max_tech->set_text(text(std::to_string(edit.maximum_tech)));
+    state.gc_heroes->set_pressed_no_signal(edit.allow_heroes);
+    const auto& campaigns = impl_->galactic_backend->campaigns();
+    const auto campaign = std::find_if(campaigns.begin(), campaigns.end(), [&](const auto& value) { return value.name == edit.campaign; });
+    // Only the difficulties the campaign's AI types author, under the stock AI captions like single player's levels; a
+    // campaign that states none shows the room's current one.
+    state.gc_difficulty->clear();
+    const auto add_choice = [&](const std::string& entry) {
+        state.gc_difficulty->add_item(resolved(resources_->text, ai_seat_caption(entry)));
+        state.gc_difficulty->set_item_metadata(state.gc_difficulty->get_item_count() - 1, text(entry));
+        return state.gc_difficulty->get_item_count() - 1;
+    };
+    int selected = -1, fallback = -1;
+    if (campaign != campaigns.end()) {
+        const std::string normal = sim::galactic::lobby_default_difficulty(*campaign, edit.difficulty);
+        for (const auto& entry : campaign->difficulties) {
+            if (entry.empty()) continue;
+            const int item = add_choice(entry);
+            if (entry == edit.difficulty) selected = item;
+            if (entry == normal) fallback = item;
+        }
+    }
+    if (state.gc_difficulty->get_item_count() == 0) selected = add_choice(edit.difficulty);
+    state.gc_difficulty->select(selected >= 0 ? selected : fallback >= 0 ? fallback : 0);
+    state.gc_auto_resolve->select(static_cast<int>(edit.auto_resolve));
+    state.gc_error->set_text("");
+    const bool supported = campaign != campaigns.end() && campaign->supports_custom_settings;
+    if (supported && !edit.custom) {
+        const auto minimum = campaign->minimum_custom_tech.value_or(0);
+        state.gc_start_tech->set_text(text(std::to_string(minimum)));
+        state.gc_max_tech->set_text(text(std::to_string(campaign->maximum_custom_tech.value_or(minimum))));
+    }
+    state.gc_custom->set_disabled(!supported);
+    std::string hint = supported ? "Custom credits and tech must fit the selected campaign." : "This campaign uses its authored settings.";
+    if (supported && campaign->minimum_custom_tech) hint += " Minimum tech: " + std::to_string(*campaign->minimum_custom_tech) + ".";
+    if (supported && campaign->maximum_custom_tech) hint += " Maximum tech: " + std::to_string(*campaign->maximum_custom_tech) + ".";
+    state.gc_custom->set_tooltip_text(text(hint));
+    state.gc_start_tech->set_tooltip_text(text(hint));
+    state.gc_max_tech->set_tooltip_text(text(hint));
+    process_options();
+}
+
+void EawrLanLobby::reset_galactic_options() {
+    auto& edit = *state_->galactic_editing;
+    // Reset settings only: faction/seat plans, the seed and network delay remain the room's choices.
+    edit.custom = false;
+    edit.credits = edit.starting_tech = edit.maximum_tech = 0;
+    edit.allow_heroes = true;
+    // SK-42/WGEP-16, as when opening the room: the campaign's Normal entry.
+    const auto& campaigns = impl_->galactic_backend->campaigns();
+    const auto campaign = std::find_if(campaigns.begin(), campaigns.end(), [&](const auto& value) { return value.name == edit.campaign; });
+    edit.difficulty = campaign != campaigns.end() ? sim::galactic::lobby_default_difficulty(*campaign, "Normal_Default") : "Normal_Default";
+    edit.auto_resolve = net::galactic_lobby_default_auto_resolve;
+    show_galactic_options_values();
+}
+
+void EawrLanLobby::close_galactic_options(const bool accept) {
+    auto& state = *state_;
+    if (!state.galactic_editing) return;
+    if (accept) {
+        auto edited = *state.galactic_editing;
+        edited.custom = state.gc_custom->is_pressed();
+        edited.allow_heroes = !edited.custom || state.gc_heroes->is_pressed();
+        edited.difficulty = utf8(String(state.gc_difficulty->get_item_metadata(state.gc_difficulty->get_selected())));
+        edited.auto_resolve = static_cast<std::uint32_t>(state.gc_auto_resolve->get_selected());
+        const auto integer = [](EawrUiEdit* control, std::int64_t& value) {
+            const auto typed = utf8(control->get_text());
+            const auto parsed = std::from_chars(typed.data(), typed.data() + typed.size(), value);
+            return !typed.empty() && parsed.ec == std::errc{} && parsed.ptr == typed.data() + typed.size();
+        };
+        if (edited.custom && (!integer(state.gc_credits, edited.credits)
+            || !integer(state.gc_start_tech, edited.starting_tech) || !integer(state.gc_max_tech, edited.maximum_tech))) {
+            state.gc_error->set_text("Enter whole numbers for credits and tech levels.");
+            return;
+        }
+        if (!edited.custom) edited.credits = edited.starting_tech = edited.maximum_tech = 0;
+        // Publish through the normal validator; a refused edit leaves the room and modal copy intact.
+        if (!match_->lobby_galactic_game(edited)) {
+            const auto room = match_->lobby_state();
+            state.gc_error->set_text(text(room && room->notice ? room->notice->message : "The room is no longer editable."));
+            return;
+        }
+        impl_->rows_signature.clear();
+    }
+    state.galactic_editing.reset();
+    state.options_panel->hide();
+}
+
 void EawrLanLobby::open_options() {
+    if (match_->galactic_room() && (impl_->checkpoint_candidate || impl_->checkpoint_read.valid()
+        || (impl_->galactic_backend && impl_->galactic_backend->checkpoint_view()))) return;
     PageState& state = *state_;
     Impl& impl = *impl_;
-    if (!impl.host || state.options_panel == nullptr || state.editing) return;
+    if (!impl.host || state.options_panel == nullptr || state.editing || state.galactic_editing) return;
+    if (match_->galactic_room()) {
+        const auto room = match_->lobby_state();
+        if (!room || room->snapshot.phase != net::LobbyPhase::staging) return;
+        auto decoded = net::decode_galactic_lobby_game(room->snapshot.game);
+        if (!decoded) return;
+        state.galactic_editing = std::move(decoded).value();
+        show_galactic_options_values();
+        state.options_panel->move_to_front();
+        state.options_panel->show();
+        state.gc_custom->grab_focus();
+        return;
+    }
     state.editing = skirmish::begin_setup_options(impl.selection, resources_->defaults);
     show_options_values();
     state.options_panel->move_to_front();
@@ -215,6 +431,7 @@ void EawrLanLobby::show_options_values() {
 }
 
 void EawrLanLobby::close_options(const bool accept) {
+    if (state_->galactic_editing) { close_galactic_options(accept); return; }
     PageState& state = *state_;
     if (!state.editing) return;
     if (accept) {
@@ -229,6 +446,14 @@ void EawrLanLobby::close_options(const bool accept) {
 
 // Polls the dialog's checks and combo into the edited copy; a change marks the options custom.
 void EawrLanLobby::process_options() {
+    if (state_->galactic_editing) {
+        const bool custom = state_->gc_custom->is_pressed();
+        state_->gc_credits->set_editable(custom);
+        state_->gc_start_tech->set_editable(custom);
+        state_->gc_max_tech->set_editable(custom);
+        state_->gc_heroes->set_disabled(!custom);
+        return;
+    }
     PageState& state = *state_;
     if (!state.editing) return;
     auto& edit = *state.editing;

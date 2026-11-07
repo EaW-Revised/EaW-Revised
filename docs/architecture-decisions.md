@@ -256,13 +256,23 @@ command-seat bound, subject to the loaded map's owner-row capacity (eight on an
 eight-row map). Skirmish refuses shared-owner seat mappings and requires at least
 two opposing teams, including cooperative humans against AI.
 
-Galactic shared seats retain one faction owner. Optional cooperative battle controller
+Galactic shared seats retain one faction owner. Cooperative battle controller
 policy separates temporary mobile-unit control from that owner: mobile roots carry a
 controller seat, while explicitly classified structures remain shared. The parent stamps
 authenticated issuing-seat provenance before forwarding commands as the faction's
 tactical player. Child replay, immutable snapshots and checkpoint continuation retain
-this identity. The foundation does not enable splitting or command restrictions;
-subsequent integration supplies deployment, spawn, transfer and departure rules. Selection, control groups and
+this identity. At final GC battle entry, the authoritative active seat roster enables
+the policy whenever either participating faction has at least two human seats; there
+is no lobby switch. Solo, one-human-per-side and no-human battles leave the policy
+absent, and ordinary skirmish keeps its existing faction command model. Deployment splits
+mobile roots by descending loaded population, stable entity-ID ties and round-robin seats.
+Seeded stable ties from the accepted plan remain follow-up
+(legacy EAWR-5319).
+Reinforcements follow their authenticated caller. Selected-root gifts and agreed
+departures transfer temporary control within the tactical side, never faction ownership.
+The same rule applies to both human sides and against AI. See the defaults and acceptance
+contract in [seats and coop](galactic-architecture.md#seats-and-coop-galactic-conquest).
+Selection, control groups and
 camera are per-seat presentation state. A seat leaving is a session command; remaining
 seats retain control and the configured AI/passive handover applies only when none
 remain. Setup, replay, checkpoint and loopback carry the seat/side tables. Galactic

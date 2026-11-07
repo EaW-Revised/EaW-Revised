@@ -380,7 +380,8 @@ func _process(delta):
     return false
 ''', encoding="utf-8")
         result = subprocess.run([os.environ["EAWR_GODOT_EXECUTABLE"], "--resolution", "1280x720",
-            "--path", str(ROOT / "apps/viewer/project"), "--script", str(driver), "--",
+            "--path", str(ROOT / "apps/viewer/project"), "--script", str(driver),
+            *(["--render-thread", self.render_thread] if getattr(self, "render_thread", None) else []), "--",
             "--eawr-galactic", "synthetic", "--eawr-galactic-seat", str(seat),
             "--eawr-galactic-hud-fixture", fixture, "--eawr-game-root", GAME_ROOT,
             "--eawr-galactic-paused", "yes", "--eawr-report", str(report),
@@ -455,6 +456,27 @@ func _process(delta):
         (xml / "starbases.xml").write_bytes(ET.tostring(tree, encoding="utf-8"))
         hidden = self.native_run([], mod_root=directory)["command_bar"]["production_choices"]
         self.assertEqual({choice["type_id"] for choice in hidden}, {1000, 1002})
+
+    def test_sparse_authored_build_slots_keep_numbered_positions(self):
+        self.render_thread = "separate"
+        import xml.etree.ElementTree as ET
+        from tools.inventory.corpus import Corpus
+
+        directory = pathlib.Path(tempfile.mkdtemp(prefix="eawr-gc-sparse-build-"))
+        xml = directory / "Data" / "XML"
+        xml.mkdir(parents=True)
+        (xml.parent / "MegaFiles.xml").write_text("<Mega_Files><File>Absent.meg</File></Mega_Files>", encoding="utf-8")
+        source = Corpus(pathlib.Path(GAME_ROOT)).read_effective("foc", "data/xml/commandbarcomponents.xml")
+        tree = ET.fromstring(source.data)
+        for node in tree:
+            group = node.find("Group")
+            if group is not None and (group.text or "").strip() == "Structure Buttons":
+                if node.get("Name") not in {"b_Create_00", "b_Create_03"}:
+                    group.text = "Other"
+        (xml / "commandbarcomponents.xml").write_bytes(ET.tostring(tree, encoding="utf-8"))
+        cards = self.native_run([], mod_root=directory)["command_bar"]["production_choices"]
+        self.assertEqual({card["button"]: card["type_id"] for card in cards},
+                         {"b_Create_00": 1000, "b_Create_03": 1001})
 
     def test_space_station_and_research_native_purchase(self):
         initial, _ = self.capture(3, "production")

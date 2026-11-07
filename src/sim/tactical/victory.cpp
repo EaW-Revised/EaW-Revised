@@ -33,7 +33,10 @@ core::Result<void> validate_victory(const VictoryRules& rules, const std::span<c
         return core::Result<void>::success();
     }
     if (rules.condition != VictoryCondition::enemy_starbase_destroyed
-        && rules.condition != VictoryCondition::all_enemy_units_destroyed) {
+        && rules.condition != VictoryCondition::all_enemy_units_destroyed
+        && rules.condition != VictoryCondition::enemy_base_components_destroyed
+        && rules.condition != VictoryCondition::enemy_hq_destroyed
+        && rules.condition != VictoryCondition::control_point_domination) {
         return invalid("unknown condition");
     }
     if (!strictly_ascending(rules.starbase_types) || !strictly_ascending(rules.contenders)
@@ -151,6 +154,16 @@ core::Result<VictoryCondition> parse_victory_condition(const std::string_view va
         "unsupported space victory condition: " + std::string(value)));
 }
 
+core::Result<VictoryCondition> parse_land_victory_condition(const std::string_view value) {
+    if (value == "SKIRMISH_ALL_ENEMY_BASE_COMPONENTS_DESTROYED")
+        return core::Result<VictoryCondition>::success(VictoryCondition::enemy_base_components_destroyed);
+    if (value == "SKIRMISH_COMMAND_HQ_DESTROYED")
+        return core::Result<VictoryCondition>::success(VictoryCondition::enemy_hq_destroyed);
+    if (value == "SKIRMISH_CONTROL_POINT_DOMINATION")
+        return core::Result<VictoryCondition>::success(VictoryCondition::control_point_domination);
+    return parse_victory_condition(value);
+}
+
 std::string_view to_string(const VictoryCondition condition) noexcept {
     switch (condition) {
     case VictoryCondition::none:
@@ -162,6 +175,9 @@ std::string_view to_string(const VictoryCondition condition) noexcept {
     case VictoryCondition::intentional_quit: return "intentional_quit";
     case VictoryCondition::enemy_leader_destroyed: return "enemy_leader_destroyed";
     case VictoryCondition::campaign_station_destroyed: return "campaign_station_destroyed";
+    case VictoryCondition::enemy_base_components_destroyed: return "enemy_base_components_destroyed";
+    case VictoryCondition::enemy_hq_destroyed: return "enemy_hq_destroyed";
+    case VictoryCondition::control_point_domination: return "control_point_domination";
     case VictoryCondition::enemies_retreated: return "enemies_retreated";
     }
     return "unknown";

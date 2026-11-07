@@ -1,4 +1,5 @@
 #include "eawr/campaign/ai_selection_content.hpp"
+#include "eawr/campaign/space_entry.hpp"
 #include "eawr/data/retail_values.hpp"
 #include "eawr/data/tag_trace.hpp"
 #include "eawr/units/unit_tables.hpp"
@@ -128,9 +129,13 @@ core::Result<std::shared_ptr<const script::foc::ai::GalacticSelectionContent>> p
     try {
         auto out = std::make_shared<ai::GalacticSelectionContent>();
         if (plan.type_bindings().empty()) throw std::runtime_error("selection content requires original bindings");
+        StockNameSkips skips;
+        const auto loadable = [&](std::string_view name) {
+            return required(resolve_stock_name(catalog, name, data::Category::game_object, "selection type", skips)).has_value();
+        };
         units::LoadInput enums; enums.catalog = &catalog; enums.filesystem = &filesystem;
-        for (const auto& binding : plan.type_bindings()) enums.types.push_back(binding.original_type);
-        for (const auto& location : plan.locations()) if (location.planet) enums.types.push_back(location.original_type);
+        for (const auto& binding : plan.type_bindings()) if (loadable(binding.original_type)) enums.types.push_back(binding.original_type);
+        for (const auto& location : plan.locations()) if (location.planet && loadable(location.original_type)) enums.types.push_back(location.original_type);
         const auto vocabulary = required(units::load_unit_tables(enums));
         for (const auto& row : vocabulary.categories) out->ai.categories.emplace(ai::upper_case(row.name), static_cast<std::uint64_t>(row.value));
         std::vector<FleetTypeBinding> bindings(plan.type_bindings().begin(), plan.type_bindings().end());
@@ -148,7 +153,7 @@ core::Result<std::shared_ptr<const script::foc::ai::GalacticSelectionContent>> p
             throw std::runtime_error("original planet metadata identity collision");
         const auto all_types = units::galactic_type_table(catalog, true);
         std::map<std::string, gc::TypeId, std::less<>> identities;
-        for (const auto& binding : bindings) identities.emplace(ai::upper_case(binding.original_type), binding.id);
+        for (const auto& binding : bindings) if (!skips.contains(binding.original_type)) identities.emplace(ai::upper_case(binding.original_type), binding.id);
         // CGS-07: a name that resolves to no bound type is a null reference; it is reported and left out.
         const auto identity = [&](std::string_view name, std::string_view where) -> std::optional<gc::TypeId> {
             const auto at = identities.find(ai::upper_case(name));
@@ -189,7 +194,9 @@ core::Result<std::shared_ptr<const script::foc::ai::GalacticSelectionContent>> p
         type_categories = [&](const units::GalacticType& type) {
             const auto name = ai::upper_case(type.name);
             if (!category_stack.insert(name).second) return std::uint64_t{};
-            const auto object = required(catalog.resolve(type.name, data::Category::game_object));
+            auto resolved = catalog.resolve(type.name, data::Category::game_object);
+            if (!resolved && stock_name_skippable(resolved.error())) { category_stack.erase(name); return std::uint64_t{}; }
+            const auto object = required(std::move(resolved));
             auto result = field_bits(object, "CategoryMask", 0);
             for (const auto* members : {&type.company_units, &type.squadron_units}) {
                 if (members->empty()) continue;
@@ -201,8 +208,11 @@ core::Result<std::shared_ptr<const script::foc::ai::GalacticSelectionContent>> p
             return result;
         };
         for (const auto& binding : bindings) {
+            if (skips.contains(binding.original_type)) continue;
             const auto source = required(units::resolve_initial_galactic_type(all_types, binding.original_type));
-            const auto object = required(catalog.resolve(source.name, data::Category::game_object));
+            auto resolved = catalog.resolve(source.name, data::Category::game_object);
+            if (!resolved && stock_name_skippable(resolved.error())) continue;
+            const auto object = required(std::move(resolved));
             ai::GalacticSelectionContentType row; row.name = ai::upper_case(source.name);
             row.company = !source.company_units.empty(); row.transport = behaves(source, "TRANSPORT");
             row.ground_base = behaves(source, "DUMMY_GROUND_BASE"); row.starbase = behaves(source, "DUMMY_STAR_BASE");
@@ -224,13 +234,19 @@ core::Result<std::shared_ptr<const script::foc::ai::GalacticSelectionContent>> p
             if (row.company) {
                 const auto* member = types.find(source.company_units.front());
                 if (!member) throw std::runtime_error("missing first company member");
-                const auto original = required(catalog.resolve(member->name, data::Category::game_object));
-                row.movement_class = text(original, "MovementClass");
+                auto resolved_member = catalog.resolve(member->name, data::Category::game_object);
+                if (!resolved_member && !stock_name_skippable(resolved_member.error())) required(std::move(resolved_member));
+                if (resolved_member) {
+                    const auto& original = resolved_member.value();
+                    row.movement_class = text(original, "MovementClass");
+                    if (!flag(original, "Create_Team")) row.survival_type = ai::upper_case(member->name);
+                }
                 for (const auto& unit : source.company_units) { // WGA-489: any member unit's authored object script
                     const auto* found = types.find(unit); if (!found) continue;
-                    if (!text(required(catalog.resolve(found->name, data::Category::game_object)), "Lua_Script").empty()) row.member_script = true;
+                    auto resolved_unit = catalog.resolve(found->name, data::Category::game_object);
+                    if (!resolved_unit && stock_name_skippable(resolved_unit.error())) continue;
+                    if (!text(required(std::move(resolved_unit)), "Lua_Script").empty()) row.member_script = true;
                 }
-                if (!flag(original, "Create_Team")) row.survival_type = ai::upper_case(member->name);
                 if (!source.company_transport.empty()) {
                     if (!types.find(source.company_transport))
                         out->unresolved_names.push_back(source.name + " Company_Transport_Unit: " + source.company_transport);
@@ -273,7 +289,7 @@ core::Result<std::shared_ptr<const script::foc::ai::GalacticSelectionContent>> p
             throw std::runtime_error("registered selection type order is incomplete");
         // PL-20: ai.types is the type table in load order (registry file, then place in the file); a
         // category team enumerates it in that order, not in binding-id order. Duplicate names
-        // retain catalog winner order pending the duplicate-entry/name-lookup seam (legacy #3741).
+        // take the first registered definition's position; separate duplicate entries remain legacy #3741.
         {
             std::map<std::string, std::uint64_t, std::less<>> table_order;
             for (const auto& binding : bindings) {
@@ -285,7 +301,11 @@ core::Result<std::shared_ptr<const script::foc::ai::GalacticSelectionContent>> p
                 [&](const auto& a, const auto& b) { return table_order.at(a.name) < table_order.at(b.name); });
         }
         for (const auto& location : plan.locations()) if (location.planet) {
-            const auto object = required(catalog.resolve(location.original_type, data::Category::game_object));
+            // CGS-22: a planet type with no loadable base is skipped (space-entry preparation owns the one load note) and gets
+            // no selection row; any other resolve failure still refuses.
+            auto resolved_planet = catalog.resolve(location.original_type, data::Category::game_object);
+            if (!resolved_planet && stock_name_skippable(resolved_planet.error())) continue;
+            const auto object = required(std::move(resolved_planet));
             ai::GalacticSelectionContentPlanet row; row.terrain = text(object, "Terrain");
             row.restricted_categories = field_bits(object, "Planet_Restricted_Unit_Categories", 0);
             for (const auto& name : ai::split_names(text(object, "Planet_Restricted_Unit_Types"), ", |\t\r\n"))

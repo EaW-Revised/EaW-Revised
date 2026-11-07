@@ -106,11 +106,19 @@ class MapParticlesStructure(unittest.TestCase):
     def test_particle_state_commands_have_one_counted_submission_path(self):
         adapter = (ROOT / "src/presentation/godot/particle_adapter.cpp").read_text(encoding="utf-8")
         # A bypass would preserve the helper's unit tests while losing counts/dedup in production.
-        self.assertEqual(adapter.count(".instance_set_visible("), 1)
-        self.assertNotIn("->instance_set_visible(", adapter)
-        self.assertEqual(adapter.count(".mesh_set_custom_aabb("), 1)
+        # Merged group instances (additive merge groups) are separate GPU objects with their own
+        # deduped submission state (group.submission); only their creation-time hide is a raw call.
+        # Per-emitter calls are the counted path (perf_trace particle_* metrics).
+        self.assertEqual(adapter.count(".instance_set_visible("), 2)
+        self.assertEqual(adapter.count("->instance_set_visible("), 1)
+        self.assertEqual(adapter.count("->instance_set_visible(group->instance, false);"), 1)
+        self.assertEqual(adapter.count("rendering.instance_set_visible(emitter.instance, value);"), 1)
+        self.assertIn("group.submission.visibility.apply(value", adapter)
+        self.assertIn("rendering.instance_set_visible(group.instance, shown);", adapter)
+        self.assertEqual(adapter.count(".mesh_set_custom_aabb("), 2)
         self.assertNotIn("->mesh_set_custom_aabb(", adapter)
-        self.assertIn("emitter.submission.visibility.apply(visible", adapter)
+        self.assertIn("group.submission.bounds.apply(bounds", adapter)
+        self.assertIn("emitter.submission.visibility.apply(render_categories::engine_visible(", adapter)
         self.assertIn("emitter.submission.bounds.apply(emitter.bounds", adapter)
         trace = (ROOT / "apps/viewer/src/perf_trace.cpp").read_text(encoding="utf-8")
         for state in ("bounds", "visibility"):

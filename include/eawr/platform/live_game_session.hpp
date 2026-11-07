@@ -3,6 +3,7 @@
 #include "eawr/core/diagnostic.hpp"
 #include "eawr/core/load_note.hpp"
 #include "eawr/core/result.hpp"
+#include "eawr/mods/save_description.hpp"
 #include "eawr/sim/galactic/commands.hpp"
 #include "eawr/sim/galactic/replay.hpp"
 #include "eawr/sim/galactic/snapshot.hpp"
@@ -65,8 +66,8 @@ struct LiveSaveCampaignSource {
 struct LiveSaveOptions {
     // UTF-8 filesystem directory, decoded by the save repository.
     std::string directory;
-    // Nonzero currently refuses capture: mod-list participation is a format seam.
-    std::array<std::uint8_t, 32> mod_list_identity{};
+    // Snapshot of the mounted chain, copied at session creation.
+    mods::ModDescription mounted_mods;
     // Filled from a prepared authored campaign when absent; synthetic galaxies save without one.
     std::optional<LiveSaveCampaignSource> campaign;
 };
@@ -92,10 +93,13 @@ struct LiveSaveSlot {
     std::uint64_t completed_tick{}, galactic_frame{}, bytes{};
     bool child{};
     std::optional<LiveSaveCampaign> campaign; // absent: the save cannot start its own campaign
+    bool skirmish{}; // #3989: a skirmish battle save (one battle and its script host, no galaxy)
     std::optional<core::Diagnostic> diagnostic;
 };
 // Session-free: one slot's repository facts and campaign identity, without a restore.
 [[nodiscard]] core::Result<LiveSaveSlot> read_save_slot(std::string_view directory, std::string_view name);
+// Bounded repository read for host distribution; call on the existing disk worker.
+[[nodiscard]] core::Result<std::vector<std::uint8_t>> read_saved_game_bytes(std::string_view directory, std::string_view name);
 
 // Validated private owner; no startup pass or live thread runs while loading.
 class PreparedLiveRestore final {
@@ -129,7 +133,9 @@ public:
         std::shared_ptr<const vfs::Vfs>, const data::Catalog&, const data::galactic::GalacticData&,
         const units::GalacticTypeTable&, campaign::CampaignSetupPlan, std::string_view difficulty,
         bool install_native_ai = true,
-        std::array<std::uint64_t, 6> ai_service_periods = {300, 1, 3, 3, 300, 1}, bool observe_native_ai = false);
+        std::array<std::uint64_t, 6> ai_service_periods = {300, 1, 3, 3, 300, 1}, bool observe_native_ai = false,
+        std::span<const std::uint8_t> exact_checkpoint = {},
+        std::array<std::uint8_t, 32> checkpoint_mod_list = {});
     [[nodiscard]] std::shared_ptr<const CampaignServiceConfiguration> services() const noexcept;
     ~PreparedLiveCampaign();
     [[nodiscard]] const campaign::CampaignSetupPlan& plan() const noexcept;
@@ -253,6 +259,20 @@ struct LiveGameFrame {
     sim::galactic::SeatId, sim::EntityId conflict);
 [[nodiscard]] std::shared_ptr<const LiveAutoResolveProgress> auto_resolve_progress_for_observer(
     const LiveGameFrame&, sim::galactic::SeatId);
+
+// What a healthy session is idle for. The pacer never steps a paused galaxy on its own: a pending conflict
+// choice, a battle summary or a player pause needs a seat's command. A headless driver without a
+// presentation must answer it, or report it by name instead of timing out on a tick that cannot publish.
+struct LiveAwaitedInput {
+    enum class Kind { battle_summary, conflict_choice, conflict_announcement, galaxy_paused };
+    Kind kind{Kind::galaxy_paused};
+    sim::EntityId conflict{};
+    sim::galactic::PlanetId planet{};
+    // "awaiting_input kind=conflict_choice conflict=N planet=P"
+    [[nodiscard]] std::string describe() const;
+};
+// Empty while the galaxy runs, and while an auto-resolve in progress steps the paused galaxy itself.
+[[nodiscard]] std::optional<LiveAwaitedInput> awaited_input(const LiveGameFrame&);
 
 // Presentation-only retained event cursor. Prior ownership is captured at the
 // event boundary, so consumers never infer losses by polling galaxy internals.
@@ -439,6 +459,9 @@ public:
     [[nodiscard]] LiveGalacticEvents galactic_events_after(std::uint64_t cursor, sim::galactic::SeatId) const;
     // WST-58: the seat's holocron goal requests after `cursor` (0 for all retained).
     [[nodiscard]] LiveStoryPresentations story_presentation_after(std::uint64_t cursor, sim::galactic::SeatId) const;
+    // #5857: true when a STORY_CLICK_GUI event of the loaded plots lists the component (case-insensitive). The HUD
+    // raises a GuiClick only for such a component, so a campaign whose plots name no control sends no click command.
+    [[nodiscard]] bool story_listens_for_click(std::string_view component) const;
     // Returns a conflict-scoped feed. Stale feeds cannot start or command a later child.
     // Readiness belongs to the live pacer; it never enters GameSession's state or replay.
     [[nodiscard]] std::shared_ptr<TacticalFeed> battle_feed(sim::EntityId conflict, sim::galactic::SeatId seat);

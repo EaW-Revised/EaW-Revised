@@ -1,4 +1,5 @@
 #include "eawr/data/ui/dialog_catalog.hpp"
+#include "eawr/vfs/vfs.hpp"
 #include "eawr/core/text.hpp"
 
 #include <pugixml.hpp>

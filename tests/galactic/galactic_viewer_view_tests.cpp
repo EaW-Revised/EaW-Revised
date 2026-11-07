@@ -22,12 +22,14 @@
 #ifdef NDEBUG
 #undef NDEBUG
 #endif
+#include <array>
 #include <algorithm>
 #include <cassert>
 #include <cmath>
 #include <limits>
 #include <numbers>
 #include <string>
+#include <utility>
 
 using namespace eawr::viewer::galactic;
 
@@ -780,6 +782,33 @@ void galaxy_reveal_is_a_draw_only_omniscient_view() {
     auto fogged_facts = observed_hud_facts(row_of(*truth), nullptr, &queue_planet, 1);
     assert(!publish_production_queue(fogged_facts, row_of(*truth), &queue_planet, false, describe));
     assert(!planet_hud_view(&fogged_facts, true, 3, 3).queues_enabled);
+    {
+        // GPD-13: known counts and maxima are shown together, unknown counts stay blank.
+        PlanetHudFacts caps; caps.unit_capacity = 10; caps.ground_capacity = 5;
+        caps.landed_companies = 3; caps.structures = 2;
+        assert(advanced_map_capacity_text(&caps, false) == "3/10");
+        assert(advanced_map_capacity_text(&caps, true) == "2/5");
+        caps.unit_capacity = 0; caps.ground_capacity = 0;
+        assert(advanced_map_capacity_text(&caps, false).empty() && advanced_map_capacity_text(&caps, true).empty());
+        caps.landed_companies.reset(); caps.ground_capacity.reset();
+        assert(advanced_map_capacity_text(&caps, false).empty() && advanced_map_capacity_text(&caps, true).empty());
+        assert(advanced_map_capacity_text(nullptr, false).empty());
+        // Planet Info title: the localized display name, never the campaign location id.
+        PlanetHudFacts named, unnamed; named.display_name = "Coruscant";
+        assert(planet_info_title("Planet Info", &named) == "Planet Info Coruscant");
+        assert(planet_info_title("Planet Info", &unnamed) == "Planet Info" && planet_info_title("Planet Info", nullptr) == "Planet Info");
+        // #5854: the dialog is 40-60% of the window wide, fits it, and CLOSE keeps a non-empty hit area.
+        const std::array sizes{std::pair{1280.0F, 720.0F}, std::pair{1920.0F, 1080.0F}};
+        for (const auto& [w, h] : sizes) {
+            const auto fit = planet_info_layout(w, h);
+            assert(fit.panel_width >= w * 0.4F && fit.panel_width <= w * 0.6F && fit.panel_height <= h);
+            assert(fit.panel_x * 2.0F + fit.panel_width == w && fit.panel_y * 2.0F + fit.panel_height == h);
+            assert(fit.close_width > 0.0F && fit.close_height > 0.0F);
+        }
+        const auto before_resize = planet_info_layout(1280.0F, 720.0F);
+        const auto after_resize = planet_info_layout(1920.0F, 1080.0F);
+        assert(after_resize.panel_width > before_resize.panel_width && after_resize.panel_x > before_resize.panel_x);
+    }
     auto queue_facts = observed_hud_facts(row_of(*revealed), nullptr, &queue_planet, 1);
     assert(!queue_facts.locally_controlled);
     assert(!publish_production_queue(queue_facts, row_of(*revealed), &queue_planet, false, describe)); // flag off
@@ -1050,6 +1079,105 @@ void the_camera_frames_and_clamps() {
     assert(same(fixed.target[2], -top.target.y));
 }
 
+void ctrl_middle_drag_tilts_and_yaws_clamped_inverted_and_fades_in_the_focused_view() {
+    const auto view = *build_view(synthetic_galaxy(), 1).view;
+    const auto& selected = planet(view, 101);
+    PlanetCamera camera;
+    static_assert(orbit_min_pitch == 10.0F && orbit_max_pitch == 89.0F);
+    assert(same(camera.tilt_offset(), 0.0F) && same(camera.yaw_offset(), 0.0F));
+    // Inverted vertical drag (#5617): dragging down raises the pitch, up lowers it.
+    assert(camera.tilt(0.04F)); // down 4 units of 1.25 degrees: pitch 30 -> 35
+    assert(same(camera.pose().pitch_degrees, 35.0F) && same(camera.pose().yaw_degrees, 0.0F));
+    assert(camera.tilt(-0.08F)); // up 8 units: 35 -> 25
+    assert(same(camera.pose().pitch_degrees, 25.0F));
+    // Clamp truth table: far below the floor, far above the ceiling, exactly on each bound.
+    assert(camera.tilt(-5.0F));
+    assert(same(camera.pose().pitch_degrees, orbit_min_pitch));
+    assert(camera.tilt(-0.01F)); // stays pinned at the floor
+    assert(same(camera.pose().pitch_degrees, orbit_min_pitch));
+    assert(camera.tilt(5.0F));
+    assert(same(camera.pose().pitch_degrees, orbit_max_pitch));
+    assert(camera.tilt(0.01F));
+    assert(same(camera.pose().pitch_degrees, orbit_max_pitch));
+    assert(camera.tilt(-0.16F)); // 89 -> 69
+    assert(same(camera.pose().pitch_degrees, 69.0F));
+    assert(!camera.tilt(std::numeric_limits<float>::quiet_NaN()));
+    assert(!camera.yaw(std::numeric_limits<float>::infinity()));
+    // Yaw: right drag turns right, wraps, never clamps.
+    assert(camera.yaw(0.08F));
+    assert(same(camera.pose().yaw_degrees, 10.0F));
+    assert(camera.yaw(-0.16F));
+    assert(same(camera.pose().yaw_degrees, -10.0F));
+    assert(camera.yaw(3.0F)); // 375 degrees of drag from -10 wraps to 5
+    assert(same(camera.pose().yaw_degrees, 5.0F));
+    camera.reset_tilt(); // plain middle-click resets both
+    assert(same(camera.pose().pitch_degrees, 30.0F) && same(camera.pose().yaw_degrees, 0.0F));
+    assert(camera.tilt(-0.04F) && camera.yaw(0.04F)); // pitch 25, yaw 5
+    const float tilted = camera.pose().pitch_degrees;
+    assert(same(tilted, 25.0F) && same(camera.pose().yaw_degrees, 5.0F));
+    assert(camera.zoom_in(selected, true));
+    assert(!camera.tilt(0.1F) && !camera.yaw(0.1F)); // no drag input during the flight
+    camera.service(0);
+    camera.service(325);
+    const float mid = camera.pose().pitch_degrees;
+    const float mid_yaw = camera.pose().yaw_degrees;
+    assert(mid > tilted && mid < 35.0F); // fading toward the authored focus pitch
+    assert(mid_yaw > 0.0F && mid_yaw < 5.0F); // yaw fades too
+    camera.service(100000);
+    assert(camera.state() == CameraState::focused);
+    assert(same(camera.pose().pitch_degrees, 35.0F) && same(camera.pose().yaw_degrees, 0.0F)); // never tilted
+    assert(camera.zoom_out());
+    camera.service(0);
+    camera.service(100000);
+    assert(camera.state() == CameraState::overview);
+    assert(same(camera.pose().pitch_degrees, tilted) && same(camera.pose().yaw_degrees, 5.0F)); // kept across zoom levels
+}
+
+void overview_wheel_zoom_out_extends_the_pullback_and_keeps_the_zoom_in_limit() {
+    const auto view = *build_view(synthetic_galaxy(), 1).view;
+    const auto& selected = planet(view, 101);
+    PlanetCamera camera;
+    const float home = camera.pose().distance;
+    assert(same(camera.overview_zoom(), 1.0F));
+    assert(!camera.zoom_overview(1.0F)); // zoom-in limit unchanged: refused, so the caller starts the planet zoom
+    assert(same(camera.pose().distance, home));
+    assert(camera.zoom_overview(-1.0F));
+    assert(same(camera.pose().distance, home * overview_zoom_step));
+    for (int i = 0; i < 100; ++i) assert(camera.zoom_overview(-1.0F));
+    assert(same(camera.pose().distance, home * overview_zoom_out_max_factor));
+    assert(camera.pose().distance <= overview_zoom_max_distance);
+    // Back in: each notch undoes one step, and the last one lands exactly on the old limit.
+    int notches = 0;
+    while (camera.zoom_overview(1.0F)) assert(++notches < 100);
+    assert(same(camera.overview_zoom(), 1.0F) && same(camera.pose().distance, home));
+    assert(!camera.zoom_overview(1.0F)); // limit: the planet zoom triggers from here exactly as before
+    assert(camera.zoom_overview(-1.0F));
+    assert(camera.zoom_in(selected, true));
+    assert(!camera.zoom_overview(-1.0F) && !camera.zoom_overview(1.0F)); // not during the flight
+    // A large authored pullback is capped by the far-plane-safe distance.
+    CameraConstants wide;
+    wide.initial_pullback = 6000.0F;
+    PlanetCamera far_camera(wide);
+    for (int i = 0; i < 100; ++i) far_camera.zoom_overview(-1.0F);
+    assert(same(far_camera.pose().distance, overview_zoom_max_distance)); // 6000 * 1.8 is capped at 8000
+    assert(far_camera.zoom_overview(1.0F) && far_camera.pose().distance < overview_zoom_max_distance);
+}
+
+void overview_pan_follows_the_yaw() {
+    const auto view = *build_view(synthetic_galaxy(), 1).view;
+    PlanetCamera camera;
+    camera.position({0.0F, 0.0F, 0.0F});
+    camera.pan(view, 1.0F, 0.0F);
+    const Vec3 base = camera.pose().target;
+    PlanetCamera turned;
+    turned.position({0.0F, 0.0F, 0.0F});
+    assert(turned.yaw(0.72F)); // 90 degrees
+    turned.pan(view, 1.0F, 0.0F);
+    const Vec3 after = turned.pose().target;
+    assert(base.x > 0.0F && std::fabs(base.y) < 1e-3F);
+    assert(std::fabs(after.x) < 1e-3F && after.y < 0.0F); // screen-right is now galaxy -y
+}
+
 void planet_flights_follow_wall_time_and_stock_transforms() {
     const auto view = *build_view(synthetic_galaxy(), 1).view;
     const auto& selected = planet(view, 101);
@@ -1142,6 +1270,34 @@ void pan_drag_and_radar_are_separate_transforms() {
     assert(custom.zoom_in(planet(view, 101), true));
     custom.service(0); custom.service(1000);
     assert(same(custom.alpha(), 0.5F) && same(custom.lighting().level, 0.7F));
+}
+
+void wide_windows_keep_the_16_9_vertical_extent() {
+    // #5600: Hor+ above 16:9; WGP-43's fixed horizontal angle below it.
+    const float reference = galactic_vertical_fov(1920, 1080);
+    const float legacy = 2.0F * std::atan(std::tan(std::atan(0.5F) * 0.5F) / (16.0F / 9.0F)) * 180.0F /
+                         std::numbers::pi_v<float>;
+    assert(reference == legacy && galactic_vertical_fov(1280, 720) == legacy);
+    for (const auto& size : {std::pair{2560U, 1080U}, std::pair{3440U, 1440U}, std::pair{5120U, 1440U},
+                            std::pair{3840U, 1080U}}) {
+        assert(galactic_vertical_fov(size.first, size.second) == reference);
+    }
+    // 4:3 and 1:1 are unchanged: the horizontal full angle stays atan(.5).
+    const float tangent = std::tan(std::atan(0.5F) * 0.5F);
+    for (const auto& size : {std::pair{1024U, 768U}, std::pair{720U, 720U}}) {
+        const float vertical = galactic_vertical_fov(size.first, size.second);
+        const float focal = static_cast<float>(size.second) * 0.5F / std::tan(vertical * std::numbers::pi_v<float> / 360.0F);
+        assert(std::abs(focal - static_cast<float>(size.first) * 0.5F / tangent) < 0.001F);
+    }
+    // The galaxy fit is the same at every aspect from 16:9 up and stays inside the zoom limits.
+    const ViewResult built = build_view(synthetic_galaxy(), 1);
+    assert(built.view);
+    const OrbitCamera base = overview_camera(*built.view, 16.0F / 9.0F, reference);
+    for (const float aspect : {21.0F / 9.0F, 32.0F / 9.0F}) {
+        const OrbitCamera wide = overview_camera(*built.view, aspect, reference);
+        assert(same(wide.distance, base.distance));
+        assert(wide.distance >= orbit_min_distance && wide.distance <= orbit_max_distance);
+    }
 }
 
 void campaign_start_uses_authored_home_transform() {
@@ -1262,8 +1418,12 @@ int main() {
     fleets_group_per_faction_in_orbit();
     bad_snapshots_and_seats_are_refused();
     the_camera_frames_and_clamps();
+    ctrl_middle_drag_tilts_and_yaws_clamped_inverted_and_fades_in_the_focused_view();
+    overview_wheel_zoom_out_extends_the_pullback_and_keeps_the_zoom_in_limit();
+    overview_pan_follows_the_yaw();
     planet_flights_follow_wall_time_and_stock_transforms();
     pan_drag_and_radar_are_separate_transforms();
     campaign_start_uses_authored_home_transform();
+    wide_windows_keep_the_16_9_vertical_extent();
     return 0;
 }

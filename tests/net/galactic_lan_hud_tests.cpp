@@ -167,6 +167,20 @@ void notices() {
     view.clock_paused = true;
     hud::LanNoticeModel clock_notice;
     expect(clock_notice.notice(view, players, 0).find("Paused by Leia") != std::string::npos, "agreed pause actor is named");
+    // #6013: a pause taken by a seat that has since left is resumed by the lowest remaining human seat, and only by it.
+    expect(hud::lan_releases_departed_pause(view, players, {2}) == false, "the actor still here keeps its pause");
+    {
+        auto left = view; left.clock_actor = {7};
+        expect(hud::lan_releases_departed_pause(left, players, {2}), "the leaver's pause is resumed by the remaining seat");
+        expect(!hud::lan_releases_departed_pause(left, players, {7}), "the leaver itself does not resume");
+        auto three = players; three.push_back({2, {9}, "Thrawn", "Empire", ""});
+        expect(hud::lan_releases_departed_pause(left, three, {2}) && !hud::lan_releases_departed_pause(left, three, {9}),
+            "only the lowest remaining seat resumes, so one Resume is sent");
+        left.clock_paused = false;
+        expect(!hud::lan_releases_departed_pause(left, players, {2}), "nothing to resume when the clock runs");
+        left.clock_paused = true; left.phase = lan::GalacticLanPhase::ended;
+        expect(!hud::lan_releases_departed_pause(left, players, {2}), "an ended match sends nothing");
+    }
     view.phase = lan::GalacticLanPhase::ended;
     view.reason = lan::GalacticLanReason::desync;
     view.message = "hash disagreement at tick 30";

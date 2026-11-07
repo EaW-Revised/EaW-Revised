@@ -37,7 +37,7 @@ inline void configure_capture_hud_fixture(sim::galactic::GalacticSetup& setup,
         row.target_owner = defender; row.starbase_owner = row.ground_occupier = 0;
         row.space_level = row.ground_level = 0; row.maximum_ground_forces = control.max_ground_forces;
         row.ground_slots = 5;
-        std::erase_if(row.offers, [](const auto& offer) { return offer.type != 1004; });
+        std::erase_if(row.offers.mutable_rows(), [](const auto& offer) { return offer.type != 1004; });
         row.offers.front().affiliated = false; // Cached initial-owner result must not hide the capturer's type.
         auto enemy = row.offers.front(); enemy.type = 1003; enemy.affiliated = true; enemy.population = whole(1);
         row.offers.insert(row.offers.begin(), enemy);

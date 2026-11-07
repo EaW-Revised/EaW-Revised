@@ -96,6 +96,12 @@ std::string TacticalHud::report_json() const {
     output << "{\"gift\": {\"visible\": " << (state.gift_button && state.gift_button->is_visible_in_tree() ? "true" : "false")
         << ", \"enabled\": " << (state.gift_enabled ? "true" : "false")
         << ", \"open\": " << (state.gift_open ? "true" : "false")
+        << ", \"base\": " << (state.gift_button && state.gift_button->get_texture_normal().is_valid() ? "true" : "false")
+        << ", \"overlay\": " << json(state.gift_button ? state.gift_button->overlay_name() : "none")
+        << ", \"recipient_overlay\": " << json(!state.gift_cells.empty() ? state.gift_cells.front().button->overlay_name() : "none")
+        << ", \"layout_changes\": " << state.gift_layout.changes()
+        << ", \"state\": " << json(state.gift_button ? state.gift_button->visual_state() : "none")
+        << ", \"recipient_state\": " << json(!state.gift_cells.empty() ? state.gift_cells.front().button->visual_state() : "none")
         << ", \"presses\": " << state.gift_presses << ", \"submissions\": " << state.gift_submissions << ", \"recipients\": [";
     for (std::size_t i = 0; i < state.gift_recipients.size(); ++i)
         output << (i ? ", " : "") << "{\"seat\": " << state.gift_recipients[i].seat.value

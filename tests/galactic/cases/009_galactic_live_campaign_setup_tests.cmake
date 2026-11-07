@@ -18,6 +18,8 @@ add_test(NAME galactic_accepted_starting_tech_stock COMMAND galactic_live_campai
 set_tests_properties(galactic_accepted_starting_tech_stock PROPERTIES SKIP_REGULAR_EXPRESSION "SKIPPED:")
 eawr_add_game_data_test(NAME galactic_origin_starbase_stock COMMAND galactic_live_campaign_setup_tests --origin-starbases)
 set_tests_properties(galactic_origin_starbase_stock PROPERTIES LABELS game-data SKIP_REGULAR_EXPRESSION "SKIPPED:")
+eawr_add_game_data_test(NAME galactic_steal_offers_stock COMMAND galactic_live_campaign_setup_tests --steal-offers)
+set_tests_properties(galactic_steal_offers_stock PROPERTIES LABELS game-data SKIP_REGULAR_EXPRESSION "SKIPPED:")
 eawr_add_game_data_test(NAME galactic_unscouted_intel_stock COMMAND galactic_live_campaign_setup_tests --unscouted-intel)
 set_tests_properties(galactic_unscouted_intel_stock PROPERTIES LABELS game-data SKIP_REGULAR_EXPRESSION "SKIPPED:")
 

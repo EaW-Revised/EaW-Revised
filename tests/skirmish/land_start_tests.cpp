@@ -1,6 +1,8 @@
 #include "eawr/skirmish/land_start.hpp"
+#include "eawr/vfs/vfs.hpp"
 #include "eawr/skirmish/land_content.hpp"
 #include "eawr/platform/sim_workers.hpp"
+#include "eawr/script/foc/tactical_ai.hpp"
 #include "eawr/sim/tactical/session.hpp"
 #include "eawr/sim/math/trig.hpp"
 #include "eawr/sim/math/trig.hpp"
@@ -14,6 +16,7 @@
 #include <array>
 #include <filesystem>
 #include <iostream>
+#include <map>
 #include <memory>
 #include <set>
 #include <vector>
@@ -99,9 +102,8 @@ std::vector<std::uint8_t> run(const skirmish::LandStart& built, std::size_t work
     platform::ThreadWorkerAdapter executor(workers);
     test_support::ReverseOrderExecutor reversed(workers);
     const bool diagnose = workers == 1 && !reverse && authored_forward;
-    if (diagnose) std::cout << "recorded expected failure #4840: the original Dantooine +X 90-degree turn "
-        "stalls after 1.72 units against an idle squad member (dd77 diagnostic); "
-        "this movement witness follows the authored forward axis and still requires more than ten units\n";
+    if (diagnose) std::cout << "#4840 Dantooine movement witness follows the authored forward axis "
+        "and requires more than ten units\n";
     const auto trace = [&] {
         if (!diagnose) return;
         const auto* motion = session.land_movement();
@@ -345,6 +347,23 @@ void contracts() {
     skirmish::LandStaticGate prop_gate; prop_gate.type = prop.id; prop_gate.primary_passability = 2;
     static_gates.unverified_static_objects.push_back(prop_gate);
     const auto static_start = take(skirmish::build_land_start(fixture, static_inputs, static_gates));
+    auto victory_inputs = static_inputs;
+    victory_inputs.common.land_victory_condition = VictoryCondition::enemy_base_components_destroyed;
+    auto& victory_prop = victory_inputs.static_tables.land_static_objects.front();
+    victory_prop.behaviors = {"DUMMY_LAND_BASE_LEVEL_COMPONENT"};
+    victory_prop.land_victory_relevant = true;
+    const auto component_start = take(skirmish::build_land_start(fixture, victory_inputs, static_gates));
+    expect(component_start.content.victory.starbase_types == std::vector<sim::tactical::TypeId>{skirmish::type_id(prop.id)},
+        "LC-70 accepts the component behavior with land relevance");
+    victory_prop.land_victory_relevant = false; victory_prop.victory_relevant = true;
+    expect(!take(skirmish::build_land_start(fixture, victory_inputs, static_gates)).content.victory.starbase_types.empty(),
+        "LC-70 accepts general relevance independently");
+    victory_prop.victory_relevant = false;
+    expect(take(skirmish::build_land_start(fixture, victory_inputs, static_gates)).content.victory.starbase_types.empty(),
+        "LC-70 excludes an irrelevant tower despite its behavior");
+    victory_prop.victory_relevant = true; victory_prop.behaviors.clear();
+    expect(take(skirmish::build_land_start(fixture, victory_inputs, static_gates)).content.victory.starbase_types.empty(),
+        "LC-70 excludes a relevant wall without component behavior");
     expect(!static_start.content.land.occupations.empty() && static_start.start.setup.units.size() > authored_start.start.setup.units.size(),
         "custom blocking prop types enter the authored simulation without a name list");
     const auto prop_session = take(TacticalSession::create(static_start.start.setup, static_start.content));
@@ -430,6 +449,12 @@ void contracts() {
         "a team-forming first survivor refuses an explicit binding without converted team speed");
     compare(fixture, inputs, bindings);
     auto built = take(skirmish::build_land_start(fixture, inputs, bindings));
+    auto chosen_inputs = inputs;
+    chosen_inputs.common.land_victory_condition = VictoryCondition::enemy_hq_destroyed;
+    const auto chosen = take(skirmish::build_land_start(fixture, chosen_inputs, bindings));
+    expect(chosen.start.victory_condition == VictoryCondition::enemy_hq_destroyed
+        && chosen.content.victory.condition == VictoryCondition::enemy_hq_destroyed,
+        "land start installs the authored condition");
     expect(built.start.removed.size() == 2 && built.start.units.size() == 5 && built.start.setup.units.size() == 2,
         "WLEN-53 playable placements removed; neutral, missing-player decoration and out-of-range owner retained in census");
     expect(built.content.economy.players[0].population_cap == 11 && built.content.economy.players[0].start_tech == 1,
@@ -448,6 +473,49 @@ void contracts() {
     const auto refused_tech = skirmish::build_land_start(bad_tech, inputs, bindings);
     expect(!refused_tech && refused_tech.error().code == skirmish::diagnostic_codes::input,
         "an invalid authored maximum tech is refused without clamping");
+    // One-switch vehicles-only start: the switch off leaves every start unchanged; on, human slots take the vehicle set.
+    {
+        const auto vehicle_company = [](std::string id) {
+            units::LandCompany row; row.id = std::move(id); row.team_locomotor = "TEAM_LOCOMOTOR";
+            units::LandCompanyMember tank; tank.type = row.id + "_Member"; tank.kind = units::LandObjectKind::vehicle;
+            units::LandLocomotionData data; data.collision_class = units::LandCollisionGroup::vehicle;
+            row.members = {tank}; row.locomotion = {data};
+            return row;
+        };
+        const auto stock = skirmish::land_vehicle_start_forces("Rebel");
+        expect(stock.size() == 2 && !skirmish::land_vehicle_start_forces("empire").empty()
+            && !skirmish::land_vehicle_start_forces("Underworld").empty() && skirmish::land_vehicle_start_forces("Mod_Dawn").empty(),
+            "stock factions have a vehicle set; a mod faction has none");
+        expect(skirmish::is_land_vehicle_company(vehicle_company("Rebel_Light_Tank_Brigade"))
+            && !skirmish::is_land_vehicle_company(company), "a generic-team vehicle company qualifies; an infantry container company does not");
+        auto giant = vehicle_company("giant"); giant.locomotion[0].collision_class = units::LandCollisionGroup::giant_vehicle;
+        auto flying = vehicle_company("flying"); flying.locomotion[0].collision_class = units::LandCollisionGroup::none;
+        auto team = vehicle_company("team"); team.team_locomotor = "LAND_TEAM_CONTAINER_LOCOMOTOR";
+        auto mixed = vehicle_company("mixed"); mixed.members.push_back(mixed.members[0]);
+        mixed.locomotion.push_back(mixed.locomotion[0]); mixed.locomotion[1].collision_class = units::LandCollisionGroup::infantry;
+        expect(skirmish::is_land_vehicle_company(giant) && !skirmish::is_land_vehicle_company(flying)
+            && !skirmish::is_land_vehicle_company(team) && !skirmish::is_land_vehicle_company(mixed)
+            && !skirmish::is_land_vehicle_company(units::LandCompany{}), "vehicle test needs the generic team and only vehicle collision classes");
+        auto switched = inputs;
+        skirmish::set_land_vehicles_only(switched, true);
+        expect(switched.human_vehicles_only && switched.factions[0].vehicle_forces.empty(), "a mod faction gets no vehicle set");
+        skirmish::set_land_vehicles_only(switched, false);
+        expect(!switched.human_vehicles_only, "turning the switch off clears it");
+        const auto plain = take(skirmish::build_land_start(fixture, inputs, bindings));
+        auto off = inputs; off.factions[0].vehicle_forces = {"Mod_Aurora_Company"};
+        const auto off_start = take(skirmish::build_land_start(fixture, off, bindings));
+        expect(off_start.start.setup.units.size() == plain.start.setup.units.size(), "with the switch off the forces are unchanged");
+        auto on = off; on.human_vehicles_only = true; on.factions[0].vehicle_forces = {"Mod_Aurora_Company"};
+        expect(!skirmish::build_land_start(fixture, on, bindings), "an infantry company in the vehicle set is refused");
+        auto fallback = inputs; fallback.human_vehicles_only = true;
+        const auto fallback_start = take(skirmish::build_land_start(fixture, fallback, bindings));
+        expect(fallback_start.start.setup.units.size() == plain.start.setup.units.size()
+            && std::any_of(fallback_start.notes.begin(), fallback_start.notes.end(), [](const auto& note) { return note.find("vehicles-only") != std::string::npos; }),
+            "a faction without a vehicle set keeps its defaults and says so");
+        auto no_free = on; fixture.match = inputs.common.match_defaults; fixture.match->free_starting_units = false;
+        expect(static_cast<bool>(skirmish::build_land_start(fixture, no_free, bindings)), "with free starting units off the vehicle set is not consulted");
+        fixture.match.reset();
+    }
     auto absent_forces = inputs;
     absent_forces.factions[0].forces.clear(); absent_forces.factions[0].forces_authored = false;
     const auto empty_start = take(skirmish::build_land_start(fixture, absent_forces, bindings));
@@ -463,6 +531,50 @@ void contracts() {
     auto tilted = inputs;
     tilted.common.placements[3].orientation_degrees->x = whole(1);
     expect(!skirmish::build_land_start(fixture, tilted, bindings), "tilted selected spawn marker is refused");
+    // #3207 G1-c (WLAI-56): a lobby AI's land difficulty reaches the durability scales and the economy account; humans and
+    // Normal slots stay neutral. The fixture adjustments are synthetic; the multipliers are read from them.
+    {
+        std::map<std::string, std::string, std::less<>> xml;
+        xml["data/xml/difficultyadjustments.xml"] = R"(<Difficulty_Adjustments>
+<Difficulty_Adjustment Name="Mod_Hard"><Credit_Multiplier>1.25</Credit_Multiplier><Land_Build_Time_Multiplier>0.5</Land_Build_Time_Multiplier>
+<Damage_Multiplier>1.5</Damage_Multiplier><Health_Multiplier>0.5</Health_Multiplier><Shield_Multiplier>0.25</Shield_Multiplier></Difficulty_Adjustment>
+<Difficulty_Adjustment Name="Mod_Normal"><Credit_Multiplier>1.0</Credit_Multiplier></Difficulty_Adjustment>
+</Difficulty_Adjustments>)";
+        xml["data/xml/ai/players/dusk.xml"] = R"(<AIPlayerType><Name>Mod_Dusk_AI</Name><Difficulty_Adjustments>
+<Normal>Mod_Normal</Normal><Hard>Mod_Hard</Hard></Difficulty_Adjustments></AIPlayerType>)";
+        auto table = script::foc::AiDifficultyTable::load(xml);
+        expect(static_cast<bool>(table), "G1-c: the fixture difficulty table loads");
+        if (table) {
+            auto ai_inputs = inputs;
+            ai_inputs.common.difficulty = std::make_shared<const script::foc::AiDifficultyTable>(std::move(table).value());
+            ai_inputs.common.factions[1].basic_ai = "Mod_Dusk_AI";
+            const Fixed one = Fixed::from_raw(Fixed::scale);
+            const auto ai_fixture = [&](const AiLevel level) {
+                auto copy = fixture;
+                copy.slots[1].human = false; copy.slots[1].difficulty = level;
+                return copy;
+            };
+            const auto normal = take(skirmish::build_land_start(ai_fixture(AiLevel::normal), ai_inputs, bindings));
+            expect(normal.content.durability.difficulty.empty() && normal.content.economy.players[1].credit_multiplier == one
+                && normal.content.economy.players[1].ai_build_time_multiplier == one,
+                "G1-c: a Normal land AI keeps neutral scales");
+            const auto hard = take(skirmish::build_land_start(ai_fixture(AiLevel::hard), ai_inputs, bindings));
+            const auto& scales = hard.content.durability.difficulty;
+            expect(scales.size() == 1 && scales[0].player == 2 && scales[0].health == Fixed::from_ratio(1, 2).value()
+                && scales[0].shield == Fixed::from_ratio(1, 4).value() && scales[0].damage == Fixed::from_ratio(3, 2).value(),
+                "G1-c: a Hard land AI binds health, shield and damage scales for its seat only");
+            expect(hard.content.economy.players[1].credit_multiplier == Fixed::from_ratio(5, 4).value()
+                && hard.content.economy.players[1].ai_build_time_multiplier == Fixed::from_ratio(1, 2).value()
+                && hard.content.economy.players[0].credit_multiplier == one && hard.content.economy.players[0].ai_build_time_multiplier == one,
+                "G1-c: a Hard land AI carries credit and land build-time multipliers, the human stays neutral");
+            const auto repeated = take(skirmish::build_land_start(ai_fixture(AiLevel::hard), ai_inputs, bindings));
+            expect(repeated.start.identity.sha256 == hard.start.identity.sha256, "G1-c: the land difficulty binding is deterministic");
+            auto no_table = ai_inputs; no_table.common.difficulty.reset();
+            const auto plain = take(skirmish::build_land_start(ai_fixture(AiLevel::hard), no_table, bindings));
+            expect(plain.content.durability.difficulty.empty() && plain.start.identity.sha256 != hard.start.identity.sha256,
+                "G1-c: no mounted difficulty table leaves the land start neutral, and the applied scales bind into its identity");
+        }
+    }
     bindings.identity = {};
     expect(!skirmish::build_land_start(fixture, inputs, bindings), "effective content identity is required");
 }
@@ -556,14 +668,13 @@ TurningResult turning_move(const skirmish::LandStart& built, const sim::Partitio
         const bool member_measured = member != members.end() && sim::math::try_length(
             {Fixed::from_raw(member->position.x.raw() - member_before.x.raw()),
              Fixed::from_raw(member->position.y.raw() - member_before.y.raw())}, member_progress);
-        expect(member_measured, "#4840 Dantooine expected-limit member progress is measurable");
-        if (repulsion) {
-            expect(measured && distance > Fixed{}, "#4840 Dantooine expected-limit parent retains initial movement");
-            const auto index = static_cast<std::size_t>(final - final_squads.begin());
-            for (const auto& m : members) if (m.squad == index)
-                expect(m.collision_lock == 0 && !m.terrain_blocked,
-                    "#4840 Dantooine expected-limit company has no collision lock or terrain block");
-        }
+        expect(member_measured, "#4840 Dantooine member progress is measurable");
+        // Strict pass: the squad turns in place, then completes the 90-degree move (same bar as Naboo).
+        expect(measured && distance > whole(10), "#4840 Dantooine parent moves more than ten units within 150 ticks");
+        expect(member_measured && member_progress > whole(10), "#4840 Dantooine member 1103 moves more than ten units within 150 ticks");
+        const auto index = static_cast<std::size_t>(final - final_squads.begin());
+        for (const auto& m : members) if (m.squad == index)
+            expect(m.collision_lock == 0 && !m.terrain_blocked, "#4840 Dantooine company has no collision lock or terrain block");
     }
     if (verify_replay) {
         auto replay = take(TacticalSession::from_replay(take(parse_replay(take(write_replay(session.record())))), built.content));
@@ -578,28 +689,19 @@ void compare_turning(const skirmish::LandStart& built, bool naboo) {
     sim::InlineExecutor serial;
     // Replay one uninterrupted witness per map; all worker/restore runs compare
     // against those same complete bytes without replaying the identical leg again.
-    const auto main_progress = naboo ? Fixed{} : turning_move(built, serial, false, false, false, false, false).member_progress;
-    const auto expected_limit = [&](const TurningResult& result) {
-        if (!naboo) expect(result.member_progress > main_progress,
-            "#4840 Dantooine expected-limit member 1103 advances farther than the main-equivalent policy");
-    };
     const auto baseline = turning_move(built, serial, naboo, false, true, true);
-    expected_limit(baseline);
     if (!naboo) {
         const auto real = [](Fixed n) { return static_cast<double>(n.raw()) / Fixed::scale; };
-        std::cout << "expected-limit #4840 Dantooine: member1103 progress main-policy=" << real(main_progress)
-            << " head=" << real(baseline.member_progress) << " parent=" << real(baseline.parent_distance)
-            << "; collision-speed decay between two idle peers and the WLPA-30 parent wait remain open\n";
+        std::cout << "strict #4840 Dantooine: member1103 progress=" << real(baseline.member_progress)
+            << " parent=" << real(baseline.parent_distance) << '\n';
     }
     for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
         platform::ThreadWorkerAdapter executor(workers);
         const auto result = turning_move(built, executor, naboo, true, false, false);
         expect(result == baseline, "stock turning contact equals at 1/2/4/8 workers");
-        expected_limit(result);
         test_support::ReverseOrderExecutor reversed(workers);
         const auto reverse = turning_move(built, reversed, naboo, true, false, false);
         expect(reverse == baseline, "stock turning contact equals with reverse partitions");
-        expected_limit(reverse);
     }
 }
 
@@ -931,6 +1033,75 @@ void live_stock_move(const vfs::Vfs& filesystem, const data::Catalog& catalog, s
         moved |= displacement_x * displacement_x + displacement_y * displacement_y > 100.0;
     }
     expect(moved, "stock Naboo authored squad moves after the same L6 move/stop command stream");
+
+    // #5204 (WLPA-84/85/86): one stock squad ordered 400 units from its stock spawn reaches the target. The baseline prints the
+    // stock radius, hard extents, gap and slot spread of the squad so the layout figures are on record.
+    {
+        struct MoveRun { std::int64_t arrived{-1}; std::uint64_t ticks{}; LandMovement::Checkpoint state; };
+        // One move of the stock squad on the given executor. Diagnostics print the parent, its members and the retained
+        // contacts at fixed ticks, so a stalled move shows which gate holds it.
+        const auto move_run = [&](const sim::PartitionExecutor& workers, int limit, bool diagnostics) {
+            auto long_session = take(TacticalSession::create(built.start.setup, built.content));
+            const auto start = long_session.land_movement()->checkpoint();
+            const auto& start_squad = start.squads[selected_member->squad];
+            Fixed far_x;
+            if (!sim::math::try_add(start_squad.position.x, whole(400), far_x)) throw std::runtime_error("stock 400-unit destination overflow");
+            const auto far_submitted = long_session.submit({{11, 1, 0}, {root}, MovePayload{sim::math::Vec3{far_x, start_squad.position.y, {}}}});
+            if (!far_submitted) throw std::runtime_error(far_submitted.error().message);
+            if (diagnostics) {
+                Fixed widest, deepest;
+                for (const auto& member : start.members) if (member.squad == selected_member->squad) {
+                    std::cout << "L6 rows member=" << member.object << " radius=" << real(member.profile.radius) << " hard=" << real(member.hard_x)
+                        << ',' << real(member.hard_y) << " gap=" << real(member.gap) << " slot=" << real(member.slot.x) << ',' << real(member.slot.y) << '\n';
+                    widest = std::max(widest, Fixed::from_raw(member.slot.y.raw() < 0 ? -member.slot.y.raw() : member.slot.y.raw()));
+                    deepest = std::max(deepest, Fixed::from_raw(-member.slot.x.raw()));
+                }
+                std::cout << "L6 rows squad=" << root << " rear=" << real(start_squad.rear_extent) << " half_width=" << real(widest)
+                    << " depth=" << real(deepest) << " mapped=" << start_squad.has_mapped << '\n';
+            }
+            MoveRun run;
+            for (int tick = 0; tick < limit && run.arrived < 0; ++tick) {
+                take(long_session.step(workers));
+                run.ticks = static_cast<std::uint64_t>(tick) + 1;
+                if (long_session.land_movement()->squads()[selected_member->squad].order == sim::tactical::LandMoveOrder::reached) run.arrived = tick;
+                if (diagnostics && (tick == 0 || tick == 1 || tick == 4 || tick == 29 || tick == 99 || tick == 299 || tick == 999 || tick == 2399)) {
+                    const auto& movement = *long_session.land_movement();
+                    const auto& parent_now = movement.squads()[selected_member->squad];
+                    std::cout << "L6 diag tick=" << tick << " order=" << static_cast<int>(parent_now.order) << " speed=" << real(parent_now.speed)
+                        << " facing=" << real(parent_now.facing) << " turning=" << parent_now.turning << " node=" << parent_now.next_node << '/'
+                        << parent_now.path.nodes.size() << " pos=" << real(parent_now.position.x) << ',' << real(parent_now.position.y)
+                        << " rear=" << real(parent_now.rear_extent) << " mapped_axis=" << real(parent_now.mapped_axis)
+                        << " contacts=" << movement.contacts().size() << '\n';
+                    for (const auto& row : movement.members()) if (row.squad == selected_member->squad)
+                        std::cout << "L6 diag   member=" << row.object << " pos=" << real(row.position.x) << ',' << real(row.position.y)
+                            << " slot=" << real(row.slot.x) << ',' << real(row.slot.y) << " speed=" << real(row.speed) << " state="
+                            << static_cast<int>(row.state) << " collision_speed=" << real(row.collision_speed)
+                            << " terrain_blocked=" << row.terrain_blocked << '\n';
+                    for (const auto& c : movement.contacts()) std::cout << "L6 diag   contact " << c.first << '-' << c.second
+                        << " kind=" << static_cast<int>(c.kind) << " state=" << static_cast<int>(c.state)
+                        << " target=" << real(c.terrain_target.x) << ',' << real(c.terrain_target.y) << " search=" << static_cast<int>(c.search)
+                        << " route=" << static_cast<int>(c.route) << " installed=" << c.installed << '\n';
+                }
+            }
+            run.state = long_session.land_movement()->checkpoint();
+            const auto& end_squad = run.state.squads[selected_member->squad];
+            if (diagnostics) std::cout << "L6 400-unit move arrived_tick=" << run.arrived << " position=" << real(end_squad.position.x) << ','
+                << real(end_squad.position.y) << " from=" << real(start_squad.position.x) << ',' << real(start_squad.position.y) << '\n';
+            return run;
+        };
+        const sim::InlineExecutor serial_executor;
+        const auto arrived = move_run(serial_executor, 2400, true);
+        expect(arrived.arrived >= 0, "#5204 a stock squad ordered 400 units from its stock spawn reaches the target");
+        // Worker matrix: the same move at 1/2/4/8 workers and with reversed partitions ends in the identical state.
+        constexpr int matrix_ticks = 600;
+        const auto reference = move_run(serial_executor, matrix_ticks, false);
+        for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+            platform::ThreadWorkerAdapter threads(workers);
+            expect(move_run(threads, matrix_ticks, false).state == reference.state, "#5204 stock move equals at 1/2/4/8 workers");
+        }
+        test_support::ReverseOrderExecutor reversed(4);
+        expect(move_run(reversed, matrix_ticks, false).state == reference.state, "#5204 stock move equals with reverse partitions");
+    }
 }
 
 }

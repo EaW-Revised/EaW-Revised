@@ -19,10 +19,13 @@
 #include "upload_identity.hpp"
 #include "upload_identity_pool.hpp"
 #include "texture_budget.hpp"
+#include "model_digest_memo.hpp"
 #include "model_recipe.hpp"
 #include "texture_recipe.hpp"
+#include "texture_census.hpp"
 #include "resource_residency.hpp"
 #include "upload_winding.hpp"
+#include "distance_band.hpp"
 
 #include <godot_cpp/classes/global_constants.hpp>
 #include <godot_cpp/classes/engine.hpp>
@@ -51,6 +54,7 @@
 #include <cmath>
 #include <cstring>
 #include <map>
+#include <tuple>
 #include <memory>
 #include <optional>
 #include <set>
@@ -122,6 +126,10 @@ public:
             std::vector<std::pair<std::string, std::shared_ptr<detail::TextureRecipe>>> bindings;
         };
         RID mesh;
+        std::uint64_t category_triangles{};
+        std::uint64_t diagnostic_model_meshes{}, diagnostic_model_submeshes{};
+        std::vector<std::string> diagnostic_surface_names;
+        std::optional<AABB> diagnostic_bounds;
         RID texture;
         // Per-binding textures (upload with BindingTexture entries), by name.
         std::vector<std::pair<std::string, RID>> binding_textures;
@@ -188,10 +196,14 @@ public:
         detail::PlacedPiece placement; // #888: what it last sent, and the submit that carried it
         bool visible{true};
         bool reserved_proxy{};
+        bool applied_visible{true};
         std::uint64_t category_submit_frame{~std::uint64_t{0}};
         std::uint64_t category_surfaces{};
         render_categories::Role category_role{render_categories::Role::unknown};
         mutable bool category_casts{true};
+        bool band_hidden{}, group_hidden{}, part_hidden{};
+        mutable RID diagnostic_cast_rid;
+        mutable RenderingServer::ShadowCastingSetting diagnostic_cast_setting{RenderingServer::SHADOW_CASTING_SETTING_ON};
     };
 
     struct PendingPose final {
@@ -223,13 +235,60 @@ public:
         return bind_skin_pose(entity_id, asset_id, resource->second, std::move(prepared));
     }
     explicit Impl(Node3D& owner, std::shared_ptr<GodotShaderCache> shaders, bool attach_scene);
+    bool census_registered_{}; // texture census switch was on at construction
     std::unordered_map<sim::EntityId, render_categories::Role> category_roles_;
+    struct DiagnosticOwner final {
+        std::uint64_t unit{};
+        std::string model;
+        render_categories::HullPart part{render_categories::HullPart::unclassified};
+        std::string object, layer, categories, xml_type, kind;
+    };
+    std::unordered_map<sim::EntityId, DiagnosticOwner> diagnostic_owners_;
+    std::unordered_map<sim::EntityId, std::optional<AABB>> diagnostic_world_bounds_;
+    render_categories::Sample diagnostic_groups_{};
+    // Opt-in cost bound only; no atlas, no production LOD or pose skipping.
+    struct DiagnosticQuad final { RID rid; Transform3D transform; bool visible{}; };
+    RID diagnostic_quad_mesh_, diagnostic_quad_shader_, diagnostic_quad_material_;
+    std::unordered_map<std::uint64_t, DiagnosticQuad> diagnostic_quads_;
+    std::unordered_set<std::uint64_t> diagnostic_impostor_units_;
+    void update_diagnostic_impostors(RenderingServer& rendering);
+    void update_diagnostic_instances(RenderingServer& rendering);
     render_categories::Source category_source_{this, [](const void* owner, render_categories::Sample& sample) {
         const auto& self = *static_cast<const Impl*>(owner);
+        if (render_categories::ablation != "off") {
+            sample.fighter_units += self.diagnostic_groups_.fighter_units;
+            sample.fighter_impostor_candidates += self.diagnostic_groups_.fighter_impostor_candidates;
+            sample.fighter_impostor_quads += self.diagnostic_groups_.fighter_impostor_quads;
+            sample.fighter_hull_surfaces += self.diagnostic_groups_.fighter_hull_surfaces;
+            sample.fighter_attachment_surfaces += self.diagnostic_groups_.fighter_attachment_surfaces;
+            sample.fighter_effect_surfaces += self.diagnostic_groups_.fighter_effect_surfaces;
+            sample.fighter_requested_casters += self.diagnostic_groups_.fighter_requested_casters;
+            sample.eligible_units += self.diagnostic_groups_.eligible_units;
+            sample.compatible_groups += self.diagnostic_groups_.compatible_groups;
+            sample.grouped_units += self.diagnostic_groups_.grouped_units;
+            sample.potential_colour_saving += self.diagnostic_groups_.potential_colour_saving;
+            sample.group_hidden_units += self.diagnostic_groups_.group_hidden_units;
+        }
         for (const auto& [entity, instance] : self.instances_) {
             static_cast<void>(entity);
             sample.record(instance.category_role, instance.category_submit_frame == sample.frame,
-                instance.category_casts, instance.category_surfaces);
+                instance.category_casts, instance.category_surfaces,
+                self.resources_.contains(instance.asset_id) ? self.resources_.at(instance.asset_id).category_triangles : 0,
+                instance.category_surfaces);
+            if (render_categories::ablation != "off") {
+                sample.band_hidden_instances += instance.band_hidden ? 1U : 0U;
+                if (instance.category_role == render_categories::Role::hull) {
+                    const auto provenance = self.diagnostic_owners_.find(entity);
+                    const auto part = provenance == self.diagnostic_owners_.end()
+                        ? render_categories::HullPart::unclassified : provenance->second.part;
+                    if (part == render_categories::HullPart::turret) sample.declared_turret_surfaces += instance.category_surfaces;
+                    else if (part == render_categories::HullPart::body) sample.other_hull_surfaces += instance.category_surfaces;
+                    else sample.unclassified_hull_surfaces += instance.category_surfaces;
+                    const auto resource = self.resources_.find(instance.asset_id);
+                    if (resource != self.resources_.end()) for (const auto& name : resource->second.diagnostic_surface_names)
+                        sample.named_hull_surfaces += name.empty() ? 0U : 1U;
+                }
+            }
         }
     }, [](const void* owner) { return static_cast<std::uint64_t>(static_cast<const Impl*>(owner)->viewport_.get_id()); }};
     bool attach_scene_{true};
@@ -348,6 +407,27 @@ public:
     [[nodiscard]] std::vector<GodotRenderer::InstanceEvidence> instance_evidence() const;
     [[nodiscard]] std::optional<std::array<float, 12>> bone_evidence(sim::EntityId entity, std::int32_t bone) const;
     void set_instance_visible(sim::EntityId entity, bool visible);
+    static void apply_diagnostic_casting(RenderingServer& rendering, const Instance& instance,
+                                         const RenderingServer::ShadowCastingSetting setting) {
+        // The fighter traversal visits every retained instance each frame. Avoid
+        // resending unchanged policy in that opt-in path; default calls retain
+        // their original behaviour. Key by RID as well as policy so a copied
+        // instance cannot carry a cached setting to newly allocated geometry.
+        if (instance.diagnostic_cast_rid == instance.rid && instance.diagnostic_cast_setting == setting) return;
+        instance.diagnostic_cast_rid = instance.rid;
+        instance.diagnostic_cast_setting = setting;
+        rendering.instance_geometry_set_cast_shadows_setting(instance.rid, setting);
+    }
+    static void apply_visibility(RenderingServer& rendering, Instance& instance, bool requested) {
+        const bool applied = render_categories::engine_visible(instance.category_role, requested)
+            && !(instance.band_hidden && !render_categories::ablation.starts_with("shadows-band-"))
+            && !instance.group_hidden && !instance.part_hidden;
+        if (instance.applied_visible != applied) {
+            rendering.instance_set_visible(instance.rid, applied);
+            instance.applied_visible = applied;
+        }
+        instance.visible = requested;
+    }
     void set_render_category(sim::EntityId entity_id, render_categories::Role role);
     void write_churn_census(std::ostream& output) const;
 
@@ -432,6 +512,8 @@ private:
     [[nodiscard]] bool acquire_texture(RenderingServer& rendering, const detail::TextureRecipe& recipe, RID& target,
         std::vector<detail::GpuItem>& items);
     void release_texture(RenderingServer& rendering, const detail::GpuItem& item);
+    void note_shared_census(detail::TextureOwnerKind owner_kind, const std::string& name,
+        const detail::GpuItem& item, const assets::Source* source);
     // `drop` top mips are left out (GM-04); 0 uploads the whole stored chain.
     [[nodiscard]] static RID create_texture(RenderingServer& rendering, const assets::Texture& source,
         std::uint32_t drop = 0);
@@ -478,7 +560,7 @@ private:
     [[nodiscard]] bool admit_resource(RenderingServer& rendering, sim::AssetId asset, Resource& resource);
     void evict_resource(RenderingServer& rendering, sim::AssetId asset, Resource& resource);
     void reconcile_residency(RenderingServer& rendering, std::span<const sim::RenderInstance> instances);
-    std::shared_ptr<detail::TextureRecipe> keep_texture(const assets::Texture& texture);
+    std::shared_ptr<detail::TextureRecipe> keep_texture(const assets::Texture& texture, const detail::GpuItem& item);
 
     [[nodiscard]] static bool shared_name(const std::string& value) {
         return value.starts_with("shared:");
@@ -502,6 +584,8 @@ private:
     std::map<sim::AssetId, Resource> resources_;
     std::map<std::string, RID> shared_textures_;
     std::vector<detail::GpuItem> shared_gpu_items_;
+    // Texture census only (switch on): owner class and name of each shared registration.
+    std::vector<std::tuple<detail::TextureOwnerKind, std::string, detail::GpuItem>> shared_census_;
     struct PooledTexture final {
         RID rid;
         std::uint64_t references{};
@@ -576,6 +660,9 @@ private:
     detail::ModelLoader model_loader_;
     detail::ModelRecipe::Batch admission_model_;
     detail::ModelRecipeStats model_stats_;
+    // The digest of each shared model object, so the surfaces of one model hash it once.
+    detail::ModelDigestMemo model_digests_;
+    [[nodiscard]] detail::UploadIdentity model_digest(const std::shared_ptr<const assets::Model>& model);
     std::size_t model_reload_failures_{};
 };
 

@@ -87,12 +87,14 @@ public:
     // Called after successful GPU admission. No second decode: the digest comes
     // from the model that was uploaded and is checked only when a reload happens.
     // Returns true when geometry was released.
-    bool uploaded(ModelRecipeStats& stats) const {
+    // `identity_of` may answer from a memo: every surface of one shared model asks for the same digest (#5197).
+    using IdentityOf = std::function<UploadIdentity(const std::shared_ptr<const assets::Model>&)>;
+    bool uploaded(ModelRecipeStats& stats, const IdentityOf& identity_of = {}) const {
         if (verified_ || !retained_) return false;
         verified_ = true;
         if (!loader_ || retained_->source.logical_path.empty()) { loader_ = {}; ++stats.ever_fallback; return false; }
         source_ = retained_->source;
-        identity_ = model_identity(*retained_);
+        identity_ = identity_of ? identity_of(retained_) : model_identity(*retained_);
         retained_.reset();
         ++stats.ever_released;
         return true;

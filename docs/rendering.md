@@ -104,6 +104,13 @@ the root viewport's settings as `render_profile`.
 - **Bloom** ([bloom](#bloom)) runs in both profiles. It follows the decode, so
   with MSAA it blooms the per-sample-saturated resolve, and SMAA then runs on
   the bloomed frame.
+- **Depth pre-pass switch.** Forward+ renders every opaque instance twice by default (the engine's
+  `rendering/driver/depth_prepass/enable`, explicit in `apps/viewer/project/project.godot`). `--eawr-depth-prepass on|off`
+  (after `--`, startup only, applied before the renderer exists, no per-frame cost; anything but `on` or `off` is
+  reported as an error and ignored) overrides it for one run. The default is on; the default decision waits for the
+  build host pair and the flag proof. Limits: the engine disables SSAO without the pre-pass (the viewer uses no SSAO, SSIL, SDFGI or
+  VoxelGI), and only space scenes are pixel-compared so far (RaW60, Dev4: identical); a ground scene with
+  alpha-tested foliage is not covered yet.
 - **Alpha-tested foliage.** MSAA leaves Tree.fx cut-out edges stepped; SMAA
   smooths them. Alpha to coverage is not used. Godot 4.7.2 draws an
   alpha-to-coverage material in the transparent pass with alpha blending and
@@ -539,6 +546,13 @@ Without leave_particles, release is immediate. Bone-hide detaches a proxy once;
 reappearance creates a new instance while an old one may drain. stay_detached is
 an explicit alternative. These reference-derived policies are not measured retail
 behaviour; see [attachment visibility](behaviour/particle-attachment-visibility.md).
+
+Authored effect admission validates the whole CPU definition, but render support
+is per emitter. A renderer without an adapter retains its reported cause and
+creates no backend resource; supported siblings still draw. Its CPU particles
+continue to age and produce supported child emitters. An effect with no supported
+render plan is refused explicitly. This keeps a mixed explosion visible without
+substituting geometry for an unsupported primitive family.
 
 Map particles advance in 1/30 s samples (`map_attachment_owner.hpp`). A fixed
 capture takes one sample per rendered frame and holds after its particle frames.

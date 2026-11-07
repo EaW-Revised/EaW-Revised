@@ -1,4 +1,5 @@
 #include "eawr/presentation/ui/battle_messages.hpp"
+#include "eawr/data/xml.hpp"
 #include "eawr/core/text.hpp"
 #include "eawr/data/tag_trace.hpp"
 

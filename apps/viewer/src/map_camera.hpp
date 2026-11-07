@@ -195,6 +195,8 @@ public:
         adapter_.set_focus(focused);
         if (!focused && controller_) controller_->stop_pan();
     }
+    void sample_pointer(float x, float y) noexcept { adapter_.sample_pointer(x, y); }
+    void clear_pointer_sample() noexcept { adapter_.clear_pointer_sample(); }
     void pointer_left() noexcept {
         adapter_.pointer_left();
         if (controller_) controller_->stop_pan();

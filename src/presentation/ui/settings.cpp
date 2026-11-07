@@ -61,7 +61,9 @@ constexpr int speed_last = speed_step_count - 1;
 constexpr int scroll_last = scroll_stop_count - 1;
 
 const IntField fields[] = {
+    EAWR_SETTINGS_FIELD("revised_layer_enabled", revised_layer_enabled, 0, 1),
     EAWR_SETTINGS_FIELD("keyboard.camera_wasd", camera_wasd, 0, 1),
+    EAWR_SETTINGS_FIELD("keyboard.selection_hotkeys", selection_hotkeys, 0, 1),
     EAWR_SETTINGS_FIELD("audio.master", audio.master_percent, 0, 100),
     EAWR_SETTINGS_FIELD("audio.sfx", audio.sfx_percent, 0, 100),
     EAWR_SETTINGS_FIELD("audio.speech", audio.speech_percent, 0, 100),
@@ -74,6 +76,9 @@ const IntField fields[] = {
     EAWR_SETTINGS_FIELD("video.windowed", video.windowed, 0, 1),
     EAWR_SETTINGS_FIELD("video.vsync", video.vsync, 0, 1),
     EAWR_SETTINGS_FIELD("video.render_thread", video.render_thread, 0, 1),
+    EAWR_SETTINGS_FIELD("video.particle_threads", video.particle_threads, 0, 64),
+    EAWR_SETTINGS_FIELD("video.simulation_threads", video.simulation_threads, 0, 256),
+    EAWR_SETTINGS_FIELD("video.depth_prepass", video.depth_prepass, 0, 1),
     EAWR_SETTINGS_FIELD("video.frame_rate_limit", video.frame_rate_limit, -1, std::numeric_limits<int>::max()),
     EAWR_SETTINGS_FIELD("video.detail_level", video.detail_level, 0, detail_level_maximum),
     EAWR_SETTINGS_FIELD("video.texture_mip_drop", video.texture_mip_drop, 0, 4),
@@ -86,6 +91,7 @@ const IntField fields[] = {
     EAWR_SETTINGS_FIELD("gameplay.absolute_scrolling", gameplay.absolute_scrolling, 0, 1),
     EAWR_SETTINGS_FIELD("gameplay.delay_tooltips", gameplay.delay_tooltips, 0, 1),
     EAWR_SETTINGS_FIELD("gameplay.reinforcement_areas_only_while_placing", gameplay.reinforcement_areas_only_while_placing, 0, 1),
+    EAWR_SETTINGS_FIELD("gameplay.animated_loading_background", gameplay.animated_loading_background, 0, 1),
     EAWR_SETTINGS_FIELD("gameplay.hover_owner_names", gameplay.hover_owner_names, -1, 1),
     EAWR_SETTINGS_FIELD("gameplay.right_button_scroll", gameplay.right_button_scroll, 0, 1),
     EAWR_SETTINGS_FIELD("gameplay.both_buttons_rotate", gameplay.both_buttons_rotate, 0, 1),
@@ -290,6 +296,36 @@ std::string_view project_key_for(const std::string_view control, const bool came
     return project_key_for(control);
 }
 
+std::string_view selection_key(const PlayerSettings& settings, const std::size_t action) noexcept {
+    if (action >= selection_commands.size()) return {};
+    const auto found = settings.keys.find(std::string(selection_commands[action]));
+    if (found != settings.keys.end()
+        && std::find(selection_key_choices.begin(), selection_key_choices.end(), found->second) != selection_key_choices.end())
+        return found->second;
+    return settings.selection_config.actions[action].default_key;
+}
+
+bool set_selection_key(PlayerSettings& settings, const std::size_t action, const std::string_view chord) {
+    if (action >= selection_commands.size()
+        || std::find(selection_key_choices.begin(), selection_key_choices.end(), chord) == selection_key_choices.end()
+        || chord == selection_key(settings, 1 - action)) return false;
+    settings.keys[std::string(selection_commands[action])] = chord;
+    return true;
+}
+
+std::optional<std::size_t> selection_action(const PlayerSettings& settings, const char physical,
+    const bool shift, const bool ctrl, const bool alt, const bool meta, const bool free_camera) noexcept {
+    if (!settings.selection_hotkeys || free_camera || shift || alt || meta) return std::nullopt;
+    // A hand-edited duplicate must not shadow either command.
+    if (selection_key(settings, 0) == selection_key(settings, 1)) return std::nullopt;
+    for (std::size_t action = 0; action < selection_commands.size(); ++action) {
+        const auto chord = selection_key(settings, action);
+        const bool wants_ctrl = chord.starts_with("Ctrl+");
+        if (ctrl == wants_ctrl && physical == chord.back()) return action;
+    }
+    return std::nullopt;
+}
+
 std::optional<core::Diagnostic> validate_online_settings(const NetworkSettings& settings, const bool require_service) {
     const auto failure = [](const char* code, const char* message) {
         core::Diagnostic diagnostic;
@@ -333,6 +369,17 @@ std::vector<std::string> clamp_settings(PlayerSettings& settings) {
             repaired.emplace_back(field.key);
         }
     }
+    const auto valid_thread_count = [](const int value, const auto& choices) {
+        return std::find(choices.begin(), choices.end(), value) != choices.end();
+    };
+    if (!valid_thread_count(settings.video.particle_threads, std::array{0, 1, 2, 4, 6, 8})) {
+        settings.video.particle_threads = 0;
+        repaired.emplace_back("video.particle_threads");
+    }
+    if (!valid_thread_count(settings.video.simulation_threads, std::array{0, 2, 4, 6, 8, 12, 16})) {
+        settings.video.simulation_threads = 0;
+        repaired.emplace_back("video.simulation_threads");
+    }
     for (std::size_t slot = 0; slot < detail_slot_count; ++slot) {
         if (clamp_field(settings.video.detail[slot], detail_automatic, detail_slot_maximum)) {
             repaired.push_back(detail_key(slot));
@@ -356,6 +403,7 @@ std::vector<std::string> clamp_settings(PlayerSettings& settings) {
 std::string serialize_settings(const PlayerSettings& settings) {
     std::string text = "eawr-settings " + std::to_string(settings_version) + "\n";
     for (const IntField& field : fields) {
+        if (field.key == "keyboard.selection_hotkeys" && !settings.selection_hotkeys_authored) continue;
         text += std::string(field.key) + "=" + std::to_string(field.get(settings)) + "\n";
     }
     for (std::size_t slot = 0; slot < detail_slot_count; ++slot) {
@@ -366,6 +414,7 @@ std::string serialize_settings(const PlayerSettings& settings) {
     const auto line_value = [](const std::string& value) {
         return std::none_of(value.begin(), value.end(), [](unsigned char c) { return c < 32 || c == 127; }) ? value : std::string{};
     };
+    if (settings.revised_layer_path) text += "revised_layer_path=" + line_value(*settings.revised_layer_path) + "\n";
     text += "network.online_host=" + line_value(settings.network.online_host) + "\n";
     text += "network.online_port=" + std::to_string(settings.network.online_port) + "\n";
     text += "network.online_trust=" + line_value(settings.network.online_trust) + "\n";
@@ -412,6 +461,11 @@ SettingsLoad parse_settings(const std::string_view text) {
         }
         const std::string key(trim(line.substr(0, equals)));
         const std::string_view value = trim(line.substr(equals + 1));
+        if (key == "revised_layer_path") {
+            if (!value.empty()) load.settings.revised_layer_path = std::string(value);
+            else load.settings.revised_layer_path.reset();
+            continue;
+        }
         if (key.rfind("network.online_", 0) == 0) {
             auto& network = load.settings.network;
             if (key == "network.online_host") network.online_host = value;
@@ -456,6 +510,7 @@ SettingsLoad parse_settings(const std::string_view text) {
             load.notes.push_back("bad value for " + key + " ignored");
         } else {
             field->set(load.settings, *number);
+            if (key == "keyboard.selection_hotkeys") load.settings.selection_hotkeys_authored = true;
         }
     }
     if (!header) {

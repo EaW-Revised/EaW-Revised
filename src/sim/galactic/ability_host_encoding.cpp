@@ -41,12 +41,13 @@ void curve(std::vector<std::uint8_t>& out, const std::vector<AbilityCurvePoint>&
     put_u32(out, static_cast<std::uint32_t>(values.size()));
     for (const auto& p : values) { put_i64(out, p.x.raw()); put_i64(out, p.y.raw()); }
 }
-bool curve(sim::detail::Reader& in, std::vector<AbilityCurvePoint>& values) {
+bool curve(sim::detail::Reader& in, std::vector<AbilityCurvePoint>& values, bool allow_duplicate_x = false) {
     std::uint32_t count{};
     if (!in.read_u32(count) || count > galactic_max_objects || count > in.remaining() / 16) return false;
     for (std::uint32_t i = 0; i < count; ++i) {
         std::int64_t x{}, y{};
-        if (!in.read_i64(x) || !in.read_i64(y) || (!values.empty() && x <= values.back().x.raw())) return false;
+        if (!in.read_i64(x) || !in.read_i64(y) || (!values.empty()
+            && (x < values.back().x.raw() || (!allow_duplicate_x && x == values.back().x.raw())))) return false;
         values.push_back({math::Fixed::from_raw(x), math::Fixed::from_raw(y)});
     }
     return true;
@@ -301,7 +302,7 @@ std::optional<GalacticAbilitySetup> decode_ability_setup(std::span<const std::ui
             auto& n = p.neutralize.emplace(); std::uint8_t flag{}, minor{}, major{};
             std::int64_t minor_mod{}, major_mod{}, a_lo{}, a_hi{}, t_lo{}, t_hi{};
             if (!text_value(in, n.name) || n.name.empty() || !in.read_u8(flag) || flag > 1
-                || !curve(in, n.base_curve) || !curve(in, n.history_curve) || !curve(in, n.corruption_curve)
+                || !curve(in, n.base_curve, true) || !curve(in, n.history_curve, true) || !curve(in, n.corruption_curve, true)
                 || !in.read_i64(minor_mod) || !in.read_i64(major_mod) || !in.read_i64(a_lo) || !in.read_i64(a_hi)
                 || !in.read_i64(t_lo) || !in.read_i64(t_hi) || !in.read_u8(minor) || minor > 1 || !in.read_u8(major) || major > 1) return {};
             n.initially_enabled = flag != 0; n.minor_modifier = math::Fixed::from_raw(minor_mod); n.major_modifier = math::Fixed::from_raw(major_mod);
@@ -386,7 +387,7 @@ std::optional<GalacticAbilitySetup> decode_ability_setup(std::span<const std::ui
     for (std::uint32_t i = 0; i < count; ++i) {
         NeutralizationTarget t; std::int64_t cost{}; std::uint8_t major{}, minor{};
         if (!in.read_u64(t.type) || !t.type || (!result.neutralization_targets.empty() && t.type <= result.neutralization_targets.back().type)
-            || !in.read_i64(cost) || cost < 0 || !in.read_u8(major) || major > 1 || !in.read_u8(minor) || minor > 1) return {};
+            || !in.read_i64(cost) || !in.read_u8(major) || major > 1 || !in.read_u8(minor) || minor > 1) return {};
         t.cost = math::Fixed::from_raw(cost); t.major_allowed = major != 0; t.minor_allowed = minor != 0;
         result.neutralization_targets.push_back(t);
     }

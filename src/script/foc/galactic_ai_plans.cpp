@@ -179,6 +179,7 @@ CatalogResult load_plan_catalog(const AiSetup& setup, const std::map<std::string
             " MinimumCost, AdditionalCost, ScriptPoolCount, AllowSpecialWeapons)\n"
             "if EnemyContrastTypes then\n for index, enemy in pairs(EnemyContrastTypes) do\n"
             " _EAWR_GalacticContrast(enemy, FriendlyContrastTypes[index])\n end\nend\n"
+            "if type(DifficultyBasedMinPause) ~= \"function\" then require(\"PGTaskForce\") end\n"
             "_EAWR_GalacticPacing(DifficultyBasedMinPause(\"Easy\"), DifficultyBasedMinPause(\"Normal\"), DifficultyBasedMinPause(\"Hard\"))\n";
         if (const auto added = manifest.add(chunks[static_cast<std::size_t>(&path - paths.data())], loader); !added)
             return CatalogResult::failure(added.error());

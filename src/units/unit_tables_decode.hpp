@@ -5,7 +5,6 @@
 #include "eawr/assets/map.hpp"
 #include "eawr/data/tag_trace.hpp"
 
-#include <algorithm>
 #include <limits>
 #include <map>
 #include <set>
@@ -65,7 +64,14 @@ public:
     }
 
 private:
+    [[nodiscard]] bool cancelled() const noexcept {
+        return input_.cancel != nullptr && input_.cancel->load(std::memory_order_acquire);
+    }
     void enqueue(const std::string& id, const UnitKind kind);
+
+    // The unit `id` is done (loaded or failed): tell the decode-ahead when no queued unit still waits for its hinted model
+    // and the loader never asked for it.
+    void release_hint(const std::string& id);
 
     void want_projectile(const std::string& id);
 
@@ -102,6 +108,7 @@ private:
     void load_special_beam(UnitType& unit, sim::tactical::SpecialAbilityProfile& special, const AbilityFields& child_text);
     void load_special_blast(UnitType& unit, sim::tactical::SpecialAbilityProfile& special, const AbilityFields& child_text);
     void load_special_stealth(UnitType& unit, sim::tactical::SpecialAbilityProfile& special, const AbilityFields& child_text);
+    void load_special_super_laser(UnitType& unit, sim::tactical::SpecialAbilityProfile& special, const AbilityFields& child_text);
     void load_special_leech(UnitType& unit, sim::tactical::SpecialAbilityProfile& special, const AbilityFields& child_text);
     void load_special_corrupt(UnitType& unit, sim::tactical::SpecialAbilityProfile& special, const AbilityFields& child_text);
     void load_special_laser_defense(UnitType& unit, sim::tactical::SpecialAbilityProfile& special, const AbilityFields& child_text);
@@ -160,6 +167,8 @@ private:
     std::map<std::string, Frames> models_;
     std::vector<std::pair<std::string, UnitKind>> queue_;
     std::set<std::string> queued_;
+    std::map<std::string, std::string> hinted_path_; // lower-case unit id -> model path handed to model_hint
+    std::map<std::string, unsigned> hinted_pending_; // model path -> hinted units not yet done
     std::vector<std::string> projectile_ids_;
     std::vector<std::string> production_ids_;
     std::vector<std::string> obstacle_ids_;

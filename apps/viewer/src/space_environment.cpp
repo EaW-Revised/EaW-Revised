@@ -145,6 +145,20 @@ void SpaceEnvironment::camera_focus(const bool focused) {
     state.bridge->set_focus(focused);
 }
 
+void SpaceEnvironment::camera_sample_pointer(const float x, const float y) {
+    if (state_->view) { state_->view->camera_sample_pointer(x, y); return; }
+    if (state_->options.camera_terminal_baseline_test || state_->options.camera_terminal_hold_test
+        || state_->options.camera_terminal_release_test) return;
+    if (state_->bridge) state_->bridge->sample_pointer(x, y);
+}
+
+void SpaceEnvironment::camera_clear_pointer_sample() {
+    if (state_->view) { state_->view->camera_clear_pointer_sample(); return; }
+    if (state_->options.camera_terminal_baseline_test || state_->options.camera_terminal_hold_test
+        || state_->options.camera_terminal_release_test) return;
+    if (state_->bridge) state_->bridge->clear_pointer_sample();
+}
+
 void SpaceEnvironment::camera_pointer_left() {
     if (state_->view) { state_->view->camera_pointer_left(); return; }
     if (state_->options.camera_terminal_baseline_test || state_->options.camera_terminal_hold_test

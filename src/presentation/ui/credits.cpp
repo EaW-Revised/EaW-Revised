@@ -1,4 +1,5 @@
 #include "eawr/presentation/ui/credits.hpp"
+#include "eawr/data/xml.hpp"
 #include "eawr/core/text.hpp"
 
 #include <algorithm>

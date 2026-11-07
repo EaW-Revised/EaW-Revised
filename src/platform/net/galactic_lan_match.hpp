@@ -1,5 +1,6 @@
 #pragma once
 #include "eawr/net/lockstep_session.hpp"
+#include "eawr/net/galactic_recovery.hpp"
 #include "eawr/net/galactic_clock_policy.hpp"
 #include "eawr/net/transport.hpp"
 
@@ -7,6 +8,7 @@
 #include <filesystem>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -15,7 +17,8 @@
 // galaxy match (the galaxy adapter, the desync monitor and the LockstepSession over an established transport) and
 // plugs into LiveGameSession::Options::step_driver. The setup offer, lobby and viewer screens belong to GCMP-07/08
 // (#3768); this driver starts from an already agreed roster, so a 2-peer match can run headless.
-namespace eawr::net { class LobbyResult; class DesyncMonitor; }
+namespace eawr::net { class LobbyResult; class DesyncMonitor; class GalacticSessionAdapter; }
+namespace eawr::campaign { class GameSession; }
 namespace eawr::platform { class LiveGameStepDriver; }
 
 namespace eawr::presentation::godot_backend {
@@ -38,6 +41,8 @@ struct GalacticLanView {
     std::vector<sim::SeatId> departed;         // seats with an agreed departure, in agreement order
     std::string diagnostic_code, message;
     std::vector<GalacticLanClockRefusal> clock_refusals; // Latest refusal per seat; UI frames may skip ticks.
+    std::optional<net::GalacticRecoveryAnchor> recovery_anchor;
+    std::string recovery_refusal;
     bool clock_paused{}; // Current agreed player pause, excluding the child-owned strategic hold.
     std::uint64_t clock_change_tick{};
     sim::SeatId clock_actor{};
@@ -58,9 +63,25 @@ struct GalacticLanOptions {
     std::uint64_t exchange_every{30};          // desync monitor hash exchange period, completed ticks
     std::uint64_t completeness_timeout_ms{30'000};
     std::uint64_t waiting_notice_ms{3000};     // MP-33: show "waiting for <peer>" after this long
+    // Immutable PR2 transfer bytes, retained only after all-peer restore agreement.
+    // New games capture once inside the pre-handover loading barrier at tick zero.
+    std::shared_ptr<const std::vector<std::uint8_t>> initial_checkpoint;
+    std::size_t recovery_log_bytes{8U * 1024U * 1024U};
+    std::string initial_recovery_refusal;
+    std::optional<net::SetupOffer> recovery_offer;
+    net::GalacticRecoveryWorker::Restore recovery_restore;
+    // I/O-owner callback: provisioned authenticated replacement streams only.
+    std::function<core::Result<void>()> repair_recovery_links;
+    // Quarantine only a failed cutover participant. The new core applies the
+    // existing departure agreement to that closed authenticated stream.
+    std::function<void(net::PeerIndex)> quarantine_recovery_peer;
     // A buffered transport must send its final hash exchange before the viewer may close it.
     std::function<bool()> final_output_drained;
 };
+
+// Optional loading-barrier capture. Failure disables recovery without failing launch.
+void prepare_galactic_recovery_base(GalacticLanOptions&, campaign::GameSession&,
+    net::GalacticSessionAdapter*, std::uint64_t initial_tick);
 
 class GalacticLanMatch {
 public:
@@ -80,7 +101,24 @@ public:
     [[nodiscard]] GalacticLanView view() const;
     [[nodiscard]] sim::SeatId local_seat() const;
     // Call before handing the driver to the live thread. Empty paths leave the ordinary path untouched.
+    void configure_recovery_restore(net::GalacticRecoveryWorker::Restore); // before live handover only
     void configure_acceptance(std::filesystem::path directory, std::string campaign, bool stock);
+
+    // A transport owner supplies its authenticated dense peer index. The query
+    // runs at the simulation boundary; UI callers never borrow the live owner.
+    [[nodiscard]] std::future<core::Result<net::GalacticRecoveryPackage>> recovery_package(
+        net::PeerIndex authenticated_peer, net::GalacticRecoveryRequest);
+
+    // Requests a private replacement from an authenticated match peer. Completion
+    // names refusal or publication; no transport or owner crosses to the caller.
+    [[nodiscard]] std::future<net::GalacticRecoveryRefusal> request_recovery(net::PeerIndex source);
+
+    // Engine-only publication after collecting one matching proof from every
+    // active survivor and the authenticated returning seat. The package binds
+    // sealed future input as well as state; a mismatch refuses the candidate.
+    [[nodiscard]] std::future<net::GalacticRecoveryRefusal> publish_recovery(
+        net::GalacticRecoveryPackage, net::GalacticRecoveryWorker::Result,
+        std::vector<net::GalacticRecoveryProof>, std::optional<net::SeatInput> rejoin = {});
 
     class State;
 private:

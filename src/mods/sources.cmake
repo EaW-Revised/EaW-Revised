@@ -17,9 +17,16 @@ set(EAWR_MODS_SOURCES
     "${CMAKE_CURRENT_LIST_DIR}/file_index_build.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/profile.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/record.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/save_description.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/shader_translation.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/workshop.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/workshop_watch.cpp"
+)
+# Content digest (MM M1b).
+list(APPEND EAWR_MODS_SOURCES
+    "${CMAKE_CURRENT_LIST_DIR}/content_digest.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/thread_priority.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/../platform/native_read.cpp"
 )
 if(WIN32)
     list(APPEND EAWR_MODS_SOURCES "${CMAKE_CURRENT_LIST_DIR}/profile_windows.cpp")

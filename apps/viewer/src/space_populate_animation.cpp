@@ -1,9 +1,12 @@
 #include "space_populate.hpp"
+#include "eawr/presentation/particles/lane_guard.hpp"
 #include "eawr/core/load_profile.hpp"
 #include "eawr/presentation/space/space.hpp"
 #include "frame_timer.hpp"
 #include "perf_trace.hpp"
 #include "render_profile_viewport.hpp"
+#include "eawr/presentation/render_categories.hpp"
+#include <godot_cpp/classes/engine.hpp>
 
 #include "family_textures.hpp"
 #include "effect_clock_assets.hpp"
@@ -66,6 +69,7 @@ void SpacePopulation::schedule_arrival_sample() noexcept {
 
 void SpacePopulation::pose_units(GodotRenderer& renderer, const std::uint32_t sample,
     const particles::StepExecutor* workers) {
+    if (render_categories::fighter_experiment()) render_categories::begin_fighter_frame(static_cast<std::uint64_t>(godot::Engine::get_singleton()->get_process_frames()));
     last_unit_sample_ = sample;
     idle_frame_ms_ = idle_sample_ms_ = idle_upload_ms_ = 0.0;
     idle_skin_work_ = {};
@@ -90,6 +94,10 @@ void SpacePopulation::pose_units(GodotRenderer& renderer, const std::uint32_t sa
         for (std::size_t index = 0; index < idle_placements_.size(); ++index) {
             const auto live = idle_live_ships_.find(index);
             if (live != idle_live_ships_.end() && live_retired_[live->second]) continue;
+            const bool fighter = render_categories::fighter_experiment() && live != idle_live_ships_.end()
+                && diagnostic_fighter(live->second);
+            FrameTimer fighter_sample(fighter ? &render_categories::fighter_work.sample_cpu_ms : nullptr, true);
+            if (fighter) ++render_categories::fighter_work.idle_samples;
             const IdlePlacement& idle = idle_placements_[index];
             auto pose = animation::sample_idle(*clips_[idle.clip], idle.playback, idle.start_frame, tick,
                                                particles::map_owner_ticks_per_second);
@@ -122,12 +130,17 @@ void SpacePopulation::pose_units(GodotRenderer& renderer, const std::uint32_t sa
     const auto prepare = [&](const std::size_t index) {
         const auto live = idle_live_ships_.find(index);
         if (live != idle_live_ships_.end() && live_retired_[live->second]) return;
+        const bool fighter = render_categories::fighter_experiment() && live != idle_live_ships_.end()
+            && live->second < diagnostic_fighters_.size() && diagnostic_fighters_[live->second];
+        FrameTimer fighter_sample(fighter ? &prepared[index].fighter_sample_ms : nullptr);
         const IdlePlacement& idle = idle_placements_[index];
         auto pose = animation::sample_idle(*clips_[idle.clip], idle.playback, idle.start_frame, tick,
                                            particles::map_owner_ticks_per_second);
         auto& row = prepared[index];
         if (!pose) { row.failed = true; return; }
         row.pose = std::move(pose.value());
+        fighter_sample.finish();
+        FrameTimer fighter_palette(fighter ? &row.fighter_palette_ms : nullptr);
         if (consumed[index])
             row.palette = GodotRenderer::prepare_skin_pose(row.pose->bones, profile ? &row.work : nullptr);
     };
@@ -158,6 +171,11 @@ void SpacePopulation::pose_units(GodotRenderer& renderer, const std::uint32_t sa
     }
     idle_skin_work_ = renderer.end_skin_batch();
     for (const auto& row : prepared) {
+        if (render_categories::fighter_experiment() && row.fighter_sample_ms > 0) {
+            ++render_categories::fighter_work.idle_samples;
+            render_categories::fighter_work.sample_cpu_ms += row.fighter_sample_ms;
+            render_categories::fighter_work.palette_cpu_ms += row.fighter_palette_ms;
+        }
         idle_skin_work_.validations += row.work.validations;
         idle_skin_work_.builds += row.work.builds;
         idle_skin_work_.validation_ms += row.work.validation_ms;
@@ -524,6 +542,9 @@ void SpacePopulation::prepare_live_clip(const std::size_t index) {
     const auto& request = pending_clip_poses_[index];
     auto& row = prepared_clips_[index];
     if (!row.player || row.cached || request.ship >= live_retired_.size() || live_retired_[request.ship]) return;
+    const bool fighter = render_categories::fighter_experiment() && request.ship < diagnostic_fighters_.size()
+        && diagnostic_fighters_[request.ship];
+    FrameTimer fighter_sample(fighter ? &row.fighter_sample_ms : nullptr);
     if (request.blend_from > 0.0F) {
         // Keep the existing bind-blend fallback exactly as authored.
         auto pose = animation::sample_death_frame(*row.player, {request.position, request.blend_from});
@@ -534,6 +555,7 @@ void SpacePopulation::prepare_live_clip(const std::size_t index) {
             request.position.subdivisions, row.sample);
         if (!sampled) { row.failure = core::format_diagnostic(sampled.error()); return; }
     }
+    fighter_sample.finish();
     row.pose = true;
     // A visible unused root does not keep a wreck alive. Every piece must
     // instead prove all of its actually weighted geometry bones hidden.
@@ -547,12 +569,14 @@ void SpacePopulation::prepare_live_clip(const std::size_t index) {
         for (std::size_t bone = 0; bone < used.size(); ++bone)
             if (used[bone] && row.sample.bones[bone].visible) row.hidden = false;
     }
+    FrameTimer fighter_palette(fighter ? &row.fighter_palette_ms : nullptr);
     if (row.consumed)
         row.palette = GodotRenderer::prepare_skin_pose(row.sample.bones);
 }
 
 bool SpacePopulation::pose_live_clips(GodotRenderer& renderer, const std::span<const LiveClipPose> poses,
     const particles::StepExecutor* workers) {
+    if (render_categories::fighter_experiment()) render_categories::begin_fighter_frame(static_cast<std::uint64_t>(godot::Engine::get_singleton()->get_process_frames()));
     // Keep high-water row capacity, including bone buffers for temporarily absent requests.
     if (prepared_clips_.size() < poses.size()) prepared_clips_.resize(poses.size());
     auto& prepared = prepared_clips_;
@@ -560,6 +584,7 @@ bool SpacePopulation::pose_live_clips(GodotRenderer& renderer, const std::span<c
         pending_clip_poses_ = {};
         active_clips_.clear();
         for (auto& row : prepared) {
+            row.fighter_sample_ms = row.fighter_palette_ms = 0;
             row.player = nullptr;
             row.terminal = row.cached = row.hidden = row.consumed = row.pose = false;
             row.geometry.clear();
@@ -630,6 +655,11 @@ bool SpacePopulation::pose_live_clips(GodotRenderer& renderer, const std::span<c
             return false;
         }
         if (row.cached || !row.pose) continue;
+        if (render_categories::fighter_experiment() && request.ship < diagnostic_fighters_.size() && diagnostic_fighters_[request.ship]) {
+            ++render_categories::fighter_work.clip_samples;
+            render_categories::fighter_work.sample_cpu_ms += row.fighter_sample_ms;
+            render_categories::fighter_work.palette_cpu_ms += row.fighter_palette_ms;
+        }
         auto& bones = row.sample.bones;
         contact_bones_[request.ship] = bones;
         if (row.terminal) held_clips_.insert_or_assign(request.ship,
@@ -717,6 +747,7 @@ void SpacePopulation::bind_live_identity(const std::size_t ship, const std::size
 std::optional<SpacePopulation::LiveShipEmitterView> SpacePopulation::live_ship_emitter_view(const std::size_t ship) const {
     if (!live_ship_drawn(ship) || live_retired_[ship]) return std::nullopt;
     const std::size_t decision = *live_decisions_[ship];
+    if (render_categories::ablation == "fighter-all" && ship < diagnostic_fighters_.size() && diagnostic_fighters_[ship]) return std::nullopt;
     auto assets = live_ship_emitter_assets(ship);
     if (!assets) return std::nullopt;
     LiveShipEmitterView& view = *assets;
@@ -735,10 +766,11 @@ std::optional<sim::math::Mat3x4> SpacePopulation::live_transform(const LivePose&
 }
 
 std::optional<SpacePopulation::LiveBoneFrame> SpacePopulation::live_bone_frame(
-    const sim::EntityId entity, const std::uint32_t bone) const {
+    const sim::EntityId entity, const std::uint32_t bone, const std::span<const std::size_t> retiring) const {
     const auto found = contact_live_ships_.find(entity);
     if (found == contact_live_ships_.end()) return std::nullopt;
     const std::size_t ship = found->second;
+    if (std::find(retiring.begin(), retiring.end(), ship) != retiring.end()) return std::nullopt;
     if (!live_ship_drawn(ship) || live_retired_[ship] || !live_transforms_[ship]
         || options_.placed_ships[ship].live_entity != entity
         || bone >= contact_bones_[ship].size()) return std::nullopt;
@@ -751,6 +783,7 @@ std::optional<SpacePopulation::LiveBoneFrame> SpacePopulation::live_bone_frame(
 }
 
 bool SpacePopulation::pose_live(const std::span<const LivePose> poses, const particles::StepExecutor* workers) {
+    particles::lane::guard_main(); // L1.2: counts a main-thread call while a lane job owns this state; never aborts
     std::fill(live_shown_.begin(), live_shown_.end(), false);
     std::fill(live_defend_.begin(), live_defend_.end(), false);
     std::fill(live_stealth_.begin(), live_stealth_.end(), false);
@@ -775,6 +808,10 @@ bool SpacePopulation::pose_live(const std::span<const LivePose> poses, const par
         // BP-43/IS-09: emitter state and fog opacity belong to the occupying unit,
         // rather than the placeholder identity used when the model slot was composed.
         if (pose.entity != sim::invalid_entity_id) options_.placed_ships[pose.ship].live_entity = pose.entity;
+        if (render_categories::fighter_experiment() && pose.entity != sim::invalid_entity_id) {
+            if (pose.ship < diagnostic_fighters_.size() && diagnostic_fighters_[pose.ship]) render_categories::fighter_entities.insert(pose.entity);
+            else render_categories::fighter_entities.erase(pose.entity);
+        }
         const std::size_t decision = *live_decisions_[pose.ship];
         const auto transform = workers ? prepared_transforms[pose_index] : live_transform(pose);
         if (!transform) {
@@ -824,6 +861,7 @@ std::span<const sim::EntityId> SpacePopulation::live_ship_entities(const std::si
 }
 
 void SpacePopulation::set_live_opacity(GodotRenderer& renderer, const std::size_t ship, const float opacity) {
+    particles::lane::guard_main(); // L1.2: counts a main-thread call while a lane job owns this state; never aborts
     if (!piece_index_.opacity_changed(ship, opacity)) return;
     for (const sim::EntityId entity : piece_index_.entities(ship)) renderer.set_unit_opacity(entity, opacity);
 }
@@ -960,6 +998,7 @@ void SpacePopulation::set_shield_time(GodotRenderer& renderer, const float secon
 }
 
 void SpacePopulation::retire_live_ship(GodotRenderer& renderer, const std::size_t ship, const bool reusable) {
+    particles::lane::guard_main(); // L1.2: counts a main-thread call while a lane job owns this state; never aborts
     if (ship >= live_retired_.size() || live_retired_[ship]) return;
     live_retired_[ship] = true;
     std::set<sim::AssetId> dropped;

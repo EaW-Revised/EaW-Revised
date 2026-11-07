@@ -1,4 +1,5 @@
 #include "unit_emitters.hpp"
+#include "eawr/vfs/vfs.hpp"
 #include "eawr/assets/geometry_stripped.hpp"
 
 #include "eawr/presentation/animation/animation.hpp"
@@ -177,12 +178,19 @@ void UnitEmitters::prepare_assets(const SpacePopulation& population) {
             reachable_plans.push_back(std::move(plan));
         }
     }
+    // A refused plan keeps the synchronous create at spawn, but its shader is
+    // warmed here (shader-only hold, drawn from the adapter's shared 32-program
+    // budget; battle-effects warm first and may fill it, then these are refused) so no first-use
+    // compile lands mid-battle. Identical output; load cost only.
     const auto coverage = detail::prewarm_particle_plans(reachable_plans, [this](const auto& plan) {
         return backend_->prewarm_emitter(plan);
+    }, [this](const auto& plan) {
+        return backend_->prewarm_program(plan);
     });
     backend_warm_requested_ += coverage.requested;
     backend_warm_admitted_ += coverage.admitted;
     backend_warm_refused_ += coverage.refused;
+    backend_warm_refused_programs_ += coverage.refused_program_warmed;
     if (auto* os = OS::get_singleton(); os != nullptr
         && os->get_cmdline_user_args().has("--eawr-emitter-prewarm-zero-holders")) {
         backend_->retain_prewarm_cache_only();
@@ -363,7 +371,7 @@ void UnitEmitters::plan_model(Ship& ship, const SpacePopulation::LiveShipEmitter
     if (model == nullptr && view.projectile && cache_.particle_system(placement.model_path)) {
         const EffectSystem& system = effect_system(placement.model_path);
         Wanted wanted{proxy_base, placement.model_declared, placement.model_path,
-            attachment, static_cast<std::uint32_t>(plan_seed) + static_cast<std::uint32_t>(view.entity), system.capacity};
+            attachment, static_cast<std::uint32_t>(plan_seed) + static_cast<std::uint32_t>(view.entity), system.capacity, {}, {}};
         if (!system.system) {
             wanted.failed = true;
             ++start_failed_[wanted.effect + ": " + system.cause];
@@ -445,7 +453,7 @@ void UnitEmitters::plan_model(Ship& ship, const SpacePopulation::LiveShipEmitter
         // turbo engines stand in for them (AB-31).
         if ((!modes.engines_online || modes.turbo) && engine_emitter(record.proxy_name)) continue;
         Wanted wanted{proxy_base + record.proxy_ordinal, record.proxy_name, record.effect_logical_path, *record.emitter_frame,
-                      record.seed + static_cast<std::uint32_t>(view.entity), record.capacity};
+                      record.seed + static_cast<std::uint32_t>(view.entity), record.capacity, {}, {}};
         // BP-45: the brightness goes to the engine type in use.
         wanted.engine = engine_emitter(record.proxy_name) || turbo_emitter(record.proxy_name);
         wanted.ion_stun = ion_stun_emitter(record.proxy_name);

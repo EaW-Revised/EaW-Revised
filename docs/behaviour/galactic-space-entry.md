@@ -72,8 +72,9 @@ The created station keeps the selected marker's complete facing, including roll
 and pitch (WGT-09, R-ROT-01..03). Only the station type contributes its height
 adjustment; the marker type is not instantiated. Three-axis station poses are
 staged through the shared yaw placement builder and restored before form-up.
-Missing position or orientation still refuses a required station. Existing
-yaw-only station placement retains its original path.
+A marker that lacks its position or orientation is skipped instead of aborting the battle. That is
+project policy under the no-abort rule, not sourced retail behaviour. A tilted marker is complete and is
+never skipped. Existing yaw-only station placement retains its original path.
 
 Defender placement uses the first defender marker. Ordinary invader placement uses the closest
 attacker marker, retaining the first exact tie (WGT-18). Missing station markers
@@ -131,7 +132,13 @@ offer. A qualifying transport advances its supplied marker cursor once after all
 passengers, wrapping at the end; all-deferred flagship passengers leave it alone
 (WGT-114). The flagship uses source-context maximum hull plus shields before
 deployment substitution, requires a strictly positive rating and keeps the first
-source-roster entry on a positive tie (WGT-119). Squadron source ratings use the
+source-roster entry on a positive tie (WGT-119). A source type with no durability
+profile (no positive `Tactical_Health` in the effective data) is not considered for
+flagship: the entry starts and reports it once as a note. This is a project rule, not
+the retail rating: retail rates a type with the tag absent by its default hull
+(100 times the mode multiplier, plus shields), and only an authored non-positive hull
+rates zero. Nothing depends on a positive rating (a side whose ratings are all zero
+has no flagship), so using the default hull in code stays a follow-up. Squadron source ratings use the
 container's own scaled health and shields, independently of its craft (WSQ-60).
 Background owner bindings remain in the setup but do not enter its recorded
 commandable seats. Child replay extension 8 records the complete
@@ -233,7 +240,16 @@ free-space search the debug build runs when a script spawns the object (xy only,
   an explicit placement seam. Initial class form-up implements WGT-45..48,
   including the current-pose collision-model bounds, team bounds/offsets,
   balanced mixed fighter/bomber order, screen/lead rings and rear transports
-  (EGT-S3-Q01..04). `Ship_Class` is independent of movement layer. A missing
+  (EGT-S3-Q01..04). `Ship_Class` is independent of movement layer. `Ship_Class` is a
+  case-insensitive word table of eleven words (debug build, EGT-S3-Q01): fighter, bomber,
+  corvette, frigate, capital, super, transport, and the land words infantry (= fighter),
+  tank (= frigate), artillery (= transport), walker (= capital). Any other word, or none,
+  leaves the class unset; form-up gives an unset class no bucket, so that ship keeps its
+  creation pose and the other buckets lay out as if it were absent. The entry reports it
+  once per type and does not refuse. A squadron whose craft did not load is likewise
+  skipped with a note. A ring whose model bounds are all zero uses one unit of spacing and
+  reports it (unverified). A negative authored population or faction cap reads as zero with
+  a note (project rule, no retail source for refusing). A missing
   loader collision box retains the existing unit-box fallback; distinguishing
   a missing model from an existing model without a renderable is a named
   geometry seam, not proof of the native model-less box. Optional

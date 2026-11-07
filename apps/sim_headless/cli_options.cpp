@@ -1,5 +1,7 @@
 #include "cli_internal.hpp"
 
+#include <algorithm>
+
 namespace sim_headless::cli {
 
 [[nodiscard]] std::optional<Options> parse_options(const int argc, const char* const argv[]) {
@@ -28,11 +30,62 @@ namespace sim_headless::cli {
              || argument == "--workers" || argument == "--events-out"
              || argument == "--snapshot-out" || argument == "--census-out" || argument == "--skirmish"
              || argument == "--game-root" || argument == "--mod-root" || argument == "--map" || argument == "--replay-out" || argument == "--ticks"
-             || argument == "--scenario" || argument == "--combat-out" || argument == "--tag-trace-out" || argument == "--ai-report-out" || argument == "--ai-trace-out")
+             || argument == "--scenario" || argument == "--combat-out" || argument == "--tag-trace-out" || argument == "--ai-report-out" || argument == "--ai-trace-out"
+             || argument == "--seat1-faction" || argument == "--seat2-faction" || argument == "--setup-inventory-out"
+             || argument == "--seat1-team" || argument == "--seat2-team" || argument == "--slot" || argument == "--seed"
+             || argument == "--commands-out" || argument == "--probe-carrier")
             && index + 1 >= argc) {
             return std::nullopt;
         }
-        if (argument == "--replay" && !saw_replay) {
+        if ((argument == "--seat1-team" && !options.seat1_team) || (argument == "--seat2-team" && !options.seat2_team)) {
+            const std::string_view value(argv[++index]);
+            std::uint32_t team{};
+            const auto result = std::from_chars(value.data(), value.data() + value.size(), team);
+            if (result.ec != std::errc{} || result.ptr != value.data() + value.size()) return std::nullopt;
+            (argument == "--seat1-team" ? options.seat1_team : options.seat2_team) = team;
+        } else if (argument == "--slot") {
+            // <player>:<FACTION>:<team>:<human|ai>[:<difficulty>]
+            const std::string value(argv[++index]);
+            std::vector<std::string> parts;
+            for (std::size_t begin = 0;;) {
+                const auto end = value.find(':', begin);
+                parts.push_back(value.substr(begin, end == std::string::npos ? end : end - begin));
+                if (end == std::string::npos) break;
+                begin = end + 1;
+            }
+            if (parts.size() < 4 || parts.size() > 5 || parts[1].empty() || (parts[3] != "human" && parts[3] != "ai")) return std::nullopt;
+            const auto number = [](const std::string& text, std::uint32_t& out) {
+                const auto result = std::from_chars(text.data(), text.data() + text.size(), out);
+                return result.ec == std::errc{} && result.ptr == text.data() + text.size();
+            };
+            eawr::skirmish::LobbySlot slot;
+            std::uint32_t difficulty{};
+            if (!number(parts[0], slot.slot) || !number(parts[2], slot.team) || (parts.size() == 5 && !number(parts[4], difficulty))) return std::nullopt;
+            slot.faction = parts[1];
+            slot.human = parts[3] == "human";
+            slot.difficulty = static_cast<eawr::sim::tactical::AiLevel>(difficulty);
+            options.slots.push_back(std::move(slot));
+        } else if (argument == "--seed" && !options.seed) {
+            const std::string_view value(argv[++index]);
+            std::uint64_t seed{};
+            const auto result = std::from_chars(value.data(), value.data() + value.size(), seed);
+            if (result.ec != std::errc{} || result.ptr != value.data() + value.size()) return std::nullopt;
+            options.seed = seed;
+        } else if (argument == "--commands-out" && options.commands_path.empty()) {
+            options.commands_path = argv[++index];
+            if (options.commands_path.empty()) return std::nullopt;
+        } else if (argument == "--setup-inventory-out" && options.setup_inventory_path.empty()) {
+            options.setup_inventory_path = argv[++index];
+            if (std::filesystem::path(options.setup_inventory_path).extension() != ".json") return std::nullopt;
+        } else if (argument == "--both-ai" && !options.both_ai) {
+            options.both_ai = true;
+        } else if (argument == "--seat1-faction" && options.seat1_faction.empty()) {
+            options.seat1_faction = argv[++index];
+            if (options.seat1_faction.empty()) return std::nullopt;
+        } else if (argument == "--seat2-faction" && options.seat2_faction.empty()) {
+            options.seat2_faction = argv[++index];
+            if (options.seat2_faction.empty()) return std::nullopt;
+        } else if (argument == "--replay" && !saw_replay) {
             saw_replay = true;
             options.replay_path = argv[++index];
         } else if (argument == "--hash-out" && !saw_hash) {
@@ -124,6 +177,9 @@ namespace sim_headless::cli {
         } else if (argument == "--ai-trace-out" && options.ai_trace_path.empty()) {
             options.ai_trace_path = argv[++index];
             if (options.ai_trace_path.empty()) return std::nullopt;
+        } else if (argument == "--probe-carrier") {
+            options.probe_carriers.emplace_back(argv[++index]);
+            if (options.probe_carriers.back().empty()) return std::nullopt;
         } else if (argument == "--ticks" && !saw_ticks) {
             saw_ticks = true;
             const std::string_view value(argv[++index]);
@@ -135,6 +191,19 @@ namespace sim_headless::cli {
         } else {
             return std::nullopt;
         }
+    }
+    if ((!options.seat1_faction.empty() || !options.seat2_faction.empty() || options.both_ai || options.seat1_team || options.seat2_team)
+            && (!saw_skirmish || options.seat1_faction.empty() || options.seat2_faction.empty())) return std::nullopt;
+    if (!options.slots.empty() && (!options.seat1_faction.empty() || !options.seat2_faction.empty() || options.both_ai
+            || options.seat1_team || options.seat2_team || !saw_skirmish)) return std::nullopt;
+    if (!options.probe_carriers.empty() && (!saw_skirmish || options.ai_report_path.empty() || options.mod_root.empty())) return std::nullopt;
+    if ((options.seed || !options.commands_path.empty()) && (!saw_skirmish || options.ai_report_path.empty())) return std::nullopt;
+    if (!options.setup_inventory_path.empty()) {
+        if (!saw_skirmish || !saw_game_root || saw_replay || saw_hash || saw_trace || saw_workers || saw_events
+            || saw_snapshot || saw_census || saw_replay_out || saw_ticks || saw_tag_trace || saw_scenario || saw_combat
+            || !options.ai_report_path.empty() || !options.ai_trace_path.empty() || !options.map_path.empty()
+            || !options.seat1_faction.empty() || options.both_ai) return std::nullopt;
+        return options;
     }
     if ((saw_combat && !saw_scenario) || (saw_tag_trace && !saw_skirmish)
         || (!options.ai_report_path.empty() && (!saw_skirmish || !saw_ticks || options.ticks == 0))
@@ -214,7 +283,8 @@ namespace sim_headless::cli {
         }
     }
     for (const auto* output : {&options.events_path, &options.snapshot_path, &options.census_path,
-             &options.replay_out_path, &options.combat_path, &options.tag_trace_path, &options.ai_report_path, &options.ai_trace_path}) {
+             &options.replay_out_path, &options.combat_path, &options.tag_trace_path, &options.ai_report_path, &options.ai_trace_path,
+             &options.setup_inventory_path}) {
         if (!output->empty()) {
             paths.emplace_back(*output);
         }

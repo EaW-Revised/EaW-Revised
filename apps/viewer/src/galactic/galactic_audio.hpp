@@ -1,12 +1,12 @@
 #pragma once
 
-#include "eawr/data/xml.hpp"
+#include "eawr/data/xml_fwd.hpp"
 #include "eawr/data/ui/command_bar.hpp"
 #include "eawr/presentation/audio/announcements.hpp"
 #include "eawr/presentation/audio/galactic.hpp"
 #include "eawr/presentation/renderer.hpp"
 #include "eawr/platform/live_game_session.hpp"
-#include "eawr/vfs/vfs.hpp"
+#include "eawr/vfs/vfs_fwd.hpp"
 
 #include <godot_cpp/classes/audio_stream_player.hpp>
 #include <godot_cpp/classes/audio_effect_panner.hpp>

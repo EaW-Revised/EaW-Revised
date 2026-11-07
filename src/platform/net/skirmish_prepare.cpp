@@ -3,6 +3,7 @@
 #include <iomanip>
 #include <locale>
 #include "eawr/core/load_profile.hpp"
+#include "eawr/scene/model_prefetch.hpp"
 #include "eawr/scene/scene.hpp"
 #include <algorithm>
 #include <charconv>
@@ -37,7 +38,9 @@ core::Result<std::vector<std::uint32_t>> skirmish_player_ids(std::string_view te
 // The mounted FoC view's unit tables (the M2 types), or nothing with `failure` set.
 [[nodiscard]] std::optional<units::UnitTables> load_start_tables(const vfs::Vfs& filesystem, const data::Catalog& catalog,
                                                            std::string& failure, const std::string& space_map,
-                                                           const std::set<std::string>& additional_types) {
+                                                           const std::set<std::string>& additional_types,
+                                                           scene::ModelPrefetch* prefetch,
+                                                           const std::atomic<bool>* cancel) {
     core::load_profile::Scope load_scope(core::load_profile::Phase::unit_tables);
     scene::VfsAssetCache cache(filesystem);
     units::LoadInput input;
@@ -45,6 +48,13 @@ core::Result<std::vector<std::uint32_t>> skirmish_player_ids(std::string_view te
     input.filesystem = &filesystem;
     input.space_map = space_map;
     input.model = cache.access().model;
+    input.cancel = cancel;
+    if (prefetch != nullptr) {
+        // Hints only: the loader asks for the same models in the same order and gets the same store entries.
+        input.model_hint = [prefetch](const std::string& path) { prefetch->offer(path); };
+        input.model_taken = [prefetch](const std::string& path) { prefetch->taken(path); };
+        input.model_skipped = [prefetch](const std::string& path) { prefetch->skipped(path); };
+    }
     if (!additional_types.empty()) {
         for (const auto type : units::pinned_m2_types()) input.types.emplace_back(type);
         input.types.insert(input.types.end(), additional_types.begin(), additional_types.end());

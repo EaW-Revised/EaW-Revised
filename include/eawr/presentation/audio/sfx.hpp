@@ -115,6 +115,10 @@ struct WavPcm final {
 // origin so an archive mount prefix never changes the requested name.
 [[nodiscard]] std::vector<std::string> sfx_sample_candidates(std::string_view name);
 [[nodiscard]] eawr::core::Result<std::vector<std::byte>> open_sfx_sample(const eawr::vfs::Vfs& filesystem, std::string_view name);
+// Where open_sfx_sample would read `name` from, for ordering a batch of reads by disk position; nullopt when no candidate
+// qualifies. Same candidate walk, no I/O, but a placement hint only: it may name an archive whose entry the read then rejects
+// by archive-entry name, so a non-null location does not promise open_sfx_sample succeeds.
+[[nodiscard]] std::optional<eawr::vfs::ReadLocation> sfx_sample_location(const eawr::vfs::Vfs& filesystem, std::string_view name);
 // Music and speech streams are different: the original adds a fixed directory to the event's
 // file name (`Data\Audio\Music\` and `Data\Audio\Speech\<language>\`) without looking at the
 // name. `language_directory` is the language's folder name (`English`).

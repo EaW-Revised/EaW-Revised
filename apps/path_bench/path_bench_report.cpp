@@ -1,5 +1,9 @@
 #include "path_bench_internal.hpp"
 
+#include <algorithm>
+#include <fstream>
+#include <iostream>
+
 namespace path_bench {
 
 [[nodiscard]] double percentile(std::vector<double> values, const double fraction) {

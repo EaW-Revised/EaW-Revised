@@ -1,7 +1,9 @@
 // Generated from third_party/shader_runtime/lock.json by package.py --header.
 #pragma once
 #include <array>
+#include <string_view>
 namespace eawr::presentation::shader_runtime::pinned {
+inline constexpr std::string_view lock_sha256 = "816fedd1459ea0f0a2f9cad0a05ba38673c230f29f26fea8c543e74a2982dfbc";
 inline constexpr std::array<RuntimeFile, 20> files{{
     {"libgcc_s_seh-1.dll", "c82f84171b9246d1cac261100b2199789c96c37b03b375f33b2c72afab060b05", 1269387ULL},
     {"libvkd3d-shader-1.dll", "72deb87ff34c29e7332bccf56042cc76e87bc48e382718307a37f3f80c650099", 8016955ULL},

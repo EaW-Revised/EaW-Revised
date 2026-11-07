@@ -100,6 +100,12 @@ std::optional<std::uint64_t> hit_projectile(const std::span<const sim::tactical:
     return std::nullopt;
 }
 
+TerminalParticle terminal_particle(const sim::tactical::CombatEvent& expired) noexcept {
+    return expired.kind == sim::tactical::CombatEventKind::projectile_expired
+            && expired.outcome == static_cast<std::uint32_t>(sim::tactical::ProjectileExpiryReason::ground_contact)
+        ? TerminalParticle::ground : TerminalParticle::lifetime;
+}
+
 std::uint64_t hit_event_key(const sim::tactical::CombatEvent& event) noexcept {
     std::uint64_t key = mix(event.tick);
     for (const std::uint64_t part : {static_cast<std::uint64_t>(event.shooter), static_cast<std::uint64_t>(event.weapon),
@@ -163,7 +169,9 @@ std::vector<std::optional<std::size_t>> ProjectileModelSlots::bind(
         } else {
             const auto minimum = ids.size() + resting;
             const auto doubled = slots_.size() > maximum / 2 ? maximum : slots_.size() * 2;
-            const auto preferred = std::max(minimum, doubled);
+            auto preferred = std::max(minimum, doubled);
+            if (slots_.size() >= growth_step_cap_from)
+                preferred = std::max(minimum, std::min(preferred, slots_.size() + growth_step_cap));
             try {
                 slots_.reserve(preferred);
                 before_bind_.reserve(preferred);

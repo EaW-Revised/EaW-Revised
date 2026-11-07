@@ -64,6 +64,9 @@ void bind_galactic_ai_actor_changes(script::foc::galactic_ai::NativeActions&,
 [[nodiscard]] core::Result<std::vector<script::foc::galactic_ai::PlayerSelection>> select_live_galactic_ai_players(
     const data::galactic::GalacticData&, const CampaignSetupPlan&, const script::foc::ai::AiData&,
     std::string_view authored_difficulty);
+// Co-op on single-player rules (D5): with exactly one human seat, every peer agrees on that seat's faction as "local".
+// Multiplayer rules, or any other human count, give no shared local player.
+[[nodiscard]] std::optional<sim::galactic::PlayerId> shared_story_local_player(const CampaignSetupPlan&);
 [[nodiscard]] core::Result<std::shared_ptr<const GalacticAiRuntimeSetup>> prepare_stock_galactic_ai_runtime(
     const vfs::Vfs&, const data::Catalog&, const data::galactic::GalacticData&, const units::GalacticTypeTable&,
     const CampaignSetupPlan&, std::vector<script::foc::galactic_ai::PlayerSelection>,

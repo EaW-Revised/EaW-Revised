@@ -1,3 +1,4 @@
+#include "eawr/units/content_selection.hpp"
 #include "eawr/assets/map.hpp"
 #include "eawr/core/text.hpp"
 #include "eawr/units/domain_tags.hpp"
@@ -39,9 +40,9 @@ namespace tactical = sim::tactical;
 [[nodiscard]] core::Result<tactical::BuzzDroidsProfile> buzz_profile(const UnitTables& tables,
     const std::string& owner, const BuzzDroids& data, const std::uint32_t damage_type) {
     using Result = core::Result<tactical::BuzzDroidsProfile>;
-    const auto droid = std::find_if(tables.units.begin(), tables.units.end(),
-        [&](const UnitType& type) { return iequals(type.id, data.object_type); });
-    if (droid == tables.units.end()) return Result::failure(failure(owner + " buzz droids need their object type (WAB-71)"));
+    const ContentTypeSelection type_selection(tables);
+    const auto* droid = type_selection.find(data.object_type);
+    if (droid == nullptr) return Result::failure(failure(owner + " buzz droids need their object type (WAB-71)"));
     std::optional<Fixed> multiplier;
     for (const auto& constant : tables.constants.scalars)
         if (constant.tag == domain_tag(tables.domain, DomainTag::speed_multiplier)) multiplier = constant.value;
@@ -104,7 +105,8 @@ bool runs_self_destruct_script(const UnitType& type) noexcept {
 core::Result<tactical::AbilityTable> ability_table(const UnitTables& tables, std::span<const tactical::PlayerId> humans,
     bool (*allowed)(std::string_view, std::string_view), const bool default_autofire, const ContentErrors policy,
     std::vector<core::Diagnostic>* const skipped, core::LoadNoteBuffer* load_notes) {
-    (void)load_notes;
+    const ContentTypeSelection type_selection(tables);
+    type_selection.emit_notes(tables, diagnostic_codes::abilities, load_notes);
     using Result = core::Result<tactical::AbilityTable>;
     tactical::AbilityTable table;
     const auto damage_types = damage_type_index(tables);
@@ -184,6 +186,11 @@ core::Result<tactical::AbilityTable> ability_table(const UnitTables& tables, std
             }
             if (kind == tactical::AbilityKind::hunt) profile.hunt_reveal_range = unit.fow_reveal_range.value_or(Fixed{});
             entry.expiration_frames = frames(ability.expiration_seconds);
+            // WSD-01 (#5702): retain positive sub-frame SELF_DESTRUCT expirations as one frame so the type loads.
+            // BARRAGE loads like SELF_DESTRUCT; barrage-specific expiry timing is not verified against retail.
+            if (entry.expiration_frames == 0 && ability.expiration_seconds && ability.expiration_seconds->raw() > 0
+                && (kind == tactical::AbilityKind::self_destruct || kind == tactical::AbilityKind::barrage))
+                entry.expiration_frames = 1;
             if (kind == tactical::AbilityKind::stealth && entry.expiration_frames != 0) {
                 entry.expiration_seconds = *ability.expiration_seconds; // WST-03: the cloak's own count
             }
@@ -261,6 +268,9 @@ core::Result<tactical::AbilityTable> ability_table(const UnitTables& tables, std
                         spawned.speed = projectile.max_speed.value_or(Fixed{});
                         spawned.max_travel = projectile.max_flight_distance.value_or(Fixed{});
                         spawned.lifetime = projectile.max_lifetime;
+                        // #5696: strict keeps the old 3600 s bound; a lenient load takes retail's unchecked lifetime.
+                        if (policy == ContentErrors::strict && spawned.lifetime && spawned.lifetime->raw() > 3600 * Fixed::scale)
+                            return failure(unit.id + " invalid spawned projectile flight or reveal range (Projectile_Max_Lifetime above 3600 s)");
                         spawned.reveal_range = projectile.reveal_range;
                         spawned.dense_reveal_multiplier = projectile.dense_reveal_multiplier;
                     }
@@ -270,12 +280,30 @@ core::Result<tactical::AbilityTable> ability_table(const UnitTables& tables, std
                         spawned.countdown_frames = frames(unit.cluster_bomb->detonation_seconds);
                     }
                     entry.spawned = std::move(spawned);
+                    // WSD-01/WHE-61 (#5696): a SELF_DESTRUCT whose named object is no area-blast projectile creates
+                    // nothing when it fires; the owner still dies. Keep the ability. Retail loads exactly this shape in
+                    // the stock game: the effective miscobjects.xml gives Radioactive_Contamination (l.75-87, Exp 18)
+                    // and Plasma_Grenade_Contamination (l.149-157, Exp 8) a SELF_DESTRUCT naming the particle
+                    // Small_Steam_Ground, and IG-88's ability spawns the first one (WLAB-64), so both types load in
+                    // vanilla too (before: skipped there, which retail never does).
+                    if (kind == tactical::AbilityKind::self_destruct && policy != ContentErrors::strict
+                        && (!entry.spawned->blast.enabled() || entry.spawned->countdown_frames != 0
+                            || entry.spawned->weaken.on_detonation || entry.spawned->z_offset.raw() != 0)) {
+                        entry.unresolved_spawn = ability.spawned_object;
+                        entry.spawned.reset();
+                        if (skipped != nullptr) {
+                            auto warning = failure("unit '" + unit.id + "' ability 'SELF_DESTRUCT' Spawned_Object_Type '"
+                                + ability.spawned_object + "' is no area-blast projectile: creation skipped; ability retained (WSD-01)");
+                            warning.severity = core::Severity::warning;
+                            skipped->push_back(std::move(warning));
+                        }
+                    }
                 }
             }
             if (kind == tactical::AbilityKind::concentrate_fire || kind == tactical::AbilityKind::energy_weapon
                 || kind == tactical::AbilityKind::tractor_beam || kind == tactical::AbilityKind::missile_shield
                 || kind == tactical::AbilityKind::sensor_jamming || kind == tactical::AbilityKind::corrupt_systems
-                || kind == tactical::AbilityKind::leech_shields) {
+                || kind == tactical::AbilityKind::leech_shields || kind == tactical::AbilityKind::super_laser) {
                 entry.effective_radius = ability.effective_radius.value_or(Fixed{});
                 entry.gui_activated_ability_name = ability.gui_activated_ability_name;
             }
@@ -356,6 +384,18 @@ core::Result<tactical::AbilityTable> ability_table(const UnitTables& tables, std
                 else if (iequals(flag.modifier, "CAN_BE_SQUASHED")) m.can_be_squashed = flag.value;
                 else if (iequals(flag.modifier, "ALLOW_TARGET_DIMINISHING_FIREPOWER")) m.allow_target_diminishing_firepower = flag.value;
             }
+            // WSD-01 (#5696): retail's SELF_DESTRUCT behaviour refuses to start without an authored Expiration_Seconds
+            // above 0 (a company's bare stub row), so such a row is inert: drop the row, load the type.
+            if (policy != ContentErrors::strict && entry.expiration_frames == 0
+                && kind == tactical::AbilityKind::self_destruct) {
+                if (skipped != nullptr) {
+                    auto warning = failure("unit '" + unit.id + "' ability '" + ability.type
+                        + "' authors no Expiration_Seconds above 0: the row is inert and was dropped (WSD-01)");
+                    warning.severity = core::Severity::warning;
+                    skipped->push_back(std::move(warning));
+                }
+                continue;
+            }
             profile.abilities.push_back(entry);
         }
         keep_last_of_each_kind(profile.abilities, unit.id, skipped);
@@ -369,12 +409,19 @@ core::Result<tactical::AbilityTable> ability_table(const UnitTables& tables, std
         // FS-29: attach the visible MC30 consumer only to its authored object script.
         profile.mc30_script = iequals(unit.lua_script, "ObjectScript_MC30")
             && tactical::ability_slot(profile, tactical::AbilityKind::cluster_bomb).has_value();
+        // WSH-09 (#5696): strict keeps refusing damage (a negative amount) together with a percent heal; only a
+        // lenient load takes the retail combination (WSH-04: percent x maximum + amount).
+        if (policy == ContentErrors::strict) for (const auto& special : profile.special)
+            if (special.kind == tactical::SpecialAbilityKind::force_healing
+                && special.heal_amount.raw() < 0 && special.heal_percent.raw() > 0)
+                return failure(unit.id + " invalid automatic healing data (negative Heal_Amount with Heal_Percent)");
         // #4666: each type is checked on its own, so a tolerant load skips this type, not the table.
         if (auto valid = tactical::validate_ability_profile(profile); !valid) return valid.error();
         table.profiles.push_back(std::move(profile));
         return std::nullopt;
     };
     for (const auto& unit : tables.units) {
+        if (!type_selection.keeps(unit)) continue;
         auto error = build_unit(unit);
         if (!error) continue;
         if (policy == ContentErrors::strict) return Result::failure(std::move(*error));
@@ -396,18 +443,25 @@ core::Result<tactical::AbilityTable> ability_table(const UnitTables& tables, std
     }
     // WSD-10: the AI combat rating of a type is its AI_Combat_Power; a squadron's is the sum over its craft (PL-13).
     for (const auto& unit : tables.units) {
+        if (!type_selection.keeps(unit)) continue;
         std::optional<Fixed> rating = unit.ai_combat_power;
         if (!unit.members.empty()) {
             Fixed sum{};
             for (const auto& member : unit.members) {
-                if (member.craft_index >= tables.units.size() || !tables.units[member.craft_index].ai_combat_power) continue;
-                const auto added = sim::math::add(sum, *tables.units[member.craft_index].ai_combat_power);
-                if (!added) return Result::failure(failure(unit.id + " squadron combat rating: " + added.error().message));
-                sum = added.value();
+                if (member.craft_index >= tables.units.size()) continue;
+                const auto* craft = type_selection.find(tables.units[member.craft_index].id);
+                if (!craft->ai_combat_power) continue;
+                sum = add_power(sum, *craft->ai_combat_power, unit.id,
+                    unit.id + " squadron combat rating: ", diagnostic_codes::abilities, load_notes);
             }
             rating = sum;
         }
-        if (rating && rating->raw() > 0) table.combat_ratings.emplace_back(assets::object_type_crc(unit.id), *rating);
+        if (rating && rating->raw() > 0) {
+            const auto effective = bounded_power(*rating, unit.id,
+                "ability table: combat ratings must strictly increase by type and stay in range",
+                diagnostic_codes::abilities, load_notes);
+            table.combat_ratings.emplace_back(assets::object_type_crc(unit.id), effective);
+        }
     }
     std::sort(table.combat_ratings.begin(), table.combat_ratings.end(),
         [](const auto& left, const auto& right) { return left.first < right.first; });

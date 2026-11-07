@@ -1,5 +1,7 @@
 #include "pathfind_search_internal.hpp"
 
+#include <optional>
+
 namespace eawr::sim::tactical::pathfind_detail {
 
 [[nodiscard]] SearchScratch& search_scratch() {

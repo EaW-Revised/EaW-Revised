@@ -2,6 +2,7 @@
 
 #include "eawr/campaign/game_session.hpp"
 #include "eawr/campaign/setup.hpp"
+#include "eawr/checkpoint/game.hpp"
 #include "eawr/core/result.hpp"
 #include "eawr/data/galactic/galactic_data.hpp"
 #include "eawr/sim/galactic/mp_roster.hpp"
@@ -35,6 +36,7 @@ struct MpPreparedSession {
     std::shared_ptr<GameSession> session;
     // Opaque platform services belonging to this exact prepared owner. Not simulation state.
     std::shared_ptr<const void> runtime_services;
+    std::vector<core::LoadNote> load_notes{};
 };
 
 struct MpLocalContent {
@@ -43,6 +45,9 @@ struct MpLocalContent {
     // Hex digests of the mounted content closure: every Lua script (story plots and AI scripts) and every XML
     // file (AI data included), as skirmish::read_data_identity computes them for the same mounts.
     std::string script_manifest_digest, xml_digest;
+    // The difficulty entries each AI player type maps its levels to; the lobby's campaign list reads it. Absent: no campaign
+    // states a difficulty list.
+    std::function<std::array<std::string, 3>(std::string_view player_type)> ai_levels;
     // This build's batch limits (net::max_batch_commands / max_batch_bytes); the offer must carry the same.
     std::uint32_t command_quota{}, byte_quota{};
     // Production plans through plan_live_campaign_setup (fiscal policy, difficulty); the default is
@@ -56,6 +61,9 @@ struct MpLocalContent {
     // Optional production owner, fully configured before computing the tick-zero claim.
     // The aliasing shared pointer retains the initialized root and all runtime services.
     std::function<core::Result<MpPreparedSession>(const CampaignSetupPlan&, std::string_view difficulty)> prepare_session{};
+    // Every invocation owns fresh mounted services and directly imports the checkpoint.
+    std::function<core::Result<MpPreparedSession>(const CampaignSetupPlan&, std::string_view,
+        std::span<const std::uint8_t>)> restore_session;
     // Production prepares the stock placement services so tick zero includes the starting forces; absent, tick
     // zero is the session built from the planned galaxy alone.
     std::function<core::Result<CampaignSetupServices>(const CampaignSetupPlan&)> services;
@@ -64,15 +72,20 @@ struct MpLocalContent {
 struct MpSessionTerms {
     std::uint64_t seed{};
     std::uint32_t command_quota{}, byte_quota{};
+    // Absent: follow the campaign entry (multiplayer entries use multiplayer rules, single-player entries the
+    // authored single-player rules). Every peer derives the same value from the agreed campaign.
+    std::optional<CampaignRulesFlavour> rules_flavour{};
 };
 
 struct MpAgreement {
+    std::optional<checkpoint::GameResumeMetadata> resume;
     sim::MatchIdentity content;                // derived locally; the net layer pairs it with the build identity
     std::array<std::uint8_t, 32> tick_zero{};  // this peer's own computation
     std::vector<std::vector<std::uint8_t>> ai_configuration; // per roster faction (empty for humans), local
     std::shared_ptr<const CampaignSetupPlan> plan;
     std::shared_ptr<GameSession> session;      // at tick zero, never stepped here; the adapter takes it over
     std::shared_ptr<const void> runtime_services{}; // travels with that owner across re-offers
+    std::vector<core::LoadNote> load_notes; // local diagnostics only; never sent to peers
 };
 
 // Fills the host's claims from local content: the AI controller configuration of every non-human faction and
@@ -90,4 +103,8 @@ struct MpAgreement {
 [[nodiscard]] core::Result<MpAgreement> derive_mp_agreement(const MpLocalContent&,
     const sim::galactic::MpRoster&, const MpSessionTerms&);
 
+// Derive local installed identities and directly restore, never run placement or player-load fixups.
+[[nodiscard]] core::Result<MpAgreement> restore_mp_agreement(const MpLocalContent&,
+    const sim::galactic::MpRoster&, const MpSessionTerms&, std::span<const std::uint8_t>,
+    const checkpoint::GameResumeMetadata&);
 } // namespace eawr::campaign

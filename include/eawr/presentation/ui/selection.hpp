@@ -100,6 +100,8 @@ struct BattleUnit {
     bool neutral{}; // WSU-63: no selection or combat overlays for neutral scenery
     bool mouse_sensitive{true}; // WSU-13: admission before testing the pick geometry
     bool controlled{true}; // ADR-020: separate from faction ownership and colour.
+    bool hero{}; // SH-01: authored unit/team hero identity.
+    std::optional<std::array<float, 4>> selection_bounds{}; // projected footprint: left, top, right, bottom
 };
 
 struct ScreenRect {
@@ -205,6 +207,10 @@ public:
     // S-5a: replaces the selection with all own selectable mobile units, including off screen.
     // Repeated craft volumes contribute their squadron container only once.
     bool all(std::span<const BattleUnit> units);
+    // SH-01: own mobile units; any overlap with the viewport includes partial units. Heroes (named,
+    // generic and team heroes) join unless the action's Include_Heroes data turns them off.
+    bool bulk(std::span<const BattleUnit> units, std::optional<ScreenRect> viewport = std::nullopt,
+              bool include_heroes = true);
     // Adds the own units of `type` on screen (Select_All_Objects_Of_Type_On_Screen).
     bool type_on_screen(sim::tactical::TypeId type, std::span<const BattleUnit> units, const ScreenRect& viewport);
     // WSU-38 (#550): the same test for a craft type: adds every own squadron with a craft of

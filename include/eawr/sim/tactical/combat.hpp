@@ -319,6 +319,11 @@ struct CombatProfile {
     std::optional<PlanetaryWeaponProfile> planetary_weapon{};
     bool star_base{}; // DUMMY_STAR_BASE behavior, independent of XML class
     std::vector<ShotProfile> death_projectiles{}; // WNO-29: one choice per ordinary death
+    // #5696: a lenient load drops an authored entry that names no projectile, but WAR-108 draws over the authored
+    // count. `death_projectile_authored` is that count and `death_projectile_slots[i]` the authored position of
+    // `death_projectiles[i]`; both are empty/0 when every authored entry resolved (the draw is then over the size).
+    std::uint32_t death_projectile_authored{};
+    std::vector<std::uint32_t> death_projectile_slots{};
     std::optional<ShotProfile> retreat_explosion{}; // RP-09: the station's created blast when a retreat destroys it
     bool target_stealth{}; // WST-07: Target_Stealth_Units; sees and shoots stealthed enemies
     math::Fixed stealth_detection_range{}; // WST-08: Space_FOW_Reveal_Range of a target_stealth type, else 0
@@ -375,7 +380,9 @@ struct CombatTable {
     friend bool operator==(const CombatTable&, const CombatTable&) = default;
 };
 
-inline constexpr std::size_t max_weapons_per_type = 255;
+// Our safety bound, not a retail limit (FoC keeps weapons in a growable list). The old 255 cap
+// made Executor-class ships with hundreds of weapons invalidate the combat table.
+inline constexpr std::size_t max_weapons_per_type = 65535;
 // Ranges, cone angles and point offsets the rules accept, in whole source units.
 inline constexpr std::int64_t max_combat_distance = std::int64_t{1} << 18;
 inline constexpr std::uint32_t max_recharge_hundredths = 100 * 3600;
@@ -384,15 +391,16 @@ inline constexpr std::uint32_t object_recharge_jitter_frames = 10;
 // The largest Collision_Box_Modifier the craft sphere (DG-37) accepts: FoC authors 2 on its craft
 // and 250 on the Death Star.
 inline constexpr std::int64_t max_sphere_modifier = 256;
-// A hardpoint's AI combat power, in whole units; a type's directed sums of up to 255 weapons
-// stay far inside Q24.
+// A hardpoint's AI combat power, in whole units. A type's directed sums use the checked Calc::add
+// (an overflow is a flagged failure, never a wrap); stock powers are tiny, so even
+// max_weapons_per_type weapons stay far inside Q24 for authored data.
 inline constexpr std::int64_t max_weapon_combat_power = std::int64_t{1} << 24;
 // How far a fire bone frame's Q24 dot products may stray from orthonormal: 2^-12, a skew of
 // about 0.014 degrees. FoC's frames, normalized per axis on load, stay far inside it.
 inline constexpr std::int64_t frame_tolerance_raw = std::int64_t{1} << 12;
 
 // Fails with EAWR-SIM-0305 unless type IDs strictly increase, every priority set index exists,
-// set rows strictly increase, a type has at most 255 weapons, hardpoint indices are below 255,
+// set rows strictly increase, a type has at most max_weapons_per_type (65535) weapons, hardpoint indices are below max_hardpoints_per_type,
 // ranges and attack distances are in [0, max_combat_distance], cones in [0, 720], recharge
 // bounds ordered and at most max_recharge_hundredths, pulse counts at least 1, AI combat powers
 // in [0, max_weapon_combat_power] and points within max_combat_distance on each axis.

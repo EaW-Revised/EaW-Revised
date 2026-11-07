@@ -72,9 +72,9 @@ bool Engine::proposable(const PlayerAi& player, const GoalFunctionEntry& functio
         return enabled != player.proposal_counts.end() && enabled->second > 0
             && (excluded == player.exclusion_counts.end() || excluded->second == 0);
     }
-    if (player.space_template == nullptr) return true;
+    if (player.mode_template == nullptr) return true;
     const std::string& category = function.goal->category;
-    return player.space_template->goals_on.contains(category) && !player.space_template->goals_off.contains(category);
+    return player.mode_template->goals_on.contains(category) && !player.mode_template->goals_off.contains(category);
 }
 
 // FT-01/FT-03: the best starts as none at score 0 and is replaced only by a strictly higher
@@ -160,9 +160,9 @@ Real Engine::category_budget(const PlayerAi& player, const std::string& category
         if (!ledger || id == data_.goal_categories.end() || !ledger->categories.contains(id->second)) return {};
         return numeric::from_fixed(ledger->categories.at(id->second).available_cash);
     }
-    if (player.space_template == nullptr) return Real{};
-    const auto found = player.space_template->budget.find(category);
-    if (found == player.space_template->budget.end()) return Real{};
+    if (player.mode_template == nullptr) return Real{};
+    const auto found = player.mode_template->budget.find(category);
+    if (found == player.mode_template->budget.end()) return Real{};
     const Equation* equation = data_.equations.find(found->second);
     if (equation == nullptr) return Real{};
     return run_equation(*equation, context_of(player, nullptr)).value_or(Real{});
@@ -207,7 +207,7 @@ void Engine::service_goals(PlayerAi& player) {
     player.per_frame = proposal_budget(player.nontrivial);
     player.nontrivial = 0;
     player.sleep_frames = truncate(to_single(real(fps) * (player.galactic
-        ? player.difficulty.galactic_goal_cycle_sleep : player.difficulty.space_goal_cycle_sleep)));
+        ? player.difficulty.galactic_goal_cycle_sleep : mode_goal_cycle_sleep(player.difficulty, host_->setup.domain))));
 }
 
 // GS-04: the proposal pass, a per-frame budget of (function, target) evaluations.
@@ -376,9 +376,9 @@ bool Engine::plan_goal(PlayerAi& player, Goal& goal) {
     for (std::size_t index = 0; index < plans_.size(); ++index) {
         const PlanDef& plan = plans_[index];
         if (std::find(plan.goals.begin(), plan.goals.end(), function.goal_name) == plan.goals.end()) continue;
-        if (player.space_template != nullptr) {
+        if (player.mode_template != nullptr) {
             const std::string& category = function.goal->category;
-            if (!player.space_template->plans_on.contains(category) || player.space_template->plans_off.contains(category)) {
+            if (!player.mode_template->plans_on.contains(category) || player.mode_template->plans_off.contains(category)) {
                 continue;
             }
         }
@@ -1040,6 +1040,7 @@ core::Result<void> Engine::attach_plan(PlayerAi& player, Goal& goal, authoritati
             index_runtime(runtime_index_.taskforces, id, player.player);
     }
     assign("PlayerObject", Value{authoritative::Handle{handle_player, player.player}});
+    if (player.galactic) assign("Budget", Value{authoritative::Handle{handle_galactic_budget, plan.id}});
     for (const std::uint64_t tf_id : plan.taskforces) {
         events_.push_back(event(ScriptEvent::Kind::start_thread, player.taskforces.at(tf_id).name + "_Thread"));
     }

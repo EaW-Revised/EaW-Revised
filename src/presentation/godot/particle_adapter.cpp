@@ -1,14 +1,18 @@
 #include "particle_adapter.hpp"
 #include "eawr/presentation/render_categories.hpp"
 #include "particle_texture.hpp"
+#include "particle_merge.hpp"
 #include "particle_prewarm.hpp"
 #include "particle_reuse.hpp"
 #include "particle_spawn_trace.hpp"
 #include "gpu_memory_ledger.hpp"
+#include "texture_census.hpp"
 #include "texture_budget.hpp"
 #include <godot_cpp/classes/engine.hpp>
 #include "particle_upload.hpp"
 #include "particle_culling.hpp"
+#include "particle_latch.hpp"
+#include "distance_band.hpp"
 
 #include "eawr/presentation/lighting/lighting.hpp"
 
@@ -41,8 +45,10 @@
 #include <chrono>
 #include <cstring>
 #include <cstdio>
+#include <functional>
 #include <map>
 #include <optional>
+#include <string>
 #include <utility>
 
 using namespace godot;
@@ -53,6 +59,7 @@ using UploadClock = std::chrono::steady_clock;
 thread_local bool measure_uploads{};
 thread_local GodotParticleBackend::FrameWork upload_work;
 std::atomic<bool> measure_preparations{};
+std::atomic<bool> batch_census{};
 
 [[nodiscard]] bool spawn_trace_requested() {
     OS* const os = OS::get_singleton();
@@ -297,11 +304,14 @@ public:
         std::size_t references{};
         detail::GpuItem item{};
     };
+    struct Group;
     struct Emitter final {
         std::uint64_t category_submit_frame{~std::uint64_t{0}};
         particles::EmitterRenderPlan plan;
         std::size_t active_index{inactive_index};
         bool requested_visible{};
+        bool band_hidden{};
+        bool diagnostic_fighter{};
         bool empty_pending{};
         std::uint64_t empty_frame{};
         detail::ParticleRestoreRetry retry;
@@ -336,6 +346,20 @@ public:
         bool replace_surface{};
         bool changed_indices{};
         double preparation_ms{};
+        // BatchCensus only: written by the preparing worker, read after the barrier.
+        std::uint64_t census_hash{};
+        bool census_identical{};
+        // Merged emitters (set_merge_additive) own no draw resources; see Group.
+        Group* group{};
+        std::vector<std::uint32_t> raw_indices;
+        std::uint64_t stream_hash{};
+        std::size_t live_vertices{};
+        // The stream the group holds for this emitter as of its last commit (stage_merged), which pack_merged
+        // compares with: a stream packed twice before one commit must still dirty the group.
+        std::uint64_t committed_hash{};
+        std::size_t committed_vertices{};
+        bool stream_unchanged{};
+        bool in_live{};
         AABB bounds;
         detail::ParticleSubmissionCache<AABB> submission;
         Array arrays;
@@ -371,6 +395,7 @@ public:
         set_reuse(false);
         release_warm();
         while (!emitters_.empty()) destroy(emitters_.begin()->first);
+        std::erase(merge_backends_, this);
     }
 
     render_churn::Owner churn_owner_{render_churn::Owner::particle};
@@ -481,8 +506,10 @@ public:
                 // a create, or transferred from the dormant owner for a restore.
                 release_shader(*rendering, shader_key);
                 Emitter emitter = std::move(*retained);
+                emitter.diagnostic_fighter = shared ? shared->diagnostic_fighter : spawn_fighter_;
                 render_churn::record(churn_owner_, render_churn::Event::restored, 3);
                 emitter.submission.reset(); // new owner/scenario attachment
+                emitter.band_hidden = false;
                 emitter.owns_textures = true;
                 rendering->material_set_param(emitter.material, StringName("eawr_particle_texture"), *texture_rid);
                 if (normal_rid) rendering->material_set_param(emitter.material,
@@ -507,6 +534,7 @@ public:
             }
         }
         Emitter emitter;
+        emitter.diagnostic_fighter = shared ? shared->diagnostic_fighter : spawn_fighter_;
         emitter.texture_key = plan.texture;
         emitter.normal_key = normal_key;
         emitter.shader_key = shader_key;
@@ -574,7 +602,286 @@ public:
         return emitter;
     }
 
-    std::uint64_t create(const particles::EmitterRenderPlan& plan) {
+
+    // ---- Opt-in additive merge (set_merge_additive) -------------------------------------------
+    // Additive streams that share shader, colour texture and render priority are drawn as ONE
+    // mesh surface per backend: the emitter keeps its identity, texture/shader references and
+    // packed bytes, but owns no mesh, material or instance. Additive blending is order
+    // independent, so only the draw's depth-sort position (one union AABB) differs from the
+    // per-emitter draws. A culled or empty emitter leaves the group's live set, so the merged
+    // draw never contains a stream the registry did not submit.
+    struct Group final {
+        std::string key;
+        RID material, mesh, instance;
+        std::int32_t priority{};
+        std::size_t refs{};
+        bool dirty{};
+        detail::ParticleSurfaceShape shape;
+        std::uint32_t vertex_stride{}, attribute_stride{}, colour_offset{}, uv_offset{}, index_stride{};
+        PackedByteArray vertex_bytes, attribute_bytes, index_bytes;
+        std::vector<std::uint32_t> topology, scratch;
+        detail::ParticleSubmissionCache<AABB> submission;
+        std::map<std::uint64_t, Emitter*> live;
+    };
+
+    static BitField<RenderingServer::ArrayFormat> merged_format() {
+        return BitField<RenderingServer::ArrayFormat>(
+            RenderingServer::ARRAY_FORMAT_VERTEX | RenderingServer::ARRAY_FORMAT_COLOR
+            | RenderingServer::ARRAY_FORMAT_TEX_UV | RenderingServer::ARRAY_FORMAT_INDEX
+            | RenderingServer::ARRAY_FLAG_USE_DYNAMIC_UPDATE | RenderingServer::ARRAY_FLAG_FORMAT_CURRENT_VERSION);
+    }
+
+    void query_layout(RenderingServer& rendering, Group& group, const std::size_t vertices) {
+        const auto format = merged_format();
+        const auto count = static_cast<int32_t>(vertices);
+        group.vertex_stride = rendering.mesh_surface_get_format_vertex_stride(format, count);
+        group.attribute_stride = rendering.mesh_surface_get_format_attribute_stride(format, count);
+        group.colour_offset = rendering.mesh_surface_get_format_offset(format, count, RenderingServer::ARRAY_COLOR);
+        group.uv_offset = rendering.mesh_surface_get_format_offset(format, count, RenderingServer::ARRAY_TEX_UV);
+        group.index_stride = rendering.mesh_surface_get_format_index_stride(format, count);
+    }
+
+    [[nodiscard]] bool mergeable(const particles::EmitterRenderPlan& plan) const {
+        return merge_additive_ && plan.drawable && plan.blend == particles::Blend::additive && !plan.triangles
+            && !fog_.register_material && !render_categories::enabled && render_categories::ablation == "off";
+    }
+
+    // 0 when the plan cannot join a group (the caller then creates an ordinary emitter).
+    std::uint64_t create_merged(const particles::EmitterRenderPlan& plan) {
+        RenderingServer* rendering = RenderingServer::get_singleton();
+        if (rendering == nullptr || !scenario_.is_valid() || !resolver_) return 0;
+        const MaterialDescription material = GodotParticleBackend::material_for(plan, false);
+        if (const auto valid = validate_material(material); !valid) return 0;
+        const assets::Texture* texture = resolver_(plan.texture);
+        if (texture == nullptr) return 0;
+        const auto texture_rid = acquire_texture(*rendering, plan.texture, *texture);
+        if (!texture_rid) return 0;
+        const std::string shader_key = material.program;
+        const auto shader = acquire_shader(*rendering, shader_key);
+        if (!shader) {
+            release_texture(*rendering, plan.texture);
+            return 0;
+        }
+        const auto priority = render_pass_priority(material.pass)
+            + static_cast<std::int32_t>(std::min<std::uint32_t>(plan.order_in_phase, 7U));
+        const std::string key = shader_key + '\n' + plan.texture + '\n' + std::to_string(priority);
+        auto found = groups_.find(key);
+        if (found == groups_.end()) {
+            auto group = std::make_unique<Group>();
+            group->key = key;
+            group->priority = priority;
+            group->material = rendering->material_create();
+            group->mesh = rendering->mesh_create();
+            group->instance = rendering->instance_create();
+            if (!group->material.is_valid() || !group->mesh.is_valid() || !group->instance.is_valid()) {
+                if (group->instance.is_valid()) free_rid(*rendering, group->instance);
+                if (group->mesh.is_valid()) free_rid(*rendering, group->mesh);
+                if (group->material.is_valid()) free_rid(*rendering, group->material);
+                release_shader(*rendering, shader_key);
+                release_texture(*rendering, plan.texture);
+                return 0;
+            }
+            rendering->material_set_shader(group->material, *shader);
+            rendering->material_set_render_priority(group->material, priority);
+            rendering->material_set_param(group->material, StringName("eawr_particle_texture"), *texture_rid);
+            rendering->instance_set_base(group->instance, group->mesh);
+            rendering->instance_set_scenario(group->instance, scenario_);
+            rendering->instance_geometry_set_cast_shadows_setting(
+                group->instance, RenderingServer::SHADOW_CASTING_SETTING_OFF);
+            rendering->instance_set_visible(group->instance, false);
+            query_layout(*rendering, *group, 4);
+            group_order_.push_back(group.get());
+            found = groups_.emplace(key, std::move(group)).first;
+        }
+        Group& group = *found->second;
+        Emitter emitter;
+        emitter.texture_key = plan.texture;
+        emitter.shader_key = shader_key;
+        emitter.emitter_index = plan.emitter_index;
+        emitter.priority = priority;
+        emitter.plan = plan;
+        emitter.group = &group;
+        ++group.refs;
+        const auto id = next_id_++;
+        emitters_.emplace(id, std::move(emitter));
+        return id;
+    }
+
+    void leave_group(const std::uint64_t id, Emitter& emitter) {
+        if (emitter.group == nullptr || !emitter.in_live) return;
+        emitter.group->live.erase(id);
+        emitter.group->dirty = true;
+        emitter.in_live = false;
+    }
+
+    void free_group(RenderingServer* rendering, Group& group) {
+        if (rendering != nullptr) {
+            if (group.instance.is_valid()) free_rid(*rendering, group.instance);
+            if (group.mesh.is_valid()) free_rid(*rendering, group.mesh);
+            if (group.material.is_valid()) free_rid(*rendering, group.material);
+        }
+        std::erase(group_order_, &group);
+        const std::string key = group.key;
+        groups_.erase(key);
+    }
+
+    // Worker: pack one merged emitter's stream; the group strides are read-only here.
+    void pack_merged(Emitter& emitter, const particles::VertexStream& stream) {
+        const Group& group = *emitter.group;
+        const auto hash = particles::stream_hash(stream);
+        emitter.stream_unchanged = emitter.committed_vertices == stream.vertices.size() && hash == emitter.committed_hash;
+        emitter.stream_hash = hash;
+        emitter.live_vertices = stream.vertices.size();
+        emitter.vertex_bytes.resize(static_cast<int64_t>(stream.vertices.size() * group.vertex_stride));
+        emitter.attribute_bytes.resize(static_cast<int64_t>(stream.vertices.size() * group.attribute_stride));
+        auto* const vertex_out = emitter.vertex_bytes.ptrw();
+        auto* const attribute_out = emitter.attribute_bytes.ptrw();
+        for (std::size_t index = 0; index < stream.vertices.size(); ++index) {
+            const auto& vertex = stream.vertices[index];
+            detail::pack_particle_vertex(vertex, vertex_out + index * group.vertex_stride,
+                attribute_out + index * group.attribute_stride + group.colour_offset,
+                attribute_out + index * group.attribute_stride + group.uv_offset);
+            emitter.bounds.expand_to(axis_convert(vertex.position));
+        }
+        emitter.raw_indices.assign(stream.indices.begin(), stream.indices.end());
+    }
+
+    // Caller thread, once per nonempty upload of a merged emitter.
+    void stage_merged(const std::uint64_t id, Emitter& emitter, const particles::VertexStream& stream) {
+        Group& group = *emitter.group;
+        if (stream.vertices.empty()) {
+            emitter.live_vertices = 0;
+            emitter.committed_vertices = 0;
+            emitter.committed_hash = 0;
+            leave_group(id, emitter);
+            return;
+        }
+        emitter.quads = stream.quads + stream.triangles;
+        if (!emitter.in_live) {
+            group.live.emplace(id, &emitter);
+            emitter.in_live = true;
+            group.dirty = true;
+        } else if (!emitter.stream_unchanged) {
+            group.dirty = true;
+        }
+        emitter.committed_hash = emitter.stream_hash;
+        emitter.committed_vertices = emitter.live_vertices;
+        if (measure_uploads && batch_census.load(std::memory_order_relaxed)) record_census(emitter, stream);
+    }
+
+    void flush_groups() {
+        RenderingServer* rendering = RenderingServer::get_singleton();
+        if (rendering == nullptr) return;
+        for (Group* group : group_order_) {
+            if (!group->dirty) continue;
+            group->dirty = false;
+            flush_group(*rendering, *group);
+        }
+    }
+
+    void flush_group(RenderingServer& rendering, Group& group) {
+        std::size_t vertices = 0, indices = 0;
+        for (const auto& [id, emitter] : group.live) {
+            static_cast<void>(id);
+            vertices += emitter->live_vertices;
+            indices += emitter->raw_indices.size();
+        }
+        const auto set_visible = [&](const bool value) {
+            group.submission.visibility.apply(value, [&](const bool shown) {
+                rendering.instance_set_visible(group.instance, shown);
+            });
+        };
+        if (vertices == 0) {
+            set_visible(false);
+            return;
+        }
+        const auto grow = [](const std::size_t demand) { return demand + demand / 2; };
+        const bool replace = group.shape.vertices < vertices || group.shape.indices < indices;
+        if (replace) {
+            const std::size_t capacity_vertices = grow(vertices);
+            std::size_t capacity_indices = grow(indices);
+            capacity_indices -= capacity_indices % 3;
+            PackedVector3Array positions;
+            PackedColorArray colours;
+            PackedVector2Array uv;
+            PackedInt32Array index_array;
+            positions.resize(static_cast<int64_t>(capacity_vertices));
+            colours.resize(static_cast<int64_t>(capacity_vertices));
+            uv.resize(static_cast<int64_t>(capacity_vertices));
+            index_array.resize(static_cast<int64_t>(capacity_indices));
+            Array arrays;
+            arrays.resize(RenderingServer::ARRAY_MAX);
+            arrays[RenderingServer::ARRAY_VERTEX] = positions;
+            arrays[RenderingServer::ARRAY_COLOR] = colours;
+            arrays[RenderingServer::ARRAY_TEX_UV] = uv;
+            arrays[RenderingServer::ARRAY_INDEX] = index_array;
+            rendering.mesh_clear(group.mesh);
+            rendering.mesh_add_surface_from_arrays(group.mesh, RenderingServer::PRIMITIVE_TRIANGLES, arrays,
+                Array(), Dictionary(), RenderingServer::ARRAY_FLAG_USE_DYNAMIC_UPDATE);
+            rendering.mesh_surface_set_material(group.mesh, 0, group.material);
+            group.shape.vertices = capacity_vertices;
+            group.shape.indices = capacity_indices;
+            const auto vertex_stride = group.vertex_stride, attribute_stride = group.attribute_stride;
+            query_layout(rendering, group, capacity_vertices);
+            if (vertex_stride != group.vertex_stride || attribute_stride != group.attribute_stride)
+                std::fprintf(stderr, "EAWR-PARTICLE-0008: merged particle surface changed its vertex layout\n");
+            group.topology.clear();
+            if (measure_uploads) ++upload_work.merged_replacements;
+        }
+        group.vertex_bytes.resize(static_cast<int64_t>(vertices * group.vertex_stride));
+        group.attribute_bytes.resize(static_cast<int64_t>(vertices * group.attribute_stride));
+        auto* const vertex_out = group.vertex_bytes.ptrw();
+        auto* const attribute_out = group.attribute_bytes.ptrw();
+        group.scratch.clear();
+        group.scratch.reserve(indices);
+        std::size_t offset = 0;
+        AABB bounds;
+        bool first = true;
+        for (const auto& [id, emitter] : group.live) {
+            static_cast<void>(id);
+            const std::size_t count = emitter->live_vertices;
+            std::memcpy(vertex_out + offset * group.vertex_stride, emitter->vertex_bytes.ptr(), count * group.vertex_stride);
+            std::memcpy(attribute_out + offset * group.attribute_stride, emitter->attribute_bytes.ptr(),
+                count * group.attribute_stride);
+            detail::append_rebased_indices(emitter->raw_indices, static_cast<std::uint32_t>(offset), group.scratch);
+            if (first) {
+                bounds = emitter->bounds;
+                first = false;
+            } else {
+                bounds = bounds.merge(emitter->bounds);
+            }
+            offset += count;
+        }
+        const bool changed_indices = replace || group.scratch != group.topology;
+        if (changed_indices) {
+            const std::size_t stride = group.index_stride;
+            group.index_bytes.resize(static_cast<int64_t>(group.shape.indices * stride));
+            detail::write_index_bytes(group.scratch, stride, group.shape.indices, group.index_bytes.ptrw());
+            group.topology.swap(group.scratch);
+        }
+        bounds.size = bounds.size.max(Vector3(0.00001F, 0.00001F, 0.00001F));
+        rendering.mesh_surface_update_vertex_region(group.mesh, 0, 0, group.vertex_bytes);
+        rendering.mesh_surface_update_attribute_region(group.mesh, 0, 0, group.attribute_bytes);
+        if (changed_indices) rendering.mesh_surface_update_index_region(group.mesh, 0, 0, group.index_bytes);
+        group.submission.bounds.apply(bounds, [&](const AABB& value) { rendering.mesh_set_custom_aabb(group.mesh, value); });
+        set_visible(true);
+        if (measure_uploads) {
+            ++upload_work.uploads;
+            ++upload_work.merged_groups;
+            upload_work.merged_streams += group.live.size();
+            upload_work.merged_vertices += vertices;
+        }
+    }
+
+    bool merge_additive_{};
+    std::map<std::string, std::unique_ptr<Group>> groups_;
+    std::vector<Group*> group_order_;
+    static inline std::vector<Impl*> merge_backends_;
+
+    std::uint64_t create(const particles::EmitterRenderPlan& plan, const bool allow_merge = true) {
+        if (allow_merge && mergeable(plan)) {
+            if (const auto merged = create_merged(plan); merged != 0) return merged;
+        }
         auto emitter = allocate(plan, next_id_);
         if (!emitter) return 0;
         const auto id = next_id_++;
@@ -583,8 +890,12 @@ public:
         return id;
     }
 
-    static void submit_visible(RenderingServer& rendering, Emitter& emitter, const bool visible) {
-        emitter.submission.visibility.apply(visible, [&](const bool value) {
+    void submit_visible(RenderingServer& rendering, Emitter& emitter, const bool visible) {
+        if (render_categories::ablation.starts_with("particle-band-"))
+            emitter.band_hidden = render_categories::band_hidden(
+                distance_band::coverage(emitter.bounds, Transform3D(), scenario_.get_id()), emitter.band_hidden);
+        emitter.submission.visibility.apply(render_categories::engine_visible(render_categories::Role::particle, visible)
+            && !emitter.band_hidden && !(emitter.diagnostic_fighter && render_categories::ablation == "fighter-all"), [&](const bool value) {
             rendering.instance_set_visible(emitter.instance, value);
         }, measure_uploads ? &upload_work.visibility_calls : nullptr);
     }
@@ -617,6 +928,10 @@ public:
         const bool retained = emitter.active_index == inactive_index;
         if (retained && !terminal) return;
         UploadTimer timer(upload_work.retirement_ms);
+        if (measure_uploads) {
+            ++upload_work.retire_suspends;
+            if (terminal) ++upload_work.retire_suspends_terminal;
+        }
         if (retained) {
             assert(retained_identities_ != 0);
             --retained_identities_;
@@ -653,9 +968,13 @@ public:
         emitter = std::move(dormant);
     }
 
-    [[nodiscard]] static std::uint64_t current_frame() {
-        const auto* engine = Engine::get_singleton();
-        return engine != nullptr ? static_cast<std::uint64_t>(engine->get_process_frames()) : 0;
+    // The frame number all residency logic keys on. A lane thread must not read the engine's
+    // process-frame counter (it moves while the lane runs), so main latches the value at the kick.
+    [[nodiscard]] std::uint64_t current_frame() const {
+        return latched_frame_.read([] {
+            const auto* engine = Engine::get_singleton();
+            return engine != nullptr ? static_cast<std::uint64_t>(engine->get_process_frames()) : std::uint64_t{0};
+        });
     }
 
     void restore_failed(const std::uint64_t id, Emitter& emitter, const std::uint64_t frame) {
@@ -677,6 +996,13 @@ public:
 
     void empty(const std::uint64_t id, const bool terminal) {
         const auto found = emitters_.find(id);
+        if (found != emitters_.end() && found->second.group != nullptr) {
+            found->second.live_vertices = 0;
+            found->second.committed_vertices = 0;
+            found->second.committed_hash = 0;
+            leave_group(id, found->second);
+            return;
+        }
         if (found == emitters_.end() || !found->second.material.is_valid()) return;
         auto& emitter = found->second;
         auto* rendering = RenderingServer::get_singleton();
@@ -760,7 +1086,7 @@ public:
             ++warm_emitter_work_.refused_texture_limit;
             return false;
         }
-        const auto id=create(plan);
+        const auto id=create(plan, false);
         if(id==0) {
             ++warm_emitter_work_.refused_backend;
             return false;
@@ -840,13 +1166,29 @@ public:
         const auto found = emitters_.find(id);
         if (found == emitters_.end()) return;
         Emitter& emitter = found->second;
-        // Tasks own their timing slots; the caller folds every slot after the worker barrier.
+        // Tasks own their timing slots; update() folds an emitter's slot into the frame's totals when it
+        // commits that emitter (which may be before the other tasks have finished).
         emitter.preparation_ms = 0.0;
         UploadTimer timer(emitter.preparation_ms, measure_preparations.load(std::memory_order_relaxed));
         emitter.prepared = true;
         emitter.source_points.clear();
-        if (stream.vertices.empty()) return;
+        emitter.census_identical = false;
+        if (stream.vertices.empty()) {
+            emitter.census_hash = 0;
+            emitter.live_vertices = 0;
+            emitter.stream_hash = 0;
+            return;
+        }
+        if (batch_census.load(std::memory_order_relaxed)) {
+            const auto hash = particles::stream_hash(stream);
+            emitter.census_identical = hash == emitter.census_hash;
+            emitter.census_hash = hash;
+        }
         emitter.bounds = AABB(axis_convert(stream.vertices.front().position), Vector3());
+        if (emitter.group != nullptr) {
+            pack_merged(emitter, stream);
+            return;
+        }
         if (fog_.attenuation_at_source_xy) emitter.source_points.reserve(stream.vertices.size());
         emitter.replace_surface = !emitter.shape.matches(stream);
         emitter.changed_indices = emitter.topology != stream.indices;
@@ -913,6 +1255,19 @@ public:
         emitter.bounds.size = emitter.bounds.size.max(Vector3(0.00001F, 0.00001F, 0.00001F));
     }
 
+    // Caller thread, once per nonempty upload.
+    void record_census(const Emitter& emitter, const particles::VertexStream& stream) {
+        const std::hash<std::string> hasher{};
+        using Kind = detail::BlendGroup;
+        Kind kind = Kind::other;
+        if (emitter.plan.blend == particles::Blend::additive) kind = Kind::additive;
+        else if (emitter.plan.blend == particles::Blend::alpha || emitter.plan.blend == particles::Blend::bump_alpha)
+            kind = Kind::alpha;
+        census_.record(current_frame(), detail::ParticleBatchCensus::key(hasher(emitter.shader_key),
+            hasher(emitter.texture_key), hasher(emitter.normal_key), emitter.priority), kind,
+            stream.vertices.size(), emitter.census_identical, upload_work.census);
+    }
+
     void update(const std::uint64_t id, const particles::VertexStream& stream) {
         RenderingServer* rendering = RenderingServer::get_singleton();
         const auto found = emitters_.find(id);
@@ -926,6 +1281,10 @@ public:
         }
         if (measure_uploads) upload_work.conversion_ms += emitter.preparation_ms;
         emitter.prepared = false;
+        if (emitter.group != nullptr) {
+            stage_merged(id, emitter, stream);
+            return;
+        }
         if (stream.vertices.empty()) {
             empty(id, false);
             return;
@@ -933,12 +1292,16 @@ public:
         cancel_empty(id, emitter);
         if (!emitter.material.is_valid()) {
             const auto frame = current_frame();
-            if (!emitter.retry.admits(frame)) return;
+            if (!emitter.retry.admits(frame)) {
+                ++deferred_;
+                return;
+            }
             auto restored = [&] {
                 [[maybe_unused]] const auto scope = asset_work_.restoring();
                 return allocate(emitter.plan, id, &emitter);
             }();
             if (!restored) {
+                ++incomplete_;
                 restore_failed(id, emitter, frame);
                 return;
             }
@@ -961,13 +1324,17 @@ public:
             assert(emitter.plan.blend == particles::Blend::opaque || emitter.fog_handle != 0);
             assert(emitter.shape.vertices == 0 && emitter.shape.indices == 0);
             const auto frame = current_frame();
-            if (!emitter.retry.admits(frame)) return;
+            if (!emitter.retry.admits(frame)) {
+                ++deferred_;
+                return;
+            }
             [[maybe_unused]] const auto scope = asset_work_.restoring();
             if (fog_.register_material && emitter.fog_handle == 0) {
                 const auto registered = fog_.register_material(emitter.material, shaders_.at(emitter.shader_key).rid);
                 if (!registered || registered.value() == 0) {
                     failure_ = registered ? "fog callback returned an empty consumer handle"
                         : core::format_diagnostic(registered.error());
+                    ++incomplete_;
                     restore_failed(id, emitter, frame);
                     return;
                 }
@@ -985,7 +1352,10 @@ public:
         }
         const bool was_empty = emitter.quads == 0;
         emitter.quads = stream.quads + stream.triangles;
-        if (measure_uploads) ++upload_work.uploads;
+        if (measure_uploads) {
+            ++upload_work.uploads;
+            if (batch_census.load(std::memory_order_relaxed)) record_census(emitter, stream);
+        }
         UploadTimer timer(upload_work.submission_ms);
         if (!emitter.replace_surface) {
             rendering->mesh_surface_update_vertex_region(emitter.mesh, 0, 0, emitter.vertex_bytes);
@@ -1015,6 +1385,8 @@ public:
         if (emitter.replace_surface || emitter.changed_indices) emitter.topology = stream.indices;
         // Bounds reflect live vertices only, never the retained surface's unused storage.
         submit_bounds(*rendering, emitter);
+        if (render_categories::ablation.starts_with("particle-band-"))
+            submit_visible(*rendering, emitter, emitter.requested_visible || was_empty);
         if (was_empty) {
             emitter.requested_visible = true;
             submit_visible(*rendering, emitter, true);
@@ -1025,7 +1397,15 @@ public:
         UploadTimer timer(upload_work.retirement_ms);
         const auto found = emitters_.find(id);
         if (found == emitters_.end()) return;
+        if (measure_uploads) ++upload_work.retire_destroys;
         RenderingServer* rendering = RenderingServer::get_singleton();
+        if (Group* const group = found->second.group) {
+            leave_group(id, found->second);
+            release_emitter(found->second, rendering);
+            emitters_.erase(found);
+            if (--group->refs == 0) free_group(rendering, *group);
+            return;
+        }
         cancel_empty(id, found->second);
         if (!found->second.material.is_valid()) {
             release_emitter(found->second, rendering);
@@ -1068,6 +1448,7 @@ public:
                 // Most recent caller-thread frame; cache age never affects CPU clocks.
                 bytes, emitter, reuse_frame_)) {
                 render_churn::record(churn_owner_, render_churn::Event::retained, 3);
+                if (measure_uploads) ++upload_work.retire_destroys_reused;
                 emitters_.erase(found);
                 return;
             }
@@ -1086,9 +1467,8 @@ public:
     }
 
     void expire_reuse() {
-        const auto* engine = Engine::get_singleton();
-        if (engine == nullptr) return;
-        const auto frame = static_cast<std::uint64_t>(engine->get_process_frames());
+        if (!latched_frame_.latched() && Engine::get_singleton() == nullptr) return;
+        const auto frame = current_frame();
         if (frame == reuse_frame_) return;
         reuse_frame_ = frame;
         RenderingServer* const rendering = RenderingServer::get_singleton();
@@ -1098,9 +1478,8 @@ public:
 
     void sample_residency() const {
         if (!trace_residency_) return;
-        const auto* engine = Engine::get_singleton();
-        if (engine == nullptr) return;
-        const auto frame = static_cast<std::uint64_t>(engine->get_process_frames());
+        if (!latched_frame_.latched() && Engine::get_singleton() == nullptr) return;
+        const auto frame = current_frame();
         if (frame / 30 == census_frame_ / 30 || census_rows_.size() >= 32768) return;
         census_frame_ = frame;
         std::array<std::uint64_t, 11> row{frame, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
@@ -1153,7 +1532,7 @@ public:
 
     [[nodiscard]] std::size_t live_rids() const noexcept {
         return detail::ParticleResidencyPolicy::live_rids(active_.size(), reuse_.size(), retained_identities_,
-            textures_.size() + shaders_.size());
+            textures_.size() + shaders_.size()) + groups_.size() * 3;
     }
     [[nodiscard]] std::size_t live_emitters() const noexcept { return active_.size(); }
     [[nodiscard]] std::vector<GodotParticleBackend::FogEmitterEvidence> fog_emitter_evidence() const {
@@ -1214,6 +1593,7 @@ private:
         const auto item=detail::texture_item(source);
         textures_.emplace(key, Shared{rid, 1, item});
         detail::gpu_memory_ledger().add(item);
+        detail::TextureCensusRegistry::instance().add(nullptr, detail::TextureOwnerKind::particle, key, item, &source.source);
         detail::texture_budget().add(item.bytes);
         return rid;
     }
@@ -1223,6 +1603,7 @@ private:
         if (found == textures_.end() || --found->second.references != 0) return;
         free_rid(rendering, found->second.rid);
         detail::gpu_memory_ledger().remove(found->second.item);
+        detail::TextureCensusRegistry::instance().remove(nullptr, detail::TextureOwnerKind::particle, key, found->second.item);
         Engine* const engine=Engine::get_singleton();
         detail::texture_budget().remove(found->second.item.bytes,
             engine?static_cast<std::uint64_t>(engine->get_frames_drawn()):0U);
@@ -1279,6 +1660,11 @@ private:
     }
 
     GodotParticleBackend::BumpLighting lighting_{GodotParticleBackend::default_bump_lighting()};
+    detail::ParticleBatchCensus census_;
+    // Uploads that failed to restore a resource: the registry resubmits after the count moves.
+    std::uint64_t incomplete_{};
+    // Uploads held back by a retry backoff: the registry resubmits that instance alone.
+    std::uint64_t deferred_{};
     TextureResolver resolver_;
     GodotParticleBackend::FogCallbacks fog_;
     RID scenario_;
@@ -1288,8 +1674,11 @@ private:
         const auto& self = *static_cast<const Impl*>(owner);
         for (const auto& [id, emitter] : self.emitters_) {
             static_cast<void>(id);
+            if (render_categories::ablation != "off") sample.band_hidden_instances += emitter.band_hidden ? 1U : 0U;
+            if (emitter.instance.is_valid() && emitter.diagnostic_fighter) ++sample.fighter_particle_emitters;
             if (emitter.instance.is_valid()) sample.record(render_categories::Role::particle,
-                emitter.category_submit_frame == sample.frame, false, emitter.shape.vertices != 0 ? 1U : 0U);
+                emitter.category_submit_frame == sample.frame, false, emitter.shape.vertices != 0 ? 1U : 0U,
+                emitter.shape.indices / 3, emitter.shape.vertices != 0 ? 1U : 0U);
         }
     }, [](const void* owner) { return static_cast<std::uint64_t>(static_cast<const Impl*>(owner)->category_viewport_.get_id()); }};
     std::vector<Emitter*> active_;
@@ -1297,6 +1686,9 @@ private:
     std::vector<std::pair<std::uint64_t, Emitter*>> pending_empty_;
     detail::ParticleReuseCache<Emitter> reuse_;
     std::uint64_t reuse_frame_{};
+    // Lane latches (L1.2): set by main before a frame's particle work, read by whichever thread runs it.
+    detail::ParticleLatch<std::uint64_t> latched_frame_;
+    detail::ParticleLatch<particles::CullingFrame> latched_culling_;
     bool reuse_enabled_{};
     std::vector<std::uint64_t> warm_ids_;
     struct WarmCacheRefs final {
@@ -1311,6 +1703,7 @@ private:
     detail::ParticleProgramWarmBudget warm_program_budget_;
     ProgramPrewarmWork warm_program_work_;
     std::map<std::string, Shared> textures_;
+    bool spawn_fighter_{};
     std::string spawn_effect_;
     std::uint64_t spawn_tick_{};
     detail::ParticleSpawnJournal spawn_journal_;
@@ -1333,6 +1726,10 @@ GodotParticleBackend::GodotParticleBackend(Node3D& host, TextureResolver resolve
 
 GodotParticleBackend::~GodotParticleBackend() = default;
 
+void GodotParticleBackend::set_batch_census(const bool enabled) noexcept {
+    batch_census.store(enabled, std::memory_order_relaxed);
+}
+
 void GodotParticleBackend::begin_frame_measurement(const bool enabled) {
     measure_uploads = enabled;
     measure_preparations.store(enabled, std::memory_order_relaxed);
@@ -1348,7 +1745,8 @@ void GodotParticleBackend::set_churn_owner(const render_churn::Owner owner) noex
     impl_->churn_owner_ = owner;
 }
 
-void GodotParticleBackend::set_spawn_context(const std::string_view effect, const std::uint64_t tick) noexcept {
+void GodotParticleBackend::set_spawn_context(const std::string_view effect, const std::uint64_t tick, const bool diagnostic_fighter) noexcept {
+    impl_->spawn_fighter_ = render_categories::fighter_experiment() && diagnostic_fighter;
     if (!impl_->spawn_journal_.enabled()) return;
     impl_->spawn_effect_ = effect;
     impl_->spawn_tick_ = tick;
@@ -1414,13 +1812,43 @@ std::string GodotParticleBackend::failure_cause() const { return impl_->failure(
 particles::CullingFrame GodotParticleBackend::culling_frame() const {
     impl_->expire_reuse();
     impl_->sample_residency();
+    // Without the latch a lane thread would read its own empty thread_local camera map and fail open.
+    return impl_->latched_culling_.read([this] { return particle_culling::frame(impl_->scenario_); });
+}
+particles::CullingFrame GodotParticleBackend::current_culling() const {
     return particle_culling::frame(impl_->scenario_);
 }
+std::uint64_t GodotParticleBackend::current_process_frame() {
+    const auto* engine = Engine::get_singleton();
+    return engine != nullptr ? static_cast<std::uint64_t>(engine->get_process_frames()) : 0;
+}
+void GodotParticleBackend::latch_culling(std::optional<particles::CullingFrame> frame) noexcept {
+    impl_->latched_culling_.set(std::move(frame));
+}
+void GodotParticleBackend::latch_frame_number(const std::optional<std::uint64_t> frame) noexcept {
+    impl_->latched_frame_.set(frame);
+}
+bool GodotParticleBackend::uses_fog_callbacks() const noexcept {
+    return static_cast<bool>(impl_->fog_.register_material) || static_cast<bool>(impl_->fog_.unregister_material)
+        || static_cast<bool>(impl_->fog_.attenuation_at_source_xy);
+}
+void GodotParticleBackend::add_frame_work(const FrameWork& work) { upload_work.merge(work, measure_uploads); }
 void GodotParticleBackend::set_emitter_visible(const std::uint64_t resource, const bool visible) {
     const auto found = impl_->emitters_.find(resource);
+    if (found != impl_->emitters_.end() && found->second.group != nullptr) {
+        auto& emitter = found->second;
+        if (!visible) {
+            impl_->leave_group(resource, emitter);
+        } else if (!emitter.in_live && emitter.live_vertices != 0) {
+            emitter.group->live.emplace(resource, &emitter);
+            emitter.group->dirty = true;
+            emitter.in_live = true;
+        }
+        return;
+    }
     if (found != impl_->emitters_.end() && found->second.instance.is_valid()) {
         found->second.requested_visible = visible && found->second.quads != 0;
-        Impl::submit_visible(*RenderingServer::get_singleton(), found->second, found->second.requested_visible);
+        impl_->submit_visible(*RenderingServer::get_singleton(), found->second, found->second.requested_visible);
     }
 }
 void GodotParticleBackend::record_group_work(const bool visible, const bool prepared, const bool stepped) {
@@ -1429,6 +1857,35 @@ void GodotParticleBackend::record_group_work(const bool visible, const bool prep
     upload_work.visible_groups += visible ? 1U : 0U;
     upload_work.prepared_groups += prepared ? 1U : 0U;
     upload_work.stepped_groups += stepped ? 1U : 0U;
+}
+std::uint64_t GodotParticleBackend::incomplete_updates() const noexcept { return impl_->incomplete_; }
+std::uint64_t GodotParticleBackend::deferred_updates() const noexcept { return impl_->deferred_; }
+// update() of one emitter writes that emitter and main-thread state only. A merged emitter's
+// update stages its stream into its group (group.live, group.dirty), which no worker reads: the
+// packing writes the emitter's own buffers and reads only the group's strides, and the group's
+// buffers are written by flush_merged after every batch has joined. So the commit may overlap
+// the packing of other emitters, merged or not.
+bool GodotParticleBackend::overlapped_commit_safe() const noexcept { return true; }
+
+namespace {
+std::atomic<bool> merge_additive_default_value{true};
+}
+void GodotParticleBackend::set_merge_additive_default(const bool enabled) noexcept {
+    merge_additive_default_value.store(enabled, std::memory_order_relaxed);
+}
+bool GodotParticleBackend::merge_additive_default() noexcept {
+    return merge_additive_default_value.load(std::memory_order_relaxed);
+}
+void GodotParticleBackend::set_merge_additive(const bool enabled) {
+    if (enabled == impl_->merge_additive_) return;
+    impl_->merge_additive_ = enabled;
+    if (enabled) Impl::merge_backends_.push_back(impl_.get());
+    else std::erase(Impl::merge_backends_, impl_.get());
+}
+void GodotParticleBackend::flush_merged() {
+    if (Impl::merge_backends_.empty()) return;
+    UploadTimer timer(upload_work.merge_flush_ms);
+    for (Impl* const backend : Impl::merge_backends_) backend->flush_groups();
 }
 GodotParticleBackend::BumpLighting GodotParticleBackend::default_bump_lighting() noexcept {
     // The renderer's hemisphere fallback split for a per-pixel sun, as the

@@ -2,6 +2,8 @@
 
 #include "sflua_persist_internal.hpp"
 
+#include <algorithm>
+
 namespace eawr::script::EAWR_SFLUA_NAMESPACE {
 namespace persist_internal {
 

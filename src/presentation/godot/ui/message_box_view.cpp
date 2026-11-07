@@ -1,6 +1,7 @@
 #include "ui/message_box_view.hpp"
 
 #include <godot_cpp/classes/input_event_key.hpp>
+#include <godot_cpp/classes/rich_text_label.hpp>
 #include <godot_cpp/classes/viewport.hpp>
 #include <godot_cpp/core/class_db.hpp>
 #include <godot_cpp/variant/callable_method_pointer.hpp>
@@ -101,6 +102,27 @@ bool EawrMessageBox::open(Node& parent, const MessageBoxContext& context, const 
 Control* EawrMessageBox::button(const std::string& control) const {
     const BuiltGadget* gadget = gadget_named(built_, control);
     return gadget != nullptr ? gadget->control : nullptr;
+}
+
+void EawrMessageBox::set_scrollable_text(const std::string& text) {
+    const auto* first = gadget_named(built_, "IDC_USER_TEXT_STRING_1");
+    const auto* left = gadget_named(built_, "IDC_DIALOG_BOX_BUTTON_LEFT");
+    if (!left || !left->control) return;
+    const auto position = first && first->control ? first->control->get_position()
+        : Vector2(built_.frame->get_size().x * 0.05F, built_.frame->get_size().y * 0.28F);
+    const auto bottom = left->control->get_position().y;
+    auto* content = memnew(RichTextLabel);
+    content->set_position(position);
+    const float width = first && first->control ? first->control->get_size().x : built_.frame->get_size().x * 0.9F;
+    content->set_size(Vector2(width, std::max(0.0F, bottom - position.y)));
+    content->set_text(godot_text(text));
+    built_.frame->add_child(content);
+    const auto style = kit_text_style(first && first->control ? *first->control : *built_.frame, "Global_Default");
+    if (style.font.is_valid()) content->add_theme_font_override("normal_font", style.font);
+    if (style.size > 0) content->add_theme_font_size_override("normal_font_size", style.size);
+    content->add_theme_color_override("default_color", style.top);
+    for (const char* id : {"IDC_USER_TEXT_STRING_1", "IDC_USER_TEXT_STRING_2", "IDC_USER_TEXT_STRING_3"})
+        if (const auto* gadget = gadget_named(built_, id); gadget && gadget->control) gadget->control->hide();
 }
 
 void EawrMessageBox::choose(const int64_t result) {

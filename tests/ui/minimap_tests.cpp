@@ -4,6 +4,7 @@
 // (tests/presentation/renderer/test_tactical_hud.py and test_battle_input.py).
 
 #include "eawr/presentation/ui/minimap.hpp"
+#include "eawr/data/xml.hpp"
 #include "eawr/presentation/ui/battle_messages.hpp"
 #include "eawr/presentation/space/fog_field.hpp"
 #include "ui_test_support.hpp"

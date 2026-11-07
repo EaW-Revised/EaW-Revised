@@ -60,6 +60,13 @@ core::Result<authoritative::TacticalOrder> translate_order(const authoritative::
         return authoritative::TacticalOrder{static_cast<tactical::PlayerId>(player.value()),
             std::move(units), std::move(payload)};
     };
+    if (command.verb == verb_make_invulnerable) {
+        if (arguments.size() != 3 || player.value() > std::numeric_limits<tactical::PlayerId>::max())
+            return bad("expects issuer, unit and enabled");
+        const auto* enabled = std::get_if<bool>(&arguments[2].data);
+        if (enabled == nullptr) return bad("malformed enabled flag");
+        return OrderResult::success(make_order({unit->id}, tactical::ScriptInvulnerablePayload{*enabled}));
+    }
     if (command.verb == verb_special_fire) {
         if (arguments.size() != 4 || player.value() > std::numeric_limits<tactical::PlayerId>::max())
             return bad("expects issuer, source, target and AI admission");

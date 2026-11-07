@@ -133,7 +133,7 @@ std::vector<std::tuple<gc::FleetId, gc::PlayerId, gc::PlanetId, unsigned, std::v
 void wire_format() {
     expect(gc::galactic_opcodes::launch_from_surface == 18 && gc::galactic_opcodes::sell_object == 19
         && gc::galactic_opcodes::transfer_fleet_members == 20 && gc::galactic_opcodes::recheck_orbit == 21
-        && gc::galactic_opcodes::launch_fleet == 22 && gc::galactic_opcodes::first_reserved == 26,
+        && gc::galactic_opcodes::launch_fleet == 22 && gc::galactic_opcodes::first_reserved == 28,
         "launch continuation occupies 22 after orbit recheck 21");
     const gc::CommandPayload typed = gc::LaunchFromSurface{{30, 31}, 0, 2};
     expect(gc::layer_of(typed) == gc::CommandLayer::galactic && gc::opcode_of(typed) == 18, "launch is a galactic-layer opcode 18");

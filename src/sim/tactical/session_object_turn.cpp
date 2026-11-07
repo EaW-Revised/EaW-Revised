@@ -63,6 +63,7 @@ bool object_turn_supports(const AbilityKind kind) noexcept {
     case AbilityKind::energy_weapon:
     case AbilityKind::tractor_beam:
     case AbilityKind::leech_shields:
+    case AbilityKind::super_laser:
         return true;
     default:
         return false;
@@ -104,7 +105,7 @@ core::Result<void> TacticalSession::submit_object_turn(const ObjectTurnRecord& r
             context + ": submitted during an object-turn provider call"));
     }
     if (record.use.unit == invalid_entity_id || record.use.ability == AbilityKind::none
-        || static_cast<std::uint8_t>(record.use.ability) > static_cast<std::uint8_t>(AbilityKind::rocket_attack)
+        || static_cast<std::uint8_t>(record.use.ability) > static_cast<std::uint8_t>(AbilityKind::super_laser)
         || static_cast<std::uint8_t>(record.use.action) < static_cast<std::uint8_t>(AbilityAction::activate)
         || static_cast<std::uint8_t>(record.use.action) > static_cast<std::uint8_t>(AbilityAction::autofire_off)) {
         return core::Result<void>::failure(detail::diagnostic(diagnostic_codes::invalid_command,
@@ -204,7 +205,7 @@ core::Result<void> session_detail::Tick::object_turn_seam() {
                 const auto label = "object-turn use (tick " + std::to_string(tick) + ", unit " + std::to_string(use.unit)
                     + ", sequence " + std::to_string(use.sequence) + ")";
                 if (use.unit == invalid_entity_id || use.ability == AbilityKind::none
-                    || static_cast<std::uint8_t>(use.ability) > static_cast<std::uint8_t>(AbilityKind::rocket_attack)
+                    || static_cast<std::uint8_t>(use.ability) > static_cast<std::uint8_t>(AbilityKind::super_laser)
                     || static_cast<std::uint8_t>(use.action) < static_cast<std::uint8_t>(AbilityAction::activate)
                     || static_cast<std::uint8_t>(use.action) > static_cast<std::uint8_t>(AbilityAction::autofire_off)) {
                     return core::Result<void>::failure(detail::diagnostic(diagnostic_codes::invalid_command,
@@ -278,7 +279,7 @@ core::Result<RejectReason> session_detail::Tick::apply_object_turn_use(const Obj
     if (group != impl_->squadrons.end() && !(group->members.size() == 1 && group->members.front() == use.unit)
         && use.ability != AbilityKind::buzz_droids && use.ability != AbilityKind::ion_cannon_shot
         && use.ability != AbilityKind::energy_weapon && use.ability != AbilityKind::tractor_beam
-        && use.ability != AbilityKind::leech_shields) {
+        && use.ability != AbilityKind::leech_shields && use.ability != AbilityKind::super_laser) {
         std::vector<EntityId> holders;
         for (const auto member : group->members) {
             const auto* live = live_unit(moving, member);
@@ -356,7 +357,8 @@ core::Result<RejectReason> session_detail::Tick::apply_object_turn_use(const Obj
         const auto member = craft_prep_->craft_squadron->find(use.unit);
         return member != craft_prep_->craft_squadron->end() ? live_unit(moving, member->second) : unit;
     };
-    if (use.ability == AbilityKind::energy_weapon || use.ability == AbilityKind::tractor_beam || use.ability == AbilityKind::leech_shields) {
+    if (use.ability == AbilityKind::energy_weapon || use.ability == AbilityKind::tractor_beam || use.ability == AbilityKind::leech_shields
+        || use.ability == AbilityKind::super_laser) {
         const auto* nested = impl_->beam_profile(*unit, use.ability);
         if (!nested) return Result::success(RejectReason::ability_unavailable);
         const auto previous = slot.target;
@@ -365,7 +367,7 @@ core::Result<RejectReason> session_detail::Tick::apply_object_turn_use(const Obj
             auto* target = live_unit(moving, use.target);
             if (!target) return Result::success(RejectReason::target_not_live);
             if (!impl_->beam_target_valid(*unit, *target, *nested) || !impl_->beam_in_range(*unit, *target, *nested)
-                || (slot.active && use.ability == AbilityKind::energy_weapon)) return Result::success(RejectReason::ability_unavailable);
+                || (slot.active && (use.ability == AbilityKind::energy_weapon || use.ability == AbilityKind::super_laser))) return Result::success(RejectReason::ability_unavailable);
             if (slot.active) { impl_->release_beam(*unit, use.ability, tick); slot.ready_tick = tick; }
             static_cast<void>(impl_->lock_beam(*unit, use.target, use.ability, tick));
             if (use.ability == AbilityKind::energy_weapon) slot.target_hardpoint = impl_->energy_hardpoint(*unit, *target);

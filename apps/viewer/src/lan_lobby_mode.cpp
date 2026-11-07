@@ -111,9 +111,25 @@ constexpr double default_wait_seconds = 60.0;
                << ", \"faction\": " << json(row.faction) << ", \"team\": " << json(row.team)
                << ", \"colour\": " << json(row.colour) << ", \"accepted\": " << (row.accepted ? "true" : "false")
                << ", \"enabled\": " << (row.enabled ? "true" : "false") << ", \"visible\": "
-               << (row.visible ? "true" : "false") << "}";
+               << (row.visible ? "true" : "false") << ", \"name_width\": " << row.name_width
+               << ", \"name_authored_width\": " << row.name_authored_width << "}";
     }
-    output << "]}";
+    output << "], \"options_error\": " << json(shot.options_error) << ", \"lobby_layer\": " << shot.lobby_layer
+           << ", \"list_layer\": " << shot.list_layer << ", \"list_visible\": " << (shot.list_visible ? "true" : "false")
+           << ", \"load_game_disabled\": " << (shot.load_game_disabled ? "true" : "false")
+           << ", \"list_cancel\": [" << static_cast<long long>(shot.list_cancel_centre.x) << ", "
+           << static_cast<long long>(shot.list_cancel_centre.y) << "], \"window\": [" << static_cast<long long>(shot.window.x)
+           << ", " << static_cast<long long>(shot.window.y) << "]"
+           << ", \"list_box_scale\": " << shot.list_box_scale << ", \"list_scale\": " << shot.list_scale
+           << ", \"list_note\": " << json(shot.list_note) << ", \"pointer\": " << shot.pointer << ", \"galactic_options\": ";
+    if (shot.galactic_options) {
+        const auto& gc = *shot.galactic_options;
+        output << "{\"custom\": " << (gc.custom ? "true" : "false")
+               << ", \"credits\": " << gc.credits << ", \"starting_tech\": " << gc.starting_tech
+               << ", \"maximum_tech\": " << gc.maximum_tech << ", \"difficulty\": " << json(gc.difficulty)
+               << ", \"heroes\": " << (gc.allow_heroes ? "true" : "false") << ", \"auto_resolve\": " << gc.auto_resolve << "}";
+    } else output << "null";
+    output << "}";
     return output.str();
 }
 
@@ -242,6 +258,9 @@ struct LanLobbyMode::State final {
     std::uint32_t width{};
     std::uint32_t height{};
     int frames{};
+    // The longest gap between two process() calls after the warm-up: a UI thread that waits on a load shows here (#5512).
+    std::optional<std::chrono::steady_clock::time_point> last_frame;
+    double max_frame_gap_ms{};
     std::size_t next_action{};
     int sleep_left{};
     std::optional<std::chrono::steady_clock::time_point> wait_deadline;
@@ -345,6 +364,8 @@ LanLobbyMode::Options LanLobbyMode::from_command_line() {
         else if (argument == "--eawr-online-password") options.online_passwords.push_back(value);
         else if (argument == "--eawr-online-list-failed") options.online_list_failed = value == "true" || value == "1";
         else if (argument == "--eawr-lan-fake") options.fake = value;
+        else if (argument == "--eawr-lan-fault") options.fault_listing_hang = options.fault_listing_hang || value == "listing-hang";
+        else if (argument == "--eawr-lan-listing-timeout-ms") options.listing_timeout_ms = std::max(0, std::atoi(value.c_str()));
         else if (argument == "--eawr-lan-do") options.actions.push_back(value);
         else if (argument == "--eawr-ui-rules") options.rules = value;
         else if (argument == "--eawr-profile") options.profile = value;
@@ -442,6 +463,7 @@ bool LanLobbyMode::State::write_report() const {
            << ", \"adapter_name\": " << json(utf8(rendering->get_video_adapter_name()))
            << "},\n  \"viewport\": {\"width\": " << width << ", \"height\": " << height << "}"
            << ",\n  \"closed\": " << (closed ? "true" : "false") << ",\n  \"started\": " << (started ? "true" : "false")
+           << ",\n  \"max_frame_gap_ms\": " << static_cast<long long>(max_frame_gap_ms)
            << ",\n  \"actions\": " << strings_json(performed);
     if (screen != nullptr) {
         output << ",\n  \"notes\": " << strings_json(screen->notes())
@@ -593,6 +615,8 @@ bool LanLobbyMode::ready(Node3D& host) {
         screen_options.online_rooms = state.fixed_online;
     }
     if (state.options.game_port) screen_options.game_port = *state.options.game_port;
+    screen_options.fault_listing_hang = state.options.fault_listing_hang;
+    screen_options.listing_timeout_ms = state.options.listing_timeout_ms;
     screen_options.silent = true;
     if (!state.options.fake.empty()) screen_options.match = make_fake_lan_match(state.options.fake);
     if (!state.screen->build(std::move(screen_options))) {
@@ -613,6 +637,14 @@ std::optional<int> LanLobbyMode::process() {
     State& state = *state_;
     if (state.completed) return std::nullopt;
     ++state.frames;
+    {
+        const auto now = std::chrono::steady_clock::now();
+        if (state.last_frame && state.frames > warmup_frames) {
+            state.max_frame_gap_ms = std::max(state.max_frame_gap_ms,
+                std::chrono::duration<double, std::milli>(now - *state.last_frame).count());
+        }
+        state.last_frame = now;
+    }
     state.write_back_profile();
     if (state.screen != nullptr && !state.screen->shown() && state.frames > 1) state.closed = true;
     if (state.closed && !state.scripted) {

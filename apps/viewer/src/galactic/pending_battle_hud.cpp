@@ -56,18 +56,16 @@ BuiltPendingBattleHud build_pending_battle_hud(const vfs::Vfs& filesystem,
     for (const auto* anchor : anchors.for_variant(presentation::ui::alt_variant(faction))) {
         if (anchor->name != "choice_button_left" && anchor->name != "choice_button_right"
             && anchor->name != "attack_button_single") continue;
-        const bool additive = anchor->shader == "MeshAdditive.fx";
-        if (!anchor->visible || (!additive && anchor->shader != "MeshAlpha.fx")
-            || anchor->base_texture.empty() || anchor->triangles.empty()) continue;
-        shell_look.meshes.push_back({anchor->name, additive ? presentation::ui::ShellBlend::additive
-            : presentation::ui::ShellBlend::alpha, anchor->base_texture, anchor->z_min, anchor->triangles});
+        const auto blend = presentation::ui::shell_blend(anchor->shader);
+        if (!anchor->visible || !blend || anchor->base_texture.empty() || anchor->triangles.empty()) continue;
+        shell_look.meshes.push_back({anchor->name, *blend, anchor->base_texture, anchor->z_min, anchor->triangles, {}});
     }
     std::stable_sort(shell_look.meshes.begin(), shell_look.meshes.end(), [](const auto& left, const auto& right) { return left.z < right.z; });
     for (const auto& mesh : shell_look.meshes) {
         const auto path = presentation::ui::vfs_standalone_textures(filesystem)(mesh.texture); if (!path) return built;
         auto loaded = assets::load_texture(filesystem, *path); if (!loaded) return built;
         std::string why; auto pixels = texture_image(loaded.value(), why); if (pixels.is_null()) return built;
-        setup.meshes.push_back({mesh.blend, ImageTexture::create_from_image(pixels), mesh.triangles});
+        setup.meshes.push_back({mesh.blend, ImageTexture::create_from_image(pixels), mesh.triangles, {}});
     }
     const auto space = presentation::ui::reference_space({static_cast<std::uint32_t>(size.x), static_cast<std::uint32_t>(size.y)});
     // GHUD-S75: the alert caller supplies half the UI camera height, moving

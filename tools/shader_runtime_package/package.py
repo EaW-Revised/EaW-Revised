@@ -162,8 +162,9 @@ def assemble(inputs: Path, destination: Path, lock_path: Path = LOCK) -> dict:
 def write_header(lock_path: Path, output: Path) -> None:
     lock = load_lock(lock_path)
     lines = ["// Generated from third_party/shader_runtime/lock.json by package.py --header.",
-             "#pragma once", "#include <array>",
+             "#pragma once", "#include <array>", "#include <string_view>",
              "namespace eawr::presentation::shader_runtime::pinned {",
+             f'inline constexpr std::string_view lock_sha256 = "{digest(lock_path)}";',
              f"inline constexpr std::array<RuntimeFile, {len(lock['files'])}> files{{{{"]
     for item in lock["files"]:
         lines.append(f'    {{"{item["path"]}", "{item["sha256"]}", {item["size"]}ULL}},')

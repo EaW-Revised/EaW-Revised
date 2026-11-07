@@ -154,6 +154,7 @@ SOURCE_BUNDLES = {
         "apps/viewer/src/live_session_economy.cpp",
         "apps/viewer/src/live_session_fighters.cpp",
         "apps/viewer/src/live_session_frame.cpp",
+        "apps/viewer/src/live_session_save.cpp",
     ),
     "apps/viewer/src/battle_effects.cpp": (
         "apps/viewer/src/battle_effects.cpp",
@@ -235,6 +236,7 @@ SOURCE_BUNDLES = {
     "apps/viewer/src/live_session_fighters.cpp": ("apps/viewer/src/live_session_fighters.cpp",),
     "apps/viewer/src/live_session_report.cpp": ("apps/viewer/src/live_session_report.cpp",),
     "apps/viewer/src/live_session_frame.cpp": ("apps/viewer/src/live_session_frame.cpp",),
+    "apps/viewer/src/live_session_save.cpp": ("apps/viewer/src/live_session_save.cpp",),
     "apps/viewer/src/space_populate_compose.cpp": ("apps/viewer/src/space_populate_compose.cpp", "apps/viewer/src/space_populate_arrivals.cpp", "apps/viewer/src/space_populate_internal.hpp",),
     "apps/viewer/src/lan_match.cpp": (
         "src/platform/net/lan_match.cpp",

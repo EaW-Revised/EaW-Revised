@@ -16,6 +16,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <functional>
 #include <iostream>
 #include <limits>
 #include <map>
@@ -205,6 +206,7 @@ public:
         empty_notifications.emplace_back(resource, terminal);
         particles::RenderBackend::empty_emitter(resource, terminal);
     }
+    [[nodiscard]] bool overlapped_commit_safe() const noexcept override { return true; }
     void destroy_emitter(const std::uint64_t resource) override {
         if (std::this_thread::get_id() != caller_) { ++wrong_thread; return; }
         if (live.erase(resource) == 0) ++invalid_destroys; else ++destroyed;
@@ -227,9 +229,30 @@ private:
 inline particles::CameraFrame test_camera() { return particles::camera_frame_from_render({0, 20, 60}, {0, 0, 0}, {0, 1, 0}); }
 
 void test_authored_effect_admission();
+// L1.3 particle lane (render_lane_tests.cpp, built with the viewer's particle_workers.cpp / particle_lane.cpp).
+void test_particle_lane_contracts();
+bool lane_twin_matches(const std::function<void(const std::function<void()>&)>& run_on_lane,
+                       const particles::StepExecutor* executor);
 void test_authored_effect_capacity_and_reset();
 void test_offscreen_updates_and_bounds();
 void test_empty_stream_residency();
+void test_clean_present_matches_rebuild();
+void test_unmoved_frame_keeps_streams();
+void test_clean_present_resubmits_after_incomplete_update();
+void test_clean_present_resubmits_only_deferred_instance();
+void test_clean_present_matches_rebuild_for_every_input();
+void test_clean_present_resubmits_deferred_moved_instance();
+void test_ordered_run_commits_in_order();
+void test_pipelined_commit_matches_serial_batches();
+void test_pipelined_commit_off_when_backend_forbids_overlap();
+void test_async_advance_matches_advance_all();
+void test_async_advance_falls_back_and_joins();
+void test_lazy_packing_matches_eager_commit();
+void test_lazy_packing_completes_after_failures();
+void test_lazy_packing_keeps_merged_groups_current();
+void test_lazy_packing_keeps_merged_groups_current_after_failures();
+void test_pipelined_failure_keeps_a_prefix_and_recovers();
+void test_catchup_screen_space_decision();
 
 inline std::vector<std::uint64_t> run(RecordingBackend& backend, const std::uint32_t seed, const int frames) {
     particles::EffectRegistry registry(backend);
@@ -300,7 +323,12 @@ void test_attachment_draining_bound();
 void test_attachment_determinism();
 void test_attachment_merge_stats();
 void test_heat_pixel_change_bound();
+void test_catchup_defer_predicate();
 void test_default_worker_count_table();
+void test_lane_guard_counts_and_never_aborts();
+void test_culling_latch_matches_live();
+void test_frame_number_latch_matches_live();
+void test_frame_work_merge_adds_once();
 void test_batch_matches_serial();
 void test_attachment_batch_matches_serial();
 void test_attachment_batch_requires_stats();

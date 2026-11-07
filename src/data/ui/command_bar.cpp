@@ -1,4 +1,5 @@
 #include "eawr/data/ui/command_bar.hpp"
+#include "eawr/vfs/vfs.hpp"
 
 #include "ui_internal.hpp"
 #include "xml_internal.hpp"

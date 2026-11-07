@@ -1,11 +1,17 @@
 #pragma once
 #include "eawr/battle/start.hpp"
+#include "eawr/vfs/vfs.hpp"
 #include "lan_lobby_screen.hpp"
 #include "eawr/skirmish/land_flag.hpp"
 #include "online_service_settings.hpp"
 #include "dialog_rectangles.hpp"
 #include "settings_store.hpp"
 #include "skirmish_prepare.hpp"
+#include "galactic_lobby_backend.hpp"
+#include "checkpoint_lobby_model.hpp"
+#include "ui/load_game_view.hpp"
+#include "saved_games.hpp"
+#include <future>
 
 #include "viewer_path.hpp"
 
@@ -25,12 +31,14 @@
 #include "eawr/net/tcp_transport.hpp"
 #include "eawr/presentation/ui/fonts.hpp"
 #include "eawr/presentation/ui/lan_lobby.hpp"
+#include "eawr/presentation/ui/faction_display.hpp"
 #include "eawr/presentation/ui/skirmish_setup.hpp"
 #include "eawr/presentation/ui/theme.hpp"
 #include "eawr/skirmish/setup.hpp"
 #include "eawr/scene/scene.hpp"
 
 #include <godot_cpp/classes/color_rect.hpp>
+#include <godot_cpp/variant/utility_functions.hpp>
 #include <godot_cpp/classes/image.hpp>
 #include <godot_cpp/classes/image_texture.hpp>
 #include <godot_cpp/classes/input_event_key.hpp>
@@ -66,6 +74,10 @@ namespace eawr::presentation::godot_backend {
 using namespace godot;
 namespace model = presentation::ui;
 namespace data = eawr::data::ui;
+
+// The text key a Galactic Conquest difficulty entry shows as in the lobby (lan_lobby_screen_galactic.cpp): the stock AI caption
+// of the level it stands for, or the entry's own authored name.
+[[nodiscard]] std::string ai_seat_caption(std::string_view difficulty);
 static_assert(model::lan_command_seat_limit == sim::max_match_seats);
 
 namespace lan_lobby_detail {
@@ -366,6 +378,13 @@ struct EawrLanLobby::PageState final {
     std::optional<BuiltDialog> options_dialog;
     Control* options_panel{};
     std::optional<skirmish::SetupOptionsEdit> editing;
+    std::optional<net::GalacticLobbyOptions> galactic_editing;
+    EawrUiCheck* gc_custom{};
+    EawrUiCheck* gc_heroes{};
+    EawrUiEdit *gc_credits{}, *gc_start_tech{}, *gc_max_tech{};
+    EawrUiCombo* gc_difficulty{};
+    EawrUiCombo* gc_auto_resolve{};
+    EawrUiLabel* gc_error{};
     EawrUiCheck *opt_heroes{}, *opt_units{}, *opt_super{};
     EawrUiCombo* opt_win{};
     EawrUiButton *opt_accept{}, *opt_cancel{}, *opt_defaults{};
@@ -414,6 +433,9 @@ struct EawrLanLobby::Impl final {
     model::HostOptions host_options;
     std::vector<sim::tactical::PlayerId> human_owners{1, 2};
     std::uint32_t direct_seats{2};
+    // Campaign rooms open the mesh only once every configured human has joined, so the default stays
+    // at two; the skirmish transport capacity (human_owners) must not leak into it.
+    std::uint32_t galactic_humans{2};
     skirmish::SetupSelection selection;
     bool custom_maps{};
     int map_index{-1};                  // into resources.maps
@@ -422,6 +444,7 @@ struct EawrLanLobby::Impl final {
     std::optional<skirmish::FixtureOptions> offered;
     bool locked{};
     bool refused{};
+    bool mod_review_box{};
     EawrMessageBox* box{};
     // The rows as last shown, for the report and the start checks.
     std::vector<model::StagingRow> rows;
@@ -442,10 +465,46 @@ struct EawrLanLobby::Impl final {
     // GCMP-07 (#4363): the Galactic Conquest mode of the staging (lan_lobby_screen_galactic.cpp).
     std::shared_ptr<GalacticLobbyBackend> galactic_backend;
     std::optional<net::GalacticLobbyOptions> galactic_options; // the room's agreed options as last read
+    bool coop_campaign_tab{};
+    bool tab_multiplayer_shown{true}, tab_coop_shown{true}; // a tab with no campaign behind it is left out
+    std::string tab_room_campaign;
+    bool tab_room_checkpoint{};
     std::vector<std::string> campaign_list;                    // the host's campaign list, in row order
+    std::vector<std::size_t> galactic_row_order;               // dialog row -> campaign row, as the roster last drew it
     std::string galactic_campaign;
     std::set<std::string> campaign_text_logged;                // campaigns whose missing text was already named in the log
     bool galactic_seam_noted{};
+    // #5512: the campaign content loads on its own thread. Host and Load Game wait for it here instead of on the UI thread.
+    bool host_pending{};
+    bool load_pending{};
+    std::string host_button_caption;
+    EawrLoadGameScreen* checkpoint_list{};
+    struct CheckpointRead {
+        std::shared_ptr<const std::vector<std::uint8_t>> bytes;
+        GalacticLobbyBackend::CheckpointCandidate candidate;
+    };
+    std::future<core::Result<CheckpointRead>> checkpoint_read;
+    viewer::CheckpointRestoreJob<core::Result<GalacticLobbyBackend::PreparedCheckpoint>, net::LobbySnapshot> checkpoint_prepare;
+    std::future<std::shared_ptr<viewer::SnapshotSavedGameStore>> checkpoint_listing;
+    std::shared_ptr<viewer::SnapshotSavedGameStore> checkpoint_store;
+    std::uint64_t checkpoint_listing_request{};
+    std::chrono::steady_clock::time_point checkpoint_listing_started{};
+    // A listing that failed, expired or went stale says so here; unlike checkpoint_problem it never blocks Start.
+    std::string checkpoint_list_note;
+    std::uint64_t checkpoint_list_instance{};
+    // The list screen, or null once the engine freed it (instance ids are never reused).
+    [[nodiscard]] EawrLoadGameScreen* list() const {
+        return checkpoint_list != nullptr && godot::UtilityFunctions::is_instance_id_valid(static_cast<int64_t>(checkpoint_list_instance))
+            ? checkpoint_list : nullptr;
+    }
+    std::shared_ptr<const std::vector<std::uint8_t>> checkpoint_bytes;
+    std::optional<GalacticLobbyBackend::CheckpointCandidate> checkpoint_candidate;
+    std::vector<net::SetupSeat> checkpoint_bindings;
+    std::string checkpoint_description, checkpoint_date, checkpoint_problem;
+    std::string checkpoint_signature, checkpoint_status_signature;
+    bool checkpoint_applied{};
+    std::uint64_t checkpoint_request{};
+    std::uint64_t checkpoint_request_active{};
 };
 
 namespace lan_lobby_detail {

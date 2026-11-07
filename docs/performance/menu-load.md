@@ -7,6 +7,7 @@ time. Without it every call returns before it reads a clock, the process or the 
 |---|---|
 | `EAWR menu_mark <label> t_ms=… private_mib=… peak_commit_mib=… ws_mib=… peak_ws_mib=… unix_us=…` | wall clock since the process was created (the viewer reads the creation time, so engine start-up is inside `t_ms`), private commit and its peak, working set and its peak |
 | `EAWR menu_frame n=… dt_ms=…` / `menu_hitch` (> 100 ms) / `menu_responsive` / `menu_frames_summary` | the front end's presented frames: the first five, every hitch, the first frame after 30 consecutive frames under 50 ms, and a summary of the first 600 |
+| `EAWR menu_step n=… ms=… last_mark=…` | one finished load callback of the attract battle that took 1 ms or more: its ordinal in execution order, its duration, and the last `menu_mark` reached when it ended (the callback's own `attract_load_*` mark when it emits one). Sorting by `ms` gives the per-callback table |
 | `EAWR menu_costs {…}` | the load-phase table (`core/load_profile.hpp`) and the per-layer cost, cumulative, at `setup_ready`, `front_end_ready`, `attract_start_end`/`attract_ready` and frame 600 |
 
 Marks, in order: `timeline_begin`, `host_ready_options`, `host_ready_profile`, `fonts_provisioned`, `setup_construct`,
@@ -62,6 +63,12 @@ What the table shows:
   run on the main thread inside the menu's first frame (stock 27 s warm, RaW 66 s warm, from `ready` to `attract load done`),
   during which the menu does not respond. This change does not touch it.
 - Remake's bare menu holds 2.8 GiB.
+- Input-aware pumping (legacy EAWR-5597): the attract load starts no callback while the pointer, a key or a click was seen in the
+  last 250 ms (`LoadJob::run_for(budget, input_pending)`), so a stall no longer begins under the player's hand. A callback that
+  was already running still holds the main thread for its full length: splitting the longest ones is the next step and starts
+  from the `menu_step` table. Idle, the work, its order and the output are identical; the load is only later by the time the
+  player spent interacting (after 300 deferred frames in a row, about 5 s, one callback runs anyway so a long interaction cannot
+  starve it).
 
 ## Levers measured or in flight (legacy EAWR-5197)
 

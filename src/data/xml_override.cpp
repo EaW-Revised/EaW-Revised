@@ -1,4 +1,5 @@
 #include "xml_internal.hpp"
+#include "eawr/vfs/vfs.hpp"
 
 #include <string>
 #include <utility>

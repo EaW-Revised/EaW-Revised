@@ -1,6 +1,7 @@
 #pragma once
 #include "eawr/data/ui/cursors.hpp"
 #include <godot_cpp/classes/image.hpp>
+#include <functional>
 #include <godot_cpp/classes/image_texture.hpp>
 #include <godot_cpp/classes/canvas_layer.hpp>
 #include <godot_cpp/classes/node.hpp>

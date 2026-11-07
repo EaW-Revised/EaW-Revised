@@ -48,6 +48,31 @@ public:
         }
     }
 
+    // Appending ships changes no earlier ship's row: new pieces and clips (indices from first_piece/first_clip
+    // on) belong to ships past the existing rows, so this equals a full rebuild without touching the others.
+    template<class Pieces, class Clips, class Hull>
+    void append(const std::size_t ships, const Pieces& pieces, const std::size_t first_piece, const Clips& clips,
+                const std::size_t first_clip, const Hull& hull) {
+        rows_.resize(ships);
+        for (std::size_t index = first_piece; index < pieces.size(); ++index) {
+            const auto& piece = pieces[index];
+            ++work_.rebuilt_pieces;
+            if (!piece.live || *piece.live >= ships) continue;
+            auto& row = rows_[*piece.live];
+            row.pieces.push_back(index);
+            row.entities.push_back(piece.instance.entity_id);
+            if (hull(piece)) row.hull.push_back(piece.instance.entity_id);
+        }
+        for (std::size_t index = first_clip; index < clips.size(); ++index) {
+            if (clips[index].ship < ships) rows_[clips[index].ship].clips.push_back(index);
+        }
+    }
+    [[nodiscard]] std::size_t ship_count() const noexcept { return rows_.size(); }
+    // Drops the rows of ships appended after `ships` (a failed append).
+    void truncate(const std::size_t ships) {
+        if (rows_.size() > ships) rows_.resize(ships);
+    }
+
     [[nodiscard]] std::span<const std::size_t> pieces(const std::size_t ship) const {
         if (ship >= rows_.size()) return {};
         work_.piece_visits += rows_[ship].pieces.size();
@@ -101,6 +126,17 @@ public:
         marks_.resize(states.size());
         for (std::size_t index = 0; index < states.size(); ++index) marks_[index].resize(states[index].size());
         clear();
+    }
+    // Adds the rows of decisions past the existing ones; marks are cleared at the start of every frame.
+    template<class States>
+    void extend(const States& states) {
+        const auto first = marks_.size();
+        marks_.resize(states.size());
+        for (std::size_t index = first; index < states.size(); ++index) marks_[index].resize(states[index].size());
+    }
+    [[nodiscard]] std::size_t decisions() const noexcept { return marks_.size(); }
+    void truncate(const std::size_t decisions) {
+        if (marks_.size() > decisions) marks_.resize(decisions);
     }
     void clear() {
         for (auto& row : marks_) std::fill(row.begin(), row.end(), std::uint8_t{0});

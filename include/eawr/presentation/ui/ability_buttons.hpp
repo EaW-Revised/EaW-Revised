@@ -22,6 +22,8 @@
 #include <string_view>
 #include <vector>
 
+namespace eawr::data { class Catalog; }
+
 namespace eawr::presentation::ui {
 
 // AB-03: one unit's state of one of its abilities.
@@ -64,6 +66,8 @@ public:
 
 // AB-04: the engine's icon for an ability type; empty when the table has none.
 [[nodiscard]] std::string_view ability_icon(std::uint32_t ability) noexcept;
+[[nodiscard]] std::string resolved_ability_icon(std::string_view type, std::uint32_t ability,
+    const data::Catalog* objects, const std::function<bool(std::string_view)>& available);
 // AB-09: abilities that take a target before they fire.
 [[nodiscard]] bool ability_targeted(std::uint32_t ability) noexcept;
 
@@ -99,7 +103,7 @@ inline constexpr float card_mark_scale = 0.75F;      // AB-08
 // (false) or second (true) ability: the type's Alternate_Icon_Name, else ability_icon().
 [[nodiscard]] AbilityBar ability_bar(const CardLayout& layout, std::span<const CardUnit> units,
                                      const AbilityState& state,
-                                     const std::function<std::string(const CardUnit& unit, bool second)>& icon);
+                                     const std::function<std::string_view(const CardUnit& unit, bool second)>& icon);
 
 // AB-09: a left (activate or deactivate) or right (autofire) release on `button`; nothing when no
 // unit of the group can take the request.

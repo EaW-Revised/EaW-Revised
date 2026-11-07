@@ -225,7 +225,7 @@ std::optional<std::pair<EntityId, core::Diagnostic>> session_detail::Tick::PlanL
         const auto search = [&](const std::size_t index) {
             if (errors[index]) return;
             const auto& job = pending[round[index]];
-            core::tick_profile::JobScope path_job_scope("job.pending-search", job.unit);
+            core::tick_profile::JobScope path_job_scope("job.pending-search", job.unit, nullptr, units[index]->state.type_id);
             auto result = phase.impl_->plan_path_within(*units[index], job.destination, frame, &worlds[index], job.max_speed,
                 &work[index], paths.remaining(job.layer));
             if (!result) {
@@ -553,6 +553,14 @@ core::Result<void> session_detail::Tick::PlanLanes::prepare_paths() {
     if (!phase.impl_->searches.empty()) {
         std::vector<std::pair<const EntityId, Impl::SlicedSearch>*> running;
         for (auto& entry : phase.impl_->searches) running.push_back(&entry);
+        std::vector<TypeId> profile_types;
+        if (core::tick_profile::active_jobs) {
+            profile_types.reserve(running.size());
+            for (const auto* entry : running) {
+                const auto unit = staged.find(entry->first);
+                profile_types.push_back(unit == staged.end() ? TypeId{} : unit->second.state.type_id);
+            }
+        }
         const auto slice = table.avoidance->search_slice;
         core::tick_profile::prepare_jobs(running.size());
         const auto sliced = phase.executor.execute_phase("plan-searches", tick_partition_count, [&](const std::size_t partition) {
@@ -565,7 +573,7 @@ core::Result<void> session_detail::Tick::PlanLanes::prepare_paths() {
                     job_work.before = SpacePathService::expansions(search.search); job_work.deadline = search.frame; job_work.limit = limit;
                 }
                 core::tick_profile::JobScope sliced_job_scope(search.frame <= frame ? "job.sliced-landing" : "job.sliced-slice",
-                    running[index]->first, &job_work);
+                    running[index]->first, &job_work, profile_types.empty() ? TypeId{} : profile_types[index]);
                 PathSearchStats job_stats;
                 static_cast<void>(SpacePathService::step(search.search, limit, core::tick_profile::active_jobs ? &job_stats : nullptr));
                 if (core::tick_profile::active_jobs) {

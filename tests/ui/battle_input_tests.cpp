@@ -1422,7 +1422,43 @@ static void cooperative_control() {
     }
 }
 
+void optional_bulk_selection() {
+    std::vector<ui::BattleUnit> staged(12);
+    for (std::size_t index = 0; index < staged.size(); ++index) {
+        staged[index].entity = index + 1;
+        staged[index].own = true;
+        staged[index].selection_bounds = std::array<float, 4>{10, 10, 20, 20};
+    }
+    staged[1].selection_bounds = std::array<float, 4>{90, 10, 110, 20}; // partial overlap
+    staged[2].selection_bounds = std::array<float, 4>{110, 10, 120, 20}; // off screen
+    staged[3].selection_bounds.reset(); // no rendered geometry / behind camera
+    staged[4].hero = true;
+    staged[5].locomotion = false; // structure
+    staged[6].own = false;
+    staged[7].selectable = false;
+    staged[8].controlled = false;
+    staged[9].neutral = true;
+    staged[10].decoration = true;
+    staged[11].entity = 2; // two craft volumes share their squadron
+    ui::Selection selection;
+    selection.bulk(staged);
+    expect(selection.units() == std::vector<sim::EntityId>({1, 2, 3, 4, 5}), "SH-01 global includes offscreen, undrawn and hero units, excludes structures/enemies/uncontrolled");
+    selection.bulk(staged, std::nullopt, false);
+    expect(selection.units() == std::vector<sim::EntityId>({1, 2, 3, 4}), "Include_Heroes off leaves heroes out");
+    selection.bulk(staged, ui::ScreenRect{0, 0, 100, 100});
+    expect(selection.units() == std::vector<sim::EntityId>({1, 2, 5}), "SH-01 screen includes partial overlap, the on-screen hero and deduplicates squadrons");
+    selection.bulk(staged, ui::ScreenRect{0, 0, 100, 100}, false);
+    expect(selection.units() == std::vector<sim::EntityId>({1, 2}), "Include_Heroes off applies to the screen action too");
+    selection.assign_group(1);
+    selection.clear();
+    selection.recall_group(1, false, 1, staged);
+    expect(selection.units() == std::vector<sim::EntityId>({1, 2}), "SH-01 result supports normal control groups");
+    selection.bulk({});
+    expect(selection.empty(), "SH-01 empty battle clears prior selection");
+}
+
 int main() {
+    optional_bulk_selection();
     {
         ui::Selection previous, allied;
         for (auto* selection : {&previous, &allied}) {

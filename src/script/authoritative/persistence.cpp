@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <map>
+#include <limits>
 #include <memory>
 #include <new>
 #include <set>
@@ -554,6 +555,10 @@ core::Result<std::string> ScriptScheduler::save(const sim::PartitionExecutor& ex
         return core::Result<std::string>::failure(detail::make_error(codes::save_refused, std::move(message)));
     };
     if (executor.worker_count() == 0) return refuse("executor reports no workers");
+    if (impl_->shared->config.galactic_clock) {
+        auto prepared = sync_hash(executor);
+        if (!prepared) return prepared;
+    }
     std::string error;
     const detail::sf::CFunctionTable* functions = detail::function_table(error);
     if (functions == nullptr) return refuse(error);
@@ -564,6 +569,11 @@ core::Result<std::string> ScriptScheduler::save(const sim::PartitionExecutor& ex
     detail::write_bindings(out, impl_->shared->bindings);
     out.u64(impl_->completed_tick);
     if (impl_->shared->config.galactic_clock || impl_->shared->config.query_clock) out.u64(impl_->galactic_frame);
+    if (impl_->shared->config.galactic_clock) {
+        if (impl_->retired.size() > std::numeric_limits<std::uint32_t>::max()) return refuse("too many retired GC instances");
+        out.u32(static_cast<std::uint32_t>(impl_->retired.size()));
+        for (const auto id : impl_->retired) out.u64(id);
+    }
     out.u32(static_cast<std::uint32_t>(impl_->objects.size()));
     for (const auto& [id, object] : impl_->objects) {
         out.u64(id);
@@ -582,7 +592,9 @@ core::Result<std::string> ScriptScheduler::save(const sim::PartitionExecutor& ex
             return false;
         }
         detail::write_instance(writer, instance);
-        if (!detail::sf::save_graph(*instance.sandbox, *functions, writer, reason)) {
+        if (impl_->shared->config.galactic_clock && instance.sync_graph_bytes) {
+            writer.raw(*instance.sync_graph_bytes);
+        } else if (!detail::sf::save_graph(*instance.sandbox, *functions, writer, reason)) {
             reason = "instance " + std::to_string(instance.id) + ": " + reason;
             return false;
         }
@@ -674,6 +686,17 @@ core::Result<void> ScriptScheduler::load(std::string_view bytes) try {
         || (!shared.config.query_clock && galactic_frame > completed_tick + 1))
         return detail::reject("invalid galactic mode clock");
     if (!in.ok() || completed_tick >= max_script_tick) return detail::reject("completed tick");
+    std::set<std::uint64_t> retired;
+    if (shared.config.galactic_clock) {
+        const auto count = in.count(8);
+        for (std::uint32_t index = 0; index < count; ++index) {
+            if (!in.charge(sizeof(std::uint64_t) + 4 * sizeof(void*))) return detail::reject("retired GC instances");
+            const auto id = in.u64();
+            if (!in.ok() || !id || (!retired.empty() && id <= *retired.rbegin()))
+                return detail::reject("retired GC instances must be nonzero and strictly increasing");
+            retired.insert(id);
+        }
+    }
     std::map<std::uint64_t, ObjectScript> objects;
     std::set<std::pair<std::uint32_t, std::uint64_t>> identities;
     const std::uint32_t object_count = in.count(32);
@@ -698,6 +721,7 @@ core::Result<void> ScriptScheduler::load(std::string_view bytes) try {
         ScriptEvent event;
         if (!detail::read_event(in, event) || !detail::valid_producer(event.key.producer) || event.key.tick == 0)
             return detail::reject("pending event");
+        if (retired.contains(event.target)) return detail::reject("event targets a retired GC instance");
         const auto deadline = shared.config.query_clock && event.key.producer == producer_script_timer
             ? galactic_frame : completed_tick;
         // A default-profile object owner can defer callbacks until a later
@@ -718,6 +742,7 @@ core::Result<void> ScriptScheduler::load(std::string_view bytes) try {
         auto instance = reader.read();
         if (!instance) return core::Result<void>::failure(instance.error());
         const std::uint64_t id = instance.value()->id;
+        if (retired.contains(id)) return detail::reject("retired GC instance is live");
         if (!instances.empty() && id <= instances.rbegin()->first) return detail::reject("instances out of order");
         instances.emplace(id, std::move(instance).value());
     }
@@ -738,6 +763,7 @@ core::Result<void> ScriptScheduler::load(std::string_view bytes) try {
 
     // Publish: nothing above touched the scheduler.
     impl_->instances = std::move(instances);
+    impl_->retired = std::move(retired);
     impl_->objects = std::move(objects);
     impl_->pending = std::move(pending);
     impl_->completed_tick = completed_tick;
@@ -774,6 +800,7 @@ core::Result<std::string> ScriptScheduler::sync_hash(const sim::PartitionExecuto
         bool changed{};
         std::string digest;
         std::string error;
+        std::shared_ptr<const std::string> bytes;
         bool valid{};
     };
     std::vector<Graph> graphs;
@@ -783,8 +810,15 @@ core::Result<std::string> ScriptScheduler::sync_hash(const sim::PartitionExecuto
         if (!instance.inbox.empty() || instance.current_thread != -1 || instance.exit_requested
             || instance.outcome != InstanceOutcome::running) return refuse("sync digest needs a completed script barrier");
         const std::array sandbox_key{instance.sandbox->identity_count(), instance.sandbox->memory_measured(), instance.sandbox->memory_charged()};
-        const bool changed = instance.sync_graph_dirty || instance.sync_graph_digest.empty() || instance.sync_graph_sandbox_key != sandbox_key;
-        if (changed || verify_graphs) graphs.push_back(Graph{&instance, sandbox_key, changed, {}, {}, false});
+        const bool changed = instance.sync_graph_dirty || instance.sync_graph_digest.empty() || !instance.sync_graph_bytes
+            || instance.sync_graph_sandbox_key != sandbox_key;
+        if (changed || verify_graphs) {
+            Graph graph;
+            graph.instance = &instance;
+            graph.sandbox_key = sandbox_key;
+            graph.changed = changed;
+            graphs.push_back(std::move(graph));
+        }
     }
     const auto encode = [&](Graph& graph) {
         detail::ByteWriter writer;
@@ -796,6 +830,7 @@ core::Result<std::string> ScriptScheduler::sync_hash(const sim::PartitionExecuto
             graph.error = "cached Lua graph digest differs from full graph oracle";
             return;
         }
+        graph.bytes = std::make_shared<const std::string>(std::move(writer.bytes()));
         graph.valid = true;
     };
     if (executor.worker_count() == 1 || graphs.size() < 2) {
@@ -817,6 +852,7 @@ core::Result<std::string> ScriptScheduler::sync_hash(const sim::PartitionExecuto
     for (auto& graph : graphs) {
         auto& instance = *graph.instance;
         instance.sync_graph_digest = std::move(graph.digest);
+        instance.sync_graph_bytes = std::move(graph.bytes);
         ++instance.sync_graph_encodes;
         instance.sync_graph_sandbox_key = graph.sandbox_key;
         instance.sync_graph_dirty = false;
@@ -827,6 +863,11 @@ core::Result<std::string> ScriptScheduler::sync_hash(const sim::PartitionExecuto
     out.text(impl_->shared->manifest_digest); detail::write_bindings(out, impl_->shared->bindings);
     out.u64(impl_->completed_tick);
     if (impl_->shared->config.galactic_clock || impl_->shared->config.query_clock) out.u64(impl_->galactic_frame);
+    if (impl_->shared->config.galactic_clock) {
+        if (impl_->retired.size() > std::numeric_limits<std::uint32_t>::max()) return refuse("too many retired GC instances");
+        out.u32(static_cast<std::uint32_t>(impl_->retired.size()));
+        for (const auto id : impl_->retired) out.u64(id);
+    }
     out.u32(static_cast<std::uint32_t>(impl_->objects.size()));
     for (const auto& [id, object] : impl_->objects) {
         out.u64(id); out.u32(object.object.kind); out.u64(object.object.id); out.u64(object.generation); out.text(object.module);
@@ -842,6 +883,97 @@ core::Result<std::string> ScriptScheduler::sync_hash(const sim::PartitionExecuto
     if (!out.ok()) return refuse("sync metadata exceeds its canonical value bounds");
     const auto& bytes = out.bytes();
     return core::Result<std::string>::success(core::sha256_hex(std::span(reinterpret_cast<const std::uint8_t*>(bytes.data()), bytes.size())));
+}
+struct ScriptScheduler::PhaseSavepoint::Saved {
+    struct InstanceBytes {
+        std::string metadata;
+        std::shared_ptr<const std::string> graph;
+    };
+    ScriptScheduler& owner;
+    Impl* impl{};
+    std::string prefix;
+    std::vector<InstanceBytes> instances;
+    Work work;
+    bool settled{};
+    explicit Saved(ScriptScheduler& value) : owner(value), impl(value.impl_.get()) {}
+    bool usable() const noexcept { return !settled && owner.impl_.get() == impl && impl->phase_active && !impl->aborted; }
+};
+ScriptScheduler::PhaseSavepoint::PhaseSavepoint(std::unique_ptr<Saved> saved) : saved_(std::move(saved)) {}
+ScriptScheduler::PhaseSavepoint::~PhaseSavepoint() {
+    if (!saved_->settled) {
+        saved_->impl->aborted = true;
+        saved_->impl->phase_active = false;
+    }
+}
+ScriptScheduler::PhaseSavepoint::Work ScriptScheduler::PhaseSavepoint::work() const noexcept { return saved_->work; }
+core::Result<void> ScriptScheduler::PhaseSavepoint::commit() {
+    if (!saved_->usable()) return core::Result<void>::failure(detail::make_error(codes::invalid_request, "script phase requires its open owner"));
+    saved_->impl->phase_active = false;
+    saved_->settled = true;
+    return core::Result<void>::success();
+}
+core::Result<void> ScriptScheduler::PhaseSavepoint::rollback() {
+    if (!saved_->usable()) return core::Result<void>::failure(detail::make_error(codes::invalid_request, "script rollback requires its open owner"));
+    try {
+        // Assemble the archive only on the fault path. During normal service
+        // the savepoint shares graph bytes and retains small host metadata.
+        detail::ByteWriter out;
+        out.raw(saved_->prefix);
+        for (const auto& instance : saved_->instances) { out.raw(instance.metadata); out.raw(*instance.graph); }
+        auto restored = saved_->owner.load(out.bytes());
+        saved_->impl->phase_active = false;
+        saved_->settled = true;
+        if (!restored) saved_->impl->aborted = true;
+        return restored;
+    } catch (const std::exception& error) {
+        saved_->impl->aborted = true;
+        saved_->impl->phase_active = false;
+        saved_->settled = true;
+        return core::Result<void>::failure(detail::make_error(codes::session_abort, error.what()));
+    }
+}
+core::Result<std::unique_ptr<ScriptScheduler::PhaseSavepoint>> ScriptScheduler::begin_phase(const sim::PartitionExecutor& executor) {
+    using Result = core::Result<std::unique_ptr<PhaseSavepoint>>;
+    if ((!impl_->shared->config.galactic_clock && !impl_->shared->config.query_clock) || impl_->phase_active)
+        return Result::failure(detail::make_error(codes::invalid_request, "script phase savepoint requires one GC or query-clock owner"));
+    const auto before = sync_graph_encodes();
+    auto prepared = sync_hash(executor);
+    if (!prepared) return Result::failure(prepared.error());
+    auto saved = std::make_unique<PhaseSavepoint::Saved>(*this);
+    saved->work.graph_encodes = sync_graph_encodes() - before;
+    detail::ByteWriter out;
+    detail::write_identity(out, impl_->shared->config, impl_->managed_handles);
+    detail::write_config(out, impl_->shared->config);
+    out.text(impl_->shared->manifest_digest);
+    detail::write_bindings(out, impl_->shared->bindings);
+    out.u64(impl_->completed_tick);
+    out.u64(impl_->galactic_frame);
+    if (impl_->shared->config.galactic_clock) {
+        out.u32(static_cast<std::uint32_t>(impl_->retired.size()));
+        for (const auto id : impl_->retired) out.u64(id);
+    }
+    out.u32(static_cast<std::uint32_t>(impl_->objects.size()));
+    for (const auto& [id, object] : impl_->objects) {
+        out.u64(id); out.u32(object.object.kind); out.u64(object.object.id); out.u64(object.generation); out.text(object.module);
+    }
+    out.u32(static_cast<std::uint32_t>(impl_->pending.size()));
+    for (const auto& [key, event] : impl_->pending) { static_cast<void>(key); detail::write_event(out, event); }
+    out.u32(static_cast<std::uint32_t>(impl_->instances.size()));
+    if (!out.ok()) return Result::failure(detail::make_error(codes::save_refused, "script phase metadata exceeds value bounds"));
+    saved->prefix = std::move(out.bytes());
+    saved->work.metadata_bytes = saved->prefix.size();
+    for (const auto& [id, instance] : impl_->instances) {
+        static_cast<void>(id);
+        detail::ByteWriter metadata;
+        detail::write_instance(metadata, *instance);
+        if (!metadata.ok()) return Result::failure(detail::make_error(codes::save_refused, "script phase instance metadata exceeds value bounds"));
+        saved->work.metadata_bytes += metadata.bytes().size();
+        saved->instances.push_back({std::move(metadata.bytes()), instance->sync_graph_bytes});
+    }
+    saved->work.shared_graphs = saved->instances.size();
+    auto result = std::unique_ptr<PhaseSavepoint>(new PhaseSavepoint(std::move(saved)));
+    impl_->phase_active = true;
+    return Result::success(std::move(result));
 }
 core::Result<std::string> ScriptScheduler::state_hash() {
     const sim::InlineExecutor executor;

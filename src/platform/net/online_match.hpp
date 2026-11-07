@@ -4,6 +4,7 @@
 #include "eawr/net/network_introduction.hpp"
 #include "eawr/net/online_lobby_source.hpp"
 #include <atomic>
+#include <filesystem> // include-guard: keep
 #include <mutex>
 
 namespace eawr::presentation::godot_backend {

@@ -13,6 +13,7 @@
 #if !defined(EAWR_SFLUA_HARDWARE_TWIN)
 
 #include "sflua_persist_internal.hpp"
+#include <map>
 
 namespace eawr::script::EAWR_SFLUA_NAMESPACE {
 Sandbox::Impl& PersistAccess::impl(Sandbox& sandbox) noexcept { return *sandbox.impl_; }
@@ -135,6 +136,9 @@ bool registry_references_consistent(Sandbox& sandbox, const ::std::vector<int>& 
 #else
 
 #include "sflua_sandbox_internal.hpp"
+
+#include <algorithm>
+#include <map>
 
 namespace eawr::script::EAWR_SFLUA_NAMESPACE {
 

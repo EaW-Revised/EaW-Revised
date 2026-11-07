@@ -26,7 +26,7 @@ class GalacticRadarRuntime(unittest.TestCase):
         x, y, width, height = row["rect"]
         return [x + width * u, y + height * v]
 
-    def native_run(self, events, focused=False, fixture="fleet-count", sample_times=()):
+    def native_run(self, events, focused=False, fixture="fleet-count", sample_times=(), zoom_timing=False):
         directory = pathlib.Path(tempfile.mkdtemp(prefix="eawr-gc-radar-clicks-"))
         report, capture, driver = directory / "report.json", directory / "capture.png", directory / "driver.gd"
         # Wall-time scheduling lets the real camera finish its 0.5-second flight
@@ -71,6 +71,8 @@ func _process(delta):
        json.dumps(str(capture).replace("\\", "/"))), encoding="utf-8")
         # JSON booleans are valid GDScript literals.
         extra = ["--eawr-galactic-focus", "101"] if focused else []
+        if zoom_timing:
+            extra += ["--eawr-galactic-zoom-timing", "yes"]
         result = subprocess.run([os.environ["EAWR_GODOT_EXECUTABLE"], "--resolution", "1280x720",
             "--path", str(support.ROOT / "apps/viewer/project"), "--script", str(driver), "--",
             "--eawr-galactic", "synthetic", "--eawr-galactic-hud-fixture", fixture,
@@ -82,7 +84,8 @@ func _process(delta):
         self.assertTrue(report.is_file(), result.stdout + result.stderr)
         data = json.loads(report.read_text(encoding="utf-8"))
         self.assertEqual(data["map_input"]["selected"], 101, "HUD pointer leaked into world picking")
-        self.assertEqual(data["live_session"]["submitted_orders"], 1, "radar/zoom must not issue simulation orders")
+        # Pausing starts with SetSpeed(1x) followed by PauseGalaxy; radar/zoom adds neither.
+        self.assertEqual(data["live_session"]["submitted_orders"], 2, "radar/zoom must not issue simulation orders")
         self.assertTrue(capture.is_file())
         if sample_times:
             from tests.presentation.renderer.space_map_test_support import decode_png
@@ -153,6 +156,22 @@ func _process(delta):
         self.assertEqual(data["radar_hud"]["zoom_requests"], 2)
         self.assertEqual(data["flights"][0]["state"], "overview")
         self.assertEqual(data["map_input"]["selection_invalidations"], initial["map_input"]["selection_invalidations"])
+
+    def test_opt_in_zoom_timing_tracks_normal_flight(self):
+        initial, _ = self.capture()
+        self.assertNotIn("zoom_timing", initial)
+        point = self.control(initial, "b_zoom")
+        data = self.native_run([[1.0, point, 1, True], [1.05, point, 1, False],
+                                [2.0, point, 1, True], [2.05, point, 1, False]], zoom_timing=True)
+        trace = data["zoom_timing"]
+        self.assertEqual(trace["thread"], "main")
+        self.assertTrue({"camera_hud", "hud_total", "lighting", "visibility"} <= set(trace["phase_names"]))
+        frames = trace["frames"]
+        self.assertGreater(len(frames), 10)
+        self.assertTrue({1, 2, 3} <= {frame["camera_state"] for frame in frames})
+        self.assertTrue(all(a["entry_usec"] < b["entry_usec"] for a, b in zip(frames, frames[1:])))
+        self.assertTrue(all(len(frame["phase_ms"]) == len(trace["phase_names"]) for frame in frames))
+        self.assertGreater(max(frame["phase_ms"][trace["phase_names"].index("hud_total")] for frame in frames), 0)
 
     def test_discovery_alpha_and_ownership_tint_are_independent(self):
         for focused in (False, True):

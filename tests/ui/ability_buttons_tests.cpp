@@ -6,6 +6,7 @@
 #include "eawr/presentation/ui/ability_buttons.hpp"
 #include "ui_test_support.hpp"
 
+#include <algorithm>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -176,7 +177,7 @@ void test_second_ability() {
     ui::ReadyAbilities state;
     state.set_units(units);
     const ui::AbilityBar bar = ui::ability_bar(layout, units, state, [](const ui::CardUnit&, const bool second) {
-        return std::string(second ? "custom_second.tga" : "");
+        return std::string_view(second ? "custom_second.tga" : "");
     });
     expect(bar.buttons.size() == 2, "two buttons for a group with a second ability");
     if (bar.buttons.size() != 2) return;
@@ -185,6 +186,26 @@ void test_second_ability() {
            "the second ability takes the next component; both shift left");
     expect(bar.buttons[0].icon == "i_sa_power_to_weapons.tga" && bar.buttons[1].icon == "custom_second.tga",
            "AB-04: Alternate_Icon_Name wins over the engine table");
+}
+
+void test_shared_icon_order() {
+    std::vector<ui::CardUnit> units{unit(7, "Alpha", power_to_weapons), unit(8, "Beta", power_to_weapons)};
+    ui::ReadyAbilities state;
+    state.set_units(units);
+    state.stage({{7, power_to_weapons, {ui::AbilityStatus::active, 1.0, false}},
+                 {8, power_to_weapons, {ui::AbilityStatus::active, 1.0, false}}});
+    const auto icon = [](const ui::CardUnit& value, bool) -> std::string_view { return value.type; };
+    const auto run = [&] { return ui::ability_bar(ui::layout_unit_cards(units, 24), units, state, icon); };
+    const auto first = run();
+    std::reverse(units.begin(), units.end());
+    const auto reversed = run();
+    expect(first.buttons.size() == 1 && reversed.buttons.size() == 1
+        && first.buttons[0].icon == "Beta" && reversed.buttons[0].icon == "Beta",
+        "AB-04: shared button uses stable last unit regardless of card order");
+    state.stage({{8, power_to_weapons, {ui::AbilityStatus::active, 1.0, false}}});
+    const auto ready = run();
+    expect(ready.buttons.size() == 1 && ready.buttons[0].icon == "Alpha",
+        "AB-04: the first ready unit supplies the shared button icon");
 }
 
 // AB-09.
@@ -231,6 +252,7 @@ int main() {
     test_m2_roster_marks_resolve_icons();
     test_active_dial();
     test_second_ability();
+    test_shared_icon_order();
     test_clicks();
     test_hotkeys();
     if (test::ui::failures() != 0) {

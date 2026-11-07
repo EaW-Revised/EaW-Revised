@@ -1,7 +1,9 @@
 #include "eawr/core/json_text.hpp"
+#include "eawr/vfs/vfs.hpp"
 #include "eawr/core/text.hpp"
 #include "loading_screen.hpp"
 #include "loading_planet.hpp"
+#include "settings_store.hpp"
 
 #include "viewer_path.hpp"
 #include "ui/dialog_builder.hpp"
@@ -13,6 +15,7 @@
 #include "eawr/data/ui/dialog_catalog.hpp"
 #include "eawr/data/ui/text_database.hpp"
 #include "eawr/presentation/ui/fonts.hpp"
+#include "eawr/presentation/ui/faction_display.hpp"
 #include "eawr/presentation/ui/layout.hpp"
 #include "eawr/presentation/ui/theme.hpp"
 
@@ -49,6 +52,7 @@ namespace {
 
 // The retail loop redraws about twenty times a second (BLD-10); a draw costs one frame of the 2D layer.
 constexpr std::chrono::milliseconds present_interval{50};
+constexpr std::chrono::microseconds animated_present_interval{16667};
 // Above the HUD and its battle overlay (layer 1); under the performance overlay and the capture
 // pointer (100), which stay readable over the screen.
 constexpr int screen_layer = 98;
@@ -73,11 +77,6 @@ constexpr const char* begin_gadget = "IDC_BEGIN_BUTTON";
 
 [[nodiscard]] bool starts_with(const std::string& value, const std::string_view prefix) {
     return value.compare(0, prefix.size(), prefix) == 0;
-}
-
-[[nodiscard]] std::string_view loading_owner_text_key(const std::string_view raw) {
-    const auto trimmed = core::trim_view(raw, core::xml_whitespace);
-    return trimmed.empty() ? std::string_view{} : trimmed;
 }
 
 [[nodiscard]] std::filesystem::path default_font_cache(const std::filesystem::path& given) {
@@ -185,8 +184,8 @@ void EawrLoadingScreen::_notification(const int what) {
     if (what != NOTIFICATION_PROCESS) return;
     ++frames_;
     if (dismiss_pending_ && (!dismiss_ready_ || dismiss_ready_())) dismiss();
-    if (planet_ && shown_) planet_->advance(std::chrono::duration<double>(std::chrono::steady_clock::now() - planet_started_).count());
-    if (planet_) set_meta("loading_planet", text(planet_->report_json()));
+    if (animated_background_ && planet_ && shown_) planet_->advance(std::chrono::duration<double>(std::chrono::steady_clock::now() - planet_started_).count());
+    if (planet_report_enabled_ && planet_) set_meta("loading_planet", text(planet_->report_json()));
     // A load that ended before the screen could draw on the spot takes its ready still once the
     // frames after it have drawn the finished screen.
     if (capture_ready_pending_ && shown_ && frames_ >= ready_frame_ + present_after_frames) {
@@ -202,6 +201,8 @@ void EawrLoadingScreen::set_3d(const bool enabled) {
 }
 
 bool EawrLoadingScreen::build(Node& host, Options options) {
+    const auto* settings = ActiveSettings::get();
+    animated_background_ = settings && settings->gameplay.animated_loading_background;
     resources_ = std::make_unique<Resources>();
     Resources& resources = *resources_;
     resources.options = std::move(options);
@@ -249,6 +250,9 @@ bool EawrLoadingScreen::build(Node& host, Options options) {
     for (const core::Diagnostic& diagnostic : resources.content->diagnostics) notes_.push_back(core::format_diagnostic(diagnostic));
 
     const PackedStringArray arguments = OS::get_singleton()->get_cmdline_user_args();
+    timing_enabled_ = arguments.has("--eawr-loading-timing");
+    if (timing_enabled_) draw_offsets_ms_ = std::make_unique<std::array<double, 65536>>();
+    planet_report_enabled_ = arguments.has("--eawr-loading-planet-report");
     for (int64_t index = 0; index + 1 < arguments.size(); ++index) {
         if (arguments[index] == String("--eawr-loading-capture")) capture_directory_ = ViewerPath{utf8(arguments[index + 1])}.native();
     }
@@ -260,6 +264,7 @@ bool EawrLoadingScreen::build(Node& host, Options options) {
         return false;
     }
     shown_ = true;
+    if (timing_enabled_) timing_start_ = std::chrono::steady_clock::now();
     observe_preparation(resources.options.campaign_preparation);
     set_meta("loading_ready", false);
     set_meta("loading_drained_inputs", static_cast<int64_t>(0));
@@ -293,7 +298,9 @@ bool EawrLoadingScreen::build_layout(const Vector2 size) {
     sources.fonts = &resources.fonts->cache();
     const auto& families = resources.fonts->system_families();
     sources.system = [&families](const std::string_view face) { return model::match_system_face(face, families).has_value(); };
-    const auto space = model::reference_space({static_cast<std::uint32_t>(size.x), static_cast<std::uint32_t>(size.y)},
+    // The plate keeps its authored 16:9 look: laid out in the largest centred 16:9 box, black bars outside (legacy #5618).
+    const model::PixelRect box = model::fit_16x9({static_cast<std::uint32_t>(size.x), static_cast<std::uint32_t>(size.y)});
+    const auto space = model::reference_space({static_cast<std::uint32_t>(box.width), static_cast<std::uint32_t>(box.height)},
                                               model::LayoutRules::retail);
     const auto theme_model = model::build_theme_model(sources, space);
 
@@ -313,6 +320,7 @@ bool EawrLoadingScreen::build_layout(const Vector2 size) {
     BuiltDialog built = build_dialog(*dialog, theme_model, resources.text ? &*resources.text : nullptr,
                                      model::Placement::full_screen);
     built.frame->set_theme(build_theme(theme_model, *resources.textures, *resources.fonts));
+    built.frame->set_position(built.frame->get_position() + Vector2(static_cast<float>(box.x), static_cast<float>(box.y)));
     layout.frame = built.frame;
     layout.root->add_child(built.frame);
     const model::PixelRect& frame_rect = built.layout.frame;
@@ -321,10 +329,8 @@ bool EawrLoadingScreen::build_layout(const Vector2 size) {
     const model::LoadingScreenContent& content = *resources.content;
     std::string owner_name = resources.options.owner_name;
     if (resources.options.content->catalog && resources.text && !owner_name.empty()) {
-        auto owner = resources.options.content->catalog->resolve(owner_name, data::Category::faction);
-        if (owner) if (const auto* key = owner.value().value("Text_ID")) {
-            owner_name = data::ui::to_utf8(resources.text->text(loading_owner_text_key(key->value.raw_text)));
-        }
+        owner_name = model::faction_display_name(*resources.options.content->catalog,
+            &*resources.text, owner_name);
     }
     bool owner_caption{}, income_caption{};
     Control* title_control{};
@@ -534,10 +540,17 @@ void EawrLoadingScreen::paint_fill(const double ratio) {
 void EawrLoadingScreen::present(const bool force) {
     const auto now = std::chrono::steady_clock::now();
     if (frames_ < present_after_frames) return;
-    if (!force && now - last_present_ < present_interval) return;
+    const auto interval = animated_background_ ? std::chrono::steady_clock::duration(animated_present_interval)
+                                               : std::chrono::steady_clock::duration(present_interval);
+    if (!force && now - last_present_ < interval) return;
     last_present_ = now;
     ++presents_;
-    if (planet_) planet_->advance(std::chrono::duration<double>(now - planet_started_).count());
+    if (animated_background_ && planet_) planet_->advance(std::chrono::duration<double>(now - planet_started_).count());
+    if (timing_enabled_ && !ready_) {
+        if (draw_offsets_count_ < draw_offsets_ms_->size())
+            (*draw_offsets_ms_)[draw_offsets_count_++] = std::chrono::duration<double, std::milli>(now - timing_start_).count();
+        else ++draw_offsets_dropped_;
+    }
     RenderingServer::get_singleton()->force_draw(true, 0.0);
 }
 
@@ -627,6 +640,7 @@ void EawrLoadingScreen::show_ready() {
     if (reports_ != 0 && !native_progress_) {
         stage_ms_.back() += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - last_report_).count();
     }
+    if (timing_enabled_) load_wall_ms_ = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - timing_start_).count();
     ratio_ = 1.0;
     ready_ = true;
     campaign_gate_.complete(true);
@@ -696,6 +710,14 @@ std::string EawrLoadingScreen::report_json() const {
            << ", \"accepted_begins\": " << accepted_begins_
            << ", \"begin_visible\": " << (layout_ && layout_->begin != nullptr && layout_->begin->is_visible_in_tree() ? "true" : "false")
            << ", \"progress\": " << ratio_ << ", \"reports\": " << reports_ << ", \"presents\": " << presents_;
+    output << ", \"timing_enabled\": " << (timing_enabled_ ? "true" : "false")
+           << ", \"load_wall_ms\": " << load_wall_ms_ << ", \"draw_offsets_dropped\": " << draw_offsets_dropped_
+           << ", \"draw_offsets_ms\": [";
+    for (std::size_t i = 0; i < draw_offsets_count_; ++i) {
+        if (i != 0) output << ", ";
+        output << (*draw_offsets_ms_)[i];
+    }
+    output << "]";
     if (layout_) output << ", \"layout_size\": [" << layout_->size.x << ", " << layout_->size.y << "]";
     if (const auto rect = begin_rect()) {
         output << ", \"begin_rect\": [" << rect->position.x << ", " << rect->position.y << ", " << rect->size.x << ", "

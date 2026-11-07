@@ -1,4 +1,5 @@
 #include "land_test_support.hpp"
+#include "eawr/vfs/vfs.hpp"
 #include "eawr/checkpoint/tactical.hpp"
 #include "eawr/core/tick_profile.hpp"
 #include "eawr/platform/sim_workers.hpp"
@@ -11,10 +12,21 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <memory>
 #include <filesystem>
 #include <iostream>
 #include <set>
 #include <stdexcept>
+#include <map>
+#include <thread>
+#include <vector>
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+#else
+#include <ctime>
+#endif
 #include <string>
 
 namespace {
@@ -62,6 +74,7 @@ Scenario scenario(bool tank = false, std::size_t count = 4) {
         LandCompanyBinding company;
         company.type = body - 1; company.company.id = body == 12 ? "synthetic-infantry" : "synthetic-tank";
         company.company.team_max_speed = whole(40); company.effective_team_max_speed = whole(40);
+        if (body == 12) company.company.team_collision_class = units::LandCollisionGroup::infantry; // WLPA-82: the container's class
         const auto number = body == 22 ? 1U : count;
         company.company.max_squad_size = static_cast<std::uint32_t>(number);
         company.formation_spacing = Fixed::from_ratio(1, 5).value();
@@ -294,21 +307,24 @@ void retained_contact_death() {
     const auto input = scenario(false, 2);
     auto session = take(TacticalSession::create(input.setup, input.content));
     auto saved = session.land_movement()->checkpoint();
-    const auto first = saved.members[0].object, blocker = saved.members[2].object;
+    // WLPA-82: a contact names squad bodies; the casualties are soldiers of the blocking squad.
+    const auto first = saved.squads[0].object, blocker_squad = saved.squads[1].object;
+    const auto blocker = saved.members[2].object;
     const auto survivor = saved.members[3];
     LandContact contact;
-    contact.first = first; contact.second = blocker; contact.kind = LandContactKind::stopped_stopped;
+    contact.first = first; contact.second = blocker_squad; contact.kind = LandContactKind::stopped_stopped;
     saved.contacts.push_back(contact);
     auto movement = LandMovement::from_checkpoint(std::move(saved));
     expect(movement.has_value(), "death fixture retains a valid stopped-pair blocker contact");
     if (!movement) return;
-    expect(movement->remove_member(blocker) && movement->contacts().empty(), "a dead blocker leaves the retained contact index");
+    expect(movement->remove_member(blocker) && movement->contacts().size() == 1,
+        "a dead soldier does not end its squad's retained contact: the squad is the body");
     const auto remaining = std::find_if(movement->members().begin(), movement->members().end(),
         [&](const auto& row) { return row.object == survivor.object; });
     expect(remaining != movement->members().end() && remaining->slot == survivor.slot,
         "a casualty preserves the other member's formation slot");
-    expect(movement->remove_member(survivor.object) && movement->squads().size() == 1,
-        "the final member removes its squad and compacts the remaining squad bindings");
+    expect(movement->remove_member(survivor.object) && movement->squads().size() == 1 && movement->contacts().empty(),
+        "the final member removes its squad, its body and the retained contact, and compacts the remaining squad bindings");
     expect(LandMovement::from_checkpoint(movement->checkpoint()).has_value(), "the casualty-compacted movement state remains restorable");
 }
 
@@ -338,6 +354,19 @@ void direct_body_wrapper() {
     expect(fired > 0 && hits > 0, "direct ground objects still exchange physical combat through their command wrappers");
 }
 
+double process_cpu_ms() {
+#ifdef _WIN32
+    FILETIME created, exited, kernel, user;
+    if (!GetProcessTimes(GetCurrentProcess(), &created, &exited, &kernel, &user)) return 0.0;
+    const auto ticks = [](const FILETIME& t) { return static_cast<double>((static_cast<std::uint64_t>(t.dwHighDateTime) << 32) | t.dwLowDateTime); };
+    return (ticks(kernel) + ticks(user)) / 10000.0;
+#else
+    timespec now{};
+    clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &now);
+    return static_cast<double>(now.tv_sec) * 1000.0 + static_cast<double>(now.tv_nsec) / 1.0e6;
+#endif
+}
+
 int stress() {
     auto input = scenario(false, 9);
     input.setup.units.clear();
@@ -353,21 +382,31 @@ int stress() {
     auto session = take(TacticalSession::create(input.setup, input.content));
     expect(session.land_movement()->members().size() + session.land_movement()->squads().size() == 880,
         "combat stress fixture starts at 880 live land objects");
+    // Production hashes on the platform hasher thread; EAWR_STRESS_SERIAL_HASH=1 measures the in-tick hash instead.
+    if (const auto serial = testing::environment("EAWR_STRESS_SERIAL_HASH"); !serial || serial->empty())
+        session.set_state_hasher(std::make_shared<platform::ThreadStateHasher>());
     platform::ThreadWorkerAdapter executor(6);
     for (int i = 0; i < 12; ++i) take(session.step(executor));
     core::tick_profile::Recording recording;
+    const auto cpu_start = process_cpu_ms();
     const auto start = std::chrono::steady_clock::now();
     {
         core::tick_profile::Capture capture(recording);
         for (int i = 0; i < 48; ++i) take(session.step(executor));
     }
-    const auto ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count() / 48;
+    const auto wall_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+    const auto cpu_ms = process_cpu_ms() - cpu_start;
+    const auto ms = wall_ms / 48;
+    const auto logical = std::max(1U, std::thread::hardware_concurrency());
     std::cout << "land combat stress objects=880 workers=6 ms/tick=" << ms << " budget=16.7\n";
-    for (const auto name : {"land-targets", "land-fire", "land-projectiles", "land-impacts", "land-canonical-state", "land-state-hash"}) {
-        double total{};
-        for (const auto& cost : recording.costs) if (cost.name == name) total += cost.ms;
-        std::cout << name << " ms/tick=" << total / 48 << '\n';
-    }
+    std::cout << "land combat stress cpu%=" << (wall_ms > 0 ? 100.0 * cpu_ms / (wall_ms * logical) : 0.0)
+              << " logical=" << logical << " barriers ms/tick=" << recording.barriers_ms / 48 << '\n';
+    // Compact per-phase summary: serial (exclusive) cost per tick, largest first, phases above 0.1 ms.
+    std::map<std::string, double> phases;
+    for (const auto& cost : recording.costs) if (!cost.name.empty()) phases[std::string(cost.name)] += cost.ms;
+    std::vector<std::pair<std::string, double>> ordered(phases.begin(), phases.end());
+    std::sort(ordered.begin(), ordered.end(), [](const auto& a, const auto& b) { return a.second > b.second; });
+    for (const auto& [name, total] : ordered) if (total / 48 >= 0.1) std::cout << name << " ms/tick=" << total / 48 << '\n';
     // Timing is reported from the remote host; deterministic work/state contracts above are the merge gates.
     expect(!session.snapshot()->projectiles().empty(), "stress harness exercises active projectile combat");
     return checks.finish();

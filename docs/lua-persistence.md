@@ -11,6 +11,28 @@ v3 added instance-local proximity registrations;
 v2 added the memory quota and account with Lua pattern metering), state hash `eawr-script-state-v1`, combined
 hash `eawr-authoritative-state-v1`. Any change to a rule below needs a new identity.
 
+The galactic clock profile uses `eawr-script-galactic-save-v3`. Immediately after
+its completed tick and galactic frame it stores a uint32 retirement count and
+strictly increasing nonzero uint64 instance IDs. Retired IDs cannot also be live
+or receive queued events. Old GC scheduler saves are refused; no legacy reader
+is retained. Default and query profiles keep their existing encodings. The GC
+retirement corpus is exercised by `galactic_scripted_session_contracts`, including
+an independently specified v3 suffix and malformed count/identity/order cases.
+Tracked galactic replay fixtures contain world input, not scheduler save blobs,
+so this profile bump does not require rewriting their binary payloads or pins.
+
+During running GC service, Lua errors, rejected binding Results and deterministic
+sandbox quota faults retire only the failing instance. Its entire uncommitted
+service output and private immediate-effect shadow are discarded; sibling
+instances continue in the existing partitioned phase or bounded native chain.
+The ordered commit records runtime LoadNote `EAWR-LOAD-1400`. Warnings remain
+nonfatal, as do API diagnostics that return a sourced fallback. Retirement follows
+an uncaught protected Lua call failure or a sandbox quota fault, never a diagnostic
+code by itself. Retirement enters both full and optimized scheduler hashes and
+checkpoint blobs; diagnostics stay outside authoritative state. Infrastructure
+and executor failures still refuse. Native AI/story callback retirement needs
+per-provider transactions and remains a separate follow-up.
+
 Code: `ScriptScheduler::save`, `load` and `state_hash`
 (`include/eawr/script/authoritative/scheduler.hpp`, `src/script/authoritative/persistence.cpp`)
 and the Lua graph codec inside the VM (`src/script/sflua/sflua_persist.*`). The upstream
@@ -239,3 +261,14 @@ checkpoint. The loader accepts such keys only for live attached object instances
 The GC/query profiles and unattached targets keep their existing deadline checks.
 This adds no fields or encoding version, and the next subset service delivers each
 held callback once in its original key order.
+
+### Shared GlobalValue scalars
+
+L-55's game-owned registry is saved with the native AI component, separately from
+instance graphs. Its numeric field stays unchanged. An optional `global-scalars-v1`
+tail carries sorted string and boolean maps only when either is nonempty; no tail
+is emitted for an empty or numeric-only registry. Keys must be disjoint across
+numeric, string and boolean maps. Bounded decode completes before publication,
+and the live typed records also cover deterministic sync hashing and phase rollback.
+See the [shared scalar implementation](research/globalvalue-stock-survey.md) for
+evidence and the remaining graph and child-mode sharing gaps.

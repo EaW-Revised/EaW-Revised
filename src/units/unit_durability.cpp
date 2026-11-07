@@ -1,3 +1,4 @@
+#include "eawr/units/content_selection.hpp"
 #include "eawr/assets/map.hpp"
 #include "eawr/core/ascii.hpp"
 #include "eawr/core/text.hpp"
@@ -17,23 +18,6 @@ namespace eawr::units {
 namespace {
 
 namespace tactical = sim::tactical;
-
-[[nodiscard]] std::string fixed_decimal(const Fixed value) {
-    const auto raw = value.raw();
-    const auto magnitude =
-        raw < 0 ? std::uint64_t{0} - static_cast<std::uint64_t>(raw) : static_cast<std::uint64_t>(raw);
-    const auto scale = static_cast<std::uint64_t>(Fixed::scale);
-    auto text = (raw < 0 ? std::string("-") : std::string{}) + std::to_string(magnitude / scale);
-    auto remainder = magnitude % scale;
-    if (remainder)
-        text += '.';
-    while (remainder) {
-        remainder *= 10;
-        text += static_cast<char>('0' + remainder / scale);
-        remainder %= scale;
-    }
-    return text;
-}
 
 [[nodiscard]] core::Diagnostic failure(std::string message) {
     core::Diagnostic diagnostic;
@@ -137,6 +121,8 @@ core::Result<tactical::DurabilityTable> durability_table(const UnitTables& table
                                                          std::vector<core::Diagnostic> *const notes,
                                                          core::LoadNoteBuffer *const load_notes) {
     using Result = core::Result<tactical::DurabilityTable>;
+    const ContentTypeSelection type_selection(tables);
+    type_selection.emit_notes(tables, diagnostic_codes::durability, load_notes);
     const auto scalar = [&tables](const std::string_view tag) -> std::optional<Fixed> {
         for (const auto& constant : tables.constants.scalars) {
             if (constant.tag == tag) return constant.value;
@@ -145,6 +131,25 @@ core::Result<tactical::DurabilityTable> durability_table(const UnitTables& table
     };
     core::LoadNoteBuffer ignored_notes;
     auto& load = load_notes ? *load_notes : ignored_notes;
+    for (const auto& source : tables.hardpoint_health_defaults) {
+        const auto* unit = tables.find(source.object);
+        if (unit == nullptr || !type_selection.keeps(*unit)) continue;
+        core::LoadNote note;
+        note.code = "EAWR-LOAD-0125";
+        note.object = source.object + "/" + source.hardpoint;
+        note.tag = "Health";
+        note.file = source.file;
+        note.line = source.line;
+        note.layer.mod_id = source.layer;
+        note.authored_value = source.authored;
+        note.action = core::LoadAction::default_used;
+        note.effective_value = source.effective;
+        note.diagnostic_code = "EAWR-LOAD-0125";
+        note.message = !source.keeps_number
+            ? "malformed hardpoint Health uses zero; the slot starts destroyed and cannot fire (HD-06)"
+            : "trailing text after the hardpoint Health number is ignored; the leading number is used (HD-06, AU-82)";
+        load.append(std::move(note));
+    }
     const auto fallback = [&](std::string_view tag, Fixed value, const char* message) {
         const auto found = scalar(tag);
         if (found) return *found;
@@ -301,6 +306,7 @@ core::Result<tactical::DurabilityTable> durability_table(const UnitTables& table
     }
     table.damage = std::move(damage);
     for (const auto& unit : tables.units) {
+        if (!type_selection.keeps(unit)) continue;
         if (!unit.hull)
             continue; // squadrons, and hulls the scan already reports as unresolved
         // SKI-25: a Tactical_Health of 0 or less builds no durability row (Empire_Gate_Large_Dest
@@ -347,7 +353,7 @@ core::Result<tactical::DurabilityTable> durability_table(const UnitTables& table
             entry.role = role(hardpoint.type);
             entry.destroyable = hardpoint.destroyable;
             if (hardpoint.destroyable) {
-                // HD-06: omitted Health was defaulted to zero; authored parse failures still fail.
+                // HD-06: the loader defaults omitted and malformed authored Health to zero.
                 if (!hardpoint.health) {
                     return Result::failure(
                         failure(unit.id + " hardpoint " + hardpoint.id + " is destroyable without Health"));
@@ -403,6 +409,7 @@ core::Result<tactical::DurabilityTable> durability_table(const UnitTables& table
         if (scalar_source != tables.constants.scalars.end())
             note.authored_value = scalar_source->text;
         for (const auto& unit : tables.units) {
+            if (!type_selection.keeps(unit)) continue;
             const auto key = "type#" + std::to_string(assets::object_type_crc(unit.id));
             const auto position = note.object.find(key);
             if (position != std::string::npos) {

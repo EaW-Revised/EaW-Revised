@@ -318,6 +318,20 @@ def check_arguments(program: str, fixtures: pathlib.Path, work: pathlib.Path) ->
                                  "--map", "Some_Map"),
         "empty map": ("--skirmish", "m2", "--game-root", str(work), "--census-out", str(work / "a.json"),
                       "--mod-root", str(work), "--map", ""),
+        "one faction only": ("--skirmish", "m2", "--game-root", str(work), "--census-out", str(work / "a.json"),
+                             "--seat1-faction", "Empire"),
+        "both ai without factions": ("--skirmish", "m2", "--game-root", str(work), "--census-out", str(work / "a.json"),
+                                     "--both-ai"),
+        "team without factions": ("--skirmish", "m2", "--game-root", str(work), "--census-out", str(work / "a.json"),
+                                  "--seat1-team", "0"),
+        "non-numeric team": ("--skirmish", "m2", "--game-root", str(work), "--census-out", str(work / "a.json"),
+                             "--seat1-faction", "Empire", "--seat2-faction", "Rebel", "--seat1-team", "no"),
+        "factions without skirmish": ("--replay", replay, "--hash-out", str(work / "h.csv"),
+                                      "--seat1-faction", "Empire", "--seat2-faction", "Rebel"),
+        "inventory mixed with census": ("--skirmish", "m2", "--game-root", str(work),
+                                        "--setup-inventory-out", str(work / "i.json"), "--census-out", str(work / "a.json")),
+        "inventory mixed with combat": ("--skirmish", "m2", "--game-root", str(work),
+                                        "--setup-inventory-out", str(work / "i.json"), "--combat-out", str(work / "combat.csv")),
         "census on the replay": ("--replay", replay, "--hash-out", str(work / "h.csv"), "--census-out", replay),
         "AI report without ticks": ("--skirmish", "m2", "--game-root", str(work),
                                     "--ai-report-out", str(work / "ai.json")),
@@ -393,6 +407,19 @@ def check_game(program: str, fixtures: pathlib.Path, work: pathlib.Path, replay_
         print("FoC skirmish start: skipped (set EAWR_EAW_GAME_ROOT)")
         return []
     errors = []
+    inventory = work / "setup-inventory.json"
+    listed = run(program, "--skirmish", "m2", "--game-root", root, "--setup-inventory-out", str(inventory))
+    if listed.returncode != 0:
+        errors.append(f"setup inventory failed: {listed.returncode}: {listed.stdout}")
+    else:
+        data = json.loads(inventory.read_bytes())
+        if not {"Rebel", "Empire"}.issubset(data["factions"]) or not data["maps"]:
+            errors.append("setup inventory omits stock factions or maps")
+    selected = run(program, "--skirmish", "m2", "--game-root", root, "--census-out", str(work / "selected.json"),
+                   "--seat1-faction", "Empire", "--seat2-faction", "Rebel", "--seat1-team", "1", "--seat2-team", "0", "--both-ai")
+    if selected.returncode != 0 or "player 1 Empire team 1 ai" not in selected.stdout or \
+            "player 2 Rebel team 0 ai" not in selected.stdout:
+        errors.append(f"explicit both-AI faction selection failed: {selected.returncode}: {selected.stdout}")
     census_path = work / "fixture-census.json"
     replay_path = work / "fixture.eawr-replay"
     completed = run(program, "--skirmish", "m2", "--game-root", root, "--census-out", str(census_path),

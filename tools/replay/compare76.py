@@ -54,7 +54,19 @@ def requires_game(program, path, runner):
     return result.returncode == 3 and b'--game-root is required' in result.stdout
 
 
-def run(program, root, baseline, game_root, out, head, runner=subprocess.run):
+def parse_workers(text):
+    """'1,8' -> [1, 8]: a subset of the full 1/2/4/8 set that includes worker 1 (the reference run)."""
+    parts = text.split(',')
+    if not all(p.isascii() and p.isdigit() and p == str(int(p)) for p in parts):
+        raise ValueError(f'--workers must be a comma list of plain integers: {text!r}')
+    chosen = [int(p) for p in parts]
+    if len(set(chosen)) != len(chosen) or any(w not in WORKERS for w in chosen) or 1 not in chosen:
+        raise ValueError(f'--workers must be distinct values from {WORKERS} and include 1: {text!r}')
+    return sorted(chosen)
+
+
+def run(program, root, baseline, game_root, out, head, runner=subprocess.run, subset=None):
+    selected = list(WORKERS) if subset is None else parse_workers(','.join(map(str, subset)))
     names = fixture_names(root)
     expected = baseline_rows(baseline, names)
     out.mkdir(parents=True, exist_ok=True)
@@ -70,7 +82,7 @@ def run(program, root, baseline, game_root, out, head, runner=subprocess.run):
         for name in names:
             path = root / name
             game = requires_game(program, path, runner)
-            for workers in WORKERS:
+            for workers in selected:
                 stem = Path(name).parent.parent.name + '-' + path.stem + '-' + str(workers)
                 kinds = {'hashes': KINDS['hashes']} if 'v1' in path.stem else KINDS
                 outputs = {k: out / (stem + '.' + k + '.csv') for k in kinds}
@@ -100,8 +112,11 @@ def run(program, root, baseline, game_root, out, head, runner=subprocess.run):
     except (OSError, ValueError, subprocess.TimeoutExpired) as error:
         failures.append(['driver error', str(error)])
     receipt = dict(head=head, baseline_head=baseline.get('head'), program_sha256=digest(program),
-                   runs=len(rows), workers=list(WORKERS), rows=rows, failures=failures,
-                   all_baseline_and_worker_bytes_equal=len(rows) == 76 and not failures)
+                   runs=len(rows), workers=selected, full_set=selected == list(WORKERS), rows=rows, failures=failures)
+    receipt['all_selected_runs_equal'] = len(rows) == len(names) * len(selected) and not failures
+    # The release gate reads this flag: only the full 1/2/4/8 set can credit a replay76.
+    receipt['all_baseline_and_worker_bytes_equal'] = (
+        receipt['full_set'] and receipt['all_selected_runs_equal'] and len(rows) == 76)
     (out / 'receipt.json').write_text(json.dumps(receipt, indent=2) + '\n')
     return receipt
 
@@ -114,11 +129,16 @@ def main():
     parser.add_argument('--fixtures-root', type=Path, default=ROOT)
     parser.add_argument('--head', required=True)
     parser.add_argument('--out', type=Path, required=True)
+    parser.add_argument('--workers', default=','.join(map(str, WORKERS)),
+                        help='comma list, a subset of 1,2,4,8 that includes 1; a subset receipt is NOT a full replay76')
     args = parser.parse_args()
     result = run(args.program, args.fixtures_root, json.loads(args.baseline.read_text()),
-                 args.game_root, args.out, args.head)
-    if not result['all_baseline_and_worker_bytes_equal']:
+                 args.game_root, args.out, args.head, subset=parse_workers(args.workers))
+    if not result['all_selected_runs_equal']:
         return 1
+    if not result['full_set']:
+        print(f'PASS (SUBSET, not a full replay76): {result["runs"]} runs on workers {result["workers"]} match baseline.')
+        return 0
     print('PASS: 76 replay runs match baseline and workers.')
     return 0
 

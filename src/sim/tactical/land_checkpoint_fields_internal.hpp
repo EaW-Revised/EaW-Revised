@@ -67,19 +67,21 @@ template <> struct Fields<LandMovingMember> {
             v.transition_frame, v.deployment_frame, v.state, v.gates, v.collision_class, v.pass_admitted,
             v.path_around_admitted, v.offset_compatible, v.terrain_blocked, v.assigned_speed, v.collision_speed,
             v.collision_lock, v.terrain_target, v.escape_aligned_admitted, v.escape_opposed_admitted, v.progress,
-            v.next_node, v.temporary_next, v.detour_path, v.detour_next, v.own_terrain_block);
+            v.next_node, v.temporary_next, v.hard_x, v.hard_y, v.gap, v.straggler_best_lag);
     }
 };
 template <> struct Fields<LandMovingSquad> {
     template <class A, class T> static void apply(A& a, T& v) {
         a(v.object, v.position, v.facing, v.maximum_speed, v.speed, v.rear_extent, v.path, v.next_node, v.order,
             v.following_start, v.progress, v.yielding_to, v.blocker_progress, v.has_formation, v.formation_length,
-            v.temporary_path, v.temporary_next, v.temporary_first, v.temporary_second, v.generic_team, v.turning);
+            v.temporary_path, v.temporary_next, v.temporary_first, v.temporary_second, v.generic_team, v.turning,
+            v.mapped_axis, v.has_mapped, v.straggler_wait_remaining, v.collision_class, v.jiggle, v.terrain_blocked,
+            v.terrain_target, v.assigned_speed, v.collision_speed);
     }
 };
 template <> struct Fields<LandContactSettings> {
     template <class A, class T> static void apply(A& a, T& v) {
-        a(v.complexity_quota, v.reset_interval, v.prediction_seconds, v.minimum_prediction_distance);
+        a(v.complexity_quota, v.reset_interval, v.prediction_seconds, v.minimum_prediction_distance, v.stopped_overlap);
     }
 };
 template <> struct Fields<LandContact> {
@@ -87,7 +89,8 @@ template <> struct Fields<LandContact> {
         a(v.first, v.second, v.primary, v.route_actor, v.recorded_member, v.kind, v.state, v.search, v.route,
             v.score, v.terrain_target, v.first_speed_limit, v.second_speed_limit, v.deadlock_remaining,
             v.search_passes, v.first_progress, v.second_progress, v.charged_nodes, v.first_stopped,
-            v.second_stopped, v.search_succeeded, v.installed, v.motion_observed, v.escape_retry_pending);
+            v.second_stopped, v.search_succeeded, v.installed, v.motion_observed, v.escape_retry_pending,
+            v.retry_remaining);
     }
 };
 template <> struct Fields<LandMovement::Checkpoint> {

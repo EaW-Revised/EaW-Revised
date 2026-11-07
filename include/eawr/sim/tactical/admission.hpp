@@ -40,6 +40,7 @@ EAWR_PAYLOAD_POLICY(RevealAllPayload, engine_only);
 EAWR_PAYLOAD_POLICY(BeaconPayload, human_wire);
 EAWR_PAYLOAD_POLICY(GiftPayload, human_wire);
 EAWR_PAYLOAD_POLICY(BattleControlPayload, engine_only);
+EAWR_PAYLOAD_POLICY(ScriptInvulnerablePayload, engine_only);
 EAWR_PAYLOAD_POLICY(RepairHardpointPayload, human_wire);
 EAWR_PAYLOAD_POLICY(AiReservationDebitPayload, engine_only);
 EAWR_PAYLOAD_POLICY(SpecialFirePayload, human_wire);

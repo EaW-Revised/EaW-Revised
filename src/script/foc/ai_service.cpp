@@ -4,6 +4,7 @@
 #include "galactic_ai_world.hpp"
 #include "ai_learning.hpp"
 #include "ai_script_evaluators.hpp"
+#include "eawr/script/foc/galactic_ai_state.hpp"
 
 #include <algorithm>
 #include <bit>
@@ -11,6 +12,9 @@
 #include <cmath>
 #include <exception>
 #include <limits>
+#include <new>
+#include <system_error>
+#include <type_traits>
 
 namespace eawr::script::foc::ai {
 
@@ -98,7 +102,10 @@ core::Result<void> Engine::begin_galactic_barrier(const World& world, galactic_a
     for (auto& player : players_) discard_effects(player);
     update_targets(); // identity/death reconciliation; WGA-79 does not sweep tokens.
     try { service_blocks(); service_taskforce_events(); }
-    catch (const std::exception& error) { return core::Result<void>::failure(detail::make_error(authoritative::codes::session_abort, error.what())); }
+    catch (const tactical_ai_detail::EvaluatorInfrastructureError&) { throw; }
+    catch (const std::bad_alloc&) { throw; }
+    catch (const std::system_error&) { throw; }
+    catch (const std::exception& error) { native_provider_threw_ = true; return core::Result<void>::failure(detail::make_error(authoritative::codes::session_abort, error.what())); }
     sequence = sequence_;
     return core::Result<void>::success();
 }
@@ -108,6 +115,7 @@ core::Result<void> Engine::apply_galactic_policy(tactical::PlayerId id, const ga
     native_records_changed(id, {1});
     mark_native_state_changed();
     auto* player = player_ai(id);
+    if (galactic_provider_retired(id)) return core::Result<void>::success();
     if (!player || !player->galactic) return core::Result<void>::failure(detail::make_error(authoritative::codes::invalid_request, "galactic template has no initialized native player"));
     if (player->galactic_policy != policy) native_records_changed(id, {33});
     player->galactic_policy = policy;
@@ -142,7 +150,10 @@ core::Result<void> Engine::service_galactic_system(tactical::PlayerId id, galact
                 return core::Result<void>::failure(detail::make_error(authoritative::codes::missing_api,
                     "galactic goal service requires selector facts and initialized funding"));
             try { service_goals(*player); }
-            catch (const std::exception& error) { return core::Result<void>::failure(detail::make_error(
+            catch (const tactical_ai_detail::EvaluatorInfrastructureError&) { throw; }
+            catch (const std::bad_alloc&) { throw; }
+            catch (const std::system_error&) { throw; }
+            catch (const std::exception& error) { native_provider_threw_ = true; return core::Result<void>::failure(detail::make_error(
                 authoritative::codes::session_abort, error.what())); }
             break;
         case galactic_ai::Service::planning:
@@ -157,7 +168,10 @@ core::Result<void> Engine::service_galactic_system(tactical::PlayerId id, galact
                 return core::Result<void>::failure(detail::make_error(authoritative::codes::missing_api,
                     "galactic execution requires native actions, selector facts and the producer completion owner"));
             try { service_execution(*player); }
-            catch (const std::exception& error) { return core::Result<void>::failure(detail::make_error(
+            catch (const tactical_ai_detail::EvaluatorInfrastructureError&) { throw; }
+            catch (const std::bad_alloc&) { throw; }
+            catch (const std::system_error&) { throw; }
+            catch (const std::exception& error) { native_provider_threw_ = true; return core::Result<void>::failure(detail::make_error(
                 authoritative::codes::session_abort, error.what())); }
             break;
         default: break; // perception only rearms; templates are applied by Manager.
@@ -295,9 +309,9 @@ core::Result<void> Engine::before_service(const World& world,
             const auto admission = host_->setup.player_ai_start_ticks.find(setup.player);
             player.admission_pending = admission != host_->setup.player_ai_start_ticks.end() && admission->second != 0;
             player.type = &type->second;
-            if (!type->second.space_templates.empty()) {
-                const auto found = data_.templates.find(type->second.space_templates.front());
-                if (found != data_.templates.end()) player.space_template = &found->second;
+            if (const auto& templates = ai::mode_templates(type->second, host_->setup.domain); !templates.empty()) {
+                const auto found = data_.templates.find(templates.front());
+                if (found != data_.templates.end()) player.mode_template = &found->second;
             }
             // WTA-46, WTA-47: the lobby slot's level picks the player type's adjustment entry; Normal is the default.
             player.difficulty = ai::resolve_difficulty(data_, &type->second, sim::tactical::to_string(setup.difficulty));
@@ -446,8 +460,88 @@ core::Result<void> Engine::before_service(const World& world,
     return core::Result<void>::success();
 }
 
+void Engine::commit_global_values(authoritative::ServiceReport& report) {
+    const auto native_record_write = native_record_scope();
+    if (std::none_of(report.commands.begin(), report.commands.end(), [](const auto& command) {
+            return command.verb == authoritative::global_value_command;
+        })) return;
+    // Sum once per ordered batch. A record contains the framed key twice,
+    // then its numeric word or tagged scalar; no payload copies are needed.
+    const auto row_bytes = [](const std::string& key, const GlobalScalar& scalar) {
+        const auto payload = std::visit([](const auto& part) -> std::size_t {
+            using T = std::decay_t<decltype(part)>;
+            if constexpr (std::is_same_v<T, std::string>) return 9 + part.size();
+            else if constexpr (std::is_same_v<T, bool>) return 10;
+            else return 8;
+        }, scalar);
+        return 2 * (8 + key.size()) + payload;
+    };
+    std::size_t retained{};
+    for (const auto& [key, scalar] : globals_) retained += row_bytes(key, scalar);
+    // Retained native rows conservatively cover the checkpoint's other fields.
+    // Admission must happen before dirtying records or changing the live map.
+    const auto native_bytes = native_records_enabled_ ? native_records_.byte_size() : 0;
+    const auto other_bytes = native_bytes > retained ? native_bytes - retained : 0;
+    // The canonical archive shares one collection-node quota across every
+    // native collection. Count its field inventory once, without payload bytes.
+    const auto nodes = native_collection_nodes();
+    const auto other_nodes = nodes >= globals_.size() ? nodes - globals_.size() : nodes;
+    std::erase_if(report.commands, [&](const authoritative::ScriptCommand& command) {
+        if (command.verb != authoritative::global_value_command) return false;
+        const auto& args = command.arguments;
+        const auto* key = args.empty() ? nullptr : std::get_if<std::string>(&args[0].data);
+        if (!key) return true;
+        const auto note = [&](std::string message) {
+            core::LoadNote row;
+            row.code = "EAWR-LOAD-1400";
+            row.object = std::to_string(command.issuer);
+            row.action = core::LoadAction::runtime_degraded;
+            row.phase = core::LoadPhase::runtime;
+            row.diagnostic_code = std::string(authoritative::codes::unsupported_api);
+            row.message = std::move(message);
+            row.effective_value = "GlobalValue write refused; prior registry preserved";
+            report.load_notes.push_back(std::move(row));
+        };
+        if (args.size() != 2) { note("GlobalValue.Set table ignored; cross-instance graph identity is unimplemented (L-55)"); return true; }
+        const auto old = globals_.find(*key);
+        const bool deleting = std::holds_alternative<std::monostate>(args[1].data);
+        const auto old_bytes = old == globals_.end() ? 0 : row_bytes(old->first, old->second);
+        const auto* text = std::get_if<std::string>(&args[1].data);
+        const auto* number = std::get_if<Real>(&args[1].data);
+        const auto* boolean = std::get_if<bool>(&args[1].data);
+        if (!deleting && !text && !number && !boolean) {
+            note("GlobalValue.Set unsupported value ignored; registry unchanged (L-55)"); return true;
+        }
+        if (!deleting && (key->size() > galactic_ai::native_state_max_text_bytes
+                || (text && text->size() > galactic_ai::native_state_max_text_bytes))) {
+            note("GlobalValue.Set refused by project archive quotas; registry unchanged (L-55)"); return true;
+        }
+        const auto payload = text ? 9 + text->size() : boolean ? std::size_t{10} : std::size_t{8};
+        const auto added_bytes = deleting ? 0 : 2 * (8 + key->size()) + payload;
+        const auto remaining = retained - old_bytes;
+        const auto count = globals_.size() + (!deleting && old == globals_.end() ? 1U : 0U);
+        if (!deleting && (count > galactic_ai::native_state_max_rows
+                || other_nodes > galactic_ai::native_state_max_nodes
+                || count > galactic_ai::native_state_max_nodes - other_nodes
+                || other_bytes > galactic_ai::global_value_max_retained_bytes
+                || remaining > galactic_ai::global_value_max_retained_bytes - other_bytes
+                || added_bytes > galactic_ai::global_value_max_retained_bytes - other_bytes - remaining)) {
+            note("GlobalValue.Set refused by project archive quotas; registry unchanged (L-55)"); return true;
+        }
+        retained = remaining + added_bytes;
+        native_records_changed(0, {27});
+        mark_native_state_changed();
+        if (deleting) globals_.erase(*key);
+        else if (number) globals_[*key] = *number;
+        else if (text) globals_[*key] = *text;
+        else if (boolean) globals_[*key] = *boolean;
+        return true;
+    });
+}
+
 core::Result<void> Engine::after_service(authoritative::ServiceReport& report) {
     const auto native_record_write = native_record_scope();
+    commit_global_values(report);
     mark_native_state_changed();
     // The Lua cost of the tick (#449 budget).
     TickCost cost = work_;
@@ -462,14 +556,15 @@ core::Result<void> Engine::after_service(authoritative::ServiceReport& report) {
             ++cost.freestore_runs;
         }
     }
-    append_ai_diagnostic(costs_, costs_dropped_, cost);
+    if (native_phase_) native_phase_->cost_reports.push_back(cost);
+    else append_ai_diagnostic(costs_, costs_dropped_, cost);
     if (host_->setup.journal) {
         host_->setup.journal->append_cost(AiTickCost{cost.tick, cost.freestore, cost.plans, cost.plan_instances,
             cost.goals_evaluated, cost.maintenances, cost.plans_attached, cost.plans_deferred, cost.plans_pumped,
             cost.freestore_runs, cost.reinforcement_candidates, cost.reinforcement_search_ns});
         if (script_evaluators_) {
             const auto& stats = script_evaluators_->stats();
-            host_->setup.journal->evaluators = AiEvaluatorStats{stats.calls, stats.memo_hits, stats.failures, stats.loaded, stats.instructions};
+            host_->setup.journal->set_evaluators(AiEvaluatorStats{stats.calls, stats.memo_hits, stats.failures, stats.loaded, stats.instructions});
         }
         for (const auto& diagnostic : report.diagnostics) {
             const Plan* source = plan_of_instance(diagnostic.instance);
@@ -488,6 +583,20 @@ core::Result<void> Engine::after_service(authoritative::ServiceReport& report) {
     std::vector<authoritative::ScriptCommand> kept;
     kept.reserve(report.commands.size());
     for (authoritative::ScriptCommand& command : report.commands) {
+        select_native_fault_context(static_cast<tactical::PlayerId>(galactic_chain_owner(command.issuer)));
+        if (command.verb == verb_story_plot) {
+            // WST-56: a Lua edit of a story plot, committed to the plot engine in command order.
+            if (auto why = commit_story_plot(*host_, command); !why.empty()) {
+                core::LoadNote note; note.code = "EAWR-LOAD-1400";
+                note.object = "Get_Story_Plot:" + (command.arguments.size() > 1 ? text_of(command.arguments[1]) : std::string{});
+                note.tag = "Get_Story_Plot"; note.phase = core::LoadPhase::runtime;
+                note.action = core::LoadAction::runtime_degraded;
+                note.diagnostic_code = std::string(authoritative::codes::unsupported_api);
+                note.message = "story plot request not applied: " + why;
+                report.load_notes.push_back(std::move(note));
+            }
+            continue;
+        }
         if (command.verb != verb_ai) {
             // U-05: direct object-script orders replace the retained positioning destination too.
             if ((command.verb == verb_move || command.verb == verb_attack_move || command.verb == verb_guard
@@ -535,6 +644,35 @@ core::Result<void> Engine::after_service(authoritative::ServiceReport& report) {
         auto blocks_ = all_blocks();
         auto tf = tf_id ? taskforces_.find(*tf_id) : taskforces_.end();
         const std::uint64_t id = block_id(command.issuer, command.sequence);
+        if (operation == "galactic_desire_unsupported" && arguments.size() == 1 && player->galactic) {
+            core::LoadNote note; note.code = "EAWR-LOAD-1400";
+            // The runtime collector/publisher deduplicates by code and object,
+            // so successful commits warn once per authored plan type.
+            note.object = "GiveDesireBonus:" + plans_.at(plan->definition).name;
+            note.tag = "GiveDesireBonus"; note.phase = core::LoadPhase::runtime;
+            note.action = core::LoadAction::runtime_degraded;
+            note.diagnostic_code = std::string(authoritative::codes::unsupported_api);
+            note.message = "GiveDesireBonus timed goal bonus is unavailable";
+            note.effective_value = "no bonus applied; nil returned; plan continues without waiting";
+            report.load_notes.push_back(std::move(note));
+            continue;
+        }
+        if (operation == "galactic_budget_flush" && arguments.size() == 2 && player->galactic) {
+            const auto category = data_.goal_categories.find(text_of(arguments[1]));
+            auto* funding = dynamic_cast<GalacticFunding*>(player->galactic_funding.get());
+            if (!funding || category == data_.goal_categories.end())
+                return core::Result<void>::failure(detail::make_error(authoritative::codes::invalid_request,
+                    "Budget.Flush_Category requires its initialized funding owner and category"));
+            const auto ledger = funding->ledger(player->player);
+            if (!ledger)
+                return core::Result<void>::failure(detail::make_error(authoritative::codes::invalid_request,
+                    "Budget.Flush_Category requires its initialized player ledger"));
+            // WGA-24: registered categories without an account have no
+            // available cash to clear. Do not create an account or fail.
+            if (!ledger->categories.contains(category->second)) continue;
+            if (auto flushed = funding->flush_category(player->player, category->second); !flushed) return flushed;
+            continue;
+        }
         if (operation == "galactic_retire_invasion" && arguments.size() == 2 && player->galactic) {
             const auto requested = handle_id(arguments[1], handle_block);
             auto block = requested ? blocks_.find(*requested) : blocks_.end();
@@ -841,8 +979,6 @@ core::Result<void> Engine::after_service(authoritative::ServiceReport& report) {
                 player->proposal_blocks -= blocker->second;
                 player->proposal_blockers.erase(blocker);
             }
-        } else if (operation == "global" && arguments.size() >= 3) {
-            if (const auto value = number_of(arguments[2])) globals_[text_of(arguments[1])] = *value;
         }
     }
     if (!orders_.empty()) native_records_changed(0, {30});
@@ -856,6 +992,7 @@ core::Result<void> Engine::after_service(authoritative::ServiceReport& report) {
     perception_executor_ = nullptr;
     for (auto& command : kept) ordered.push_back(std::move(command));
     report.commands = std::move(ordered);
+    clear_native_fault_context();
     return core::Result<void>::success();
 }
 

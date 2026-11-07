@@ -9,9 +9,11 @@
 #include "eawr/sim/tactical/session.hpp"
 #include "ui_test_support.hpp"
 #include "../../apps/viewer/src/scripted_input_dispatch.hpp"
+#include "../../apps/viewer/src/edge_pointer.hpp"
 
 #include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <cstdint>
 #include <functional>
 #include <iostream>
@@ -418,6 +420,26 @@ void input_routing_contracts() {
     expect(!ui::world_accepts(InputClass::key, typing), "UI-I3: a focused edit box suppresses hotkeys and camera keys");
     for (const auto input : {InputClass::button_press, InputClass::button_release, InputClass::wheel, InputClass::motion}) {
         expect(ui::world_accepts(input, typing), "UI-I3: text focus leaves the pointer to the world");
+    }
+
+    // #4571: the position-only pointer feed ahead of the GUI obeys the same gates as the world path.
+    {
+        ui::PointerFeedState feed;
+        expect(ui::world_feeds_pointer_position(feed), "#4571: a normal battle feeds the pointer over the HUD (edge scroll)");
+        feed.focus = modal;
+        expect(!ui::world_feeds_pointer_position(feed), "#4571: a modal dialog stops the pointer feed");
+        feed = {};
+        feed.focus = typing;
+        expect(ui::world_feeds_pointer_position(feed), "#4571: a focused edit box leaves the pointer to the world");
+        feed = {};
+        feed.ready_phase = true;
+        expect(!ui::world_feeds_pointer_position(feed), "#4571: the loading screen stops the pointer feed");
+        feed = {};
+        feed.camera_movie = true;
+        expect(!ui::world_feeds_pointer_position(feed), "#4571: the camera movie stops the pointer feed");
+        feed = {};
+        feed.attract = true;
+        expect(!ui::world_feeds_pointer_position(feed), "#4571: the demo battle stops the pointer feed");
     }
 
     ui::WorldPointerCapture capture;
@@ -870,6 +892,20 @@ int main() {
         expect(!lan.pending_intent_epoch(), "scripted gesture releases the LAN epoch");
     }
     {
+        // #5217: scripted viewport pixels reach Input::parse_input_event as window pixels, so a
+        // click equals the real one at content scale 1.0 and 1.5 (final transform = scale).
+        namespace gb = presentation::godot_backend;
+        const gb::Affine2D identity{1, 0, 0, 1, 0, 0};
+        const gb::Affine2D scale15{1.5F, 0, 0, 1.5F, 0, 0};
+        const auto p1 = gb::viewport_to_window_point(identity, {632.944F, 350.186F});
+        expect(p1[0] == 632.944F && p1[1] == 350.186F, "scale 1.0 scripted click keeps its pixel");
+        const auto p15 = gb::viewport_to_window_point(scale15, {632.944F, 350.186F});
+        expect(std::abs(p15[0] - 949.416F) < 0.001F && std::abs(p15[1] - 525.279F) < 0.001F,
+            "scale 1.5 scripted click is sent in window pixels (the engine divides by 1.5 again)");
+        const auto d15 = gb::viewport_to_window_delta({1.5F, 0, 0, 1.5F, 20, 30}, {10, -4});
+        expect(d15[0] == 15.0F && d15[1] == -6.0F, "a motion delta scales without the origin offset");
+    }
+    {
         ui::CommandScheduler scheduler(local_player, 0, 0, {}, sim::SeatId{11});
         auto gift = intent(ui::TacticalVerb::gift, {7, 3, 7}); gift.gift_recipient = {12};
         expect(static_cast<bool>(scheduler.issue(gift)), "gift enters the ordinary command queue");
@@ -893,6 +929,31 @@ int main() {
         const auto legacy = ordinary.take(0);
         expect(legacy.size() == 1 && legacy[0].issuing_seat.value == 0 && legacy[0].origin == tactical::CommandOrigin::ordinary,
             "policy OFF retains identical ordinary provenance");
+    }
+    {
+        namespace gb = presentation::godot_backend;
+        using Mode = gb::PointerWindowMode;
+        expect(!gb::pointer_confined(Mode::windowed, true, false, false), "windowed pointer remains free");
+        expect(gb::pointer_confined(Mode::fullscreen, true, false, false), "fullscreen pointer is confined");
+        expect(gb::pointer_confined(Mode::exclusive_fullscreen, true, false, false), "exclusive fullscreen pointer is confined");
+        expect(!gb::pointer_confined(Mode::fullscreen, false, false, false), "focus loss releases pointer");
+        expect(!gb::pointer_confined(Mode::fullscreen, true, true, false), "minimize releases pointer");
+        expect(!gb::pointer_confined(Mode::fullscreen, true, false, true), "modal releases pointer");
+        ui::PointerFeedState feed{};
+        expect(gb::map_pointer_feed_allowed(feed, true, false, false), "focused map samples pointer");
+        feed.attract = true;
+        expect(!gb::map_pointer_feed_allowed(feed, true, false, false), "attract blocks pointer sample");
+        feed.attract = false; feed.ready_phase = true;
+        expect(!gb::map_pointer_feed_allowed(feed, true, false, false), "ready phase blocks pointer sample");
+        feed.ready_phase = false; feed.camera_movie = true;
+        expect(!gb::map_pointer_feed_allowed(feed, true, false, false), "movie blocks pointer sample");
+        feed.camera_movie = false; feed.focus.modal_open = true;
+        expect(!gb::map_pointer_feed_allowed(feed, true, false, false), "modal blocks pointer sample");
+        feed.focus.modal_open = false;
+        expect(!gb::map_pointer_feed_allowed(feed, false, false, false), "focus loss blocks pointer sample");
+        expect(!gb::map_pointer_feed_allowed(feed, true, true, false), "menu blocks pointer sample");
+        expect(!gb::map_pointer_feed_allowed(feed, true, false, true), "external blocker stops pointer sample");
+        expect(!gb::galactic_pointer_feed_allowed(true, true, true, false), "minimized galaxy does not scroll");
     }
     paused_reservation_contracts();
     command_scheduler_cross_thread();

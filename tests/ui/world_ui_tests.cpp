@@ -557,7 +557,7 @@ void reticle_size() {
             previous_hull = hull;
             const auto centre = project({0.0F, 40.0F, 10.0F}, distance, viewport);
             const ui::ReticleRect rect = ui::hardpoint_reticle_rect(centre, viewport, 0.03F);
-            expect(close_to(rect.width, 0.03F * viewport[0]), "the width is 0.03 of the screen width");
+            expect(close_to(rect.width, 0.03F * viewport[1] * 16.0F / 9.0F), "the width is 0.03 of the 16:9 width at the screen height");
             expect(close_to(rect.height, 0.04F * viewport[1]), "the height is 0.04 of the screen height");
             expect(close_to(rect.x + rect.width * 0.5F, centre[0]) && close_to(rect.y + rect.height * 0.5F, centre[1]),
                    "the reticle is centred on the hardpoint's screen point");
@@ -566,6 +566,14 @@ void reticle_size() {
     const ui::ReticleRect hd = ui::hardpoint_reticle_rect({960.0F, 540.0F}, {1920.0F, 1080.0F}, 0.03F);
     expect(close_to(hd.x, 931.2F) && close_to(hd.y, 518.4F) && close_to(hd.width, 57.6F) && close_to(hd.height, 43.2F),
            "stock reticle remains at 931.2/518.4 with 57.6 x 43.2 pixels at 1920 x 1080");
+    // #5599: the reticle shape does not follow the window aspect (4:3, 16:10, 16:9, 21:9, 32:9).
+    for (const std::array<float, 2> viewport : {std::array<float, 2>{1440.0F, 1080.0F}, std::array<float, 2>{1728.0F, 1080.0F},
+                                                std::array<float, 2>{1920.0F, 1080.0F}, std::array<float, 2>{2560.0F, 1080.0F},
+                                                std::array<float, 2>{5120.0F, 1440.0F}}) {
+        const ui::ReticleRect rect = ui::hardpoint_reticle_rect({100.0F, 100.0F}, viewport, 0.03F);
+        expect(close_to(rect.width / rect.height, 4.0F / 3.0F), "the reticle is 4:3 wide:high at every window aspect");
+        expect(close_to(rect.height, 0.04F * viewport[1]), "the reticle height is 0.04 of the screen height");
+    }
 }
 
 void reticle_anchor() {
@@ -668,7 +676,7 @@ void reticle_xml() {
         if (!sizes) continue;
         const auto ongoing = ui::hardpoint_reticle_rect({512.5F, 384.5F}, {1024, 768}, sizes->enemy);
         const auto first = ui::hardpoint_reticle_rect({512.5F, 384.5F}, {1024, 768}, sizes->friendly);
-        expect(close_to(ongoing.width, enemy * 1024) && close_to(first.width, friendly * 1024),
+        expect(close_to(ongoing.width, enemy * 768.0F * 16.0F / 9.0F) && close_to(first.width, friendly * 768.0F * 16.0F / 9.0F),
             "WU-31: XML perturbation changes enemy service and friendly appearance sizes");
     }
     for (const auto raw : {"", "NaN", "-1", "0.03 trailing"}) {

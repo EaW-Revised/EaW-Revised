@@ -76,6 +76,9 @@ class GalacticGroundRuntime(unittest.TestCase):
         if action in {"reorder-empty", "reorder-occupied"}:
             # Press the first company and release over an empty pad (03) or over the second company.
             end = self.center(controls["Pad_03" if action == "reorder-empty" else "Pad_01"])
+        if action == "rejected-drag":
+            # Release outside the pads and fleet targets: the unit drop is rejected.
+            end = [start[0] - 120, start[1] + 110]
         if action in {"land", "land-drag"}:
             start = self.center(next(row for row in initial["fleet_hud"]["controls"] if row["name"] == "q1_fleet"))
             end = self.center(controls["Slot_00"])
@@ -164,6 +167,8 @@ func _process(delta):
         motion(target, true)
     if frame == 20 and world_target in ["launch-world", "launch-world-slot"]:
         viewport.get_texture().get_image().save_png(evidence_path.replace(".png", "-held.png"))
+    if frame == 20 and world_target in ["box", "reorder-empty"]:
+        viewport.get_texture().get_image().save_png(evidence_path.replace(".png", "-held.png"))
     if frame == 20 and click_land: mouse(target, true)
     if frame == 20 and confirm_sale:
         var sale = current_scene.find_child("g_ground_sell", true, false)
@@ -190,7 +195,8 @@ func _process(delta):
         if action not in {"land", "land-drag", "launch", "launch-slot", "launch-move", "launch-world", "launch-world-slot"}:
             args += ["--eawr-galactic-paused", "yes"]
         result = subprocess.run([os.environ["EAWR_GODOT_EXECUTABLE"], "--resolution", "1280x720",
-            "--path", str(support.ROOT / "apps/viewer/project"), "--script", str(driver), "--", *args],
+            "--path", str(support.ROOT / "apps/viewer/project"), "--script", str(driver),
+            *(["--render-thread", self.render_thread] if getattr(self, "render_thread", None) else []), "--", *args],
             cwd=support.ROOT, capture_output=True, text=True, timeout=300, check=False)
         (directory / "viewer.log").write_text(result.stdout + result.stderr, encoding="utf-8")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -198,6 +204,8 @@ func _process(delta):
         self.assertEqual(data["map_input"]["selected"], initial["map_input"]["selected"], "ground input leaked into world selection")
         self.assertEqual(data["map_input"]["selection_invalidations"], initial["map_input"]["selection_invalidations"])
         self.assertTrue(capture.is_file())
+        if action in {"box", "reorder-empty"}:
+            self.assertTrue(capture.with_name(capture.stem + "-held.png").is_file())
         return data, initial
 
     def test_unit_sale_native_pads_cells_and_hero_exclusion(self):
@@ -218,6 +226,7 @@ func _process(delta):
         self.assertFalse(hero["ground_hud"]["sale"]["visible"])
 
     def test_native_ground_click_and_strict_rectangle(self):
+        self.render_thread = "separate"
         for action in ["click", "threshold", "box"]:
             with self.subTest(action=action):
                 data, initial = self.native(action)
@@ -239,6 +248,7 @@ func _process(delta):
 
     def test_company_drop_on_a_pad_reorders_without_an_order(self):
         """GHUD-S69: pad to pad is slot placement (presentation only), never a rectangle or a command."""
+        self.render_thread = "separate"
         for action, expected in [("reorder-empty", {3: 8001, 1: 8002}), ("reorder-occupied", {0: 8002, 1: 8001})]:
             with self.subTest(action=action):
                 data, initial = self.native(action)
@@ -399,6 +409,13 @@ func _process(delta):
         data, initial = self.native("box")
         self.assertEqual(data["ground_hud"]["launch_orders"], 0)
         self.assertEqual(data["ground_hud"]["boxes"], 1)
+        self.assertEqual(data["live_session"]["submitted_orders"], initial["live_session"]["submitted_orders"])
+
+    def test_rejected_company_drag_does_not_select_a_box(self):
+        self.render_thread = "separate"
+        data, initial = self.native("rejected-drag")
+        self.assertEqual(data["ground_hud"]["boxes"], 0, "rejected company drag fell through to box selection")
+        self.assertFalse(any(row["selected"] for row in data["ground_hud"]["widgets"]))
         self.assertEqual(data["live_session"]["submitted_orders"], initial["live_session"]["submitted_orders"])
 
 

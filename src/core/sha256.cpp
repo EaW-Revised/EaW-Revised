@@ -222,29 +222,40 @@ const char* sha256_backend_name(const Sha256Backend backend) noexcept {
     return "scalar";
 }
 
-std::array<std::uint8_t, 32> sha256(const std::span<const std::uint8_t> bytes) noexcept {
-    return sha256(bytes, Sha256Backend::automatic);
+Sha256Hasher::Sha256Hasher(const Sha256Backend backend) noexcept : backend_(sha256_backend(backend)) {}
+
+void Sha256Hasher::update(std::span<const std::uint8_t> bytes) noexcept {
+    const auto compress = compressor(backend_);
+    length_ += static_cast<std::uint64_t>(bytes.size());
+    if (tail_size_ != 0) {
+        const auto count = std::min(bytes.size(), tail_.size() - tail_size_);
+        if (count != 0) std::copy_n(bytes.data(), count, tail_.data() + tail_size_);
+        tail_size_ += count;
+        bytes = bytes.subspan(count);
+        if (tail_size_ != tail_.size()) return;
+        compress(state_, tail_.data(), 1);
+        tail_size_ = 0;
+    }
+    const auto blocks = bytes.size() / 64;
+    if (blocks != 0) compress(state_, bytes.data(), blocks);
+    bytes = bytes.subspan(blocks * 64);
+    if (!bytes.empty()) std::copy(bytes.begin(), bytes.end(), tail_.begin());
+    tail_size_ = bytes.size();
 }
 
-std::array<std::uint8_t, 32> sha256(const std::span<const std::uint8_t> bytes, const Sha256Backend backend) noexcept {
-    const auto compress = compressor(sha256_backend(backend));
-    std::array<std::uint32_t, 8> state{
-        0x6a09e667U, 0xbb67ae85U, 0x3c6ef372U, 0xa54ff53aU,
-        0x510e527fU, 0x9b05688cU, 0x1f83d9abU, 0x5be0cd19U,
-    };
-    const auto blocks = bytes.size() / 64;
-    if (blocks != 0) compress(state, bytes.data(), blocks);
-    const auto remainder = bytes.size() % 64;
-    const auto offset = bytes.size() - remainder;
+std::array<std::uint8_t, 32> Sha256Hasher::digest() const noexcept {
+    auto state = state_;
     std::array<std::uint8_t, 128> tail{};
-    if (remainder != 0) std::copy_n(bytes.data() + offset, remainder, tail.begin());
-    tail[remainder] = 0x80U;
-    const std::size_t padded_size = remainder < 56 ? 64U : 128U;
-    const auto bit_length = static_cast<std::uint64_t>(bytes.size()) * 8U;
+    // tail_size_ is always < 64 here; the mask lets GCC prove the bound.
+    const std::size_t used = tail_size_ & 63U;
+    std::copy_n(tail_.data(), used, tail.data());
+    tail[used] = 0x80U;
+    const std::size_t padded_size = used < 56 ? 64U : 128U;
+    const auto bit_length = length_ * 8U;
     for (unsigned index = 0; index < 8; ++index) {
         tail[padded_size - 1U - index] = static_cast<std::uint8_t>(bit_length >> (8U * index));
     }
-    compress(state, tail.data(), padded_size / 64);
+    compressor(backend_)(state, tail.data(), padded_size / 64);
     std::array<std::uint8_t, 32> digest{};
     for (std::size_t index = 0; index < state.size(); ++index) {
         digest[index * 4] = static_cast<std::uint8_t>(state[index] >> 24U);
@@ -255,12 +266,28 @@ std::array<std::uint8_t, 32> sha256(const std::span<const std::uint8_t> bytes, c
     return digest;
 }
 
+std::array<std::uint8_t, 32> sha256(const std::span<const std::uint8_t> bytes) noexcept {
+    return sha256(bytes, Sha256Backend::automatic);
+}
+
+std::array<std::uint8_t, 32> sha256(const std::span<const std::uint8_t> bytes, const Sha256Backend backend) noexcept {
+    Sha256Hasher hasher(backend);
+    hasher.update(bytes);
+    return hasher.digest();
+}
+
 std::string sha256_hex(const std::span<const std::uint8_t> bytes) {
     return sha256_hex(bytes, Sha256Backend::automatic);
 }
 
 std::string sha256_hex(const std::span<const std::uint8_t> bytes, const Sha256Backend backend) {
-    const auto digest = sha256(bytes, backend);
+    Sha256Hasher hasher(backend);
+    hasher.update(bytes);
+    return hasher.hex_digest();
+}
+
+std::string Sha256Hasher::hex_digest() const {
+    const auto digest = this->digest();
     constexpr char digits[] = "0123456789abcdef";
     std::string output(digest.size() * 2, '\0');
     for (std::size_t index = 0; index < digest.size(); ++index) {

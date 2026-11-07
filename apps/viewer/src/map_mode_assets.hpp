@@ -14,6 +14,7 @@
 #include "live_fog_view.hpp"
 #include "overview_fade_view.hpp"
 #include "battle_audio.hpp"
+#include "particle_lane.hpp"
 #include "particle_workers.hpp"
 #include "perf_trace.hpp"
 #include "unit_emitters.hpp"
@@ -43,7 +44,7 @@
 #include "eawr/scene/space_population.hpp"
 #include "eawr/sim/replay.hpp"
 #include "eawr/sim/snapshot.hpp"
-#include "eawr/vfs/vfs.hpp"
+#include "eawr/vfs/vfs_fwd.hpp"
 
 #include <godot_cpp/classes/image.hpp>
 #include <godot_cpp/classes/os.hpp>

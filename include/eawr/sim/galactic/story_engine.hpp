@@ -89,6 +89,18 @@ struct SubPlotState {
     bool active{};
     std::vector<EventState> events;
 };
+// WST-56: what a Lua event object (Get_Story_Plot(file).Get_Event(name)) changed in one event. Indices are
+// 0-based (Event_Param1 = 0). The definitions stay as loaded; these rows are applied over them and travel in
+// the checkpoint tail only when present (an unedited game has the old bytes).
+struct EventEdit {
+    std::string subplot; // the sub-plot file name as written
+    std::string event;   // upper-cased event name
+    std::map<std::uint32_t, std::vector<std::string>> event_params, reward_params;
+    std::optional<std::string> reward_type, dialog;
+    std::vector<std::string> dialog_text; // extra formatting arguments, in order (Add_Dialog_Text)
+    friend bool operator==(const EventEdit&, const EventEdit&) = default;
+};
+
 // Everything the checkpoint keeps (WST-60..62); the definitions are rebuilt from data.
 struct State {
     bool started{};   // the initial tech levels have been delivered
@@ -96,6 +108,19 @@ struct State {
     std::uint64_t sequence{}; // Triggered sequence, strictly increasing
     std::vector<SubPlotState> subplots;
     std::map<std::string, std::int64_t> flags; // upper-cased flag name -> value (WST-27)
+    // WST-56 Lua edits, in order of first edit. Not part of the positional fields: saved as an optional tail.
+    std::vector<EventEdit> edits;
+};
+
+// One Lua request on a plot, as plain ordered data (ids are names, never pointers). `subplot` is the file name as
+// written; `event` is needed by the event operations.
+struct PlotCommand {
+    enum class Op : std::uint8_t { activate, suspend, reset, event_param, reward_param, reward_type, dialog, add_dialog_text, clear_dialog_text };
+    Op op{};
+    std::string subplot, event;
+    std::uint32_t index{};            // event_param / reward_param
+    std::vector<std::string> values;  // the tokens, or the one name / text argument
+    friend bool operator==(const PlotCommand&, const PlotCommand&) = default;
 };
 
 // A triggered event and its reward, ordered by `sequence`. Rewards the engine runs itself
@@ -107,6 +132,7 @@ struct Triggered {
     std::array<std::vector<std::string>, token_slots_reward> reward_params;
     std::vector<std::string> reward_list;
     std::string dialog, tag, variable;
+    std::vector<std::string> dialog_text; // WST-56 extra dialog arguments set by Lua; no presentation consumer yet
     std::int64_t chapter{};
     bool popup{true}, sound{true};
     bool remove_after_viewed{}; // resolved from authored Story_Tag, independently of Story_Incoming
@@ -144,10 +170,21 @@ public:
     // WST-11: one story service. Sends the elapsed notice with the mode time, then polls the flag
     // events of every active sub-plot in table order.
     [[nodiscard]] core::Result<void> service(math::Fixed time_seconds, bool paused);
+    // #5857: the upper-cased component names STORY_CLICK_GUI events list (any sub-plot, owner or state, sorted). A HUD
+    // raises a click only for a listed component, so campaigns whose plots never name a control add no commands.
+    // The revision changes when a Lua edit of Event_Param1 can have changed the list.
+    [[nodiscard]] std::vector<std::string> click_listeners() const;
+    [[nodiscard]] std::uint64_t click_listener_revision() const noexcept;
     // The triggers since the last call, in order.
     [[nodiscard]] std::vector<Triggered> take_triggered();
     // The Lua callbacks the triggers since the last call asked for, in trigger order (WST-20 (3)).
     [[nodiscard]] std::vector<ScriptCall> take_script_calls();
+
+    // WST-56/26: Lua Activate / Suspend / Reset on a sub-plot and the event edits. A sub-plot or event that is not
+    // loaded, or an index outside the parameter slots, is refused without changing anything.
+    [[nodiscard]] core::Result<void> apply(const PlotCommand& command);
+    [[nodiscard]] bool has_subplot(std::string_view name) const;
+    [[nodiscard]] bool has_event(std::string_view subplot, std::string_view event) const;
 
     [[nodiscard]] const State& state() const noexcept;
     [[nodiscard]] core::Result<void> restore(State state);

@@ -1,3 +1,13 @@
+#include <span>
+#include "eawr/data/ui/text_database.hpp"
+#include <godot_cpp/classes/center_container.hpp>
+#include <godot_cpp/classes/color_rect.hpp>
+#include <godot_cpp/classes/h_box_container.hpp>
+#include <godot_cpp/classes/label.hpp>
+#include <godot_cpp/classes/panel_container.hpp>
+#include <godot_cpp/classes/scroll_container.hpp>
+#include <godot_cpp/classes/text_server.hpp>
+#include <godot_cpp/classes/v_box_container.hpp>
 #include "galactic_mode_internal.hpp"
 #include "ground_stack.hpp"
 #include "eawr/sim/galactic/ground_intelligence.hpp"
@@ -63,6 +73,175 @@ GalacticMode::State::FleetDragSource GalacticMode::State::pathfinder_source(cons
     return {found->fleet, {}, static_cast<std::uint8_t>(panel), type, found->member.id};
 }
 
+void GalacticMode::State::build_planet_info() {
+    const auto* component = command_catalog.find("planet_info");
+    if (!component || !fleet_anchors.find("planet_info") || !hud) return;
+    auto text = data::ui::load_language_text_database(*filesystem, "english");
+    const auto get = [&](const char* key) {
+        if (!text) return std::string{};
+        const auto* entry = text.value().find(key);
+        return entry ? data::ui::to_utf8(entry->value) : std::string{};
+    };
+    planet_info_texts = {get("TEXT_BUTTON_PLANET_INFO"), get("TEXT_TACTICAL_INFORMATION"), get("TEXT_PLANETARY_ADVANTAGES"),
+        get("TEXT_HISTORICAL_REFERENCE"), get("TEXT_PLANET_INFO_WEATHER"), get("TEXT_BUTTON_CLOSE")};
+    const auto make_button = [&](const char* name, Node* parent) {
+        auto* button = memnew(EawrHudButton);
+        button->set_name(name);
+        button->set_sounds(*component, [this](const std::string& cue) { if (audio) audio->ui_sound(cue); });
+        button->set_texture_normal(command_texture(first(*component, data::ui::Field::icon_texture_name)));
+        button->set_texture_hover(command_texture(first(*component, data::ui::Field::mouse_over_texture_name)));
+        button->set_order_icon({}, false);
+        parent->add_child(button);
+        return button;
+    };
+    planet_info_button = make_button("planet_info", fleet_organize);
+    planet_info_button->set_action([this] {
+        if (!map_input.hud_event() || !map_input.gates.world_allowed()) return;
+        open_planet_info();
+    });
+    planet_info_caption = memnew(EawrHudText);
+    planet_info_caption->set_mouse_filter(Control::MOUSE_FILTER_IGNORE);
+    planet_info_button->add_child(planet_info_caption);
+
+    // The dialog: a dimmed full-screen blocker with a centred panel (no retail frame art is captured, GHUD-C04).
+    // PLACEHOLDER: this dialog uses the default Godot theme until the retail dialog art is captured (GHUD-C04).
+    planet_info_dialog = memnew(Control);
+    planet_info_dialog->set_name("planet_info_dialog");
+    planet_info_dialog->set_mouse_filter(Control::MOUSE_FILTER_STOP);
+    planet_info_dialog->set_anchors_and_offsets_preset(Control::PRESET_FULL_RECT);
+    planet_info_dialog->set_z_index(50);
+    hud->add_child(planet_info_dialog);
+    auto* dim = memnew(ColorRect);
+    dim->set_color(Color(0, 0, 0, 0.8F));
+    dim->set_mouse_filter(Control::MOUSE_FILTER_IGNORE);
+    dim->set_anchors_and_offsets_preset(Control::PRESET_FULL_RECT);
+    planet_info_dialog->add_child(dim);
+    // The panel is sized explicitly (a container would shrink it to its smallest child, #5854).
+    auto* panel = memnew(PanelContainer);
+    planet_info_panel = panel;
+    panel->set_name("panel");
+    const auto layout = galactic_view::planet_info_layout(static_cast<float>(camera.width), static_cast<float>(camera.height));
+    panel->set_size({layout.panel_width, layout.panel_height});
+    panel->set_position({layout.panel_x, layout.panel_y});
+    planet_info_dialog->add_child(panel);
+    auto* column = memnew(VBoxContainer);
+    column->set_name("column");
+    panel->add_child(column);
+    planet_info_title = memnew(Label);
+    planet_info_title->set_horizontal_alignment(HORIZONTAL_ALIGNMENT_CENTER);
+    column->add_child(planet_info_title);
+    auto* scroll = memnew(ScrollContainer);
+    scroll->set_name("scroll");
+    scroll->set_mouse_filter(Control::MOUSE_FILTER_PASS);
+    scroll->set_horizontal_scroll_mode(ScrollContainer::SCROLL_MODE_DISABLED);
+    scroll->set_h_size_flags(Control::SIZE_EXPAND_FILL);
+    scroll->set_v_size_flags(Control::SIZE_EXPAND_FILL);
+    column->add_child(scroll);
+    planet_info_content = memnew(VBoxContainer);
+    planet_info_content->set_h_size_flags(Control::SIZE_EXPAND_FILL);
+    scroll->add_child(planet_info_content);
+    auto* close = make_button("planet_info_close", column);
+    close->set_custom_minimum_size(Vector2(layout.close_width, layout.close_height));
+    close->set_h_size_flags(Control::SIZE_SHRINK_CENTER);
+    // The button never had a hit rectangle, so the press was ignored (#5854).
+    close->set_hit_rect({{}, {layout.close_width, layout.close_height}});
+    auto* close_caption = memnew(Label);
+    close_caption->set_text(String::utf8(planet_info_texts[5].c_str()).to_upper());
+    close_caption->set_mouse_filter(Control::MOUSE_FILTER_IGNORE);
+    close_caption->set_anchors_and_offsets_preset(Control::PRESET_FULL_RECT);
+    close_caption->set_horizontal_alignment(HORIZONTAL_ALIGNMENT_CENTER);
+    close_caption->set_vertical_alignment(VERTICAL_ALIGNMENT_CENTER);
+    close->add_child(close_caption);
+    close->set_action([this] { close_planet_info(); });
+    planet_info_dialog->hide();
+}
+
+void GalacticMode::State::open_planet_info() {
+    if (!planet_info_dialog || !galaxy) return;
+    const auto planet = std::find_if(galaxy->planets.begin(), galaxy->planets.end(),
+        [this](const auto& row) { return row.id == selected_planet; });
+    if (planet == galaxy->planets.end()) return;
+    const auto layout = galactic_view::planet_info_layout(static_cast<float>(camera.width), static_cast<float>(camera.height));
+    planet_info_panel->set_size({layout.panel_width, layout.panel_height});
+    planet_info_panel->set_position({layout.panel_x, layout.panel_y});
+    planet_info_planet = planet->id;
+    // The captured title is "Planet Info <name>" (GHUD-R45), with the localized display name like the planet HUD.
+    const auto facts = hud_facts.find(planet->id);
+    planet_info_title->set_text(String::utf8(galactic_view::planet_info_title(planet_info_texts[0],
+        facts == hud_facts.end() ? nullptr : &facts->second).c_str()));
+    while (planet_info_content->get_child_count() > 0) {
+        auto* child = planet_info_content->get_child(0);
+        planet_info_content->remove_child(child);
+        child->queue_free();
+    }
+    const Color heading_colour(1.0F, 0.85F, 0.3F);
+    const auto section = [&](const std::string& heading, const std::string& body) {
+        if (body.empty()) return;
+        if (!heading.empty()) {
+            auto* head = memnew(Label);
+            head->set_text(String::utf8(heading.c_str()));
+            head->add_theme_color_override("font_color", heading_colour);
+            planet_info_content->add_child(head);
+        }
+        auto* label = memnew(Label);
+        label->set_autowrap_mode(TextServer::AUTOWRAP_WORD_SMART);
+        label->set_h_size_flags(Control::SIZE_EXPAND_FILL);
+        label->set_text(String::utf8(body.c_str()));
+        planet_info_content->add_child(label);
+    };
+    section(planet_info_texts[1], planet->info.tactical);
+    section(planet_info_texts[2], planet->info.advantage);
+    section(planet_info_texts[3], planet->info.history);
+    // Weather: icon and name, then the planet's own weather description.
+    if (!planet->weather.icon.empty() || !planet->weather.name.empty()) {
+        auto* row = memnew(HBoxContainer);
+        planet_info_content->add_child(row);
+        if (const auto art = command_texture(planet->weather.icon); art.is_valid()) {
+            auto* icon = memnew(TextureRect);
+            icon->set_texture(art);
+            icon->set_stretch_mode(TextureRect::STRETCH_KEEP);
+            row->add_child(icon);
+        }
+        auto* head = memnew(Label);
+        head->set_text(String::utf8((planet_info_texts[4] + planet->weather.name).c_str()));
+        head->add_theme_color_override("font_color", heading_colour);
+        row->add_child(head);
+    }
+    section({}, planet->info.weather);
+    section({}, planet->info.population);
+    section({}, planet->info.terrain);
+    planet_info_dialog->show();
+}
+
+void GalacticMode::State::close_planet_info() {
+    if (planet_info_dialog) planet_info_dialog->hide();
+    planet_info_planet = 0;
+}
+
+void GalacticMode::State::update_planet_info(const presentation::ui::ShellPlacement& placement) {
+    if (!planet_info_button) return;
+    const auto* anchor = fleet_anchors.find("planet_info");
+    const auto* component = command_catalog.find("planet_info");
+    if (!anchor || !component) { planet_info_button->hide(); return; }
+    const auto pixels = presentation::ui::shell_to_screen(anchor->rect, placement);
+    planet_info_button->set_position({static_cast<float>(pixels.x), static_cast<float>(pixels.y)});
+    planet_info_button->set_size({static_cast<float>(pixels.width), static_cast<float>(pixels.height)});
+    planet_info_button->set_hit_rect({{}, planet_info_button->get_size()});
+    planet_info_button->set_disabled(!map_input.gates.hud_enabled || map_input.gates.tutorial_locked);
+    planet_info_caption->set_position({});
+    planet_info_caption->set_size(planet_info_button->get_size());
+    const auto caption = String::utf8(planet_info_texts[0].c_str()).to_upper();
+    if (planet_info_caption->get_text() != caption) planet_info_caption->set_text(caption);
+    configure_command_bar_text(placement, *planet_info_caption, *component, *anchor);
+    const auto tint = component->color(data::ui::Field::text_color).value_or(data::ui::Rgba8{255, 255, 255, 255});
+    planet_info_caption->set_colour(Color(tint.r / 255.0F, tint.g / 255.0F, tint.b / 255.0F, tint.a / 255.0F));
+    planet_info_caption->set_horizontal_alignment(HORIZONTAL_ALIGNMENT_CENTER);
+    // The dialog belongs to the focused planet: leaving focus or changing the selection closes it.
+    if (planet_info_dialog && planet_info_dialog->is_visible()
+        && (seat_flight().state() != galactic_view::CameraState::focused || selected_planet != planet_info_planet))
+        close_planet_info();
+}
+
 bool GalacticMode::State::build_fleet_hud() {
     const auto* shell = command_catalog.find("i_main_organize");
     if (!shell) return true; // Optional authored surface; no fabricated placement.
@@ -117,6 +296,16 @@ bool GalacticMode::State::build_fleet_hud() {
             // Aggregate labels keep their separate authored text_fleet anchors.
             auto* label = memnew(Label); label->set_mouse_filter(Control::MOUSE_FILTER_IGNORE);
             button->add_child(label); fleet_counts.emplace(name, label);
+            if (name[1] <= '3') {
+                // icon_fleet0n Icon_Alternate_Texture_Name[0]: the zoomed stealth mark of an all-stealth card.
+                auto* mark = memnew(TextureRect);
+                mark->set_name("fleet_stealth_zoomed");
+                mark->set_mouse_filter(Control::MOUSE_FILTER_IGNORE);
+                mark->set_expand_mode(TextureRect::EXPAND_IGNORE_SIZE);
+                mark->hide();
+                button->add_child(mark);
+                fleet_stealth_marks.emplace(name, mark);
+            }
             label->add_theme_font_override("font", hud_fonts->font(face));
             label->add_theme_font_size_override("font_size", std::max(1,
                 presentation::ui::font_pixel_height(face.point_size, camera.height)));
@@ -171,7 +360,7 @@ bool GalacticMode::State::build_fleet_hud() {
                 const auto* card = shown_fleet_cards[static_cast<std::size_t>(name[1] - '1')];
                 // #3072: the whole card moves all its slot's fleets as one stack.
                 if (!card || !card->local || !card->orbit_slot) return FleetDragSource{};
-                return FleetDragSource{card->fleet.value_or(0), {*card->orbit_slot}};
+                return FleetDragSource{card->fleet.value_or(0), {*card->orbit_slot}, {}, {}};
             });
         }
         if (!name.ends_with("_fleet") && name[1] <= '3') {
@@ -212,6 +401,22 @@ bool GalacticMode::State::build_fleet_hud() {
         fleet_organize->add_child(label);
         fleet_captions[panel] = label;
     }
+    if (const auto* component = command_catalog.find("advanced_planetary"); component && fleet_anchors.find("advanced_planetary")) {
+        // H033/H034: the focused view's way into the advanced planetary map (the same command as the wheel).
+        auto* button = memnew(EawrHudButton);
+        button->set_name("advanced_planetary");
+        button->set_sounds(*component, [this](const std::string& cue) { if (audio) audio->ui_sound(cue); });
+        button->set_texture_normal(command_texture(first(*component, data::ui::Field::blank_texture_name)));
+        button->set_texture_hover(command_texture(first(*component, data::ui::Field::mouse_over_texture_name)));
+        button->set_order_icon({}, false);
+        button->set_action([this] {
+            if (!map_input.hud_event() || !map_input.gates.world_allowed()) return;
+            static_cast<void>(request_hud_zoom(true));
+        });
+        fleet_organize->add_child(button);
+        advanced_open_button = button;
+    }
+    build_planet_info();
     fleet_organize->hide();
     build_fleet_drag_receiver();
     build_fleet_stack_popup();
@@ -348,8 +553,13 @@ void GalacticMode::State::service_fleet_stack_popup() {
         const auto planet = (hovered - 1U) >> 2U;
         std::vector<sim::galactic::FleetDisplayVisibility> visibility;
         for (const auto& row : fleet_visibility) if (row.planet == planet) visibility.push_back(row);
-        const auto complete = sim::galactic::observed_fleets(*fleet_publication, galaxy->local.player,
-            fleet_display_traits, std::numeric_limits<std::size_t>::max(), visibility);
+        auto display_traits = fleet_display_traits;
+        if (fleet_publication->fleet_control())
+            galactic_view::apply_fleet_transport_traits(display_traits, fleet_publication->fleet_control()->types);
+        auto complete = sim::galactic::observed_fleets(*fleet_publication, galaxy->local.player,
+            display_traits, std::numeric_limits<std::size_t>::max(), visibility);
+        if (fleet_publication->fleet_control())
+            galactic_view::apply_local_transport_traits(complete.cards, fleet_publication->fleets(), fleet_publication->fleet_control()->types);
         std::vector<const sim::galactic::ObservedFleet*> cards;
         for (const auto& card : complete.cards) if (card.planet == planet) cards.push_back(&card);
         std::optional<sim::galactic::PlayerId> other;
@@ -493,8 +703,13 @@ void GalacticMode::State::rebuild_fleet_projection(const bool publication_change
         std::erase_if(fleet_gui_indices, [&](const auto& entry) { return !live.contains(entry.first); });
     }
     const std::vector<std::pair<sim::EntityId, std::int64_t>> indices(fleet_gui_indices.begin(), fleet_gui_indices.end());
+    auto display_traits = fleet_display_traits;
+    if (displayed_snapshot->fleet_control())
+        galactic_view::apply_fleet_transport_traits(display_traits, displayed_snapshot->fleet_control()->types);
     fleet_intelligence = sim::galactic::observed_fleets(*displayed_snapshot, galaxy->local.player,
-        fleet_display_traits, capacity, fleet_visibility, image_rank, indices);
+        display_traits, capacity, fleet_visibility, image_rank, indices);
+    if (displayed_snapshot->fleet_control())
+        galactic_view::apply_local_transport_traits(fleet_intelligence.cards, displayed_snapshot->fleets(), displayed_snapshot->fleet_control()->types);
     ++fleet_projection_rebuilds;
     visible_fleet_badges.clear();
     // GHUD-S76: stack icons require a filtered fleet card, never presence
@@ -507,7 +722,7 @@ void GalacticMode::State::rebuild_fleet_projection(const bool publication_change
     for (const auto& row : fleet_intelligence.presence)
         if (row.owner != galaxy->local.player) aware_other.try_emplace(row.planet, row.owner);
     const auto* style = command_catalog.find("g_planet_fleet");
-    const auto stacks = style ? style->list(data::ui::Field::blank_texture_name) : std::vector<std::string>{};
+    const auto stacks = style ? style->list(data::ui::Field::blank_texture_name) : std::span<const std::string>{};
     std::vector<std::pair<galactic_view::ObjectId, viewer::galactic::FleetStackIcon>> placed;
     // fleet_stacks.hpp's mixed layout: the same any-other-owner test as fleet_stack_icons.
     mixed_fleet_planets.clear();
@@ -554,10 +769,10 @@ void GalacticMode::State::rebuild_fleet_projection(const bool publication_change
                 if (found == fleet_badges.end() || found->second.owner != galaxy->local.player) return FleetDragSource{};
                 // #3072: the stack icon moves every local fleet of the slots it shows.
                 auto slots = stack_icon_slots(key.first, key.second);
-                if (found->second.fleet) return FleetDragSource{*found->second.fleet, std::move(slots)};
+                if (found->second.fleet) return FleetDragSource{*found->second.fleet, std::move(slots), {}, {}};
                 const auto marker = std::find_if(galaxy->fleets.begin(), galaxy->fleets.end(),
                     [&](const auto& value) { return value.planet == key.first && value.owner == found->second.owner; });
-                return FleetDragSource{marker != galaxy->fleets.end() ? marker->fleet : 0, std::move(slots)};
+                return FleetDragSource{marker != galaxy->fleets.end() ? marker->fleet : 0, std::move(slots), {}, {}};
             });
             // Control picking follows sibling order; the drag-only receiver
             // stays above badges created by later snapshot publications.
@@ -651,7 +866,8 @@ void GalacticMode::State::rebuild_fleet_cell_layouts(const presentation::ui::She
             look.type = group.type; look.gui_index = group.gui_index;
             if (group.type) if (const auto type = production_names.find(*group.type); type != production_names.end())
                 if (const auto art = production_art.find(type->second); art != production_art.end()) {
-                    const auto big = command_texture("big_" + art->second.icon);
+                    // The big_ variant is optional by design: a miss falls back to the small icon silently.
+                    const auto big = command_texture_optional("big_" + art->second.icon);
                     look.icon = big.is_valid() ? big : command_texture(art->second.icon);
                     if (big.is_valid()) {
                         const auto size = big->get_size();
@@ -718,6 +934,21 @@ void GalacticMode::State::update_fleet_controls(const presentation::ui::ShellPla
         // blank art, which is the empty rounded frame).
         const bool inert_frame = slot < 3 && name.ends_with("_0000") && !(card && card->local);
         button->set_disabled(!map_input.gates.hud_enabled || map_input.gates.tutorial_locked || inert_frame);
+        if (const auto mark = fleet_stealth_marks.find(name); mark != fleet_stealth_marks.end()) {
+            // Only the stealth alternate has a producer (card.all_stealth); the raid alternate has none yet.
+            const auto* style = command_catalog.find("icon_fleet0" + std::string(1, name[1]));
+            const auto names = style ? style->list(data::ui::Field::icon_alternate_texture_name) : std::span<const std::string>{};
+            Ref<Texture2D> art;
+            if (const auto art_name = galactic_view::stealth_mark_art(card && card->all_stealth, names); !art_name.empty())
+                art = command_texture(art_name);
+            if (mark->second->get_texture() != art) mark->second->set_texture(art);
+            if (art.is_valid()) {
+                const auto image = art->get_size() * static_cast<float>(placement.scale);
+                mark->second->set_size(image);
+                mark->second->set_position((button->get_size() - image) * 0.5F);
+            }
+            mark->second->set_visible(art.is_valid());
+        }
         if (!changed) continue; // No text, icon resolution or allocations per render frame.
         if (slot < 3 && name.ends_with("_0000")) {
             button->set_position({static_cast<float>(pixels.x), static_cast<float>(pixels.y)});
@@ -897,6 +1128,8 @@ void GalacticMode::State::update_fleet_hud() {
         rebuild_fleet_cell_layouts(placement);
     }
     update_fleet_controls(placement, changed);
+    update_advanced_open_button(placement);
+    update_planet_info(placement);
     if (changed) update_fleet_captions(placement);
     service_fleet_stack_popup();
 }

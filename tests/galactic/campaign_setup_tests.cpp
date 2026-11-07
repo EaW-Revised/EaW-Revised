@@ -372,6 +372,93 @@ void victory_authoring_contracts() {
     if (complete) expect(complete.value().galaxy().victory->installed[10].kind == gc::VictoryKind::superweapon_kill_leader,
         "WGS-83 authored order reaches the last event condition before defaults");
 }
+void campaign_rules_flavour() {
+    auto d = data();
+    d.factions[0].multiplayer_campaign_heroes = {"Ship"};
+    d.campaigns[0].human_victory_conditions = {"Galactic_Credits_Accrued"};
+    d.campaigns[0].ai_victory_conditions = {"Galactic_Cycles_Elapsed"};
+    d.campaigns[0].human_victory_credit_target = 100000;
+    d.campaigns[0].ai_victory_cycle_limit = 100000;
+    auto opts = options();
+    const auto solo = cp::plan_campaign_setup(d, types(), "Ordinary", opts).value();
+    expect(solo.rules_flavour() == cp::CampaignRulesFlavour::single_player, "solo transport defaults to SP rules");
+    opts.mode = cp::CampaignSetupMode::multiplayer;
+    const auto legacy_mp = cp::plan_campaign_setup(d, types(), "Ordinary", opts).value();
+    expect(legacy_mp.rules_flavour() == cp::CampaignRulesFlavour::multiplayer && legacy_mp.multiplayer_heroes().size() == 1,
+        "existing MP transport defaults to MP rules and MP heroes");
+    opts.rules_flavour = cp::CampaignRulesFlavour::multiplayer;
+    const auto explicit_mp = cp::plan_campaign_setup(d, types(), "Ordinary", opts).value();
+    expect(explicit_mp.galaxy().campaign_identity == legacy_mp.galaxy().campaign_identity,
+        "explicit and default MP rules have identical identity");
+    opts.rules_flavour = cp::CampaignRulesFlavour::single_player;
+    const auto coop = cp::plan_campaign_setup(d, types(), "Ordinary", opts).value();
+    expect(coop.mode() == cp::CampaignSetupMode::multiplayer && coop.multiplayer_heroes().empty(),
+        "SP rules in networked transport suppress the extra MP hero pass");
+    expect(!coop.solo_reference_human(), "networked SP rules never acquire a per-peer solo reference");
+    expect(coop.galaxy().victory->installed == solo.galaxy().victory->installed
+        && coop.galaxy().victory->context.multiplayer == false,
+        "networked SP rules install the authored SP human/AI victory lists and predicates");
+    expect(coop.galaxy().campaign_identity != legacy_mp.galaxy().campaign_identity
+        && coop.galaxy().campaign_identity != solo.galaxy().campaign_identity,
+        "identity binds both rules flavour and transport independently");
+    opts.rules_flavour = static_cast<cp::CampaignRulesFlavour>(99);
+    expect(!cp::plan_campaign_setup(d, types(), "Ordinary", opts), "invalid rules flavour refuses setup");
+    std::string reference;
+    for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+        const eawr::platform::ThreadWorkerAdapter executor(workers);
+        auto game = cp::GameSession::create(coop.galaxy()).value();
+        expect(game.galaxy().multiplayer() && game.galaxy().snapshot()->multiplayer(),
+            "networked SP rules preserve transport in the session and published view");
+        auto observer_setup = coop.galaxy(); observer_setup.interactive_seat = gc::SeatId{1};
+        expect(cp::GameSession::create(observer_setup).value().state_sha256() == game.state_sha256(),
+            "networked SP setup removes the per-seat observer before simulation construction");
+        auto local_setup = coop.galaxy(); local_setup.networked_transport = false;
+        auto local_game = cp::GameSession::create(local_setup).value();
+        expect(!local_game.galaxy().multiplayer() && !local_game.galaxy().snapshot()->multiplayer()
+            && local_game.state_sha256() != game.state_sha256(),
+            "transport alone changes canonical identity while SP victory rules stay the same");
+        auto voting_game = cp::GameSession::create(coop.galaxy()).value();
+        expect(bool(voting_game.configure_multiplayer_votes(30)), "networked SP rules retain transport-gated voting setup");
+        const auto before_observer = game.state_sha256();
+        game.set_interactive_seat(gc::SeatId{1}).value();
+        expect(game.state_sha256() == before_observer, "networked SP observer choice stays outside canonical policy");
+        const auto identities = eawr::checkpoint::game_identities(coop.galaxy());
+        const auto bytes = eawr::checkpoint::save_game_checkpoint(game, identities).value();
+        auto restored = eawr::checkpoint::load_game_checkpoint(bytes, identities, {}, executor).value();
+        const auto mp_identities = eawr::checkpoint::game_identities(legacy_mp.galaxy());
+        expect(!eawr::checkpoint::load_game_checkpoint(bytes, mp_identities, {}, executor),
+            "checkpoint cannot resume with another rules flavour");
+        auto old_identities = identities; --old_identities.rules_version;
+        expect(!eawr::checkpoint::load_game_checkpoint(bytes, old_identities, {}, executor),
+            "checkpoint rules domain refuses an older build");
+        const std::vector<gc::GameCommand> saves{
+            {{0, gc::SeatId{1}, 1}, gc::SaveRequest{1, true, false, false}},
+            {{0, gc::SeatId{1}, 2}, gc::SaveRequest{2, false, true, false}},
+            {{0, gc::SeatId{1}, 3}, gc::SaveRequest{3, false, false, false}}};
+        for (const auto& save : saves) { static_cast<void>(game.submit(save).value()); static_cast<void>(restored.session.submit(save).value()); }
+        std::string hashes;
+        for (unsigned tick = 0; tick < 35; ++tick) {
+            const auto stepped = game.step(executor).value();
+            expect(restored.session.step(executor).value().state_hash.get() == stepped.state_hash.get(),
+                "networked SP checkpoint continuation equals uninterrupted run");
+            if (tick == 0) {
+                const auto& events = stepped.save_events;
+                expect(std::count_if(events.begin(), events.end(), [](const auto& event) { return event.kind == gc::GalacticEventKind::save_rejected; }) == 2
+                    && std::count_if(events.begin(), events.end(), [](const auto& event) { return event.kind == gc::GalacticEventKind::save_requested; }) == 1,
+                    "WGS-33 networked SP rules reject quick/auto saves and admit ordinary saves");
+            }
+            hashes += stepped.state_hash.get();
+        }
+        if (reference.empty()) reference = hashes;
+        else expect(reference == hashes, "networked SP rules give equal per-tick hashes on 1/2/4/8 workers");
+        auto replay_bytes = gc::write_replay(game.record()).value();
+        auto replay = cp::GameSession::from_replay(gc::parse_replay(replay_bytes).value()).value();
+        for (unsigned tick = 0; tick < 35; ++tick) static_cast<void>(replay.step(executor).value());
+        expect(replay.state_sha256() == game.state_sha256(), "networked SP replay preserves setup flavour identity");
+        replay_bytes[12] = static_cast<std::uint8_t>(gc::galactic_rules_version - 1);
+        expect(!gc::parse_replay(replay_bytes), "replay refuses the old galactic rules domain");
+    }
+}
 void planning() {
     auto input = data(); auto opts = options();
     const auto built = cp::plan_campaign_setup(input, types(), "ordinary", opts);
@@ -964,6 +1051,6 @@ void installed() {
 }
 } // namespace
 int case_galactic_campaign_setup_tests(int argc, const char* const[]) {
-    if (argc > 1) installed(); else { load_resource_guards(); numeric_campaign_load(); signed_loader_campaign(); full_initial_control(); victory_authoring_contracts(); planning(); pause_policy_defaults(); order_and_parity(); observer_start(); layout_observer(); provider_refusals(); retained_parent(); }
+    if (argc > 1) installed(); else { load_resource_guards(); numeric_campaign_load(); signed_loader_campaign(); full_initial_control(); victory_authoring_contracts(); campaign_rules_flavour(); planning(); pause_policy_defaults(); order_and_parity(); observer_start(); layout_observer(); provider_refusals(); retained_parent(); }
     return galactic_test::failures == 0 ? 0 : 1;
 }

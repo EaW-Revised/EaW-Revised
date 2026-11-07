@@ -11,19 +11,25 @@ namespace eawr::script::foc::galactic_ai {
 using MovementBattleSubscription = std::function<bool(std::uint64_t request)>;
 using MovementBattleDelivery = std::function<core::Result<void>(std::uint64_t request,
     bool begin, const campaign::GalacticAiBattleNotice&)>;
+using MovementBattleDegrade = std::function<void(std::uint64_t request, const core::Diagnostic&)>;
 
 // MovementOwner is NativeActions in production. Keeping its narrow existing
 // movements()/movement_conflict() interface lets the adapter be tested before
 // the shared TaskForce/action bindings are composed.
 template<class MovementOwner>
 std::function<core::Result<void>(const campaign::GalacticAiBattleNotice&)> movement_battle_listener(
-    std::shared_ptr<MovementOwner> owner, MovementBattleSubscription subscribed_request, MovementBattleDelivery delivery) {
-    return [owner = std::move(owner), subscribed_request = std::move(subscribed_request), delivery = std::move(delivery)](const campaign::GalacticAiBattleNotice& notice) -> core::Result<void> {
+    std::shared_ptr<MovementOwner> owner, MovementBattleSubscription subscribed_request, MovementBattleDelivery delivery,
+    MovementBattleDegrade degrade = {}) {
+    return [owner = std::move(owner), subscribed_request = std::move(subscribed_request), delivery = std::move(delivery), degrade = std::move(degrade)](const campaign::GalacticAiBattleNotice& notice) -> core::Result<void> {
         const auto refuse = [](const char* message) {
             core::Diagnostic diagnostic; diagnostic.code = "EAWR-GCAI-BATTLE-0001"; diagnostic.message = message;
             return core::Result<void>::failure(std::move(diagnostic));
         };
-        if (!owner || !subscribed_request || !delivery) return refuse("battle listener requires retained owner, registered requests and delivery adapter");
+        if (!owner || !subscribed_request || !delivery) {
+            auto unavailable = refuse("battle listener requires retained owner, registered requests and delivery adapter");
+            if (!degrade) return unavailable;
+            degrade(0, unavailable.error()); return core::Result<void>::success();
+        }
         const bool begin = notice.kind == campaign::GalacticAiBattleKind::entered;
         if ((!begin && notice.kind != campaign::GalacticAiBattleKind::returned)
             || !notice.conflict.id || !notice.conflict.planet) return refuse("battle notice has no valid conflict identity");
@@ -46,8 +52,14 @@ std::function<core::Result<void>(const campaign::GalacticAiBattleNotice&)> movem
                 });
             }
             if (!subscribed) continue;
-            if (auto changed = owner->movement_conflict(request, notice.conflict.planet, begin); !changed) return changed;
-            if (auto delivered = delivery(request, begin, notice); !delivered) return delivered;
+            if (auto changed = owner->movement_conflict(request, notice.conflict.planet, begin); !changed) {
+                if (!degrade) return changed;
+                degrade(request, changed.error()); continue;
+            }
+            if (auto delivered = delivery(request, begin, notice); !delivered) {
+                if (!degrade) return delivered;
+                degrade(request, delivered.error());
+            }
         }
         // Ground invasion end/result and auto-resolve begin come from their
         // actual world listeners, not a fabricated tactical-entry notice.
@@ -65,7 +77,10 @@ inline auto retained_movement_battle_listener(std::shared_ptr<NativeActions> act
                 const auto* facts = actions->qualified_freestore().facts(found->second.freestore_actor);
                 return facts && facts->qualified && facts->object.owner == found->second.player && facts->tracked_movement;
             }
-            return engine && movement_subscribed(*actions, *engine, request);
+            // Keep native movement bookkeeping when only the script owner is
+            // unavailable. WGA-204 skips the callback, not the battle itself.
+            return engine ? movement_subscribed(*actions, *engine, request)
+                : found != actions->movements().end() && found->second.registered;
         },
         [actions, engine, scheduler = std::move(scheduler)](std::uint64_t request, bool begin, const campaign::GalacticAiBattleNotice& notice) -> core::Result<void> {
             if (!actions || !actions->movements().contains(request)) {
@@ -94,8 +109,19 @@ inline auto retained_movement_battle_listener(std::shared_ptr<NativeActions> act
                 error.message = "TaskForce battle delivery requires its retained engine and script owners";
                 return core::Result<void>::failure(std::move(error));
             }
+            if (const auto* plan = engine->plan(movement.plan_id)) {
+                const auto retired = scripts->retired_instances();
+                if (std::find(retired.begin(), retired.end(), plan->instance) != retired.end()) {
+                    core::Diagnostic error; error.code = std::string(authoritative::codes::invalid_request);
+                    error.message = "TaskForce battle callback skipped for a retired Lua instance";
+                    return core::Result<void>::failure(std::move(error));
+                }
+            }
             return engine->deliver_galactic_space_conflict(request, movement.plan_id,
                 movement.taskforce_id, movement.block_id, begin, *scripts);
+        },
+        [actions](std::uint64_t request, const core::Diagnostic& diagnostic) {
+            if (actions) actions->note_battle_delivery(request, diagnostic);
         });
 }
 inline auto retained_movement_battle_listener(std::shared_ptr<NativeActions> actions,

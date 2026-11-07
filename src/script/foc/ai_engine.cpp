@@ -161,10 +161,10 @@ bool Engine::reserved(sim::EntityId object) const {
     return false;
 }
 
-std::optional<Real> Engine::global_value(const std::string& name) const {
+std::optional<authoritative::Value> Engine::global_value(const std::string& name) const {
     const auto found = globals_.find(name);
     if (found == globals_.end()) return std::nullopt;
-    return found->second;
+    return std::visit([](const auto& value) { return authoritative::Value{value}; }, found->second);
 }
 
 void Engine::freeze_galactic_decision_reads() {
@@ -252,6 +252,21 @@ std::uint64_t Engine::galactic_chain_owner(std::uint64_t instance) const {
     if (instance < first_plan_instance) return instance;
     const auto* owner = player_of_slot(galactic_instance_slot(instance));
     return owner ? owner->player : 0;
+}
+
+core::Result<void> Engine::retire_galactic_provider(tactical::PlayerId player, authoritative::ScriptScheduler& scripts) {
+    const auto write = native_record_scope();
+    // Fault path only: remove the failed native owner's attached Lua chains,
+    // retaining its committed native identities/policy for checkpoint readers.
+    for (const auto id : scripts.instances()) if (galactic_chain_owner(id) == player)
+        if (auto removed = scripts.remove_instance(id); !removed) return removed;
+    if (auto* owner = player_ai(player)) {
+        native_records_changed(player, {22});
+        for (auto& [id, plan] : owner->running) { static_cast<void>(id); plan.exited = true; }
+    }
+    native_records_changed(0, {29});
+    std::erase_if(events_, [&](const auto& event) { return galactic_chain_owner(event.target) == player; });
+    mark_native_state_changed(); return core::Result<void>::success();
 }
 
 bool Engine::galactic_target_issued(std::uint64_t id) const {
@@ -373,7 +388,8 @@ void Engine::publish_record(PlanRecord line) {
         host_->setup.journal->append_plan(
             PlanEvent{line.tick, line.player, line.plan, line.goal, line.target, line.event, line.detail});
     }
-    append_ai_diagnostic(records_, records_dropped_, std::move(line));
+    if (native_phase_) native_phase_->plan_reports.push_back(std::move(line));
+    else append_ai_diagnostic(records_, records_dropped_, std::move(line));
 }
 
 // ---- Player effects (S-T3b) ---------------------------------------------------------------------
@@ -487,7 +503,7 @@ void Engine::stage_removal(authoritative::ScriptScheduler& scripts, const std::u
 void Engine::journal_plan(PlanEvent row, const bool raw) const {
     if (!host_->setup.journal) return;
     if (auto* turn = staged()) { turn->diagnostics.emplace_back(PlayerEffects::JournalPlan{std::move(row), raw}); return; }
-    if (raw) host_->setup.journal->plans.push_back(std::move(row)); else host_->setup.journal->append_plan(std::move(row));
+    if (raw) host_->setup.journal->append_raw_plan(std::move(row)); else host_->setup.journal->append_plan(std::move(row));
 }
 
 void Engine::note_pad_query(const tactical::PlayerId player, const bool open) const {
@@ -683,6 +699,7 @@ core::Result<void> Engine::commit_effects(authoritative::ScriptScheduler& script
             || effects.work.plans_attached != 0 || effects.work.plans_pumped != 0
             || effects.work.reinforcement_candidates != 0 || effects.work.reinforcement_search_ns != 0;
         if (failed || (effects.empty() && !worked && effects.reads == EffectReads{})) { discard_effects(player); continue; }
+        select_native_fault_context(player.player);
         EffectCounts counts;
         counts.turns = 1;
         counts.orders = effects.orders.size();
@@ -736,7 +753,7 @@ core::Result<void> Engine::commit_effects(authoritative::ScriptScheduler& script
                 publish_record(std::move(*record_line));
             } else if (auto* plan_row = std::get_if<PlayerEffects::JournalPlan>(&line)) {
                 if (!host_->setup.journal) continue;
-                if (plan_row->raw) host_->setup.journal->plans.push_back(std::move(plan_row->row));
+                if (plan_row->raw) host_->setup.journal->append_raw_plan(std::move(plan_row->row));
                 else host_->setup.journal->append_plan(std::move(plan_row->row));
             } else if (host_->setup.journal) {
                 host_->setup.journal->append_service(std::get<AiServiceEvent>(line));
@@ -770,6 +787,7 @@ core::Result<void> Engine::commit_effects(authoritative::ScriptScheduler& script
         effects.clear(player.player);
     }
     if (failed) return core::Result<void>::failure(*failed);
+    clear_native_fault_context();
     return core::Result<void>::success();
 }
 

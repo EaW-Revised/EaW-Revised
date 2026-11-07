@@ -146,6 +146,14 @@ std::shared_ptr<const tactical::TacticalSnapshot> LiveSessionView::snapshot_at(c
     return session_ ? session_->snapshot_at(tick) : nullptr;
 }
 
+std::shared_ptr<const sim::tactical::LandOverlayData> LiveSessionView::land_overlay() const {
+    return session_ ? session_->land_overlay() : nullptr;
+}
+
+platform::LiveSession::SnapshotHistory LiveSessionView::history_copy() const {
+    return session_ ? session_->history_copy() : platform::LiveSession::SnapshotHistory{};
+}
+
 std::string LiveSessionView::slotless_report_rows() const {
     // #3957: live units that found no launch slot (squadron containers draw nothing by design).
     std::string rows;
@@ -534,7 +542,7 @@ void LiveSessionView::write_report_frame_progress_and_visibility(std::ostream& o
                       const auto entity = unit.state.entity_id;
                       if (!std::binary_search(unfogged_map_props_.begin(), unfogged_map_props_.end(), entity)) continue;
                       const auto contacts = battle_frame_.latest ? battle_frame_.latest->visible_entities(player_)
-                          : std::span<const sim::EntityId>{};
+                          : std::vector<sim::EntityId>{};
                       rows += (rows.empty() ? "" : ", ") + std::string("{\"entity\": ") + std::to_string(entity)
                           + ", \"type\": " + json(unit.type)
                           + ", \"sensor_visible\": " + (std::binary_search(contacts.begin(), contacts.end(), entity) ? "true" : "false")
@@ -1011,6 +1019,11 @@ void LiveSessionView::write_report_status(std::ostream& output) const {
     output << ", \"status\": " << json(finish_status_)
            << ", \"error\": " << (simulation_error_.empty() ? std::string("null") : json(simulation_error_))
            << ", \"failure_replay\": " << (failure_replay_.empty() ? std::string("null") : json(failure_replay_));
+    // #3989: the in-game menu's saves (written, refused) and the last one that ended.
+    output << ", \"player_saves\": {\"running\": " << (save_status_.running ? "true" : "false")
+           << ", \"written\": " << save_status_.written << ", \"failed\": " << save_status_.failed
+           << ", \"last_name\": " << json(save_status_.last_name) << ", \"last_tick\": " << save_status_.last_tick
+           << ", \"last_problem\": " << json(save_status_.last_problem) << "}";
 }
 
 

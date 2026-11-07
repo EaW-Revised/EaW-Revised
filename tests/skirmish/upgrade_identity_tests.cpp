@@ -4,6 +4,8 @@
 #include "eawr/data/xml.hpp"
 #include "eawr/units/unit_tables.hpp"
 #include "eawr/skirmish/start.hpp"
+#include "eawr/script/foc/tactical_ai.hpp"
+#include "eawr/sim/tactical/motion.hpp"
 #include "eawr/sim/tactical/session.hpp"
 #include "eawr/vfs/vfs.hpp"
 
@@ -16,6 +18,7 @@
 #include <fstream>
 #include <iostream>
 #include <iterator>
+#include <limits>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -188,6 +191,9 @@ int stock_contract() {
     auto tables=eawr::units::load_unit_tables(input); if(!tables) return 2;
     auto rules=eawr::skirmish::economy_rules({}, {}, tables.value());
     if(!rules) {std::cerr<<rules.error().message<<'\n'; return 2;}
+    expect(std::none_of(rules.value().load_notes.pending.begin(), rules.value().load_notes.pending.end(), [](const auto& note) {
+        return note.code == "EAWR-LOAD-0355";
+    }), "stock economy emits zero invalid-purchase notes");
     const auto faction=eawr::skirmish::faction_id("Underworld");
     for(std::size_t index=0;index<std::size(stock);++index) {
         const auto& entry=stock[index]; const std::string name=entry.name;
@@ -277,8 +283,250 @@ int stock_contract() {
     return failures?1:0;
 }
 }
+static int economy_defaults_contract() {
+    namespace t = eawr::sim::tactical;
+    eawr::units::UnitTables tables;
+    auto built = eawr::skirmish::economy_rules({}, {}, tables);
+    if (!built || built.value().match_policy != t::SkirmishMatchPolicy{} || built.value().vulnerability != Fixed::from_raw(-3 * Fixed::scale)
+        || built.value().collision_distance != Fixed::from_raw(200 * Fixed::scale)
+        || built.value().vulnerability_frames != 150) return 1;
+    eawr::core::LoadNoteBuffer notes;
+    t::TacticalSetup setup;
+    if (built.value().match_policy.disabled_flags() != 0) setup.match_policy = built.value().match_policy;
+    auto made = t::TacticalSession::create(setup, {}, {}, {}, std::nullopt, {}, {}, {}, built.value(), {}, &notes);
+    eawr::core::LoadNoteCollector collected;
+    collected.merge(notes);
+    const auto emitted = collected.snapshot();
+    if (emitted.size() != 4 || !std::all_of(emitted.begin(), emitted.end(), [](const auto& note) {
+        return note.code == "EAWR-LOAD-0352" && note.classification == eawr::core::LoadCategory::retail_accepts
+            && note.retail == "LSA-P5" && note.action == eawr::core::LoadAction::default_used;
+    })) return 1;
+    eawr::sim::InlineExecutor executor;
+    if (!made || !made.value().step(executor)) return 1;
+    auto replayed = t::TacticalSession::from_replay(made.value().record(), {}, {}, {}, std::nullopt, {}, {}, {}, built.value());
+    if (!replayed || !replayed.value().step(executor)) return 1;
+    if (made.value().state_sha256() != replayed.value().state_sha256()) return 1;
+    eawr::units::UnitType type;
+    type.id = "Synthetic_Construction";
+    type.tactical_respawn_seconds = Fixed::from_raw(std::numeric_limits<std::int64_t>::max());
+    type.under_construction = true;
+    type.constructed_type = "Synthetic_Complete";
+    type.production.build_time_seconds = Fixed::from_raw(std::numeric_limits<std::int64_t>::max());
+    tables.units.push_back(type);
+    tables.pad_ai_build_multiplier = Fixed::from_raw(std::numeric_limits<std::int64_t>::max());
+    auto degraded = eawr::skirmish::economy_rules({}, {}, tables);
+    if (!degraded || degraded.value().pads.respawn.size() != 1
+        || degraded.value().pads.respawn[0].frames != 86400U * 30U
+        || degraded.value().pads.construction.size() != 1
+        || degraded.value().pads.construction[0].seconds != 86400
+        || degraded.value().pads.construction[0].ai_seconds != 86400) return 1;
+    eawr::core::LoadNoteBuffer degraded_notes;
+    auto safe = t::TacticalSession::create(setup, {}, {}, {}, std::nullopt, {}, {}, {}, degraded.value(), {}, &degraded_notes);
+    eawr::core::LoadNoteCollector degraded_collector;
+    degraded_collector.merge(degraded_notes);
+    const auto diagnostic = degraded_collector.snapshot();
+    if (!safe || !safe.value().step(executor) || !std::any_of(diagnostic.begin(), diagnostic.end(), [](const auto& note) {
+        return note.code == "EAWR-LOAD-0354" && note.object == "Synthetic_Construction";
+    })) return 1;
+    return 0;
+}
+
+static int economy_builder_rows_contract() {
+    namespace t = eawr::sim::tactical;
+    namespace sk = eawr::skirmish;
+    int row_failures = 0;
+    const auto expect = [&](bool okay, const char* label) { if (!okay) { ++row_failures; std::cerr << label << '\n'; } };
+    const auto value = [](std::int64_t n) { return Fixed::from_raw(n * Fixed::scale); };
+    eawr::units::UnitTables base;
+    base.ai_credit_multiplier = value(1);
+    base.pad_ai_build_multiplier = value(1);
+    base.constants.scalars = {{"Tactical_Build_Time_Multiplier", value(1), "1"},
+        {"Space_Elevated_Vulnerability_Factor", value(-3), "-3"},
+        {"Space_Elevated_Vulnerability_Duration", value(5), "5"},
+        {"Space_Reinforcement_Collision_Check_Distance", value(200), "200"}};
+    sk::SkirmishStart start;
+    start.setup.players = {{1, 0, sk::faction_id("SyntheticFaction"), 1}};
+    sk::StartPlayer player;
+    player.player = start.setup.players[0]; player.faction = "SyntheticFaction"; player.lobby = true;
+    player.difficulty = t::AiLevel::normal;
+    start.players.push_back(player);
+    sk::StartInputs inputs;
+    sk::StartFaction faction;
+    faction.name = "SyntheticFaction"; faction.space_unit_cap = 20; faction.basic_ai = "SyntheticAI";
+    inputs.factions.push_back(faction);
+    const auto count = [&](const auto& made, const char* code, std::size_t expected) {
+        expect(static_cast<bool>(made), "builder row accepts authored content");
+        if (!made) return;
+        expect(made.value().load_notes.pending.size() == expected, "builder row exact total note count");
+        expect(static_cast<std::size_t>(std::count_if(made.value().load_notes.pending.begin(),
+            made.value().load_notes.pending.end(), [&](const auto& note) { return note.code == code; })) == expected,
+            "builder row exact code count");
+    };
+    auto missing = base;
+    missing.ai_credit_multiplier.reset(); missing.pad_ai_build_multiplier.reset();
+    auto no_cap = inputs; no_cap.factions[0].space_unit_cap.reset();
+    auto fallback = sk::economy_rules(start, no_cap, missing);
+    count(fallback, "EAWR-LOAD-0353", 3);
+    if (fallback) {
+        expect(fallback.value().players[0].population_cap == 0, "missing cap safely prevents new reinforcement population");
+        expect(std::count_if(fallback.value().load_notes.pending.begin(), fallback.value().load_notes.pending.end(), [](const auto& n) {
+            return n.classification == eawr::core::LoadCategory::retail_accepts;
+        }) == 2, "missing credit and build multipliers use class B stock defaults");
+    }
+    auto absent = sk::economy_rules(start, {}, base);
+    count(absent, "EAWR-LOAD-0353", 1);
+    if (absent) expect(absent.value().load_notes.pending[0].message.find("faction is absent") != std::string::npos,
+        "absent faction diagnostic distinguishes absent cap");
+    for (const auto& values : {std::pair{"-2", "0"}, std::pair{"1e100", "1e100"}, std::pair{"0", "1"}}) {
+        std::map<std::string, std::string, std::less<>> xml;
+        xml["data/xml/difficultyadjustments.xml"] = "<Difficulty_Adjustments><Difficulty_Adjustment Name=\"Probe\">"
+            "<Credit_Multiplier>" + std::string(values.first) + "</Credit_Multiplier><Space_Build_Time_Multiplier>"
+            + values.second + "</Space_Build_Time_Multiplier></Difficulty_Adjustment></Difficulty_Adjustments>";
+        xml["data/xml/ai/players/probe.xml"] = "<AIPlayerType><Name>SyntheticAI</Name><Difficulty_Adjustments>"
+            "<Normal>Probe</Normal></Difficulty_Adjustments></AIPlayerType>";
+        auto difficulty = eawr::script::foc::AiDifficultyTable::load(xml);
+        expect(static_cast<bool>(difficulty), "synthetic difficulty XML loads");
+        if (!difficulty) continue;
+        auto adjusted = inputs;
+        adjusted.difficulty = std::make_shared<const eawr::script::foc::AiDifficultyTable>(std::move(difficulty).value());
+        auto made = sk::economy_rules(start, adjusted, base);
+        count(made, "EAWR-LOAD-0350", std::string_view(values.first) == "0" ? 0 : 2);
+        if (made) expect(made.value().players[0].credit_multiplier.raw() >= 0
+            && made.value().players[0].ai_build_time_multiplier.raw() > 0, "difficulty effective multipliers are safe");
+    }
+    for (const auto seconds : {86400, 86401}) {
+        auto tables = base;
+        eawr::units::UnitType pad; pad.id = "SyntheticPad"; pad.build_pad = true;
+        pad.production.buildable.push_back({"SyntheticFaction", {"SyntheticChild"}});
+        eawr::units::UnitType child; child.id = "SyntheticChild"; child.under_construction = true;
+        child.constructed_type = "SyntheticComplete"; child.production.build_time_seconds = value(seconds);
+        child.production.build_cost_multiplayer = value(25);
+        tables.units = {pad, child};
+        auto made = sk::economy_rules(start, inputs, tables);
+        count(made, "EAWR-LOAD-0354", seconds == 86400 ? 0 : 1);
+        if (made) expect(made.value().pads.construction[0].seconds == 86400
+            && made.value().menus[0].options[0].build_frames == 86400U * 30U,
+            "structure and construction durations share bounded seconds without wrap");
+        tables.units[0].build_pad = false;
+        tables.units[1].under_construction = false;
+        tables.units[1].production.upgrade_object = true;
+        tables.units[1].production.build_time_seconds = value(2);
+        tables.constants.scalars[0].value = Fixed::from_raw(std::numeric_limits<std::int64_t>::max());
+        auto overflow = sk::economy_rules(start, inputs, tables);
+        count(overflow, "EAWR-LOAD-0355", 1);
+        if (overflow) expect(!overflow.value().menus[0].options[0].available, "overflow product disables only the affected offer");
+    }
+    for (const auto seconds : {86400, 86401}) {
+        auto tables = base;
+        tables.constants.scalars[2].value = value(seconds);
+        tables.constants.scalars[2].text = std::to_string(seconds);
+        auto made = sk::economy_rules(start, inputs, tables);
+        count(made, "EAWR-LOAD-0351", seconds == 86400 ? 0 : 1);
+        if (made) expect(made.value().vulnerability_frames == 86400U * 30U, "vulnerable duration clamps at exact day boundary");
+    }
+    {
+        auto tables = base;
+        eawr::units::UnitType point; point.id = "SyntheticPoint"; point.capture_point = true;
+        point.capture_radius = value(1); point.capture_seconds = value(1);
+        const auto huge = Fixed::from_raw(std::numeric_limits<std::int64_t>::max());
+        point.scale_factor = huge;
+        point.build_attachment.position = eawr::sim::math::Vec3{huge, huge, huge};
+        tables.units.push_back(point);
+        auto neutral = inputs; neutral.factions[0].neutral = true;
+        auto made = sk::economy_rules(start, neutral, tables);
+        count(made, "EAWR-LOAD-0361", 1);
+        if (made) expect(made.value().pads.capture[0].attachment.x == value(-t::max_motion_coordinate)
+            && made.value().pads.capture[0].attachment.y == value(t::max_motion_coordinate),
+            "overflow attachment transform saturates and rotates safely");
+    }
+    {
+        auto tables = base;
+        tables.constants.scalars[1].value = value(-10);
+        tables.constants.scalars[1].text = std::string(200, '9');
+        auto made = sk::economy_rules(start, inputs, tables);
+        count(made, "EAWR-LOAD-0365", 1);
+        if (made) expect(made.value().load_notes.pending[0].authored_value.size() <= 128,
+            "authored scalar text override is bounded before publication");
+    }
+    {
+        auto campaign_start = start;
+        campaign_start.setup.first_free_entity_id = 1;
+        campaign_start.setup.campaign.emplace();
+        t::EconomyPlayer account; account.player = 1; account.credits = value(-3); account.credit_cap = value(100);
+        campaign_start.setup.campaign->players.push_back(account);
+        auto made = sk::economy_rules(campaign_start, inputs, base, true);
+        count(made, "EAWR-LOAD-0358", 1);
+        if (made) {
+            expect(made.value().match_policy == t::SkirmishMatchPolicy{}, "default campaign match policy uses canonical absent representation");
+            if (made.value().match_policy.disabled_flags() != 0) campaign_start.setup.match_policy = made.value().match_policy;
+            auto session = t::TacticalSession::create(campaign_start.setup, {}, {}, {}, std::nullopt, {}, {}, {}, made.value());
+            eawr::sim::InlineExecutor executor;
+            expect(session && session.value().step(executor), "campaign builder normalized accounts create and step");
+            if (session) {
+                auto replayed = t::TacticalSession::from_replay(session.value().record(), {}, {}, {}, std::nullopt,
+                    {}, {}, {}, made.value());
+                expect(replayed && replayed.value().step(executor), "campaign builder normalized accounts replay and step");
+                if (replayed) expect(replayed.value().state_sha256() == session.value().state_sha256(), "campaign replay state matches");
+            }
+            auto mismatch = made.value(); mismatch.players[0].credits = value(5);
+            expect(!t::TacticalSession::create(campaign_start.setup, {}, {}, {}, std::nullopt, {}, {}, {}, mismatch),
+                "genuinely different campaign accounts still fail binding");
+        }
+    }
+    return row_failures ? 1 : 0;
+}
+
+static int collision_projection_contract() {
+    namespace sk = eawr::skirmish;
+    namespace units = eawr::units;
+    const auto value = [](int n) { return Fixed::from_raw(n * Fixed::scale); };
+    units::UnitType loser; loser.id = "SYNTH_OIVRHNPFF4K4"; loser.table_order = 9;
+    loser.influences_capture = true; loser.capture_point = true;
+    loser.capture_radius = value(1); loser.capture_seconds = value(1);
+    loser.production.build_cost_multiplayer = value(99);
+    loser.production.income.push_back({"loser", value(90), value(1), false, false});
+    loser.movement.layer_z_adjust = value(9);
+    units::UnitType winner; winner.id = "SYNTH_QLU1MOI5PTT3"; winner.table_order = 2;
+    winner.influences_capture = false; winner.hull = value(10);
+    winner.production.build_cost_multiplayer = value(25); winner.production.build_time_seconds = value(2);
+    winner.production.income.push_back({"winner", value(30), value(1), false, false});
+    winner.movement.layer_z_adjust = value(2);
+    units::UnitType station; station.id = "SyntheticStation"; station.table_order = 10;
+    station.production.buildable.push_back({"Faction", {loser.id}});
+    units::UnitTables tables; tables.units = {loser, winner, station};
+    const auto id = sk::type_id(loser.id);
+    if (id != sk::type_id(winner.id)) return 1;
+    const auto check = [&](const units::UnitTables& input, bool expect_income) {
+        const auto made = sk::economy_rules({}, {}, input);
+        if (!made) { std::cerr << made.error().message << '\n'; return false; }
+        const auto& rules = made.value();
+        const auto* menu = rules.menu(sk::type_id(station.id), sk::faction_id("Faction"));
+        const auto* option = menu ? menu->find(id) : nullptr;
+        const auto influence = std::find_if(rules.pads.influence.begin(), rules.pads.influence.end(),
+            [id](const auto& row) { return row.type == id; });
+        const auto footprint = std::find_if(rules.footprints.begin(), rules.footprints.end(),
+            [id](const auto& row) { return row.type == id; });
+        const auto income = std::find_if(rules.income.begin(), rules.income.end(),
+            [id](const auto& row) { return row.source == id; });
+        const auto name = rules.load_notes.type_names.find(id);
+        const auto note = std::find_if(rules.load_notes.pending.begin(), rules.load_notes.pending.end(),
+            [](const auto& row) { return row.code == "EAWR-LOAD-0251"; });
+        return option && option->price == value(25) && option->available
+            && influence != rules.pads.influence.end() && !influence->influences
+            && rules.pads.capture.empty() && footprint != rules.footprints.end() && footprint->layer_z == value(2)
+            && (expect_income ? income != rules.income.end() && income->base_value == value(30) : income == rules.income.end())
+            && name != rules.load_notes.type_names.end() && name->second == winner.id && note != rules.load_notes.pending.end();
+    };
+    if (!check(tables, true)) return 1;
+    tables.units[1].production.income.clear();
+    return check(tables, false) ? 0 : 1;
+}
+
 int main(int argc,char** argv) {
     if(argc>1&&std::string_view(argv[1])=="--stock") return stock_contract();
+    if (collision_projection_contract() != 0) { std::cerr << "collision projection contract failed\n"; return 1; }
+    if (economy_builder_rows_contract() != 0) return 1;
+    if (economy_defaults_contract() != 0) { std::cerr << "economy defaults contract failed\n"; return 1; }
     const auto control=paired(false); const auto duplicate=paired(true); const auto cloak=cloaking();
     return control==0&&duplicate==0&&cloak==0?0:1;
 }

@@ -1,7 +1,7 @@
 #pragma once
 
 #include "eawr/assets/assets.hpp"
-#include "eawr/data/xml.hpp"
+#include "eawr/data/xml_fwd.hpp"
 #include "eawr/platform/live_session.hpp"
 #include "eawr/presentation/particles/render.hpp"
 #include "eawr/presentation/renderer.hpp"
@@ -10,7 +10,7 @@
 #include "eawr/sim/tactical/combat.hpp"
 #include "eawr/sim/tactical/snapshot.hpp"
 #include "eawr/units/unit_tables.hpp"
-#include "eawr/vfs/vfs.hpp"
+#include "eawr/vfs/vfs_fwd.hpp"
 #include "particle_adapter.hpp"
 #include "space_populate.hpp"
 
@@ -74,6 +74,8 @@ public:
     // #638: the pool the particle systems step on (null: the main thread alone); it must outlive
     // this object's frames.
     void set_workers(const particles::StepExecutor* workers) noexcept { registry_->set_executor(workers); }
+    // L1.2: the render backend, for the frame's latches (ParticleLatches); null once released.
+    [[nodiscard]] GodotParticleBackend* particle_backend() noexcept { return backend_.get(); }
     void measure_particles(bool on) noexcept { registry_->begin_measurement(on); }
     [[nodiscard]] const particles::RegistryTimings& particle_timings() const noexcept { return registry_->timings(); }
     [[nodiscard]] core::Result<void> set_particle_detail(const particles::ParticleDetail detail) {

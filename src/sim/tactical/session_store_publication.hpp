@@ -20,6 +20,7 @@ struct SessionStorePublication {
     std::uint64_t registry_emplacement_count{};
     std::function<void(std::string_view, bool)> commit_observer;
     std::shared_ptr<StateHasher> hasher; // #637: null hashes on the stepping thread
+    StateHashPolicy hash_policy{StateHashPolicy::always}; // on_demand: steps skip the encode + hash
 };
 
 } // namespace eawr::sim::tactical::session_detail

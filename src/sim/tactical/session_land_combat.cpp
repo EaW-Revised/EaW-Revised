@@ -17,6 +17,35 @@ bool target_alive(const detail::CombatWorld& world, const detail::CombatUnit& so
         && world.hostile(source.owner, target->owner);
 }
 
+}
+
+core::Result<void> Tick::land_victory_census(const std::vector<LiveUnit>& live) {
+    if (impl_->victory.condition != VictoryCondition::all_enemy_units_destroyed) return core::Result<void>::success();
+    std::array<std::array<std::uint64_t, max_players>, tick_partition_count> parts{};
+    const auto counted = executor.execute_phase("land-victory-census", tick_partition_count, [&](std::size_t partition) {
+        const auto range = partition_range(partition, live.size());
+        for (auto i = range.begin; i < range.end; ++i) {
+            const auto& unit = live[i].state;
+            if (!std::binary_search(impl_->victory.relevant_types.begin(), impl_->victory.relevant_types.end(), unit.type_id)) continue;
+            const auto owner = std::lower_bound(impl_->setup.players.begin(), impl_->setup.players.end(), unit.owner,
+                [](const Player& row, PlayerId id) { return row.player_id < id; });
+            if (owner != impl_->setup.players.end() && owner->player_id == unit.owner)
+                ++parts[partition][static_cast<std::size_t>(owner - impl_->setup.players.begin())];
+        }
+    });
+    if (!counted) return counted;
+    for (const auto& part : parts) for (std::size_t i = 0; i < impl_->setup.players.size(); ++i)
+        victory_counts_[i] += part[i];
+    return core::Result<void>::success();
+}
+
+void Tick::land_commit_victory(std::vector<Event>& events) {
+    impl_->starbases = std::move(pending_starbases_);
+    impl_->outcome = pending_outcome_;
+    if (pending_victory_event_) events.push_back(*pending_victory_event_);
+}
+
+namespace {
 const detail::CombatUnit* nearest_land_target(const detail::CombatWorld& world, const detail::CombatUnit& source,
     const Fixed radius) {
     if (!source.profile || !source.profile->max_attack_distance) return nullptr;
@@ -225,6 +254,7 @@ core::Result<void> Tick::land_combat(std::vector<LiveUnit>& live,
             [&](const auto& row) { return row.object == request->first; })) { ++request; continue; }
         const auto root = staged.find(request->first);
         if (root != staged.end()) {
+            track_victory_change(&root->second.state, nullptr, true);
             impacts_->events->push_back(Event{tick, EventKind::unit_destroyed, root->second.state.owner, 0, root->first});
             impl_->adjust_owned(root->second.state, false);
             staged.erase(root);

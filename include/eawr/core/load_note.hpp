@@ -53,6 +53,9 @@ inline constexpr std::size_t load_note_byte_cap = 512 * 1024;
 
 namespace load_note_codes {
 inline constexpr std::string_view missing_include = "EAWR-LOAD-0001";
+inline constexpr std::string_view duplicate_object_name = "EAWR-LOAD-0005";
+inline constexpr std::string_view compatible_xml_header = "EAWR-LOAD-0003";
+inline constexpr std::string_view skipped_xml_file = "EAWR-LOAD-0004";
 } // namespace load_note_codes
 
 [[nodiscard]] std::string_view to_string(LoadCategory value) noexcept;

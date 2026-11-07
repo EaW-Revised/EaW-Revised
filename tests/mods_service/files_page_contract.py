@@ -29,7 +29,7 @@ class FilesPageContracts(unittest.TestCase):
         self.client = contract.Interactive(args=["--user-data", str(self.user), "--loadcheck-helper", str(FAKE)])
         self.counter = 0
         hello = self.call("hello")
-        self.assertEqual(hello["result"]["protocol"], {"major": 1, "minor": 6})
+        self.assertEqual(hello["result"]["protocol"], {"major": 1, "minor": 14})
         self.assertIn("files.page", hello["result"]["capabilities"])
         self.assertIn("result", self.call("game.find", hint=str(self.game)))
         self.profile = {"id": "file-index", "name": "file-index", "layers": [{"key": "mods:Leaf", "root": str(self.mod)}]}

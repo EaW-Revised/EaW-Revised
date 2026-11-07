@@ -342,6 +342,12 @@
     "constant": "opcode_battle_control",
     "name": "battle control transition",
     "documented": true
+   },
+   {
+    "value": 34,
+    "constant": "opcode_script_invulnerable",
+    "name": "script invulnerable",
+    "documented": true
    }
   ]
  },
@@ -580,6 +586,11 @@
    "tag": "SEEN",
    "constant": "sighting_tag",
    "documented": false
+  },
+  {
+   "tag": "SINV",
+   "constant": "script_invulnerable_tag",
+   "documented": true
   },
   {
    "tag": "SLCE",

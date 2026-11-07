@@ -36,7 +36,7 @@ void build_shell_art(HudState& state, const vfs::Vfs& filesystem, const model::S
             origin = "missing";
         }
         state.mesh_textures.push_back(mesh.name + ": " + mesh.texture + " (" + origin + ")");
-        setup.meshes.push_back({mesh.blend, found->second, mesh.triangles});
+        setup.meshes.push_back({mesh.blend, found->second, mesh.triangles, {}});
     }
 
 }
@@ -56,7 +56,7 @@ void build_command_buttons(HudState& state, const vfs::Vfs& filesystem, EawrTact
         };
         const Ref<Texture2D> normal = texture("normal", look.normal);
         state.options_button->setup_art({.normal = normal, .hover = texture("mouse_over", look.mouse_over),
-            .pressed = texture("pressed", look.pressed), .disabled = texture("disabled", look.disabled)});
+            .pressed = texture("pressed", look.pressed), .disabled = texture("disabled", look.disabled), .portrait = {}, .overlays = {}});
         state.options_button->set_action([&state] { if (state.options_handler) state.options_handler(); });
         setup.options_quad = quad(look, normal);
         setup.options_hit = look.rect;
@@ -84,7 +84,7 @@ void build_command_buttons(HudState& state, const vfs::Vfs& filesystem, EawrTact
         const auto normal = button_texture(look.name, look.normal, origin);
         control->setup_art({.normal = normal, .hover = button_texture(look.name, look.mouse_over, origin),
             .pressed = button_texture(look.name, look.pressed, origin),
-            .disabled = button_texture(look.name, look.disabled, origin)});
+            .disabled = button_texture(look.name, look.disabled, origin), .portrait = {}, .overlays = {}});
         control->set_disabled(!state.movie_height.has_value());
         control->set_action([&state] { if (state.movie_handler) state.movie_handler(); });
         state.movie_button = control;
@@ -116,7 +116,7 @@ void build_command_buttons(HudState& state, const vfs::Vfs& filesystem, EawrTact
             return result;
         };
         control->setup_art({.normal = texture, .hover = state_texture("mouse_over", button.mouse_over),
-            .pressed = state_texture("pressed", button.pressed), .disabled = state_texture("disabled", button.disabled)});
+            .pressed = state_texture("pressed", button.pressed), .disabled = state_texture("disabled", button.disabled), .portrait = {}, .overlays = {}});
         if (pause) {
             std::string flash_origin;
             control->set_flash_texture(button_texture(button.name + " flash",
@@ -609,6 +609,9 @@ void build_battle_overlay(HudState& state, const vfs::Vfs& filesystem, const dat
 bool TacticalHud::build(const vfs::Vfs& filesystem, const data::Catalog* objects,
                         const std::optional<std::string>& context_name, Node& parent) {
     State& state = *state_;
+    bool invalid_project_hud = false;
+    state.project_hud = model::load_project_hud(filesystem, &invalid_project_hud);
+    if (invalid_project_hud) state.warn("EAWR-UI-0791", "invalid EawrHud.xml layer; project controls hidden until replaced");
     auto command_bar = data::ui::load_command_bar(filesystem);
     if (!command_bar) {
         state.failure = core::format_diagnostic(command_bar.error());
@@ -634,6 +637,7 @@ bool TacticalHud::build(const vfs::Vfs& filesystem, const data::Catalog* objects
     setup.rules = state.options.rules;
     setup.view = model::hud_view_model(anchors.value().shell, catalog, model::alt_variant(state.options.faction),
                                        model::vfs_shell_masks(filesystem));
+    state.project_hud_anchors = setup.view.components;
     for (const auto& diagnostic : setup.view.diagnostics) state.diagnostics.push_back(diagnostic);
     state.faceplates = setup.view.faceplates.size();
 
@@ -672,7 +676,7 @@ bool TacticalHud::build(const vfs::Vfs& filesystem, const data::Catalog* objects
                                     const Ref<Texture2D>& icon) {
         std::string origin;
         const auto blank = button_texture(button.name, button.blank, origin);
-        control->setup_art({.normal = blank, .disabled = blank,
+        control->setup_art({.normal = blank, .hover = {}, .pressed = {}, .disabled = blank,
             .portrait = HudButtonArt::Portrait{icon, button.click_shift, false},
             .overlays = HudButtonArt::Overlays{button_texture(button.name, button.mouse_over, origin),
                 button_texture(button.name, button.pressed, origin), button_texture(button.name, button.disabled, origin),
@@ -690,7 +694,12 @@ bool TacticalHud::build(const vfs::Vfs& filesystem, const data::Catalog* objects
     state.hud = memnew(EawrTacticalHud);
     state.hud->set_name("EawrTacticalHud");
     EawrTacticalHud* hud = state.hud;
-    state.mask->set_hit_test([hud](const double x, const double y) { return hud->hit(x, y); });
+    state.mask->set_hit_test([hud, &state](const double x, const double y) {
+        const Vector2 point(static_cast<float>(x), static_cast<float>(y));
+        if (state.gift_button && state.gift_button->is_visible_in_tree() && state.gift_button->get_rect().has_point(point)) return true;
+        if (state.gift_scroll && state.gift_scroll->is_visible_in_tree() && state.gift_scroll->get_rect().has_point(point)) return true;
+        return hud->hit(x, y);
+    });
     state.mask->add_child(state.hud);
     layer->add_child(state.mask);
     parent.add_child(layer);

@@ -37,7 +37,7 @@ using namespace sim_bench;
 
 void print_help(std::ostream& output) {
     output << "Usage: sim_bench [--units <n>] [--ticks <n>] [--warmup <n>] [--repeat <n>] [--seed <n>]\n"
-              "                 [--workers <n|hardware>[,<n|hardware>...]] [--dispatch-cost 1]\n"
+              "                 [--workers <n|hardware>[,<n|hardware>...]] [--dispatch-cost 1] [--fog on|off] [--hash on|off]\n"
               "\n"
               "Generates a synthetic space battle of <n> units (default 1200) from the seed, steps it\n"
               "<warmup> + <ticks> ticks (default 30 + 300) with each worker count (default 1, 2, 4, 8 and\n"
@@ -115,6 +115,10 @@ template <typename T>
         } else if (argument == "--dispatch-cost") {
             valid = value == "0" || value == "1";
             options.dispatch_cost = value == "1";
+        } else if (argument == "--fog" || argument == "--hash") {
+            valid = value == "on" || value == "off";
+            if (argument == "--fog") options.fog = value == "on";
+            else options.hash = value == "on";
         } else if (argument == "--workers") {
             auto workers = parse_workers(value);
             valid = workers.has_value();
@@ -169,14 +173,26 @@ struct Run {
     return std::chrono::duration<double>(duration).count();
 }
 
+[[nodiscard]] std::optional<tactical::FogRules> fog_rules(const Options& options) {
+    if (!options.fog) return std::nullopt;
+    tactical::FogRules fog;
+    fog.map_left = Fixed::from_raw(-12000 * Fixed::scale);
+    fog.map_top = Fixed::from_raw(12000 * Fixed::scale);
+    fog.cell_size = Fixed::from_raw(100 * Fixed::scale);
+    fog.cells_wide = 240;
+    fog.cells_tall = 240;
+    return fog;
+}
+
 [[nodiscard]] std::optional<Run> run(const Battle& battle, const Options& options, const std::size_t workers) {
     auto created = tactical::TacticalSession::from_replay(
-        battle.replay, battle.sensors, battle.durability, tactical::MotionTable{}, std::nullopt, battle.combat);
+        battle.replay, battle.sensors, battle.durability, tactical::MotionTable{}, fog_rules(options), battle.combat);
     if (!created) {
         std::cerr << eawr::core::format_diagnostic(created.error()) << '\n';
         return std::nullopt;
     }
     auto session = std::move(created).value();
+    if (!options.hash) session.set_state_hash_policy(eawr::sim::StateHashPolicy::on_demand);
     const eawr::platform::ThreadWorkerAdapter pool(workers);
     const TimingExecutor timed(pool);
     std::string hashes;
@@ -217,7 +233,8 @@ struct SerialProbe {
 };
 
 [[nodiscard]] SerialProbe probe_serial(const Battle& battle, const Options& options) {
-    auto session = tactical::TacticalSession::from_replay(battle.replay, battle.sensors, battle.durability).value();
+    auto session = tactical::TacticalSession::from_replay(
+        battle.replay, battle.sensors, battle.durability, tactical::MotionTable{}, fog_rules(options)).value();
     const eawr::sim::InlineExecutor executor;
     for (std::uint64_t tick = 0; tick < options.warmup + options.ticks; ++tick) {
         static_cast<void>(session.step(executor));
@@ -302,6 +319,8 @@ int main(const int argc, const char* const argv[]) {
     std::cout << "sim_bench: synthetic space battle, " << options->units << " units, " << player_count
               << " players in 2 teams, " << options->ticks << " timed ticks after " << options->warmup
               << " warm-up, seed " << options->seed << ", median of " << options->repeat << " run(s)\n"
+              << "fog " << (options->fog ? "on" : "off (exact-range fallback)")
+              << ", hash " << (options->hash ? "on" : "off") << "\n"
               << "hardware threads: " << eawr::platform::ThreadWorkerAdapter::hardware_worker_count()
               << ", partitions per phase: " << eawr::sim::tick_partition_count << "\n\n";
 
@@ -339,11 +358,11 @@ int main(const int argc, const char* const argv[]) {
     for (const auto& phase : phases) {
         std::cout << ' ' << phase << " ms |";
     }
-    std::cout << " serial ms |\n|---:|---:|---:|---:|---:|";
+    std::cout << " serial ms | serial us/unit |\n|---:|---:|---:|---:|---:|";
     for (std::size_t index = 0; index <= phases.size(); ++index) {
         std::cout << "---:|";
     }
-    std::cout << '\n';
+    std::cout << "---:|\n";
     for (const auto& row : rows) {
         const auto per_tick = row.median.seconds / ticks;
         double parallel = 0;
@@ -356,13 +375,18 @@ int main(const int argc, const char* const argv[]) {
             parallel += seconds;
             std::cout << ' ' << fixed(seconds / ticks * 1000, 3) << " |";
         }
-        std::cout << ' ' << fixed((row.median.seconds - parallel) / ticks * 1000, 3) << " |\n";
+        std::cout << ' ' << fixed((row.median.seconds - parallel) / ticks * 1000, 3) << " | "
+                  << fixed((row.median.seconds - parallel) / ticks * 1e6 / static_cast<double>(options->units), 3) << " |\n";
     }
     const auto probe = probe_serial(battle, *options);
     std::cout << "\nserial steps alone on the final state: state encoding " << fixed(probe.encode_seconds * 1000, 3)
               << " ms and SHA-256 " << fixed(probe.sha_seconds * 1000, 3) << " ms (" << probe.state_bytes / 1024
               << " KiB), sensor field build " << fixed(probe.sensor_field_seconds * 1000, 3) << " ms\n"
               << "units alive after the run: " << rows.front().median.final_units << " of " << options->units << '\n';
+    if (!options->hash) {
+        std::cout << "per-tick hashing disabled; worker equality was not checked\n";
+        return 0;
+    }
     if (digests.size() != 1) {
         std::cout << "FAIL: worker counts disagree on the state hashes (" << digests.size() << " different runs)\n";
         return 1;

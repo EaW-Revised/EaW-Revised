@@ -23,6 +23,34 @@ namespace eawr::sim::galactic {
 using session_detail::invalid;
 using session_detail::ordered_births;
 using session_detail::validate_native_force;
+struct GalacticSession::NativeOutputPhase::State {
+    Impl* owner{};
+    std::atomic<bool> published{};
+    bool fault_recorded{};
+};
+GalacticSession::NativeOutputPhase::NativeOutputPhase(std::unique_ptr<State> state) : state_(std::move(state)) {}
+GalacticSession::NativeOutputPhase::~NativeOutputPhase() { state_->owner->native_output_published = nullptr; }
+bool GalacticSession::NativeOutputPhase::published() const noexcept { return state_->published.load(std::memory_order_acquire); }
+void GalacticSession::NativeOutputPhase::record_fault() noexcept {
+    if (published() && !state_->fault_recorded) {
+        if (state_->owner->native_post_publication_faults != std::numeric_limits<std::uint64_t>::max())
+            ++state_->owner->native_post_publication_faults;
+        state_->fault_recorded = true;
+    }
+}
+core::Result<std::unique_ptr<GalacticSession::NativeOutputPhase>> GalacticSession::begin_native_output_phase() {
+    if (impl_->failed || impl_->native_output_published)
+        return invalid<std::unique_ptr<NativeOutputPhase>>("native output phase requires a healthy idle publication latch");
+    auto state = std::make_unique<NativeOutputPhase::State>(); state->owner = impl_.get();
+    auto token = std::unique_ptr<NativeOutputPhase>(new NativeOutputPhase(std::move(state)));
+    impl_->native_output_published = &token->state_->published;
+    return core::Result<std::unique_ptr<NativeOutputPhase>>::success(std::move(token));
+}
+void GalacticSession::note_native_output_published() noexcept {
+    if (impl_->native_output_published) impl_->native_output_published->store(true, std::memory_order_release);
+}
+std::uint64_t GalacticSession::native_post_publication_faults() const noexcept { return impl_->native_post_publication_faults; }
+
 void GalacticSession::Impl::record_actor(CensusObject row, NativeActorChange::Kind kind) {
     if (kind == NativeActorChange::Kind::created && row.combat_role == ActorCombatRole::unavailable
         && production && production->nested_creation) {
@@ -416,6 +444,7 @@ core::Result<std::vector<EntityId>> GalacticSession::create_native_force(const N
         *impl.production->nested_creation, [&](EntityId id) { return bool(impl.snapshot->current_type(id)); });
     if (!actors) return actors;
     auto movement = std::make_shared<MovementSetup>(*impl.movement_inputs);
+    note_native_output_published(); // due-hero reward writes live owners
     if (auto applied = impl.apply_native_force(request, placement, *movement); !applied)
         return Result::failure(applied.error());
     std::sort(movement->contents.begin(), movement->contents.end(), [](const auto& a, const auto& b) { return a.container < b.container; });
@@ -492,8 +521,74 @@ struct GalacticSession::NativeActionBarrier::State {
     std::recursive_mutex mutex;
     std::atomic<bool> closing{};
     bool independent_committed{};
+    bool provider_active{};
+    std::size_t provider_savepoints{}, provider_rollbacks{};
     ~State() { while (!segments.empty()) segments.pop_back(); }
 };
+struct GalacticSession::NativeActionBarrier::ProviderSavepoint::Saved {
+    std::shared_ptr<State> state;
+    NativeActionShadow checkpoint;
+    std::size_t segments{}, actions{}, journal_entries{};
+    std::optional<NativeEffectPhase> last_phase;
+    bool settled{};
+
+    explicit Saved(std::shared_ptr<State> owner)
+        : state(std::move(owner)), checkpoint(*state->segments.back()), segments(state->segments.size()),
+          actions(state->actions), journal_entries(state->journal_entries), last_phase(state->last_phase) {}
+
+    bool usable() const noexcept {
+        return !settled && state->provider_active && !state->finished
+            && native_action_barrier_context.lock().get() == state.get();
+    }
+    void discard() noexcept {
+        // No new publication or allocation on the rollback path. The first
+        // mutation detached the sparse shadow from checkpoint; later layers
+        // own only this provider's writes and journal entries.
+        while (state->segments.size() > segments) state->segments.pop_back();
+        *state->segments.back() = checkpoint;
+        state->actions = actions;
+        state->journal_entries = journal_entries;
+        state->last_phase = last_phase;
+        state->provider_active = false;
+        ++state->provider_rollbacks;
+        settled = true;
+    }
+};
+GalacticSession::NativeActionBarrier::ProviderSavepoint::ProviderSavepoint(std::unique_ptr<Saved> saved)
+    : saved_(std::move(saved)) {}
+GalacticSession::NativeActionBarrier::ProviderSavepoint::~ProviderSavepoint() {
+    if (saved_->settled) return;
+    if (saved_->usable()) saved_->discard();
+    else {
+        // Losing the owning thread/barrier is infrastructure misuse, not a
+        // deterministic provider failure that may be silently retired.
+        saved_->state->world->impl_->failed = true;
+    }
+}
+core::Result<void> GalacticSession::NativeActionBarrier::ProviderSavepoint::commit() {
+    if (!saved_->usable()) return invalid<void>("provider world savepoint requires its open owning barrier");
+    saved_->state->provider_active = false;
+    saved_->settled = true;
+    return core::Result<void>::success();
+}
+core::Result<void> GalacticSession::NativeActionBarrier::ProviderSavepoint::rollback() {
+    if (!saved_->usable()) return invalid<void>("provider world rollback requires its open owning barrier");
+    saved_->discard();
+    return core::Result<void>::success();
+}
+core::Result<std::unique_ptr<GalacticSession::NativeActionBarrier::ProviderSavepoint>>
+GalacticSession::NativeActionBarrier::begin_provider(PlayerId player) {
+    using Result = core::Result<std::unique_ptr<ProviderSavepoint>>;
+    if (!state_ || state_->finished || state_->provider_active || state_->tail || !state_->independent_players.empty()
+        || native_action_barrier_context.lock().get() != state_.get())
+        return invalid<std::unique_ptr<ProviderSavepoint>>("provider world savepoint requires its serial player barrier");
+    if (auto selected = select_player(player); !selected) return Result::failure(selected.error());
+    auto saved = std::make_unique<ProviderSavepoint::Saved>(state_);
+    auto result = std::unique_ptr<ProviderSavepoint>(new ProviderSavepoint(std::move(saved)));
+    state_->provider_active = true;
+    ++state_->provider_savepoints;
+    return Result::success(std::move(result));
+}
 struct GalacticSession::NativeActionBarrier::PlayerScope {
     std::shared_ptr<State> parent, selected;
     std::weak_ptr<void> previous;
@@ -679,6 +774,8 @@ core::Result<void> GalacticSession::NativeActionBarrier::select_player(PlayerId 
     if (!state_ || state_->finished || native_action_barrier_context.lock().get() != state_.get()
         || !state_->independent_players.empty() || !std::binary_search(state_->players.begin(), state_->players.end(), player))
         return invalid<void>("native barrier selection requires its admitted player and owning thread");
+    if (state_->provider_active && state_->segments.back()->player() != player)
+        return invalid<void>("settle the provider world savepoint before changing players");
     if (auto started = begin_players(); !started) return started;
     if (state_->tail || state_->segments.back()->player() == player) return core::Result<void>::success();
     auto next = state_->segments.back()->for_player(player, std::min<std::size_t>(state_->max_requests, galactic_max_objects));
@@ -688,7 +785,7 @@ core::Result<void> GalacticSession::NativeActionBarrier::select_player(PlayerId 
     return core::Result<void>::success();
 }
 core::Result<void> GalacticSession::NativeActionBarrier::begin_tail() {
-    if (!state_ || state_->finished || native_action_barrier_context.lock().get() != state_.get()
+    if (!state_ || state_->finished || state_->provider_active || native_action_barrier_context.lock().get() != state_.get()
         || (!state_->independent_players.empty() && !state_->independent_committed))
         return invalid<void>("native tail requires its active barrier and owning thread");
     if (state_->tail) return core::Result<void>::success();
@@ -698,7 +795,7 @@ core::Result<void> GalacticSession::NativeActionBarrier::begin_tail() {
 }
 core::Result<void> GalacticSession::NativeActionBarrier::commit() {
     gc_profile::Scope profile_scope(gc_profile::Phase::barrier_commit);
-    if (!state_ || state_->finished || native_action_barrier_context.lock().get() != state_.get()
+    if (!state_ || state_->finished || state_->provider_active || native_action_barrier_context.lock().get() != state_.get()
         || (!state_->independent_players.empty() && !state_->independent_committed))
         return invalid<void>("native commit requires its active barrier and owning thread");
     std::vector<NativeActionShadow> layers; layers.reserve(state_->segments.size());
@@ -709,9 +806,20 @@ core::Result<void> GalacticSession::NativeActionBarrier::commit() {
     if (!committed) state_->world->impl_->failed = true;
     return committed;
 }
+core::Result<void> GalacticSession::NativeActionBarrier::discard() {
+    if (!state_ || state_->finished || state_->provider_active || !state_->independent_players.empty()
+        || native_action_barrier_context.lock().get() != state_.get() || state_->world->impl_->failed)
+        return invalid<void>("native phase discard requires its healthy unpublished serial barrier");
+    native_action_barrier_context.reset(); state_->finished = true;
+    state_->world->impl_->native_barrier_active.store(false, std::memory_order_release);
+    while (!state_->segments.empty()) state_->segments.pop_back();
+    return core::Result<void>::success();
+}
 GalacticSession::NativeActionBarrier::Work GalacticSession::NativeActionBarrier::work() const noexcept {
     Work result;
     if (!state_) return result;
+    result.provider_savepoints = state_->provider_savepoints;
+    result.provider_rollbacks = state_->provider_rollbacks;
     result.layers = state_->segments.size();
     for (const auto& segment : state_->segments) result.read_checkpoints += segment->data_->read_checkpoints;
     for (const auto& [player, child] : state_->independent_players) {
@@ -820,9 +928,14 @@ core::Result<GalacticSession::NativeFleetReceipt> GalacticSession::stage_native_
     const auto first = shadow.actor_changes().size();
     auto result = shadow.land_transports(player, fleet, pending);
     if (!result) return result;
-    if (shadow.data_->last_published) {
+    // An admitted hostile landing can dispatch a ground ability at ordered
+    // commit without publishing surface changes in the shadow. Preserve its
+    // place among staged effects so replay invokes that same live callback.
+    if (result.value().admitted) {
         if (auto saved = impl_->journal_native_receipt(*this, NativeEffectKind::land, player, fleet, 0, pending, nullptr, result.value()); !saved)
             return core::Result<NativeFleetReceipt>::failure(saved.error());
+    }
+    if (shadow.data_->last_published) {
         if (auto delivered = deliver_native_shadow_changes(shadow, first); !delivered) return core::Result<NativeFleetReceipt>::failure(delivered.error());
     }
     if (auto continued = advance_native_segment(); !continued) return core::Result<NativeFleetReceipt>::failure(continued.error());
@@ -1326,6 +1439,7 @@ core::Result<void> GalacticSession::commit_native_actions(std::span<const Native
         struct RestoreHandlers {
             Impl& owner;
             NativeActorChangesHandler actors;
+            const NativeActorChangesHandler* live_ability_actors;
             NativeMovementListener movement;
             CreditNotificationHandler credits;
             NativeProductionHandler production;
@@ -1336,15 +1450,19 @@ core::Result<void> GalacticSession::commit_native_actions(std::span<const Native
             ~RestoreHandlers() {
                 owner.native_commit_publication.reset();
                 if (!committed && failure_snapshot) owner.snapshot = std::move(failure_snapshot);
+                owner.native_live_ability_actor_changes = live_ability_actors;
                 owner.native_actor_changes_handler = std::move(actors); owner.native_movement_listener = std::move(movement);
                 owner.credit_notification_handler = std::move(credits); owner.native_production_handler = std::move(production);
                 owner.native_production_outcome_handler = std::move(outcomes);
                 owner.native_applying = applying;
             }
-        } restore{*impl_, impl_->native_actor_changes_handler, impl_->native_movement_listener,
+        } restore{*impl_, impl_->native_actor_changes_handler, impl_->native_live_ability_actor_changes, impl_->native_movement_listener,
             impl_->credit_notification_handler, impl_->native_production_handler, impl_->native_production_outcome_handler, impl_->native_applying,
             native_effects_prepared ? impl_->snapshot : nullptr};
-        if (actor_changes_prepared) impl_->native_actor_changes_handler = {};
+        if (actor_changes_prepared) {
+            impl_->native_live_ability_actor_changes = &restore.actors;
+            impl_->native_actor_changes_handler = {};
+        }
         if (native_effects_prepared) {
             impl_->native_commit_publications = 0;
             impl_->native_commit_publication = impl_->snapshot;
@@ -1535,6 +1653,7 @@ core::Result<GalacticSession::DueHeroPlacement> GalacticSession::place_due_hero(
         [&](const auto& row) { return row.id == placement.primary; }))
         return invalid<DueHeroPlacement>("due placement primary must belong to its committed object tree");
     auto movement = std::make_shared<MovementSetup>(*impl.movement_inputs);
+    note_native_output_published(); // due-hero reward writes live owners
     if (auto applied = impl.apply_native_force(request, placement, *movement); !applied)
         return Result::failure(applied.error());
     std::sort(movement->contents.begin(), movement->contents.end(), [](const auto& a, const auto& b) { return a.container < b.container; });

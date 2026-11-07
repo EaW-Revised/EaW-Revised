@@ -285,12 +285,13 @@ void victory_superweapon_return(VictoryState& s, const VictorySuperweaponReturn&
 }
 
 std::optional<CampaignResult> campaign_result(const VictoryState& s, PlayerId local,
-    bool dialog_active, bool movie_playing) {
-    if (!s.context.multiplayer && (dialog_active || movie_playing)) return std::nullopt;
+    bool dialog_active, bool movie_playing, std::optional<bool> networked_transport) {
+    const bool networked = networked_transport.value_or(s.context.multiplayer);
+    if (!networked && (dialog_active || movie_playing)) return std::nullopt;
     GalacticVictoryCondition condition;
     if (!local || !pending_victory(s, condition)) return std::nullopt;
     return CampaignResult{condition, condition.player == local,
-        s.context.multiplayer ? CampaignResultRoute::multiplayer_quit : CampaignResultRoute::score};
+        networked ? CampaignResultRoute::multiplayer_quit : CampaignResultRoute::score};
 }
 
 bool victory_leader_planet_destruction(VictoryState& s, PlayerId actor, PlayerId controller,

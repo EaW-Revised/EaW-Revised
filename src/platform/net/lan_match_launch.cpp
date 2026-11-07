@@ -3,6 +3,18 @@
 
 namespace eawr::presentation::godot_backend::lan_detail {
 
+void TcpLanMatch::start_load_pump() {
+        load_pump_ = std::make_unique<LoadTransportPump>(io_->transport);
+    }
+
+std::optional<core::Diagnostic> TcpLanMatch::stop_load_pump() {
+        if (!load_pump_) return {};
+        load_pump_->stop();
+        auto failure = load_pump_->failure();
+        load_pump_.reset();
+        return failure;
+    }
+
 void TcpLanMatch::pump_setup(const skirmish::FixtureOptions& selected)  {
         pump_setup_impl(selected);
         if (!handed_over_) diagnostics_->view(view());
@@ -171,6 +183,7 @@ std::optional<skirmish::FixtureOptions> TcpLanMatch::take_start()  {
         if (!pending_ || view().phase == LanPhase::ended) return {};
         handed_over_ = true; // Between main-thread polls, before the simulation thread exists.
         { const std::lock_guard lock(mutex_); view_.phase = LanPhase::barrier; view_.start_enabled = false; }
+        start_load_pump();
         return std::exchange(pending_, {});
     }
 
@@ -202,8 +215,15 @@ void TcpLanMatch::set_input_epoch_provider(std::function<std::optional<std::uint
     }
 
 platform::LiveStepDriver TcpLanMatch::driver(const tactical::TacticalSetup& setup)  {
-        return [self = shared_from_this(), setup](platform::LiveStepContext& context,
-            std::span<const tactical::PlayerCommand> commands, std::uint64_t now) {
+        // Join the temporary owner before the live worker can touch the stream.
+        auto load_failure = stop_load_pump();
+        return [self = shared_from_this(), setup, load_failure = std::move(load_failure)](platform::LiveStepContext& context,
+            std::span<const tactical::PlayerCommand> commands, std::uint64_t now) mutable {
+                if (load_failure && self->io_->transport.pending.empty()) {
+                    auto failure = std::move(*load_failure); load_failure.reset();
+                    self->set_failure(failure);
+                    return DriverResult::failure(std::move(failure));
+                }
                 self->progress(context, now);
                 self->diagnostics_->tick = context.completed_tick();
                 if (self->trace_ && self->trace_->failed()) {
@@ -212,6 +232,11 @@ platform::LiveStepDriver TcpLanMatch::driver(const tactical::TacticalSetup& setu
                     return result;
                 }
                 auto result = self->drive(setup, context, commands, now);
+                if (result && load_failure && self->io_->transport.pending.empty()) {
+                    auto failure = std::move(*load_failure); load_failure.reset();
+                    self->set_failure(failure);
+                    return DriverResult::failure(std::move(failure));
+                }
                 if (!result && self->view().phase != LanPhase::ended) self->set_failure(result.error());
                 self->diagnostics_->tick = context.completed_tick();
                 self->diagnostics_->view(self->view());

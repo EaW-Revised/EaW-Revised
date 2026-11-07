@@ -2,6 +2,7 @@
 #include <utility>
 #include <string_view>
 #include "../support/check.hpp"
+#include "eawr/vfs/vfs.hpp"
 #include "eawr/assets/assets.hpp"
 
 #include <array>

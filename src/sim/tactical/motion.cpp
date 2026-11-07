@@ -1,4 +1,5 @@
 #include "eawr/sim/tactical/motion.hpp"
+#include "eawr/sim/tactical/fighters.hpp"
 
 #include "eawr/sim/math/math.hpp"
 #include "../math/wide.hpp"
@@ -299,19 +300,188 @@ const Footprint* MotionTable::footprint(const TypeId type_id) const noexcept {
     return found != footprints.end() && found->type_id == type_id ? &*found : nullptr;
 }
 
+namespace {
+
+std::string motion_decimal(const Fixed value) {
+    const auto raw = value.raw();
+    const auto magnitude = raw < 0 ? std::uint64_t{0} - static_cast<std::uint64_t>(raw)
+                                   : static_cast<std::uint64_t>(raw);
+    const auto scale = static_cast<std::uint64_t>(Fixed::scale);
+    auto text = (raw < 0 ? std::string("-") : std::string{}) + std::to_string(magnitude / scale);
+    auto remainder = magnitude % scale;
+    if (remainder) text += '.';
+    while (remainder) {
+        remainder *= 10;
+        text += static_cast<char>('0' + remainder / scale);
+        remainder %= scale;
+    }
+    return text;
+}
+
+} // namespace
+
+void normalize_motion(MotionTable& table, core::LoadNoteBuffer& notes) {
+    const auto clamp = [&](Fixed& value, const std::int64_t minimum, const std::int64_t maximum,
+                           const char* code, const char* tag, const std::string& object, const char* message) {
+        if (value.raw() >= minimum && value.raw() <= maximum) return;
+        core::LoadNote note;
+        note.code = code;
+        note.object = object;
+        note.tag = tag;
+        note.authored_value = motion_decimal(value);
+        note.diagnostic_code = std::string(diagnostic_codes::invalid_setup);
+        note.message = message;
+        core::LoadNoteBuffer temporary;
+        const auto effective = core::clamp_note(value.raw(), minimum, maximum, std::move(note), temporary);
+        core::LoadNoteCollector collector;
+        collector.merge(temporary);
+        for (auto emitted : collector.snapshot()) {
+            emitted.effective_value = motion_decimal(Fixed::from_raw(effective));
+            notes.append(std::move(emitted));
+        }
+        value = Fixed::from_raw(effective);
+    };
+    const auto count = [&](auto& value, const std::uint64_t minimum, const std::uint64_t maximum,
+                           const char* code, const char* tag, const char* message) {
+        using T = std::remove_reference_t<decltype(value)>;
+        core::LoadNote note;
+        note.code = code;
+        note.object = "motion rules";
+        note.tag = tag;
+        note.authored_value = std::to_string(value);
+        note.diagnostic_code = std::string(diagnostic_codes::invalid_setup);
+        note.message = message;
+        value = core::clamp_note(value, static_cast<T>(minimum), static_cast<T>(maximum), std::move(note), notes);
+    };
+    clamp(table.nebula_disable_seconds, 0, 3600 * Fixed::scale, "EAWR-LOAD-0154",
+          "Nebula_Ability_Disable_Time", "motion rules", "invalid nebula service content");
+    // An unbound table has no path rules to normalize; keep its identity unchanged.
+    if (table.profiles.empty() && table.footprints.empty() && !table.avoidance) return;
+    clamp(table.rules.arc_degrees, 1, max_motion_arc_degrees * Fixed::scale, "EAWR-LOAD-0151", "MaxRotationsSpace",
+          "motion rules", "the arc angle must be in (0, 180] degrees");
+    clamp(table.rules.expansion_distance, 1, coordinate_limit_raw, "EAWR-LOAD-0151", "XYExpansionDistanceSpace",
+          "motion rules", "the expansion distance is out of range");
+    count(table.rules.reevaluation_frames, 1, max_motion_reevaluation_frames,
+          "EAWR-LOAD-0152", "MovementReevaluationFrameCount",
+          "the reevaluation interval must be 1 to 65536 frames");
+    clamp(table.rules.guard_range, 0, coordinate_limit_raw, "EAWR-LOAD-0153", "Space_Guard_Range",
+          "motion rules", "the guard range is out of range");
+    for (auto& profile : table.profiles) {
+        const auto object = std::to_string(profile.type_id);
+        const auto rate = [&](Fixed& value, const std::int64_t minimum, const char* tag) {
+            clamp(value, minimum, rate_limit_raw, "EAWR-LOAD-0155", tag, object,
+                  "speed must be in [1/16, 1024], rate of turn in [1/128, 1024], "
+                  "acceleration and deceleration in [2^-12, 1024]");
+        };
+        rate(profile.max_speed, min_speed_raw, "Max_Speed");
+        rate(profile.acceleration, min_acceleration_raw, "OverrideAcceleration");
+        rate(profile.deceleration, min_acceleration_raw, "OverrideDeceleration");
+        rate(profile.rate_of_turn, min_turn_raw, "Max_Rate_Of_Turn");
+        clamp(profile.turn_in_place_slowdown, 1, INT64_MAX, "EAWR-LOAD-0156", "TurnInPlaceSlowdown",
+              object, "the turn-in-place slowdown must be positive");
+        clamp(profile.roll_rate, 0, rate_limit_raw, "EAWR-LOAD-0156", "Max_Rate_Of_Roll",
+              object, "the roll rate must be in [0, 1024]");
+    }
+    for (auto& footprint : table.footprints) {
+        const auto object = std::to_string(footprint.type_id);
+        const auto extent = [&](Fixed& value, const char* tag) {
+            clamp(value, 0, coordinate_limit_raw, "EAWR-LOAD-0157", tag, object,
+                  "extents and radius must be in [0, 262144]");
+        };
+        extent(footprint.x_extent, "Custom_Hard_XExtent");
+        extent(footprint.y_extent, "Custom_Hard_YExtent");
+        extent(footprint.radius, "Custom_Soft_Footprint_Radius");
+        for (auto* value : {&footprint.obstacle_offset.x, &footprint.obstacle_offset.y})
+            clamp(*value, -coordinate_limit_raw, coordinate_limit_raw, "EAWR-LOAD-0157", "Space_Obstacle_Offset",
+                  object, "obstacle offsets must be in [-262144, 262144]");
+    }
+    if (!table.avoidance) return;
+    auto& rules = *table.avoidance;
+    const auto rule = [&](Fixed& value, const std::int64_t minimum, const std::int64_t maximum, const char* tag) {
+        clamp(value, minimum, maximum, "EAWR-LOAD-0158", tag, "motion rules", "avoidance rules are out of range");
+    };
+    rule(rules.max_rotations, Fixed::scale, max_avoidance_rotations * Fixed::scale, "MaxRotationsSpace");
+    rule(rules.wait_speed, 1, Fixed::scale, "WaitOperatorSpeedCoefficient");
+    rule(rules.wait_frames, 0, rate_limit_raw, "WaitOperatorBaseFrameTime");
+    rule(rules.wait_cost, 0, rate_limit_raw, "WaitOperatorCostCoefficient");
+    rule(rules.min_obstacle_cost, 1, rate_limit_raw, "MinObstacleCostSpace");
+    rule(rules.path_cost_coefficient, 1, Fixed::scale, "CurrentPathCostCoefficientSpace");
+    rule(rules.occupation_radius, 1, rate_limit_raw, "OccupationRadiusCoefficientSpace");
+    rule(rules.failure_cutoff, 0, rate_limit_raw, "SpacePathFailureDistanceCutoffCoefficient");
+    rule(rules.failure_expansions, 1, rate_limit_raw, "SpacePathFailureMaxExpansionsCoefficient");
+    rule(rules.failure_rotation, 0, rate_limit_raw, "SpacePathFailureRotationExpansionIncrement");
+    rule(rules.failure_forward, 0, rate_limit_raw, "SpacePathFailureForwardExpansionIncrement");
+    rule(rules.destination_search_increment, 1, rate_limit_raw, "DestinationSearchRadiusIncrementSpace");
+    const auto bounded_count = [&](auto& value, std::uint64_t maximum, const char* tag) {
+        count(value, 1, maximum, "EAWR-LOAD-0158", tag, "avoidance rules are out of range");
+    };
+    bounded_count(rules.max_expansions, max_avoidance_expansions, "SpacePathfindMaxExpansions");
+    bounded_count(rules.tries, max_avoidance_tries, "SpacePathingTries");
+    bounded_count(rules.tracking_interval, max_avoidance_tracking_interval, "SpaceObjectTrackingInterval");
+    bounded_count(rules.tracking_windows, max_avoidance_tracking_windows, "SpaceObjectTrackingTreeCount");
+    bounded_count(rules.search_budget, UINT64_MAX, "search_budget");
+    bounded_count(rules.search_delay, max_avoidance_search_delay, "search_delay");
+    bounded_count(rules.search_slice, UINT64_MAX, "search_slice");
+    // PC-08: keep the authored reevaluation interval unless it cannot admit even one slice.
+    count(table.rules.reevaluation_frames, 2, max_motion_reevaluation_frames,
+          "EAWR-LOAD-0159", "MovementReevaluationFrameCount",
+          "search delay must be less than the reevaluation interval");
+    count(rules.search_delay, 1, table.rules.reevaluation_frames - 1, "EAWR-LOAD-0159", "search_delay",
+          "search delay must be less than the reevaluation interval");
+    const Fixed outer = Fixed::from_raw(rules.destination_search_increment.raw()
+        * (motion_detail::destination_search_rings - 1));
+    const auto fits = [&](std::int64_t radius, Fixed occupation) {
+        Calc calc;
+        const auto points = motion_detail::ring_points(calc, outer, calc.mul(Fixed::from_raw(radius), occupation));
+        return calc.ok() && points <= motion_detail::max_ring_points;
+    };
+    const auto minimum = [](std::int64_t high, const auto& predicate) {
+        std::int64_t low = 1;
+        while (low < high) {
+            const auto middle = low + (high - low) / 2;
+            if (predicate(middle)) high = middle;
+            else low = middle + 1;
+        }
+        return low;
+    };
+    for (auto& footprint : table.footprints) {
+        if (footprint.radius.raw() == 0 || (footprint.layer == SpaceLayer::static_object && !footprint.locomotor
+            && table.find(footprint.type_id) == nullptr)) continue;
+        if (fits(footprint.radius.raw(), rules.occupation_radius)) continue;
+        // If no positive radius in the coordinate range can fit, use the existing one-point
+        // zero-radius search. Only this mover degrades; other units keep the authored coefficient.
+        if (!fits(coordinate_limit_raw, rules.occupation_radius)) {
+            clamp(footprint.radius, 0, 0, "EAWR-LOAD-0160", "Custom_Soft_Footprint_Radius",
+                  std::to_string(footprint.type_id), "the radius is too small for the destination search");
+            continue;
+        }
+        const auto radius = minimum(coordinate_limit_raw, [&](auto raw) { return fits(raw, rules.occupation_radius); });
+        clamp(footprint.radius, radius, coordinate_limit_raw, "EAWR-LOAD-0160", "Custom_Soft_Footprint_Radius",
+              std::to_string(footprint.type_id), "the radius is too small for the destination search");
+    }
+}
+
+core::Result<MotionTable> prepare_motion(const MotionTable& source, core::LoadNoteBuffer& notes) {
+    return core::normalize_owned_load_table(source, notes, normalize_motion, [](const MotionTable& table) {
+        if (table.profiles.empty() && table.footprints.empty() && !table.avoidance)
+            return validate_squadron_table(table.squadrons);
+        return validate_motion(table);
+    });
+}
+
 core::Result<void> validate_motion(const MotionTable& table) {
     if (table.nebula_disable_seconds.raw() < 0 || table.nebula_disable_seconds.raw() > 3600 * math::Fixed::scale
         || !std::is_sorted(table.nebula_service_types.begin(), table.nebula_service_types.end())
         || std::adjacent_find(table.nebula_service_types.begin(), table.nebula_service_types.end()) != table.nebula_service_types.end()) {
         return core::Result<void>::failure(invalid("invalid nebula service content"));
     }
-    if (!(table.rules.arc_degrees.raw() > 0 && table.rules.arc_degrees <= whole(180))) {
+    if (!(table.rules.arc_degrees.raw() > 0 && table.rules.arc_degrees <= whole(max_motion_arc_degrees))) {
         return core::Result<void>::failure(invalid("the arc angle must be in (0, 180] degrees"));
     }
     if (!(table.rules.expansion_distance.raw() > 0 && table.rules.expansion_distance.raw() <= coordinate_limit_raw)) {
         return core::Result<void>::failure(invalid("the expansion distance is out of range"));
     }
-    if (table.rules.reevaluation_frames == 0 || table.rules.reevaluation_frames > (1U << 16U)) {
+    if (table.rules.reevaluation_frames == 0 || table.rules.reevaluation_frames > max_motion_reevaluation_frames) {
         return core::Result<void>::failure(invalid("the reevaluation interval must be 1 to 65536 frames"));
     }
     if (table.rules.guard_range.raw() < 0 || table.rules.guard_range.raw() > coordinate_limit_raw) {
@@ -358,7 +528,8 @@ core::Result<void> validate_motion(const MotionTable& table) {
         const auto positive = [](const Fixed value) { return value.raw() > 0 && value.raw() <= rate_limit_raw; };
         // #4992: Alliance at War authors zero for the wait leg frame time and cost; a negative one stays refused.
         const auto non_negative = [](const Fixed value) { return value.raw() >= 0 && value.raw() <= rate_limit_raw; };
-        if (!(rules->max_rotations >= whole(1) && rules->max_rotations <= whole(360)) || !positive(rules->wait_speed)
+        if (!(rules->max_rotations >= whole(1) && rules->max_rotations <= whole(max_avoidance_rotations))
+            || !positive(rules->wait_speed)
             || rules->wait_speed > whole(1) || !non_negative(rules->wait_frames) || !non_negative(rules->wait_cost)
             || !positive(rules->min_obstacle_cost) || !positive(rules->path_cost_coefficient)
             || rules->path_cost_coefficient > whole(1) || !positive(rules->occupation_radius)
@@ -366,10 +537,11 @@ core::Result<void> validate_motion(const MotionTable& table) {
             || !positive(rules->failure_expansions) || rules->failure_rotation.raw() < 0
             || rules->failure_rotation.raw() > rate_limit_raw || rules->failure_forward.raw() < 0
             || rules->failure_forward.raw() > rate_limit_raw || rules->max_expansions == 0
-            || rules->max_expansions > (1U << 20) || rules->tries == 0 || rules->tries > 16
-            || rules->tracking_interval == 0 || rules->tracking_interval > (1U << 16) || rules->tracking_windows == 0
-            || rules->tracking_windows > 1024 || !positive(rules->destination_search_increment)
-            || rules->search_budget == 0 || rules->search_delay == 0 || rules->search_delay > 1024
+            || rules->max_expansions > max_avoidance_expansions || rules->tries == 0 || rules->tries > max_avoidance_tries
+            || rules->tracking_interval == 0 || rules->tracking_interval > max_avoidance_tracking_interval
+            || rules->tracking_windows == 0
+            || rules->tracking_windows > max_avoidance_tracking_windows || !positive(rules->destination_search_increment)
+            || rules->search_budget == 0 || rules->search_delay == 0 || rules->search_delay > max_avoidance_search_delay
             || rules->search_slice == 0) {
             return core::Result<void>::failure(invalid("avoidance rules are out of range"));
         }

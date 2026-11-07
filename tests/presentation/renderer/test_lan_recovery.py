@@ -43,11 +43,11 @@ class LanRecoveryWiring(unittest.TestCase):
 
     def test_only_outcome_and_summary_audio_bypass_recovery(self):
         source = (ROOT / "apps/viewer/src/battle_audio_events.cpp").read_text(encoding="utf-8")
-        body = function_body(source, "BattleAudio::frame(")
+        body = function_body(source, "BattleAudio::frame_before_combat(")
         phase_call = "present_outcome_cues(live, battle, recovery_quiet);"
         self.assertEqual(body.count(phase_call), 1)
         body = body.replace(phase_call, function_body(source, "BattleAudio::present_outcome_cues("))
-        quiet = body.index("if (recovery_quiet) return;")
+        quiet = body.index("if (recovery_quiet) return false;")
         self.assertLess(body.index("if (!outcome_shown_"), quiet)
         self.assertLess(body.index("if (!summary_shown_"), quiet)
         self.assertLess(quiet, body.index("for (const auto& cue : reinforcement_feedback)"))

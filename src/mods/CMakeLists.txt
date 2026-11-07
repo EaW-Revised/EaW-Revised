@@ -10,7 +10,8 @@ target_include_directories(
     PUBLIC
         "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>"
 )
-target_link_libraries(eawr_mods PUBLIC eawr::core PRIVATE eawr::vfs)
+find_package(Threads REQUIRED)
+target_link_libraries(eawr_mods PUBLIC eawr::core PRIVATE eawr::vfs Threads::Threads)
 if(WIN32)
     target_link_libraries(eawr_mods PRIVATE advapi32)
 endif()

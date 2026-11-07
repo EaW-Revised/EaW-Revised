@@ -127,7 +127,10 @@ void dispatch_hero_click(const HeroCollectInput& input, const HeroTrayPolicy& po
     };
     if (!same_side(*represented) || !same_side(*ordered)) return;
     if (!hostile) {
-        if (!right && select) select(*ordered, double_click);
+        // WHE-47 (EHR-34/41/52): any friendly hero icon may centre the camera on a double click, but the ordinary
+        // selection path gives another player's unit no select action (same rule as Selection::click), so only the
+        // local player's own heroes are selected; the callback gets `own` and must not select when it is false.
+        if (!right && select) select(*ordered, double_click, ordered->owner == input.local);
         return;
     }
     // The icon grants no sight. Validate both the represented object and the actual

@@ -3,6 +3,7 @@
 #include "checkpoint_access_internal.hpp"
 
 // Raw domain 9 retains six bonus slots; domain 10 includes WFR-01's nonzero fire range.
+// TL-03 adds 2 to the domain (11, 12) when any live unit has the Lua Make_Invulnerable flag.
 namespace eawr::sim::tactical::checkpoint_detail {
 
 template <> struct Fields<AbilitySlot> {
@@ -227,6 +228,7 @@ template <> struct Fields<session_detail::LiveUnit> {
         for (std::size_t slot = 0; slot < 6; ++slot) a(v.upgrade_bonuses[slot]);
         if (a.fire_range_bonuses) a(v.upgrade_bonuses[6]);
         a(v.upgraded_durability, v.asteroid_contact, v.nebula, v.corrupt, v.waypoints, v.garrison_unit, v.sighting, v.position_history);
+        if (a.script_invulnerable) a(v.script_invulnerable);
     }
 };
 

@@ -116,6 +116,10 @@ void capture_galactic_memory(State& state, const char* phase, bool prepared) {
         const auto stats = scene::VfsAssetCache(*filesystem).model_stats();
         output << "{\"cache_retained_bytes\":" << stats.cache_retained_bytes
                << ",\"cache_budget_bytes\":" << stats.cache_budget_bytes << ",\"entries\":" << stats.entries
+               << ",\"gameplay_model_loads\":" << stats.gameplay_loads
+               << ",\"first_gameplay_model\":" << std::quoted(stats.first_gameplay_model)
+               << ",\"battle_load_model_loads\":" << stats.battle_loads
+               << ",\"battle_load_boundaries\":" << stats.battle_load_boundaries
                << ",\"capacity\":";
         assets::write_payload_capacity(output, stats.capacity);
         output << '}';

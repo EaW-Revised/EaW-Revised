@@ -8,6 +8,7 @@
 #include <system_error>
 #include <vector>
 #include "../support/env.hpp"
+#include "eawr/vfs/vfs.hpp"
 #include "../support/result.hpp"
 // #3189: an invasion won by auto-resolve must hand the planet to the invader.
 //

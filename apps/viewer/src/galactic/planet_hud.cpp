@@ -57,8 +57,19 @@ int production_percent(std::int64_t full, std::int64_t remaining) noexcept {
     return low;
 }
 
-bool clock_controls_admitted(const std::size_t active_humans, const bool fixture) noexcept {
-    return fixture || active_humans <= 1;
+bool clock_controls_admitted(const std::size_t active_humans, const bool fixture, const bool lan_match, const bool lan_gameplay) noexcept {
+    return lan_match ? lan_gameplay : (fixture || active_humans <= 1);
+}
+bool clock_controls_open(const ClockGates& gates) noexcept {
+    return !gates.tutorial_locked && gates.world_allowed && !gates.lan_battle
+        && clock_controls_admitted(gates.active_humans, gates.fixture, gates.lan_match, gates.lan_gameplay);
+}
+bool pause_press_admitted(const bool has_command_bar, const bool bar_clock_enabled, const ClockGates& gates) noexcept {
+    if (has_command_bar) return bar_clock_enabled;
+    return !gates.lan_match || clock_controls_open(gates);
+}
+bool fast_forward_controls_admitted(const bool clock_enabled, const std::size_t active_humans, const bool fixture) noexcept {
+    return clock_enabled && (fixture || active_humans <= 1);
 }
 std::optional<sim::math::Fixed> live_fast_forward_factor(const bool fixture, const bool live_game) noexcept {
     if (fixture || !live_game) return std::nullopt;
@@ -118,6 +129,9 @@ PlanetHudFacts observed_hud_facts(const sim::galactic::ObservedPlanet& observati
         if (result.ground_level_known) result.ground_level = planet->ground_level;
         if (result.space_level_known) result.space_level = planet->space_level;
         result.corrupted = planet->corrupted;
+        if (observation.knowledge.ground_count) result.landed_companies = static_cast<std::size_t>(std::count_if(
+            planet->landed_transports.begin(), planet->landed_transports.end(),
+            [](const auto& row) { return row.id && !row.delete_pending; }));
     }
     if (observation.knowledge.political_control && observation.known_political_control)
         result.political_control = static_cast<double>(observation.known_political_control->raw())
@@ -127,6 +141,7 @@ PlanetHudFacts observed_hud_facts(const sim::galactic::ObservedPlanet& observati
         // WGUI-39: positions are authored capacity, filled counts need knowledge.
         result.ground_capacity = production->ground_slots;
         result.space_capacity = production->maximum_space_level;
+        result.unit_capacity = static_cast<std::int64_t>(production->maximum_ground_forces);
         if (result.structures_known) result.structures = static_cast<std::size_t>(std::count_if(
             production->objects.begin(), production->objects.end(), [](const auto& object) {
                 return object.domain == sim::galactic::ProductionDomain::ground
@@ -293,25 +308,62 @@ std::uint64_t label_placement_digest(const PlanetHudFacts& facts) {
     digest.add(facts.political_breakdown_known); digest.add(facts.structures_known);
     digest.add(facts.ground_level_known); digest.add(facts.space_level_known);
     digest.add(facts.corrupted); digest.add(facts.local_benefits_from_corruption);
+    digest.add(facts.corruption_type);
     return digest.value();
 }
 
-std::vector<PlanetStatusIcon> planet_status_icons(const PlanetHudFacts& planet) {
+std::vector<PlanetStatusIcon> planet_status_icons(const PlanetHudFacts& planet, const bool corruption_layer) {
     std::vector<PlanetStatusIcon> result;
     if (!planet.discovered) return result;
     if (production_activity(planet)) result.push_back(PlanetStatusIcon::build);
+    // GHUD-S55 component order: build, smuggler, bounty, smuggled, corruption.
+    if (planet.siphon_source) result.push_back(PlanetStatusIcon::smuggler);
+    if (planet.bounty_hunter_active) result.push_back(PlanetStatusIcon::bounty_hunter);
+    if (planet.siphon_smuggled) result.push_back(PlanetStatusIcon::smuggled);
     // GHUDL-15: an uncorrupted planet shows the information icon while the
-    // local faction benefits from corruption. A corrupted planet's per-type
-    // icon follows the corruption layer, which this viewer does not publish.
-    if (!planet.corrupted && planet.local_benefits_from_corruption) result.push_back(PlanetStatusIcon::corruption_info);
+    // local faction benefits from corruption. A corrupted planet shows its
+    // per-type icon only while the corruption filter bit is on (debug build).
+    if (planet.corrupted && corruption_layer && planet.corruption_type != 0) result.push_back(PlanetStatusIcon::corruption_type);
+    else if (!planet.corrupted && planet.local_benefits_from_corruption) result.push_back(PlanetStatusIcon::corruption_info);
     return result;
 }
 
 std::string status_icon_texture_name(const PlanetStatusIcon kind,
-    const std::vector<std::string>& build_tokens, const std::vector<std::string>& corruption_icons) {
+    const std::vector<std::string>& build_tokens, const std::vector<std::string>& corruption_icons,
+    const std::uint8_t corruption_type) {
+    if (kind == PlanetStatusIcon::smuggler || kind == PlanetStatusIcon::bounty_hunter
+        || kind == PlanetStatusIcon::smuggled) return {};
     if (kind == PlanetStatusIcon::build) return build_tokens.empty() ? std::string{} : build_tokens.front();
+    if (kind == PlanetStatusIcon::corruption_type) {
+        // The authored list is indexed by the corruption type without the none entry.
+        const std::size_t index = corruption_type > 0 ? corruption_type - 1u : corruption_information_icon_index;
+        return index < corruption_information_icon_index && index < corruption_icons.size() ? corruption_icons[index] : std::string{};
+    }
     return corruption_icons.size() > corruption_information_icon_index
         ? corruption_icons[corruption_information_icon_index] : std::string{};
+}
+
+std::string status_effect_component_name(const PlanetStatusIcon kind) {
+    switch (kind) {
+        case PlanetStatusIcon::smuggler: return "g_smuggler";
+        case PlanetStatusIcon::bounty_hunter: return "g_bounty_hunter";
+        case PlanetStatusIcon::smuggled: return "g_smuggled";
+        default: return {};
+    }
+}
+
+std::string status_effect_icon_name(const PlanetStatusIcon kind, const std::vector<std::string>& component_icons) {
+    if (status_effect_component_name(kind).empty() || component_icons.empty()) return {};
+    return component_icons.front();
+}
+
+ObjectId step_planet(const std::vector<ObjectId>& ordered, const ObjectId current, const PlanetStep step) noexcept {
+    if (ordered.empty()) return current;
+    const auto found = std::find(ordered.begin(), ordered.end(), current);
+    if (found == ordered.end()) return step == PlanetStep::next ? ordered.front() : ordered.back();
+    const auto index = static_cast<std::size_t>(found - ordered.begin());
+    const auto size = ordered.size();
+    return ordered[step == PlanetStep::next ? (index + 1) % size : (index + size - 1) % size];
 }
 
 StatusRowOrigin status_row_origin(const double conflict_x, const double conflict_y,
@@ -328,6 +380,19 @@ std::vector<double> status_row_centres(const double origin_x, const std::vector<
         cursor += width;
     }
     return centres;
+}
+
+BonusIconStyle planet_bonus_icon_style(const bool layer_visible, const std::string& icon, const bool in_command_atlas,
+    const float alpha, const Rgb* owner_colour) noexcept {
+    constexpr float grey = 100.0F / 255.0F;
+    return {layer_visible && !icon.empty() && in_command_atlas && alpha > 0.0F,
+        owner_colour ? *owner_colour : Rgb{grey, grey, grey}};
+}
+
+BonusIconRect planet_bonus_icon_rect(const double anchor_x, const double anchor_y, const double offset_x,
+    const double offset_y, const double ui_scale, const double texture_width, const double texture_height) noexcept {
+    const double width = texture_width * ui_scale, height = texture_height * ui_scale;
+    return {anchor_x + offset_x * ui_scale - width / 2.0, anchor_y - offset_y * ui_scale - height / 2.0, width, height};
 }
 
 std::string production_denial_text(sim::galactic::ProductionAdmission admission) {

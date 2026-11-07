@@ -24,18 +24,22 @@ inline constexpr std::string_view mods_folder_cut = "EAWR-MODS-0007";         //
 inline constexpr std::string_view tree_walk_incomplete = "EAWR-MODS-0008";    // an entry could not be read
 inline constexpr std::string_view needs_update = "EAWR-MODS-0009";            // Steam has a newer version listed
 inline constexpr std::string_view downloading = "EAWR-MODS-0010";             // listed, but Steam has not finished
+inline constexpr std::string_view content_digest_unavailable = "EAWR-MODS-0020"; // the file-content digest could not be made
 } // namespace codes
 
 enum class ModKind { workshop, mods_folder, manual };
 enum class ModRole { playable, parent_only, unknown };
 enum class ModState { installed, needs_update, downloading, missing };
+enum class ContentDigestState { unavailable, pending, ready };
 
 [[nodiscard]] std::string_view to_string(ModKind kind) noexcept;   // workshop | mods-folder | manual
 [[nodiscard]] std::string_view to_string(ModRole role) noexcept;   // playable | parent-only | unknown
 [[nodiscard]] std::string_view to_string(ModState state) noexcept; // installed | needs-update | downloading | missing
+[[nodiscard]] std::string_view to_string(ContentDigestState state) noexcept; // unavailable | pending | ready
 [[nodiscard]] std::optional<ModKind> parse_mod_kind(std::string_view text) noexcept;
 [[nodiscard]] std::optional<ModRole> parse_mod_role(std::string_view text) noexcept;
 [[nodiscard]] std::optional<ModState> parse_mod_state(std::string_view text) noexcept;
+[[nodiscard]] std::optional<ContentDigestState> parse_content_digest_state(std::string_view text) noexcept;
 
 struct Warning {
     std::string code;     // codes::*
@@ -59,6 +63,27 @@ struct Fingerprint {
     friend bool operator==(const Fingerprint&, const Fingerprint&) = default;
 };
 
+// A digest of the mod's file BYTES (content_digest.hpp), as opposed to the cheap tree `Fingerprint` above (path, size,
+// mtime). A save compares it to notice a mod that kept its name but changed its files.
+//
+// Canonical material: SHA-256 over one line per regular file, sorted by the relative path's UTF-8 bytes,
+//   "<relative path>\t<size>\t<sha256 hex of the file bytes>\n"
+// with '/' separators and the path's original case; symbolic links and junctions are not followed (the walk of
+// tree_fingerprint). A folder without files has no digest (unavailable, note "no files"), and neither has a capped
+// or incomplete walk: the digest is never a guess.
+//  - ready:       `sha256` (lowercase hex) covers `files` files / `bytes` bytes.
+//  - pending:     a background job is hashing; `files` / `bytes` are what it has covered so far, `sha256` is empty.
+//  - unavailable: `note` says why (empty when nobody asked for this record's digest); `sha256` is empty.
+struct ContentDigest {
+    std::string sha256;
+    ContentDigestState state = ContentDigestState::unavailable;
+    std::uint64_t files = 0;
+    std::uint64_t bytes = 0;
+    std::string note;
+
+    friend bool operator==(const ContentDigest&, const ContentDigest&) = default;
+};
+
 struct ModRecord {
     std::string key;                 // workshop:<id> | mods:<folder> | path:<sha256 of the normalised absolute path>
     ModKind kind = ModKind::manual;
@@ -70,6 +95,7 @@ struct ModRecord {
     ModRole role = ModRole::unknown;
     ModState state = ModState::installed;
     Fingerprint fingerprint;
+    ContentDigest content;           // default unavailable; filled from the content digest cache / job, never by discovery
     std::vector<Warning> warnings;
 
     [[nodiscard]] bool has_warning(std::string_view code) const;
@@ -83,6 +109,8 @@ struct Catalog {
     std::vector<Warning> warnings;   // discovery-wide (e.g. codes::mods_folder_cut)
 };
 
+// {"state": "ready|pending|unavailable", "sha256": "", "files": 0, "bytes": 0, "note": ""}: a record's `content` member.
+[[nodiscard]] std::string content_digest_to_json(const ContentDigest& content);
 // One record as a JSON object (UTF-8, no trailing newline). Member order is fixed, so equal records give equal text.
 [[nodiscard]] std::string record_to_json(const ModRecord& record);
 // nullopt when a required member is missing or has the wrong type, or an enum value is unknown.

@@ -70,12 +70,14 @@ struct Derived {
     std::shared_ptr<const CampaignSetupPlan> plan;
     std::shared_ptr<GameSession> session;
     std::shared_ptr<const void> runtime_services;
+    std::vector<core::LoadNote> load_notes;
     Digest tick_zero{};
     std::vector<std::vector<std::uint8_t>> ai_configuration;
 };
 
 // Controller kind a faction has at tick zero: the roster's human sides hold their factions, everyone else is AI.
-core::Result<Derived> derive_local(const MpLocalContent& local, const gc::MpRoster& roster, const MpSessionTerms& terms) {
+core::Result<Derived> derive_local(const MpLocalContent& local, const gc::MpRoster& roster, const MpSessionTerms& terms,
+    std::span<const std::uint8_t> checkpoint_bytes = {}) {
     using Result = core::Result<Derived>;
     const core::gc_load::Scope derive_scope("mp.derive_local");
     if (!local.data || !local.types) return refuse<Derived>("local content is not loaded");
@@ -85,11 +87,19 @@ core::Result<Derived> derive_local(const MpLocalContent& local, const gc::MpRost
     const auto& data = *local.data;
     const auto* campaign = data.campaign(roster.campaign);
     if (!campaign) return refuse<Derived>("campaign " + roster.campaign + " is not installed");
-    if (!campaign->is_multiplayer.value_or(false)) return refuse<Derived>("campaign " + roster.campaign + " is not a multiplayer campaign");
+    const bool multiplayer_entry = campaign->is_multiplayer.value_or(false);
+    const auto flavour = terms.rules_flavour.value_or(multiplayer_entry ? CampaignRulesFlavour::multiplayer : CampaignRulesFlavour::single_player);
+    if (!multiplayer_entry) {
+        // Co-op on a single-player entry (design B2, D3): single-player rules only, never a story campaign or tutorial.
+        if (flavour != CampaignRulesFlavour::single_player || !campaign->is_listed.value_or(true) || campaign->tutorial.value_or(false)
+            || campaign->is_story_campaign.value_or(false) || campaign->starting_active_player.empty())
+            return refuse<Derived>("campaign " + roster.campaign + " is not a multiplayer campaign");
+    }
     Derived out;
     auto& options = out.options;
     options.seed = terms.seed;
     options.mode = CampaignSetupMode::multiplayer;
+    options.rules_flavour = flavour;
     if (roster.custom) options.custom = CampaignCustomOptions{roster.credits, roster.starting_tech, roster.maximum_tech, roster.allow_heroes};
     for (const auto& player : roster.players) options.players.push_back({{player.player, player.faction_id, player.flags}, player.faction, player.active});
     options.seats = roster.seats;
@@ -102,6 +112,12 @@ core::Result<Derived> derive_local(const MpLocalContent& local, const gc::MpRost
     for (const auto& seat : roster.seats) if (seat.kind == sim::SeatKind::human) {
         human_players.insert(seat.player);
         if (seat.active) active_humans.insert(seat.player);
+    }
+    if (!multiplayer_entry) for (const auto& player : roster.players) if (human_players.contains(player.player)) {
+        // Co-op seats hold the entry's authored human faction and nothing else (design D2).
+        std::string held = player.faction, human = campaign->starting_active_player;
+        for (auto* text : {&held, &human}) for (auto& c : *text) if (c >= 'a' && c <= 'z') c = static_cast<char>(c - 'a' + 'A');
+        if (held != human) return refuse<Derived>("campaign " + roster.campaign + " seats humans only on its authored human faction");
     }
     gc::SeatControlSetup control;
     control.teams = roster.teams;
@@ -129,15 +145,43 @@ core::Result<Derived> derive_local(const MpLocalContent& local, const gc::MpRost
                                  : plan_campaign_setup(data, *local.types, roster.campaign, options);
     plan_scope.reset();
     if (!planned) return Result::failure(planned.error());
+    if (planned.value().mode() != CampaignSetupMode::multiplayer
+        || planned.value().rules_flavour() != flavour)
+        return refuse<Derived>("planner did not preserve agreed transport and campaign rules");
     out.plan = std::make_shared<const CampaignSetupPlan>(std::move(planned).value());
     std::string hex;
-    if (local.prepare_session) {
+    if (!checkpoint_bytes.empty()) {
+        // The checkpoint's sealed setup identifies both the selected entry and its
+        // rules flavour. Verify it before invoking even a custom restore callback.
+        auto saved = checkpoint::parse_checkpoint(checkpoint_bytes);
+        if (!saved) return Result::failure(saved.error());
+        auto saved_setup = checkpoint::inspect_game_setup(saved.value());
+        if (!saved_setup) return Result::failure(saved_setup.error());
+        const auto identities = checkpoint::game_identities(out.plan->galaxy());
+        if (!saved_setup.value().uses_network_transport()
+            || saved_setup.value().seed != out.plan->galaxy().seed
+            || saved_setup.value().campaign_identity != out.plan->galaxy().campaign_identity
+            || saved_setup.value().content_identity != out.plan->galaxy().content_identity)
+            return refuse<Derived>("saved_setup_identity_mismatch");
+        if (auto valid = checkpoint::check_identities(saved.value().header, identities); !valid)
+            return Result::failure(valid.error());
+        if (local.restore_session) {
+            auto prepared = local.restore_session(*out.plan, roster.difficulty, checkpoint_bytes);
+            if (!prepared) return Result::failure(prepared.error());
+            out.session = std::move(prepared.value().session);
+            out.runtime_services = std::move(prepared.value().runtime_services);
+            out.load_notes = std::move(prepared.value().load_notes);
+        } else return refuse<Derived>("fresh_restore_services_unavailable");
+        if (!out.session) return refuse<Derived>("restore_owner_unavailable");
+        hex = out.session->state_sha256();
+    } else if (local.prepare_session) {
         std::optional<core::gc_load::Scope> prepare_scope(std::in_place, "mp.derive_local.prepare_session");
         auto prepared = local.prepare_session(*out.plan, roster.difficulty);
         prepare_scope.reset();
         if (!prepared) return Result::failure(prepared.error());
         out.session = std::move(prepared.value().session);
         out.runtime_services = std::move(prepared.value().runtime_services);
+        out.load_notes = std::move(prepared.value().load_notes);
         if (!out.session || out.session->completed_tick() != 0)
             return refuse<Derived>("campaign preparation did not return a tick-zero session");
         const core::gc_load::Scope hash_scope("mp.derive_local.tick_zero_hash");
@@ -150,6 +194,8 @@ core::Result<Derived> derive_local(const MpLocalContent& local, const gc::MpRost
         if (!root) return Result::failure(root.error());
         auto owner = std::make_shared<CampaignRoot>(std::move(root).value());
         if (!owner->game()) return refuse<Derived>("campaign root has no session");
+        const auto notes = owner->load_notes();
+        out.load_notes.assign(notes.begin(), notes.end());
         hex = owner->game()->state_sha256();
         out.session = std::shared_ptr<GameSession>(owner, owner->game());
     } else {
@@ -209,9 +255,10 @@ Digest resolver_digest(const MpLocalContent& local, const data::galactic::Campai
     for (const auto& [tag, text] : constants) { out.text(tag); out.text(text); }
     return out.digest();
 }
-Digest rules_digest(const MpLocalContent& local) {
+Digest rules_digest(const MpLocalContent& local, CampaignRulesFlavour flavour) {
     const auto abi = script::numeric::numeric_abi();
-    Writer out("eawr-gc-rules-v4");
+    Writer out("eawr-gc-rules-v5");
+    out.integer(flavour == CampaignRulesFlavour::multiplayer ? 1 : 0);
     out.integer(gc::galactic_rules_version); out.integer(gc::galactic_frames_per_second);
     out.integer(sim::math::Fixed::fractional_bits);
     out.text(abi.name); out.integer(abi.version);
@@ -268,7 +315,7 @@ MpAgreement agreement_from_derived(const MpLocalContent& local, const gc::MpRost
         domain(mp_domains::ai_data, content_digest("eawr-gc-ai-data-v1", local.xml_digest)),
         domain(mp_domains::ai_controllers, controllers.digest()),
         domain(mp_domains::resolver, resolver_digest(local, *campaign)),
-        domain(mp_domains::rules, rules_digest(local)),
+        domain(mp_domains::rules, rules_digest(local, value.plan->rules_flavour())),
         domain(mp_domains::tick_zero, roster.tick_zero == value.tick_zero ? value.tick_zero : zero.digest()),
     };
     out.content = sim::compute_match_identity(std::move(out.content));
@@ -277,6 +324,7 @@ MpAgreement agreement_from_derived(const MpLocalContent& local, const gc::MpRost
     out.plan = std::move(value.plan);
     out.session = std::move(value.session);
     out.runtime_services = std::move(value.runtime_services);
+    out.load_notes = std::move(value.load_notes);
     return out;
 }
 } // namespace
@@ -316,4 +364,30 @@ core::Result<MpAgreement> derive_mp_agreement(const MpLocalContent& local, const
     return Result::success(agreement_from_derived(local, roster, std::move(derived).value()));
 }
 
+core::Result<MpAgreement> restore_mp_agreement(const MpLocalContent& local, const gc::MpRoster& roster,
+    const MpSessionTerms& terms, std::span<const std::uint8_t> bytes, const checkpoint::GameResumeMetadata& metadata) {
+    using Result = core::Result<MpAgreement>;
+    if (auto valid = gc::validate_mp_roster(roster); !valid) return Result::failure(valid.error());
+    auto derived = derive_local(local, roster, terms, bytes);
+    if (!derived && !terms.rules_flavour) {
+        // An MP entry may also have been launched with SP rules. Try the other
+        // flavour against the saved setup identity rather than inferring it from
+        // the network transport; a mismatching plan never reaches restoration.
+        const auto* entry = local.data ? local.data->campaign(roster.campaign) : nullptr;
+        if (entry && entry->is_multiplayer.value_or(false)) {
+            auto alternate = terms;
+            alternate.rules_flavour = CampaignRulesFlavour::single_player;
+            derived = derive_local(local, roster, alternate, bytes);
+        }
+    }
+    if (!derived) return Result::failure(derived.error());
+    if (derived.value().session->completed_tick() != metadata.completed_tick
+        || derived.value().tick_zero != metadata.state_digest)
+        return refuse<MpAgreement>("restored_state_hash_mismatch");
+    // The resume claim replaces the tick-zero claim only in this start domain.
+    auto claims = roster; claims.tick_zero = derived.value().tick_zero;
+    auto agreement = agreement_from_derived(local, claims, std::move(derived).value());
+    agreement.resume = metadata;
+    return Result::success(std::move(agreement));
+}
 } // namespace eawr::campaign

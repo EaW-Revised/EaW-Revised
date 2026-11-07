@@ -1,4 +1,5 @@
 #include "../support/temp_dir.hpp"
+#include "eawr/vfs/vfs.hpp"
 #include "data_test_support.hpp"
 #include "eawr/data/xml.hpp"
 
@@ -91,9 +92,8 @@ void locale_contracts() {
     expect(changed, "at least one non-C LC_CTYPE is exercised");
 }
 
-// #793 (R-10, R-13, C-06): the registry and hardpoint-include failures FoC fails on are counted apart
-// from physical-XML noise, and load_catalog_strict returns them as the error. A missing include stays
-// a warning with both neighbours loaded.
+// Parse failures are reported and skipped while neighboring definitions remain available.
+// Other registry and read failures retain their existing health treatment.
 void load_health_contracts() {
     struct Variant {
         std::string hardpoint_registry =
@@ -135,7 +135,43 @@ void load_health_contracts() {
                "a clean tree has a clean health and passes the strict load");
         expect(loaded && has_code(loaded.value().diagnostics, eawr::data::diagnostic_codes::malformed_xml),
                "the unreferenced malformed file stays a diagnostic");
+        // XML R-12: the original reader never opens a file no registry names, so the stray file leaves no load note.
+        expect(loaded && std::none_of(loaded.value().notes.begin(), loaded.value().notes.end(), [](const auto& note) {
+                   return note.code == eawr::core::load_note_codes::skipped_xml_file;
+               }), "an unreferenced malformed file leaves a diagnostic but no skipped-file load note");
         expect(loaded && eawr::data::describe_load_health(loaded.value().health).empty(), "a clean load describes nothing");
+    }
+    {
+        Variant sloppy;
+        sloppy.hardpoints_a = "<?xmlversion=\"1.0\"?><HardPoints><HardPoint Name=\"HP_A\"/></HardPoints>";
+        auto loaded = load(sloppy, true);
+        expect(loaded && loaded.value().catalog.find("HP_A", eawr::data::Category::hardpoint),
+               "missing declaration space is accepted in a hardpoint include");
+        expect(loaded && std::any_of(loaded.value().notes.begin(), loaded.value().notes.end(), [](const auto& note) {
+            return note.code == eawr::core::load_note_codes::compatible_xml_header &&
+                   note.file == "data/xml/hardpoints-a.xml" && note.line == 1;
+        }), "accepted declaration produces a file-specific load note");
+        expect(loaded && !has_code(loaded.value().diagnostics, eawr::data::diagnostic_codes::malformed_xml),
+               "accepted declaration produces no malformed XML diagnostic");
+        for (const std::string header : {"<?xmlversion=\"unusual\"?>", "<?xmlencoding=\"odd\"?>",
+                                         " \n<?xmlversion=\"1.0\"?>", "  <?xmlversion=\"1.0\"  ?>", "\xef\xbb\xbf<?xmlversion=\"1.0\"?>"}) {
+            sloppy.hardpoints_a = header + "<HardPoints><HardPoint Name=\"HP_A\"/></HardPoints>";
+            auto variant = load(sloppy, true);
+            expect(variant && variant.value().catalog.find("HP_A", eawr::data::Category::hardpoint),
+                   "compatible XML header variant loads");
+            expect(variant && std::any_of(variant.value().notes.begin(), variant.value().notes.end(), [](const auto& note) {
+                return note.code == eawr::core::load_note_codes::compatible_xml_header;
+            }), "compatible XML header variant emits a note");
+        }
+        sloppy.hardpoints_a = "<?xmlversion=\"1.0\"<HardPoints";
+        auto unclosed = load(sloppy, true);
+        expect(unclosed && has_code(unclosed.value().diagnostics, eawr::data::diagnostic_codes::malformed_xml),
+               "unterminated header remains a parse failure");
+        sloppy.hardpoints_a = "<?xmlversion=\"1.0\"?><HardPoints><Broken></HardPoints>";
+        auto broken = load(sloppy, true);
+        expect(broken && has_code(broken.value().diagnostics, eawr::data::diagnostic_codes::malformed_xml) &&
+                   broken.value().catalog.find("HP_A", eawr::data::Category::hardpoint) == nullptr,
+               "a malformed document is skipped after the compatibility retry");
     }
     {
         Variant malformed;
@@ -144,20 +180,48 @@ void load_health_contracts() {
         expect(static_cast<bool>(lenient), "load_catalog still returns the catalog and its diagnostics");
         if (lenient) {
             const auto& health = lenient.value().health;
-            expect(health.failed() && health.hardpoint_include_failed == 1 && health.include_failed == 1 &&
+            expect(!health.failed() && health.hardpoint_include_failed == 1 && health.include_failed == 1 &&
                        health.registry_invalid == 0 && health.include_missing == 0,
-                   "a malformed admitted hardpoint include is a counted, fatal failure (C-06)");
-            expect(health.fatal && health.fatal->code == eawr::data::diagnostic_codes::malformed_xml,
-                   "the fatal diagnostic is the include's parse error");
+                   "a malformed hardpoint include is counted without failing the load");
             expect(lenient.value().catalog.find("HP_A", eawr::data::Category::hardpoint) != nullptr,
                    "the neighbouring hardpoint include still loads");
             expect(eawr::data::describe_load_health(health) == "include_failed=1 hardpoint_include_failed=1",
                    "the health line names each non-zero count");
         }
         auto strict = load(malformed, true);
-        expect(!strict && strict.error().code == eawr::data::diagnostic_codes::malformed_xml &&
-                   strict.error().logical_path && strict.error().logical_path->find("hardpoints-b.xml") != std::string::npos,
-               "the strict load fails on a malformed admitted hardpoint include and names the file");
+        expect(strict && strict.value().catalog.find("HP_A", eawr::data::Category::hardpoint) != nullptr &&
+                   strict.value().catalog.find("HP_B", eawr::data::Category::hardpoint) == nullptr &&
+                   std::any_of(strict.value().notes.begin(), strict.value().notes.end(), [](const auto& note) {
+                       return note.code == eawr::core::load_note_codes::skipped_xml_file &&
+                              note.file == "data/xml/hardpoints-b.xml";
+                   }), "strict load skips and notes the malformed file while keeping its neighbor");
+        expect(strict && std::count_if(strict.value().notes.begin(), strict.value().notes.end(), [](const auto& note) {
+                   return note.code == eawr::core::load_note_codes::skipped_xml_file &&
+                          note.file == "data/xml/hardpoints-b.xml";
+               }) == 1, "a registered malformed file leaves exactly one skipped-file note");
+    }
+    {
+        TempTree tree;
+        registries(tree.root);
+        write(tree.root / "XML" / "HardpointDataFiles.xml",
+              "<Hard_Point_Files><File>hardpoints-a.xml</File><File>hardpoints-b.xml</File></Hard_Point_Files>");
+        write(tree.root / "XML" / "hardpoints-a.xml", "<HardPoints><HardPoint Name=\"HP_A\"/></HardPoints>");
+        write(tree.root / "XML" / "hardpoints-b.xml", "<HardPoints><HardPoint Name=\"HP_B\"/></HardPoints>");
+        write(tree.mod_root / "XML" / "hardpoints-b.xml", "<HardPoints><HardPoint></HardPoints>");
+        const std::array mounts{eawr::vfs::MountSpec{"mod", tree.mod_root, "data", {}},
+                                eawr::vfs::MountSpec{"base", tree.root, "data", {}}};
+        auto mounted = eawr::vfs::Vfs::mount(mounts);
+        expect(static_cast<bool>(mounted), "malformed mod chain mounts");
+        if (mounted) {
+            auto loaded = eawr::data::load_catalog_strict(mounted.value(), eawr::data::Profile::eaw);
+            expect(loaded && loaded.value().catalog.find("HP_A", eawr::data::Category::hardpoint) &&
+                       !loaded.value().catalog.find("HP_B", eawr::data::Category::hardpoint),
+                   "malformed winning mod file is skipped and its neighbor loads");
+            expect(loaded && std::any_of(loaded.value().notes.begin(), loaded.value().notes.end(), [](const auto& note) {
+                return note.code == eawr::core::load_note_codes::skipped_xml_file &&
+                       note.layer.mod_id == "mod" && note.file == "data/xml/hardpoints-b.xml";
+            }), "skipped mod file is named in a load note");
+        }
     }
     {
         Variant missing;
@@ -171,6 +235,10 @@ void load_health_contracts() {
                    "a missing include is counted as a warning only");
             expect(has_code(strict.value().diagnostics, eawr::data::diagnostic_codes::registry_include_missing),
                    "the missing include keeps its diagnostic");
+            expect(std::any_of(strict.value().diagnostics.begin(), strict.value().diagnostics.end(), [](const auto& d) {
+                return d.code == eawr::data::diagnostic_codes::registry_include_missing &&
+                       d.severity == eawr::core::Severity::warning;
+            }), "a missing include is a warning, never an error (mod data mistake, R-10)");
             expect(strict.value().catalog.find("HP_A", eawr::data::Category::hardpoint) != nullptr &&
                        strict.value().catalog.find("HP_B", eawr::data::Category::hardpoint) != nullptr,
                    "both neighbours of a missing include are present");
@@ -197,8 +265,10 @@ void load_health_contracts() {
         Variant unparsable;
         unparsable.hardpoint_registry = "<Hard_Point_Files><File>x</Hard_Point_Files";
         auto broken = load(unparsable, true);
-        expect(!broken && broken.error().code == eawr::data::diagnostic_codes::registry_invalid,
-               "an unparsable registry root fails the strict load");
+        expect(broken && has_code(broken.value().diagnostics, eawr::data::diagnostic_codes::registry_invalid) &&
+                   std::any_of(broken.value().notes.begin(), broken.value().notes.end(), [](const auto& note) {
+                       return note.code == eawr::core::load_note_codes::skipped_xml_file;
+                   }), "an unparsable registry is skipped with a load note");
         Variant gone;
         gone.drop_faction_registry = true;
         auto absent = load(gone, true);
@@ -229,6 +299,12 @@ void object_class_contracts() {
 <Props_Wave Name="LONE_HERO_COMPANY"><Variant_Of_Existing_Type>template_hero_company</Variant_Of_Existing_Type></Props_Wave>
 <Props_Wave Name="LONE_UPGRADE"><Variant_Of_Existing_Type>template_upgrade</Variant_Of_Existing_Type></Props_Wave>
 <Space_Unit Name="ANCESTOR_BEATS_TAGS"><Variant_Of_Existing_Type>stock_ship</Variant_Of_Existing_Type><Squadron_Units>stock_ship, 3</Squadron_Units></Space_Unit>
+<Squadron Name="REAL_SQUAD"><Squadron_Units>stock_ship, 3</Squadron_Units></Squadron>
+<SpaceUnit Name="SQUAD_VARIANT_LABELLED_SHIP"><Variant_Of_Existing_Type>real_squad</Variant_Of_Existing_Type><Affiliation>Rebel</Affiliation></SpaceUnit>
+<SpaceUnit Name="SQUAD_VARIANT_OF_VARIANT"><Variant_Of_Existing_Type>squad_variant_labelled_ship</Variant_Of_Existing_Type></SpaceUnit>
+<SpaceUnit Name="SHIP_VARIANT_WITH_OWN_UNITS"><Variant_Of_Existing_Type>stock_ship</Variant_Of_Existing_Type><Squadron_Units>stock_ship, 3</Squadron_Units></SpaceUnit>
+<SpaceUnit Name="BOTH_LISTS_KEEP_CLASS"><Variant_Of_Existing_Type>stock_ship</Variant_Of_Existing_Type><Squadron_Units>stock_ship, 3</Squadron_Units><Company_Units>stock_ship, 2</Company_Units></SpaceUnit>
+<Space_Unit Name="LABEL_OVER_SHIP_OVER_SQUAD"><Variant_Of_Existing_Type>squad_variant_labelled_ship</Variant_Of_Existing_Type></Space_Unit>
 </Objects>)xml");
     write(tree.root / "XML" / "objects-b.xml", "<Objects/>");
     const std::array mounts{eawr::vfs::MountSpec{"base", tree.root, "data", {}}};
@@ -255,12 +331,133 @@ void object_class_contracts() {
     check("LONE_COMPANY", "GroundCompany", "tags:GroundCompany");
     check("LONE_HERO_COMPANY", "HeroCompany", "tags:HeroCompany");
     check("LONE_UPGRADE", "UpgradeObject", "tags:UpgradeObject");
-    check("ANCESTOR_BEATS_TAGS", "SpaceUnit", "ancestor:SpaceUnit");
+    // SG-CLS-01: the effective Squadron_Units decide, not the element name and not an ancestor.
+    check("ANCESTOR_BEATS_TAGS", "Squadron", "tags:Squadron");
+    // A FoC class name on the element is a label too: the object creator places a squadron from Squadron_Units alone, so
+    // any non-company object that lists squadron units is a Squadron (a mod's SpaceUnit variant of a squadron template
+    // carries no hull of its own, its craft do). A company keeps its class: a type with both lists uses one per mode.
+    check("REAL_SQUAD", "Squadron", "");
+    check("SQUAD_VARIANT_LABELLED_SHIP", "Squadron", "tags:Squadron");
+    check("SQUAD_VARIANT_OF_VARIANT", "Squadron", "tags:Squadron");
+    check("SHIP_VARIANT_WITH_OWN_UNITS", "Squadron", "tags:Squadron");
+    check("BOTH_LISTS_KEEP_CLASS", "SpaceUnit", "");
+    check("LABEL_OVER_SHIP_OVER_SQUAD", "Squadron", "tags:Squadron");
     expect(eawr::data::is_foc_object_class("spaceUNIT") && !eawr::data::is_foc_object_class("Space_Unit"),
            "FoC class names match without case, a mod label does not");
 }
 
+void primary_sfx_repeats_unchanged_contract() {
+    TempTree tree;
+    registries(tree.root);
+    write(tree.root / "XML" / "SFXEventFiles.xml",
+        "<SFXEvent_Files><File>sfx.xml</File><File>sfx.xml</File></SFXEvent_Files>");
+    write(tree.root / "XML" / "sfx.xml", "<SFXEvents><SFXEvent Name=\"Repeated\"/></SFXEvents>");
+    const std::array mounts{eawr::vfs::MountSpec{"base", tree.root, "data", {}}};
+    auto filesystem = eawr::vfs::Vfs::mount(mounts);
+    expect(static_cast<bool>(filesystem), "SH-03 primary repeats fixture mounts");
+    if (!filesystem) return;
+    auto loaded = eawr::data::load_catalog(filesystem.value(), eawr::data::Profile::foc);
+    expect(loaded && loaded.value().catalog.find_all("Repeated").size() == 2,
+        "SH-03 without additions the primary registry keeps main's repeated include behavior");
+}
+
+void additive_sfx_contracts() {
+    TempTree tree;
+    registries(tree.root);
+    write(tree.root / "XML" / "sfx.xml", R"xml(<SFXEvents>
+<SFXEvent Name="Existing"><Samples>base.wav</Samples></SFXEvent>
+<SFXEvent Name="Shared"><Samples>base.wav</Samples></SFXEvent></SFXEvents>)xml");
+    write(tree.mod_root / "XML" / "SFXEventFilesAdditions.xml",
+        "<SFXEvent_Files><File>revised.xml</File><File>sfx.xml</File></SFXEvent_Files>");
+    write(tree.mod_root / "XML" / "revised.xml", R"xml(<SFXEvents>
+<SFXEvent Name="Added"><Samples>added.wav</Samples></SFXEvent>
+<SFXEvent Name="Shared"><Samples>revised.wav</Samples></SFXEvent></SFXEvents>)xml");
+    const auto base = tree.root / "older-base";
+    write(base / "XML" / "SFXEventFiles.xml", "<SFXEvent_Files><File>removed.xml</File></SFXEvent_Files>");
+    write(base / "XML" / "removed.xml", "<SFXEvents><SFXEvent Name=\"RemovedByExpansion\"/></SFXEvents>");
+    const std::array mounts{eawr::vfs::MountSpec{"mod", tree.mod_root, "data", {}},
+        eawr::vfs::MountSpec{"expansion", tree.root, "data", {}},
+        eawr::vfs::MountSpec{"base", base, "data", {}}};
+    auto filesystem = eawr::vfs::Vfs::mount(mounts);
+    expect(static_cast<bool>(filesystem), "SH-03 additive SFX fixture mounts");
+    if (!filesystem) return;
+    auto loaded = eawr::data::load_catalog(filesystem.value(), eawr::data::Profile::foc);
+    expect(static_cast<bool>(loaded), "SH-03 additive catalog loads");
+    if (!loaded) return;
+    const auto& catalog = loaded.value().catalog;
+    const auto* shared = catalog.find("Shared", eawr::data::Category::sfx);
+    expect(catalog.find("Existing", eawr::data::Category::sfx)
+        && catalog.find("Added", eawr::data::Category::sfx)
+        && shared && shared->root.source.layer_id == "mod", "SH-03 layer events preserve base events and obey priority");
+    expect(!catalog.find("RemovedByExpansion", eawr::data::Category::sfx),
+        "SH-03 additions do not revive omitted base primary registry events");
+    expect(catalog.find_all("Existing").size() == 1, "SH-03 repeated registry includes load once");
+}
+
+void shadowed_definitions_contract() {
+    TempTree tree;
+    registries(tree.root);
+    write(tree.mod_root / "XML" / "GameObjectFiles.xml",
+          "<Game_Object_Files><File>objects-a.xml</File></Game_Object_Files>");
+    write(tree.root / "XML" / "objects-a.xml",
+          "<Objects>\n  <SpaceUnit Name=\"A\"><Tactical_Health>1</Tactical_Health></SpaceUnit>\n"
+          "  <SpaceUnit Name=\"A\"><Tactical_Health>2</Tactical_Health></SpaceUnit></Objects>");
+    write(tree.root / "XML" / "objects-b.xml", "<Objects><SpaceUnit Name=\"Dropped\"/></Objects>");
+    write(tree.mod_root / "XML" / "objects-a.xml", "<Objects><SpaceUnit Name=\"A\"/></Objects>");
+
+    // A single MEG-v1 entry in the mod layer, shadowed by its loose file.
+    const std::string name = "DATA/XML/objects-a.xml";
+    const std::string payload = "<Objects>\n <SpaceUnit Name=\"Archive\"/></Objects>";
+    std::vector<std::byte> meg;
+    const auto u32 = [&meg](std::uint32_t n) {
+        for (unsigned shift = 0; shift < 32; shift += 8) meg.push_back(static_cast<std::byte>((n >> shift) & 255U));
+    };
+    u32(1); u32(1);
+    meg.push_back(static_cast<std::byte>(name.size())); meg.push_back(std::byte{0});
+    for (const char ch : name) meg.push_back(static_cast<std::byte>(static_cast<unsigned char>(ch)));
+    u32(0); u32(0); u32(static_cast<std::uint32_t>(payload.size()));
+    u32(static_cast<std::uint32_t>(8 + 2 + name.size() + 20)); u32(0);
+    for (const char ch : payload) meg.push_back(static_cast<std::byte>(static_cast<unsigned char>(ch)));
+    const auto archive = tree.mod_root / "objects.meg";
+    { std::ofstream out(archive, std::ios::binary); out.write(reinterpret_cast<const char*>(meg.data()), static_cast<std::streamsize>(meg.size())); }
+    const std::array mounts{eawr::vfs::MountSpec{"mod", tree.mod_root, "data", {{archive, "mod-archive", ""}}},
+                            eawr::vfs::MountSpec{"base", tree.root, "data", {}}};
+    auto mounted = eawr::vfs::Vfs::mount(mounts);
+    expect(static_cast<bool>(mounted), "shadow fixture mounts");
+    if (!mounted) return;
+    auto loaded = eawr::data::load_catalog(mounted.value(), eawr::data::Profile::foc);
+    auto baseline = eawr::data::load_catalog(mounted.value(), eawr::data::Profile::foc);
+    expect(loaded && baseline, "shadow fixture loads");
+    if (!loaded || !baseline) return;
+    auto& catalog = loaded.value().catalog;
+    auto shadow = eawr::data::load_shadowed_definitions(mounted.value(), catalog);
+    expect(static_cast<bool>(shadow), "shadow diagnostic loads");
+    if (!shadow) return;
+    const auto& defs = shadow.value().definitions;
+    expect(defs.size() == 3, "archive and duplicate lower definitions retained");
+    if (defs.size() == 3) {
+        expect(defs[0].id == "Archive" && defs[0].root.source.layer_id == "mod" &&
+            defs[0].root.source.source_id == "mod-archive" && defs[0].root.source.logical_path == "data/xml/objects-a.xml" &&
+            defs[0].root.source.line == 2 && defs[0].root.source.column == 3, "archive candidate attribution and order");
+        expect(defs[1].id == "A" && defs[2].id == "A" && defs[1].root.source.layer_id == "base" &&
+            defs[1].root.source.line == 2 && defs[1].root.source.column == 4 && defs[2].definition_order == 1 &&
+            defs[1].registry_order == 0 && defs[2].registry_order == 0, "lower duplicates retain location and order");
+    }
+    expect(catalog.find("Dropped") == nullptr && std::none_of(defs.begin(), defs.end(),
+        [](const auto& d) { return d.id == "Dropped"; }), "registry replacement excludes inactive lower include");
+    const auto* winner = catalog.find("A");
+    const auto* original = baseline.value().catalog.find("A");
+    expect(winner && original && winner->root.children.empty() && original->root.children.empty() &&
+        winner->root.source.source_id == original->root.source.source_id &&
+        catalog.definitions().size() == baseline.value().catalog.definitions().size() &&
+        catalog.find_all("A").size() == baseline.value().catalog.find_all("A").size(),
+        "empty override and effective catalog match independent load");
+}
+
 void run_contracts() {
+    shadowed_definitions_contract();
+    primary_sfx_repeats_unchanged_contract();
+    additive_sfx_contracts();
     locale_contracts();
     object_class_contracts();
     load_health_contracts();
@@ -291,23 +488,34 @@ void run_contracts() {
 <SpaceUnit Name="CYCLE_A"><Variant_Of_Existing_Type>CYCLE_B</Variant_Of_Existing_Type></SpaceUnit>
 <SpaceUnit Name="CYCLE_B"><Variant_Of_Existing_Type>cycle_a</Variant_Of_Existing_Type></SpaceUnit>
 <SpaceUnit Name="DUP"><ReplaceTag>first</ReplaceTag></SpaceUnit>
+<SpaceUnit Name="DUP_FIRST"><ReplaceTag>base-first-in-registry</ReplaceTag></SpaceUnit>
+<SpaceUnit Name="DUP_SAME"><ReplaceTag>same-file-first</ReplaceTag></SpaceUnit>
+<SpaceUnit Name="DUP_SAME"><ReplaceTag>same-file-second</ReplaceTag></SpaceUnit>
 <SpaceUnit Name="ABILITY_OWNER"><Abilities><Lucky_Shot_Attack_Ability Name="LUCKY"><Damage>9</Damage><Definitely_Unknown_Ability_Field>raw</Definitely_Unknown_Ability_Field></Lucky_Shot_Attack_Ability></Abilities></SpaceUnit>
 </Objects>)xml");
     write(tree.root / "XML" / "objects-b.xml", R"xml(<Objects>
 <SpaceUnit Name="dup"><ReplaceTag>second</ReplaceTag></SpaceUnit>
 <SpaceUnit Name="DUP_LAYER"><ReplaceTag>base-later-include</ReplaceTag></SpaceUnit>
+<SpaceUnit Name="DUP_FIRST"><ReplaceTag>base-later-file</ReplaceTag></SpaceUnit>
 </Objects>)xml");
     write(tree.mod_root / "XML" / "GameObjectFiles.xml",
           "<Game_Object_Files><File>mod-objects.xml</File><File>objects-a.xml</File><File>objects-b.xml</File><File>numeric-root.xml</File></Game_Object_Files>");
     write(tree.mod_root / "XML" / "mod-objects.xml",
-          "<Objects><SpaceUnit Name=\"DUP_LAYER\"><ReplaceTag>mod-stronger-layer</ReplaceTag></SpaceUnit></Objects>");
+          "<Objects><SpaceUnit Name=\"MOD_ONLY\"><ReplaceTag>mod</ReplaceTag></SpaceUnit></Objects>");
     write(tree.mod_root / "XML" / "numeric-root.xml",
-          "<?xml version=\"1.0\"?><181st><SpaceUnit Name=\"NUMERIC_ROOT\"><Value>accepted</Value></SpaceUnit></181st>");
+          "<?xml version=\"1.0\"?><181st><SpaceUnit Name=\"NUMERIC_ROOT\"><Value>accepted</Value></SpaceUnit><SpaceUnit Name=\"DUP_LAYER\"><ReplaceTag>mod-stronger-layer</ReplaceTag></SpaceUnit></181st>");
     write(tree.root / "XML" / "hardpoints.xml",
           "<HardPoints><HardPoint Name=\"HP_A\"><Damage>1</Damage></HardPoint></HardPoints>");
+    write(tree.mod_root / "XML" / "hardpoints.xml",
+          "<HardPoints><HardPoint Name=\"HP_A\"><Damage>1</Damage></HardPoint>"
+          "<HardPoint Name=\"HP_A\"><Damage>2</Damage></HardPoint></HardPoints>");
     write(tree.root / "XML" / "factions.xml", R"xml(<Factions><Faction Name="FACTION_A">
 <Standalone_Space_Maps_Special_Weapon_B>OLD</Standalone_Space_Maps_Special_Weapon_B>
-</Faction></Factions>)xml");
+</Faction><Faction Name="FACTION_DUP"><Color>1 1 1</Color></Faction><Faction Name="FACTION_DUP"><Color>2 2 2</Color></Faction><Faction Name="FACTION_LAYER"><Color>1 1 1</Color></Faction></Factions>)xml");
+    write(tree.mod_root / "XML" / "FactionFiles.xml",
+          "<Faction_Files><File>factions.xml</File><File>mod-factions.xml</File></Faction_Files>");
+    write(tree.mod_root / "XML" / "mod-factions.xml",
+          "<Factions><Faction Name=\"FACTION_LAYER\"><Color>9 9 9</Color></Faction></Factions>");
     write(tree.root / "XML" / "campaigns.xml",
           "<Campaigns><Campaign Name=\"CAMPAIGN_A\"><Starting_Credits>Empire, 1000</Starting_Credits></Campaign></Campaigns>");
     write(tree.root / "XML" / "sfx.xml",
@@ -372,15 +580,60 @@ void run_contracts() {
     }
     expect(manifest_records == 2 && active_manifest_records == 1 && shadow_manifest_records == 1,
            "physical inventory separates effective parsed bytes from shadowed layer metadata");
+    const auto* hp = catalog.find("HP_A", eawr::data::Category::hardpoint);
+    expect(hp && hp->namespace_winner && hp->root.children[0].raw_text == "2",
+           "ML-18: a mod's later hardpoint binding replaces its earlier binding");
+    expect(catalog.find("HP_A") == hp, "untyped hardpoint lookup agrees with the typed binding");
     expect(catalog.find("top") != nullptr && catalog.find("ToP") == catalog.find("TOP"),
            "object IDs resolve case-insensitively");
     expect(catalog.find("DUP") != nullptr && catalog.find_all("dup").size() == 2,
            "duplicates remain available to the raw API");
-    expect(catalog.find("DUP") && catalog.find("DUP")->root.children[0].raw_text == "second",
-           "later same-layer registry include wins deterministically");
+    expect(catalog.find("DUP") && catalog.find("DUP")->root.children[0].raw_text == "first",
+           "the first registered duplicate answers name lookups (#3741)");
+    expect(catalog.find_all("dup").size() == 2 && catalog.find_all("dup")[0]->root.children[0].raw_text == "first" &&
+               catalog.find_all("dup")[1]->root.children[0].raw_text == "second",
+           "every duplicate definition stays, in load order");
+    expect(catalog.find("DUP_FIRST") &&
+               catalog.find("DUP_FIRST")->root.children[0].raw_text == "base-first-in-registry" &&
+               catalog.find_all("DUP_FIRST").size() == 2,
+           "two same-layer files: the definition in the file registered first answers name lookups (#3741)");
+    {
+        // The faction selection paths (scene_build.cpp faction_colours, skirmish/inputs.cpp faction_definition) take the
+        // first active faction definition find_all lists: a mod faction listed later still beats the vanilla one.
+        const auto first_faction = [&](const std::string_view id) -> const eawr::data::Definition* {
+            for (const auto* definition : catalog.find_all(id))
+                if (definition->category == eawr::data::Category::faction && definition->active) return definition;
+            return nullptr;
+        };
+        const auto* layered = first_faction("FACTION_LAYER");
+        expect(catalog.find_all("FACTION_LAYER").size() == 2 && layered && layered->root.children[0].raw_text == "9 9 9",
+               "a mod faction overrides the vanilla one by layer for the faction selection paths");
+        const auto* repeated = first_faction("FACTION_DUP");
+        expect(repeated && repeated->root.children[0].raw_text == "1 1 1",
+               "within one layer the first registered faction definition is the one selected");
+    }
+    {
+        const auto factions = catalog.find_all("FACTION_DUP");
+        expect(factions.size() == 2 && factions[0]->root.children[0].raw_text == "1 1 1",
+               "a repeated faction Name keeps both, the first registered one leads find_all");
+    }
+    expect(catalog.find("DUP_SAME") &&
+               catalog.find("DUP_SAME")->root.children[0].raw_text == "same-file-first" &&
+               catalog.find_all("DUP_SAME").size() == 2,
+           "two definitions in one file: the first in the file answers name lookups (#3741)");
+    {
+        std::size_t duplicate_notes = 0;
+        for (const auto& note : loaded.value().notes)
+            if (note.code == eawr::core::load_note_codes::duplicate_object_name && note.object == "DUP") ++duplicate_notes;
+        expect(duplicate_notes == 1, "a duplicate Name emits one load note");
+        std::size_t layer_notes = 0;
+        for (const auto& note : loaded.value().notes)
+            if (note.code == eawr::core::load_note_codes::duplicate_object_name && note.object == "DUP_LAYER") ++layer_notes;
+        expect(layer_notes == 0, "a mod overriding a vanilla object emits no duplicate-name note");
+    }
     expect(catalog.find("DUP_LAYER") &&
                catalog.find("DUP_LAYER")->root.children[0].raw_text == "mod-stronger-layer",
-           "stronger VFS layer wins even when a weaker definition is later in registry order");
+           "the stronger layer (mod) overrides vanilla even when its file is registered later");
     if (!catalog.find("NUMERIC_ROOT")) {
         for (const auto& value : loaded.value().diagnostics) {
             if (value.logical_path && value.logical_path->find("numeric-root") != std::string::npos) {
@@ -454,9 +707,9 @@ void category_contracts(const eawr::data::Catalog& catalog) {
                              [&](const auto& value) { return value.category == category; });
     };
     expect(categories(eawr::data::Category::game_object) > 0 &&
-               categories(eawr::data::Category::hardpoint) == 1 &&
+               categories(eawr::data::Category::hardpoint) == 2 &&
                categories(eawr::data::Category::ability) == 1 &&
-               categories(eawr::data::Category::faction) == 1 &&
+               categories(eawr::data::Category::faction) == 5 &&
                categories(eawr::data::Category::campaign) == 1 &&
                categories(eawr::data::Category::sfx) == 1,
            "all six requested active catalog categories are populated");

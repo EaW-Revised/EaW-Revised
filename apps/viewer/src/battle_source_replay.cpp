@@ -5,6 +5,7 @@
 #include "viewer_path.hpp"
 #include "eawr/campaign/standalone_replay.hpp"
 #include "eawr/campaign/space_replay_rules.hpp"
+#include "eawr/units/content_selection.hpp"
 #include <fstream>
 #include <iterator>
 #include <algorithm>
@@ -29,7 +30,10 @@ bool BattleSourceState::prepare_native(const live_session::PreparedBattle& battl
         return false;
     }
     std::map<tactical::TypeId, std::string> names;
-    for (const units::UnitType& type : battle.tables.units) names.emplace(battle::type_id(type.id), type.id);
+    const units::ContentTypeSelection type_selection(battle.tables);
+    for (const units::UnitType& type : battle.tables.units) {
+        if (type_selection.keeps(type)) names.emplace(battle::type_id(type.id), type.id);
+    }
     // Native start metadata also names map objects that are outside the unit tables.
     if (battle.start) for (const auto& unit : battle.start->units) names.emplace(unit.state.type_id, unit.type);
     for (const auto& unit : setup.units) {
@@ -81,7 +85,7 @@ bool BattleSourceState::bind_replay(const vfs::Vfs& filesystem, const data::Cata
     }
     if (!tables) tables = load_start_tables(filesystem, catalog, failure, {});
     if (!tables) return false;
-    const tactical::TacticalSetup& setup = replay->setup;
+    tactical::TacticalSetup& setup = replay->setup;
     const std::string replay_map = setup.skirmish ? setup.skirmish->map : std::string(map_path);
     if (units::content_identity(*tables) != replay.value().setup.content_identity) {
         // WHZ-01: live recordings include the selected map's authored hazard
@@ -141,13 +145,12 @@ bool BattleSourceState::bind_replay(const vfs::Vfs& filesystem, const data::Cata
         return false;
     }
     if (!skipped.empty()) std::cerr << "EAWR live session content: " << skirmish::content_load_summary(skipped) << std::endl;
-    // #4589: a recording that places a skipped type would replay it unarmed; refuse it like a live start.
-    if (auto placed = skirmish::refuse_skipped_setup(setup, skipped); !placed) {
-        failure = "live session start: " + core::format_diagnostic(placed.error());
-        return false;
-    }
+    skirmish::drop_skipped_setup(setup, skipped, &content.value().load_notes);
     std::map<tactical::TypeId, std::string> names;
-    for (const units::UnitType& type : tables->units) names.emplace(battle::type_id(type.id), type.id);
+    const units::ContentTypeSelection type_selection(*tables);
+    for (const units::UnitType& type : tables->units) {
+        if (type_selection.keeps(type)) names.emplace(battle::type_id(type.id), type.id);
+    }
     // Team colours: the lobby colour of the M2 slot playing the player's faction.
     std::map<tactical::FactionId, std::array<std::uint8_t, 3>> faction_colours;
     auto selected_victory = tactical::VictoryCondition::enemy_starbase_destroyed;
@@ -218,6 +221,13 @@ bool BattleSourceState::bind_replay(const vfs::Vfs& filesystem, const data::Cata
         }
         auto start = skirmish::build_start(replay_fixture, inputs.value());
         if (!start) { failure = core::format_diagnostic(start.error()); return false; }
+        {
+            eawr::core::LoadNoteCollector collector;
+            for (const auto& note : content.value().load_notes) collector.append(note);
+            for (const auto& note : start.value().load_notes) collector.append(note);
+            content.value().load_notes = collector.snapshot();
+        }
+        skirmish::drop_skipped_starts(start.value(), skipped, &content.value().load_notes);
         // WTA-46 (#735): the recorded slot levels rebuild the live session's difficulty scales.
         if (auto bound = skirmish::bind_difficulty(content.value(), start.value(), inputs.value()); !bound) {
             failure = "--eawr-live-replay: " + core::format_diagnostic(bound.error());
@@ -245,6 +255,9 @@ bool BattleSourceState::bind_replay(const vfs::Vfs& filesystem, const data::Cata
             if (!economy) { failure = core::format_diagnostic(economy.error()); return false; }
             economy_ = std::move(economy).value();
         }
+        std::vector<std::string> dropped;
+        skirmish::drop_skipped_menu_options(economy_, skirmish::skipped_type_ids(skipped), &dropped);
+        for (const auto& line : dropped) std::cerr << "EAWR live session content: " << line << std::endl;
         // WBP-29: focused fleets assign different IDs; map placement/type supplies model metadata.
         std::vector<battle::StartUnit> replay_units;
         replay_units.reserve(setup.units.size());

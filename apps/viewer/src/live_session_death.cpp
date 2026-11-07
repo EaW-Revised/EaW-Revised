@@ -1,5 +1,7 @@
 #include "eawr/core/load_profile.hpp"
+#include "eawr/vfs/vfs.hpp"
 #include "live_session_view.hpp"
+#include "eawr/presentation/particles/lane_guard.hpp"
 #include "eawr/presentation/ui/pads.hpp"
 
 #include "shutdown_trace.hpp"
@@ -132,7 +134,7 @@ std::optional<LiveSessionView::DeathClone> LiveSessionView::prepare_death_clone(
     std::string status = "ready";
     std::string clip_type(animation::clip_type_names[animation::clip_types::die]);
     bool removed = false;
-    DeathClone death{.ship = placed_ships_.size(), .type = *clone_type};
+    DeathClone death{.ship = placed_ships_.size(), .type = *clone_type, .clip = {}};
     if (!clone) {
         status = "clone type not in the catalog";
     } else {
@@ -237,8 +239,16 @@ std::optional<LiveSessionView::CloneFrame> LiveSessionView::clone_frame(const Ba
     return std::nullopt;
 }
 
+std::vector<std::size_t> LiveSessionView::retiring_ships() const {
+    std::vector<std::size_t> ships;
+    ships.reserve(retiring_clones_.size());
+    for (const ActiveClone& retiring : retiring_clones_) ships.push_back(death_clones_.at(retiring.unit).ship);
+    return ships;
+}
+
 void LiveSessionView::retire_clones(BattleScene& population, GodotRenderer& renderer,
     const std::function<bool(std::size_t)>& terminal_ready) {
+    particles::lane::guard_main(); // L1.2: counts a main-thread call while a lane job owns this state; never aborts
     for (const ActiveClone& retiring : retiring_clones_) {
         const auto ship = death_clones_.at(retiring.unit).ship;
         const bool reusable = std::any_of(launch_clones_.begin(), launch_clones_.end(),

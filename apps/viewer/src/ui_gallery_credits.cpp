@@ -139,7 +139,7 @@ void UiGalleryMode::State::build_credits_page(Control& root) {
     };
     box_steps.push_back(std::move(running));
     box_steps.push_back({click ? "a click skips and closed fires" : "Esc skips and closed fires",
-                         [this, viewport, click, centre] {
+                         [viewport, click, centre] {
                              if (click) send_click(*viewport, centre);
                              else send_escape();
                          },

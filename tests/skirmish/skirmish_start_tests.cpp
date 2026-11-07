@@ -155,6 +155,7 @@ int main(const int argc, char** argv) {
     }
     setup_contract(fixtures);
     synthetic_start();
+    minimap_default_evidence();
     synthetic_special_sources();
     synthetic_tactical_super_weapon();
     synthetic_placed_start();

@@ -2,11 +2,14 @@
 #include "eawr/presentation/particles/prewarmed_capacity.hpp"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <bit>
 #include <cmath>
 #include <chrono>
+#include <cstring>
 #include <thread>
+#include <type_traits>
 #include <limits>
 #include <new>
 #include <ostream>
@@ -26,6 +29,23 @@ namespace {
 using TimingClock = std::chrono::steady_clock;
 std::atomic<bool> default_stream_bucketing{true};
 std::atomic<bool> default_catchup_folding{true};
+std::atomic<bool> default_clean_present{true};
+std::atomic<std::size_t> default_slice_cap{StepExecutor::max_ordered};
+// Exact bit equality: a value that merely compares equal (-0 and +0) may still build another stream.
+template<class T> bool same_bits(const T& left, const T& right) noexcept {
+    static_assert(std::is_trivially_copyable_v<T>);
+    return std::memcmp(&left, &right, sizeof(T)) == 0;
+}
+bool same_camera(const CameraFrame& left, const CameraFrame& right) noexcept {
+    return same_bits(left.position, right.position) && same_bits(left.right, right.right) &&
+           same_bits(left.up, right.up) && left.collect_axis_diagnostics == right.collect_axis_diagnostics;
+}
+bool same_culling(const CullingFrame& left, const CullingFrame& right) noexcept {
+    return left.valid == right.valid && left.enabled == right.enabled && same_bits(left.planes, right.planes);
+}
+bool same_emitter_frame(const EmitterFrame& left, const EmitterFrame& right) noexcept {
+    return same_bits(left.origin, right.origin) && same_bits(left.basis, right.basis);
+}
 struct Measure final {
     explicit Measure(double* destination):destination_(destination),start_(destination?TimingClock::now():TimingClock::time_point{}){}
     ~Measure(){if(destination_)*destination_+=std::chrono::duration<double,std::milli>(TimingClock::now()-start_).count();}
@@ -82,6 +102,16 @@ struct EffectRegistry::Instance final {
     bool bucket_particles{};
     std::uint64_t bucket_visits{}, stream_visits{};
     float brightness{1.0F};
+    // Dirty tracking for present: the streams built last are exactly what a build now would
+    // produce while nothing below changed (EffectRegistry::set_clean_present_default).
+    bool dirty{true};
+    bool frame_dirty{};
+    bool skipped{};
+    bool frame_known{}, mesh_known{}, dynamic_known{};
+    EmitterFrame frame_set{};
+    MeshFrame mesh_set{};
+    float dynamic_size{}, dynamic_energy{};
+    std::uint64_t built_environment{~std::uint64_t{0}};
     bool visible{true};
     bool prepared{true};
     bool pending_upload{};
@@ -98,7 +128,122 @@ struct EffectRegistry::Instance final {
     bool measured_on_main{};
 };
 
-EffectRegistry::EffectRegistry(RenderBackend& backend) : backend_(&backend) {}
+EffectRegistry::EffectRegistry(RenderBackend& backend)
+    : backend_(&backend), clean_present_(default_clean_present.load(std::memory_order_relaxed)) {}
+
+namespace {
+// One slot per task: 0 not done, 2 done, 3 failed. The builders claim tasks in order, so the
+// earliest finish first and the calling thread rarely has to wait.
+struct OrderedRun final {
+    const std::function<void(std::size_t)>* task;
+    const std::function<void(std::size_t)>* consume;
+    std::size_t count;
+    std::thread::id caller;
+    std::atomic<std::size_t> next{0};
+    std::atomic<bool> failed{false};
+    std::array<std::atomic<std::uint8_t>, StepExecutor::max_ordered> state{};
+    std::size_t consumed{};
+
+    void build(const std::size_t index) {
+        bool ok = false;
+        try {
+            (*task)(index);
+            ok = true;
+        } catch (...) {
+        }
+        if (!ok) failed.store(true, std::memory_order_relaxed);
+        state[index].store(ok ? 2 : 3, std::memory_order_release);
+        state[index].notify_all();
+    }
+
+    // The calling thread commits in order; when the next task is not done it builds one that
+    // no thread has claimed, and waits only when every task is claimed.
+    void commit() {
+        while (consumed < count) {
+            std::uint8_t seen = state[consumed].load(std::memory_order_acquire);
+            while (seen < 2) {
+                const std::size_t claim = next.fetch_add(1, std::memory_order_relaxed);
+                if (claim < count) build(claim);
+                else state[consumed].wait(seen, std::memory_order_acquire);
+                seen = state[consumed].load(std::memory_order_acquire);
+            }
+            if (seen == 3) return;
+            // A throwing commit fails the run and ends the commits (nothing is retried): the
+            // executor's job wrapper would otherwise catch it and call commit() again.
+            try {
+                (*consume)(consumed);
+            } catch (...) {
+                failed.store(true, std::memory_order_relaxed);
+                consumed = count;
+                return;
+            }
+            ++consumed;
+        }
+    }
+
+    // A builder that is not the caller: claims tasks until none is left; returns how many it built.
+    std::size_t build_claims() {
+        std::size_t built = 0;
+        for (std::size_t claim = next.fetch_add(1, std::memory_order_relaxed); claim < count;
+             claim = next.fetch_add(1, std::memory_order_relaxed)) {
+            build(claim);
+            ++built;
+        }
+        return built;
+    }
+
+    void work() {
+        if (std::this_thread::get_id() == caller) {
+            commit();
+            return;
+        }
+        static_cast<void>(build_claims());
+    }
+
+    // HelpBoard::Entry::work: a thread outside the executor (PF lane-serial (a)).
+    static std::size_t help(void* context) { return static_cast<OrderedRun*>(context)->build_claims(); }
+};
+} // namespace
+
+bool StepExecutor::run_ordered(const std::size_t count, const std::function<void(std::size_t)>& task,
+    const std::function<void(std::size_t)>& consume) const {
+    if (count > max_ordered) return false;
+    OrderedRun shared{.task = &task, .consume = &consume, .count = count, .caller = std::this_thread::get_id()};
+    OrderedRun* const pointer = &shared;
+    // Published for the run's whole length; retracted (no helper inside any more) before `shared` dies.
+    HelpBoard* const board = help_board();
+    const HelpBoard::Entry entry{.work = &OrderedRun::help, .context = pointer};
+    struct Retract final {
+        HelpBoard* board;
+        ~Retract() { if (board != nullptr) board->retract(); }
+    } retract{board};
+    if (board != nullptr) board->publish(&entry);
+    const bool ran = run(std::max<std::size_t>(participants(), 1), [pointer](const std::size_t) { pointer->work(); });
+    // An executor that gave the caller no job leaves the commits to it, every task being done.
+    if (ran && !shared.failed.load(std::memory_order_relaxed) && shared.consumed < shared.count) shared.commit();
+    return ran && !shared.failed.load(std::memory_order_relaxed) && shared.consumed == shared.count;
+}
+
+void EffectRegistry::set_clean_present_default(const bool on) noexcept {
+    default_clean_present.store(on, std::memory_order_relaxed);
+}
+
+void EffectRegistry::set_slice_cap_default(const std::size_t slices) noexcept {
+    default_slice_cap.store(std::clamp<std::size_t>(slices, 1, StepExecutor::max_ordered), std::memory_order_relaxed);
+}
+
+void EffectRegistry::observe_environment(const CameraFrame& camera) {
+    culling_ = backend_->culling_frame();
+    // A backend that could not finish an upload asks for the same stream again.
+    const std::uint64_t incomplete = backend_->incomplete_updates();
+    const bool retry = incomplete != incomplete_updates_;
+    incomplete_updates_ = incomplete;
+    if (!retry && environment_known_ && same_camera(camera, environment_camera_) && same_culling(culling_, environment_culling_)) return;
+    environment_known_ = true;
+    environment_camera_ = camera;
+    environment_culling_ = culling_;
+    ++environment_;
+}
 
 EffectRegistry::FrameUploads::FrameUploads(EffectRegistry& registry, const bool enabled) noexcept
     : registry_(registry), enabled_(enabled) {
@@ -107,10 +252,79 @@ EffectRegistry::FrameUploads::FrameUploads(EffectRegistry& registry, const bool 
 
 EffectRegistry::FrameUploads::~FrameUploads() {
     if (!enabled_ || --registry_.upload_scopes_ != 0) return;
-    for (const auto& instance : registry_.instances_) {
+    // A destructor must not throw: an instance that cannot be packed or committed is rebuilt and
+    // uploaded by its next present.
+    try {
+        static_cast<void>(registry_.commit_pending_uploads());
+    } catch (...) {
+        registry_.abandon_pending_uploads();
+    }
+}
+
+core::Result<void> EffectRegistry::commit_pending_uploads() {
+    batch_.clear();
+    for (const auto& instance : instances_) {
+        if (instance->pending_upload) batch_.push_back(instance.get());
+    }
+    auto outcome = [this]() -> core::Result<void> {
+        if (batch_.empty()) return core::Result<void>::success();
+        measurement_caller_ = measure_ ? std::this_thread::get_id() : std::thread::id{};
+        return run_batch([this](const std::size_t index) {
+            Instance& instance = *batch_[index];
+            instance.measured_on_main = measure_ && std::this_thread::get_id() == measurement_caller_;
+            pack_pending(instance);
+        }, [this](const std::size_t index) { finish_pending(*batch_[index]); });
+    }();
+    // A failed or partial run leaves instances parked: pack and commit them here, in order.
+    for (Instance* const instance : batch_) {
+        if (!instance->pending_upload) continue;
+        instance->measured_on_main = measure_;
+        try {
+            pack_pending(*instance);
+        } catch (...) {
+            instance->pending_upload = false;
+            instance->dirty = true;
+            continue;
+        }
+        finish_pending(*instance);
+    }
+    batch_.clear();
+    return outcome;
+}
+
+void EffectRegistry::pack_pending(Instance& instance) const {
+    instance.packing_ms = 0;
+    // build() returned early for an instance that was not prepared, and an exhausted instance's
+    // streams were reset after its last build: neither has bytes to pack. (An eager pass packed the
+    // exhausted stream before the reset; the commit's update(empty) takes the backend's empty path
+    // either way, so the drawn result is the same.)
+    if (!instance.prepared) return;
+    for (const std::size_t index : instance.render_active) {
+        const VertexStream& stream = instance.streams[index];
+        if (instance.resources[index] == 0U || stream.indices.empty()) continue;
+        Measure timer(measure_ ? &instance.packing_ms : nullptr);
+        backend_->prepare_emitter(instance.resources[index], stream);
+    }
+}
+
+void EffectRegistry::finish_pending(Instance& instance) noexcept {
+    instance.pending_upload = false;
+    if (measure_) {
+        auto& stages = instance.measured_on_main ? timings_.main_stages_ms : timings_.worker_stages_ms;
+        stages[4] += instance.packing_ms;
+    }
+    try {
+        commit_upload(instance);
+    } catch (...) {
+        instance.dirty = true;
+    }
+}
+
+void EffectRegistry::abandon_pending_uploads() noexcept {
+    for (const auto& instance : instances_) {
         if (!instance->pending_upload) continue;
         instance->pending_upload = false;
-        registry_.commit_upload(*instance);
+        instance->dirty = true;
     }
 }
 
@@ -127,6 +341,7 @@ void EffectRegistry::set_stream_bucketing_default(const bool on) noexcept {
 }
 
 EffectRegistry::~EffectRegistry() {
+    static_cast<void>(finish_advance_all());
     while (!instances_.empty()) static_cast<void>(release(instances_.back()->handle));
     evict_idle();
 }
@@ -279,6 +494,9 @@ EffectRegistry::Admission EffectRegistry::spawn_authored(
             instance->brightness = 1; instance->visible = instance->prepared = instance->backend_visible = true;
             instance->pending_upload = instance->stepped = instance->deferred = instance->updated = instance->was_rendered = instance->exhausted = false;
             instance->accumulated = 0; instance->render_active.clear();
+            instance->dirty = true; instance->frame_dirty = false; instance->skipped = false;
+            instance->frame_known = instance->mesh_known = instance->dynamic_known = false;
+            instance->built_environment = ~std::uint64_t{0};
             std::fill(instance->backend_empty.begin(), instance->backend_empty.end(), false);
             std::fill(instance->backend_terminal.begin(), instance->backend_terminal.end(), false);
             for (auto& stream : instance->streams) stream.clear();
@@ -303,14 +521,18 @@ EffectRegistry::Admission EffectRegistry::spawn_authored(
             if (!capacity) return refuse(capacity.error().message.find("overflow") != std::string::npos
                 ? Refusal::arithmetic_failure : Refusal::definition_failure, capacity.error().message.c_str());
             auto plans = plan_system(*system);
-            for (const auto& plan : plans) if (!plan.drawable)
-                return refuse(Refusal::definition_failure, "effect has an unsupported render plan");
+            // Render support is per emitter, independent of CPU validity. Keep
+            // unsupported parents alive so their drawable children still emit.
+            if (std::none_of(plans.begin(), plans.end(), [](const auto& plan) { return plan.drawable; }))
+                return refuse(Refusal::definition_failure, "effect has no supported render plan");
             const auto payload = CpuSystem::planned_memory_bytes(*system, capacity.value().emitters);
             if (!payload) return refuse(Refusal::arithmetic_failure, "effect CPU payload size overflows");
             std::size_t wanted = payload.value();
-            const bool buckets = default_stream_bucketing.load(std::memory_order_relaxed) && plans.size() > 1;
+            const bool buckets = default_stream_bucketing.load(std::memory_order_relaxed)
+                && std::count_if(plans.begin(), plans.end(), [](const auto& plan) { return plan.drawable; }) > 1;
             for (std::size_t index = 0; index < plans.size(); ++index) {
                 const auto& plan = plans[index];
+                if (!plan.drawable) continue;
                 const auto width = (plan.triangles ? 3U : 4U) * sizeof(ParticleVertex)
                     + (plan.triangles ? 3U : 6U) * sizeof(std::uint32_t)
                     + ((plan.sort_particles || plan.legacy_slot_order) ? sizeof(const Particle*) : 0U)
@@ -372,11 +594,12 @@ EffectRegistry::Admission EffectRegistry::spawn_authored(
         if (fail_stage == AdmissionStage::cpu) throw std::bad_alloc{};
         stage = AdmissionStage::backend;
         for (std::size_t index = 0; index < instance->plans.size(); ++index) {
-            if (fail_stage == AdmissionStage::backend && index + 1 == instance->plans.size()) throw std::bad_alloc{};
+            if (!instance->plans[index].drawable) continue;
             const auto resource = backend_->create_emitter(instance->plans[index]);
             if (resource == 0) return refuse(Refusal::allocation_failed, "effect backend allocation failed");
             instance->resources[index] = resource; ++live_resources_;
         }
+        if (fail_stage == AdmissionStage::backend) throw std::bad_alloc{};
         const auto handle = instance->handle;
         stage = AdmissionStage::publication;
         if (fail_stage == AdmissionStage::publication) throw std::bad_alloc{};
@@ -520,6 +743,11 @@ core::Result<void> EffectRegistry::set_frame(const EffectHandle handle, const Em
         diagnostics_.push_back(diagnostic);
         return core::Result<void>::failure(std::move(diagnostic));
     }
+    if (!instance->frame_known || !same_emitter_frame(instance->frame_set, frame)) {
+        instance->frame_known = true;
+        instance->frame_set = frame;
+        instance->frame_dirty = true;
+    }
     instance->cpu.set_origin(frame.origin);
     instance->cpu.set_basis(frame.basis);
     return core::Result<void>::success();
@@ -528,6 +756,11 @@ core::Result<void> EffectRegistry::set_frame(const EffectHandle handle, const Em
 core::Result<void> EffectRegistry::set_mesh_frame(const EffectHandle handle, const MeshFrame& frame) {
     Instance* const instance = find(handle);
     if (instance == nullptr) return core::Result<void>::failure(unknown(handle));
+    if (!instance->mesh_known || !same_bits(instance->mesh_set, frame)) {
+        instance->mesh_known = true;
+        instance->mesh_set = frame;
+        instance->dirty = true;
+    }
     auto result=instance->cpu.set_mesh_frame(frame);
     if(!result)diagnostics_.push_back(result.error());
     return result;
@@ -544,7 +777,10 @@ core::Result<void> EffectRegistry::set_detail(ParticleDetail detail) {
     detail.local = std::clamp(detail.local, 0.0F, 1.0F);
     if (detail == detail_) return core::Result<void>::success();
     detail_ = detail;
-    for (const auto& instance : instances_) static_cast<void>(instance->cpu.set_detail(detail));
+    for (const auto& instance : instances_) {
+        instance->dirty = true;
+        static_cast<void>(instance->cpu.set_detail(detail));
+    }
     return core::Result<void>::success();
 }
 
@@ -557,6 +793,7 @@ core::Result<void> EffectRegistry::set_brightness(const EffectHandle handle, con
         diagnostics_.push_back(diagnostic);
         return core::Result<void>::failure(std::move(diagnostic));
     }
+    if (!same_bits(instance->brightness, brightness)) instance->dirty = true;
     instance->brightness = brightness;
     return core::Result<void>::success();
 }
@@ -564,6 +801,12 @@ core::Result<void> EffectRegistry::set_brightness(const EffectHandle handle, con
 core::Result<void> EffectRegistry::set_dynamic(const EffectHandle handle, const float size, const float energy) {
     Instance* const instance = find(handle);
     if (!instance) return core::Result<void>::failure(unknown(handle));
+    if (!instance->dynamic_known || !same_bits(instance->dynamic_size, size) || !same_bits(instance->dynamic_energy, energy)) {
+        instance->dynamic_known = true;
+        instance->dynamic_size = size;
+        instance->dynamic_energy = energy;
+        instance->dirty = true;
+    }
     return instance->cpu.set_dynamic(size, energy);
 }
 
@@ -574,6 +817,7 @@ core::Result<void> EffectRegistry::set_pinched_cylinder(const EffectHandle handl
     // This changes the definition's shape; its original immutable reuse key is
     // no longer compatible. Ordinary dynamic/frame controls are reset on reuse.
     instance->admitted_definition.reset();
+    instance->dirty = true;
     return instance->cpu.set_pinched_cylinder(radius, height, fraction);
 }
 
@@ -582,7 +826,7 @@ core::Result<EffectFrameStats> EffectRegistry::advance(
     Instance* const instance = find(handle);
     if (instance == nullptr) return core::Result<EffectFrameStats>::failure(unknown(handle));
     EffectFrameStats stats;
-    culling_ = backend_->culling_frame();
+    observe_environment(camera);
     instance->measured_on_main = true;
     instance->cpu.measure_phases(measure_);
     instance->step_ms = instance->build_ms = 0;
@@ -596,13 +840,25 @@ core::Result<EffectFrameStats> EffectRegistry::advance(
 core::Result<void> EffectRegistry::present(const EffectHandle handle, const CameraFrame& camera) {
     Instance* const instance = find(handle);
     if (instance == nullptr) return core::Result<void>::failure(unknown(handle));
-    culling_ = backend_->culling_frame();
+    observe_environment(camera);
+    if (clean_present_ && is_clean(*instance)) {
+        ++work_.presents_clean;
+        return core::Result<void>::success();
+    }
     instance->measured_on_main = true;
     instance->cpu.measure_phases(measure_);
     instance->step_ms = instance->build_ms = 0;
+    bool skipped = false;
     { Measure timer(measure_?&instance->build_ms:nullptr);
-      instance->cpu.follow_emitter(); build(*instance, camera, nullptr); }
+      const std::size_t moved = instance->cpu.follow_emitter();
+      if (clean_present_ && moved == 0 && follow_only(*instance)) skipped = true;
+      else build(*instance, camera, nullptr); }
     if (measure_) timings_.scalar_build_ms += instance->build_ms;
+    if (skipped) {
+        instance->frame_dirty = false;
+        ++work_.presents_unmoved;
+        return core::Result<void>::success();
+    }
     upload(*instance, false, false);
     return core::Result<void>::success();
 }
@@ -627,7 +883,7 @@ core::Result<void> EffectRegistry::advance_batch(const std::span<const EffectHan
     const float uniform_delta, const std::span<const float> deltas, const CameraFrame& camera,
     std::vector<EffectFrameStats>& stats) {
     if (auto resolved = resolve(handles); !resolved) return resolved;
-    culling_ = backend_->culling_frame();
+    observe_environment(camera);
     stats.resize(batch_.size());
     measurement_caller_ = measure_ ? std::this_thread::get_id() : std::thread::id{};
     struct Inputs final {
@@ -638,30 +894,117 @@ core::Result<void> EffectRegistry::advance_batch(const std::span<const EffectHan
     };
     const Inputs inputs{uniform_delta, deltas, camera, stats};
     auto ran = run_batch([this, &inputs](const std::size_t index) {
-        // The slot keeps its per-emitter vector's storage; every field starts over.
-        EffectFrameStats& slot = inputs.stats[index];
-        std::vector<EmitterFrameStats> emitters = std::move(slot.emitters);
-        emitters.clear();
-        slot = EffectFrameStats{};
-        slot.emitters = std::move(emitters);
-        Instance& instance = *batch_[index];
-        instance.measured_on_main = measure_ && std::this_thread::get_id() == measurement_caller_;
-        instance.cpu.measure_phases(measure_);
-        instance.step_ms=instance.build_ms=0.0;
-        { Measure timer(measure_?&instance.step_ms:nullptr); step(instance, inputs.deltas.empty() ? inputs.uniform_delta : inputs.deltas[index], slot); }
-        { Measure timer(measure_?&instance.build_ms:nullptr); build(instance, inputs.camera, &slot); }
-    });
-    if (!ran) return ran;
-    for (Instance* const instance : batch_) {
+        advance_task(*batch_[index], inputs.deltas.empty() ? inputs.uniform_delta : inputs.deltas[index], inputs.camera,
+            inputs.stats[index], measure_ && std::this_thread::get_id() == measurement_caller_);
+    }, [this](const std::size_t index) {
+        Instance* const instance = batch_[index];
         if(measure_){timings_.batch_step_cpu_ms+=instance->step_ms;timings_.batch_build_cpu_ms+=instance->build_ms;}
         upload(*instance, true, stream_hashes_);
+    });
+    return ran;
+}
+
+void EffectRegistry::advance_task(Instance& instance, const float delta, const CameraFrame& camera,
+    EffectFrameStats& slot, const bool on_caller) const {
+    // The slot keeps its per-emitter vector's storage; every field starts over.
+    std::vector<EmitterFrameStats> emitters = std::move(slot.emitters);
+    emitters.clear();
+    slot = EffectFrameStats{};
+    slot.emitters = std::move(emitters);
+    instance.measured_on_main = on_caller;
+    instance.cpu.measure_phases(measure_);
+    instance.step_ms=instance.build_ms=0.0;
+    { Measure timer(measure_?&instance.step_ms:nullptr); step(instance, delta, slot); }
+    { Measure timer(measure_?&instance.build_ms:nullptr); build(instance, camera, &slot); }
+}
+
+core::Result<bool> EffectRegistry::begin_advance_all(const std::span<const EffectHandle> handles,
+    const std::span<const float> delta_seconds, const CameraFrame& camera, std::vector<EffectFrameStats>& stats) {
+    if (async_.active) {
+        core::Diagnostic diagnostic{std::string(diagnostic_codes::batch), core::Severity::error,
+            "an asynchronous particle batch is still running", {}, {}, {}, {}};
+        diagnostics_.push_back(diagnostic);
+        return core::Result<bool>::failure(std::move(diagnostic));
     }
-    return core::Result<void>::success();
+    if (delta_seconds.size() != handles.size()) {
+        core::Diagnostic diagnostic{std::string(diagnostic_codes::batch), core::Severity::error,
+            "the particle batch needs one delta per effect", {}, {}, {}, {}};
+        diagnostics_.push_back(diagnostic);
+        return core::Result<bool>::failure(std::move(diagnostic));
+    }
+    // Inside a deferred-upload scope the pack waits for the scope's exit; a backend that does not allow
+    // its commit beside the pack may not pack while the caller does other work either.
+    if (executor_ == nullptr || handles.size() < 2 || upload_scopes_ != 0 || executor_->participants() < 2
+        || !backend_->overlapped_commit_safe()) return core::Result<bool>::success(false);
+    if (auto resolved = resolve(handles); !resolved) return core::Result<bool>::failure(resolved.error());
+    observe_environment(camera);
+    stats.resize(batch_.size());
+    async_.batch.swap(batch_);
+    batch_.clear();
+    async_.deltas.assign(delta_seconds.begin(), delta_seconds.end());
+    async_.camera = camera;
+    async_.stats = &stats;
+    const std::size_t max_tasks = default_slice_cap.load(std::memory_order_relaxed);
+    async_.tasks = std::min(async_.batch.size(), max_tasks);
+    // The workers have no calling thread to measure: their stages count as worker stages.
+    measurement_caller_ = std::thread::id{};
+    async_.job = [this](const std::size_t slice) {
+        const std::size_t count = async_.batch.size();
+        const std::size_t first = count * slice / async_.tasks;
+        const std::size_t last = count * (slice + 1) / async_.tasks;
+        for (std::size_t index = first; index < last; ++index) {
+            advance_task(*async_.batch[index], async_.deltas[index], async_.camera, (*async_.stats)[index], false);
+        }
+    };
+    if (!executor_->start_async(async_.tasks, async_.job)) {
+        // Nothing started: hand the instances back so the caller's advance_all resolves them again.
+        batch_.swap(async_.batch);
+        batch_.clear();
+        async_.job = nullptr;
+        async_.stats = nullptr;
+        return core::Result<bool>::success(false);
+    }
+    async_.active = true;
+    return core::Result<bool>::success(true);
+}
+
+core::Result<void> EffectRegistry::finish_advance_all() {
+    if (!async_.active) return core::Result<void>::success();
+    async_.active = false;
+    const bool ran = executor_->join_async();
+    ++work_.batches;
+    work_.tasks += async_.tasks;
+    auto outcome = core::Result<void>::success();
+    if (!ran) {
+        core::Diagnostic diagnostic{std::string(diagnostic_codes::batch), core::Severity::error,
+            "the particle executor could not run a batch of " + std::to_string(async_.batch.size()) + " effects", {}, {}, {}, {}};
+        diagnostics_.push_back(diagnostic);
+        outcome = core::Result<void>::failure(std::move(diagnostic));
+    } else {
+        // The commit, in handle order, on the calling thread: what the pipelined commit does one by one.
+        for (Instance* const instance : async_.batch) {
+            if(measure_){timings_.batch_step_cpu_ms+=instance->step_ms;timings_.batch_build_cpu_ms+=instance->build_ms;}
+            upload(*instance, true, stream_hashes_);
+        }
+    }
+    async_.batch.clear();
+    async_.job = nullptr;
+    async_.stats = nullptr;
+    return outcome;
 }
 
 core::Result<void> EffectRegistry::present_all(const std::span<const EffectHandle> handles, const CameraFrame& camera) {
     if (auto resolved = resolve(handles); !resolved) return resolved;
-    culling_ = backend_->culling_frame();
+    observe_environment(camera);
+    if (clean_present_) {
+        // A clean instance keeps the streams (and backend state) of its last build; only the
+        // others are built and uploaded, in the order they were given.
+        const auto kept = std::remove_if(batch_.begin(), batch_.end(), [this](const Instance* instance) {
+            return is_clean(*instance);
+        });
+        work_.presents_clean += static_cast<std::uint64_t>(batch_.end() - kept);
+        batch_.erase(kept, batch_.end());
+    }
     measurement_caller_ = measure_ ? std::this_thread::get_id() : std::thread::id{};
     auto ran = run_batch([this, &camera](const std::size_t index) {
         Instance& instance = *batch_[index];
@@ -669,14 +1012,26 @@ core::Result<void> EffectRegistry::present_all(const std::span<const EffectHandl
         instance.cpu.measure_phases(measure_);
         instance.step_ms=instance.build_ms=0.0;
         Measure timer(measure_?&instance.build_ms:nullptr);
-        instance.cpu.follow_emitter(); build(instance, camera, nullptr);
-    });
-    if (!ran) return ran;
-    for (Instance* const instance : batch_) {
+        instance.skipped = false;
+        const std::size_t moved = instance.cpu.follow_emitter();
+        // The frame moved but nothing lives in it: the streams of the last build still stand.
+        if (clean_present_ && moved == 0 && follow_only(instance)) {
+            instance.skipped = true;
+            return;
+        }
+        build(instance, camera, nullptr);
+    }, [this](const std::size_t index) {
+        Instance* const instance = batch_[index];
         if(measure_){timings_.batch_step_cpu_ms+=instance->step_ms;timings_.batch_build_cpu_ms+=instance->build_ms;}
+        if (instance->skipped) {
+            instance->skipped = false;
+            instance->frame_dirty = false;
+            ++work_.presents_unmoved;
+            return;
+        }
         upload(*instance, false, false);
-    }
-    return core::Result<void>::success();
+    });
+    return ran;
 }
 
 core::Result<void> EffectRegistry::resolve(const std::span<const EffectHandle> handles) {
@@ -706,25 +1061,48 @@ core::Result<void> EffectRegistry::resolve(const std::span<const EffectHandle> h
     return core::Result<void>::success();
 }
 
-core::Result<void> EffectRegistry::run_batch(const std::function<void(std::size_t)>& task) {
+core::Result<void> EffectRegistry::run_batch(const std::function<void(std::size_t)>& task,
+    const std::function<void(std::size_t)>& consume) {
     const std::size_t count = batch_.size();
     if (executor_ == nullptr || count < 2) {
         for (std::size_t index = 0; index < count; ++index) task(index);
+        for (std::size_t index = 0; index < count; ++index) consume(index);
         return core::Result<void>::success();
     }
-    // Contiguous slices of the batch in order, at most ADR-009's 64 partitions, which the pool's
+    // Contiguous slices of the batch in order, at most StepExecutor::max_ordered of them, which the pool's
     // workers claim; no two slices share an instance.
-    constexpr std::size_t max_tasks = 64;
+    const std::size_t max_tasks = default_slice_cap.load(std::memory_order_relaxed);
     const std::size_t tasks = std::min(count, max_tasks);
     batch_task_count_ = tasks;
     const auto start=measure_?TimingClock::now():TimingClock::time_point{};
     caller_work_ms_ = 0.0;
-    const bool ran = executor_->run(tasks, [this, &task](const std::size_t slice) {
-        Measure caller_timer(measure_&&std::this_thread::get_id()==measurement_caller_?&caller_work_ms_:nullptr);
-        const std::size_t first = batch_.size() * slice / batch_task_count_;
-        const std::size_t last = batch_.size() * (slice + 1) / batch_task_count_;
-        for (std::size_t index = first; index < last; ++index) task(index);
-    });
+    const auto slice_range = [this](const std::size_t slice) {
+        return std::pair<std::size_t, std::size_t>{batch_.size() * slice / batch_task_count_,
+            batch_.size() * (slice + 1) / batch_task_count_};
+    };
+    // The commit overlaps the builds only when the executor has threads to build with and the
+    // backend can take an update while it prepares other resources.
+    const bool pipelined = executor_->participants() > 1 && backend_->overlapped_commit_safe();
+    bool ran = false;
+    if (pipelined) {
+        ran = executor_->run_ordered(tasks, [this, &task, &slice_range](const std::size_t slice) {
+            Measure caller_timer(measure_&&std::this_thread::get_id()==measurement_caller_?&caller_work_ms_:nullptr);
+            const auto [first, last] = slice_range(slice);
+            for (std::size_t index = first; index < last; ++index) task(index);
+        }, [this, &consume, &slice_range](const std::size_t slice) {
+            // The commits run on the caller: they are its work, not waiting for the pool.
+            Measure caller_timer(measure_&&std::this_thread::get_id()==measurement_caller_?&caller_work_ms_:nullptr);
+            const auto [first, last] = slice_range(slice);
+            for (std::size_t index = first; index < last; ++index) consume(index);
+        });
+        if (ran) ++work_.pipelined_batches;
+    } else {
+        ran = executor_->run(tasks, [this, &task, &slice_range](const std::size_t slice) {
+            Measure caller_timer(measure_&&std::this_thread::get_id()==measurement_caller_?&caller_work_ms_:nullptr);
+            const auto [first, last] = slice_range(slice);
+            for (std::size_t index = first; index < last; ++index) task(index);
+        });
+    }
     if(measure_){
         const double elapsed=std::chrono::duration<double,std::milli>(TimingClock::now()-start).count();
         timings_.executor_ms+=elapsed;
@@ -739,6 +1117,7 @@ core::Result<void> EffectRegistry::run_batch(const std::function<void(std::size_
         diagnostics_.push_back(diagnostic);
         return core::Result<void>::failure(std::move(diagnostic));
     }
+    if (!pipelined) for (std::size_t index = 0; index < count; ++index) consume(index);
     return core::Result<void>::success();
 }
 
@@ -851,8 +1230,12 @@ void EffectRegistry::build(Instance& instance, const CameraFrame& camera, Effect
         }
         if (instance.resources[index] != 0U && !stream.indices.empty()) {
             instance.render_active.push_back(index);
-            Measure timer(measure_ ? &instance.packing_ms : nullptr);
-            backend_->prepare_emitter(instance.resources[index], stream);
+            // Inside a deferred-upload scope only the last build of the frame is committed, so its
+            // bytes are packed once at the scope's exit (commit_pending_uploads), not in every pass.
+            if (upload_scopes_ == 0) {
+                Measure timer(measure_ ? &instance.packing_ms : nullptr);
+                backend_->prepare_emitter(instance.resources[index], stream);
+            }
         }
         // Only terminal CPU lifecycles relinquish reusable stream capacity.
         // A temporary gap keeps it for the next burst, with identical RNG/age.
@@ -897,8 +1280,23 @@ void EffectRegistry::build(Instance& instance, const CameraFrame& camera, Effect
     stats->finished = instance.cpu.finished();
 }
 
+bool EffectRegistry::is_clean(const Instance& instance) const noexcept {
+    // A frame set after the last follow (a zero-delta advance builds without following) still
+    // owes linked particles their move, which only the rebuild in present applies.
+    return !instance.dirty && !instance.frame_dirty && instance.built_environment == environment_
+        && !instance.pending_upload && instance.cpu.emitter_followed();
+}
+
+bool EffectRegistry::follow_only(const Instance& instance) const noexcept {
+    return !instance.dirty && instance.frame_dirty && instance.built_environment == environment_
+        && !instance.pending_upload;
+}
+
 void EffectRegistry::upload(Instance& instance, const bool stepped, const bool hashed) {
     Measure commit_time(measure_?&timings_.commit_ms:nullptr);
+    // Every upload follows a build of the state and environment as they stand now.
+    instance.dirty = instance.frame_dirty = false;
+    instance.built_environment = environment_;
     work_.particle_bucket_visits += instance.bucket_visits;
     work_.stream_particle_visits += instance.stream_visits;
     if (measure_) {
@@ -956,7 +1354,10 @@ void EffectRegistry::commit_upload(Instance& instance) {
         return;
     }
     for (const std::size_t index : instance.render_active) {
+        const std::uint64_t deferred = backend_->deferred_updates();
         backend_->update_emitter(instance.resources[index], instance.streams[index]);
+        // Held back by a retry backoff: the next present builds and submits this instance again.
+        if (backend_->deferred_updates() != deferred) instance.dirty = true;
         instance.backend_empty[index] = false;
         instance.backend_terminal[index] = false;
         if (!instance.backend_visible) backend_->set_emitter_visible(instance.resources[index], true);
@@ -1006,6 +1407,7 @@ core::Result<EffectDetachState> EffectRegistry::detach(const EffectHandle handle
         if (!released) return core::Result<EffectDetachState>::failure(released.error());
         return core::Result<EffectDetachState>::success(EffectDetachState::released);
     }
+    found->dirty = true;
     found->cpu.detach();
     return core::Result<EffectDetachState>::success(EffectDetachState::draining);
 }
@@ -1013,6 +1415,7 @@ core::Result<EffectDetachState> EffectRegistry::detach(const EffectHandle handle
 core::Result<void> EffectRegistry::stop_emission(const EffectHandle handle) {
     Instance* const found = find(handle);
     if (found == nullptr) return core::Result<void>::failure(unknown(handle));
+    found->dirty = true;
     found->cpu.detach();
     return core::Result<void>::success();
 }

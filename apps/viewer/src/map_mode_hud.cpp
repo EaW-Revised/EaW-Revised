@@ -1,4 +1,5 @@
 #include "eawr/core/load_profile.hpp"
+#include "eawr/vfs/vfs.hpp"
 // The tactical HUD over a map (P2-20a, #83): `--eawr-hud tactical` draws the
 // space HUD shell for `--eawr-hud-faction <empire|rebel|underworld>` (default
 // rebel), laid out by `--eawr-hud-rules <aspect|retail>` (default aspect, D4).
@@ -8,11 +9,19 @@
 // checkout's out/fonts, as for `--eawr-ui-gallery`.
 
 #include "battle_content.hpp"
+#include "bink_load_notes.hpp"
+#include "bink_child.hpp"
 #include "map_mode_internal.hpp"
 #include "memory_attribution.hpp"
+#include "texture_census_journal.hpp"
 #include "menu_timeline.hpp"
 #include "viewer_path.hpp"
+#include "skirmish_save_hints.hpp"
 #include "ui/kit.hpp"
+
+#include "eawr/platform/saved_games.hpp"
+
+#include <godot_cpp/classes/os.hpp>
 
 #include <godot_cpp/classes/canvas_layer.hpp>
 #include <godot_cpp/classes/project_settings.hpp>
@@ -242,6 +251,19 @@ bool MapMode::State::open_game_menu() {
         screen_options.context = EawrOptionsScreen::Context::in_game;
         screen_options.multiplayer = live_session->observer_multiplayer();
         screen_options.apply_window = options.capture_path.empty();
+        if (live_session->can_save()) {
+            // #3989: a local single-player skirmish saves from its menu.
+            screen_options.save_names = [directory = player_save_directory()] {
+                std::vector<std::string> names;
+                if (const auto listed = platform::list_saved_games(directory)) {
+                    for (const auto& slot : listed.value()) names.push_back(slot.name);
+                }
+                return names;
+            };
+            screen_options.save_game = [this](const std::string& name, const bool overwrite) {
+                return save_battle(name, overwrite);
+            };
+        }
         if (!screen->build(std::move(screen_options))) {
             UtilityFunctions::printerr("EAWR in-game menu: ", String::utf8(screen->failure().c_str()));
             memdelete(screen);
@@ -261,7 +283,31 @@ bool MapMode::State::open_game_menu() {
     return true;
 }
 
+std::filesystem::path MapMode::State::player_save_directory() const {
+    return save_directory.empty()
+        ? ViewerPath{std::string(OS::get_singleton()->get_user_data_dir().utf8().get_data())}.native() / "saves"
+        : save_directory;
+}
+
+// #3989: the Save page's Save. The view saves the battle between two ticks and writes the file off the frame;
+// the hints keep the camera and the map's name for the load and the list.
+bool MapMode::State::save_battle(const std::string& name, const bool overwrite) {
+    if (!live_session || !platform::valid_saved_game_name(name)) return false;
+    eawr::viewer::SkirmishSaveHints hints;
+    if (map_camera && map_camera->active()) {
+        const auto& controller = map_camera->controller();
+        hints.camera = eawr::viewer::SkirmishSaveCamera{controller.tactical_frame().target, controller.target_zoom(),
+                                                  controller.yaw_degrees()};
+    }
+    hints.label = std::filesystem::path(options.map_path).stem().string();
+    const bool begun = live_session->save_game(player_save_directory(), name, overwrite,
+                                                 eawr::viewer::encode_skirmish_save_hints(hints));
+    UtilityFunctions::print("EAWR battle save requested: ", String::utf8(name.c_str()), "; started ", begun);
+    return begun;
+}
+
 void MapMode::State::service_game_menu() {
+    if (live_session) static_cast<void>(live_session->service_save());
     if (!menu_open) return;
     if (game_menu != nullptr && !UtilityFunctions::is_instance_id_valid(game_menu_id)) game_menu = nullptr;
     if (game_menu != nullptr && game_menu->shown()) return;
@@ -290,7 +336,8 @@ std::optional<std::array<float, 2>> MapMode::State::game_menu_point(const std::s
     if (game_menu == nullptr || !UtilityFunctions::is_instance_id_valid(game_menu_id)) return std::nullopt;
     const char* gadget = name == "menu_resume" ? "IDC_GAME_OPTIONS_RESUME" : name == "menu_options" ? "IDC_INGAME_OPTIONS"
         : name == "menu_quit" ? "IDC_GAME_OPTIONS_QUIT" : name == "menu_yes" ? "yes" : name == "menu_no" ? "no"
-        : name == "menu_back" ? "IDC_OK_IN_GAME" : nullptr;
+        : name == "menu_back" ? "IDC_OK_IN_GAME" : name == "menu_save" ? "IDC_SAVE_GAME"
+        : name == "menu_save_first" ? "IDC_SAVE_GAME_LIST#0" : name == "menu_save_button" ? "IDC_SAVE_GAME_BUTTON" : nullptr;
     if (gadget == nullptr) return std::nullopt;
     const auto point = game_menu->control_point(gadget);
     if (!point) return std::nullopt;
@@ -322,7 +369,15 @@ bool MapMode::State::build_hud(Node3D& host, const std::optional<std::string>& c
     }
     host.set_process_input(true);
     if (!options.campaign_briefing_movie.empty()) {
-        hud->prepare_command_bar_movie(*filesystem, options.campaign_briefing_movie);
+        const auto helper = ViewerPath{utf8(ProjectSettings::get_singleton()->globalize_path("res://common/eawr_bink_helper.exe"))}.native();
+        const auto game_root = options.game_root;
+        hud->prepare_command_bar_movie(*filesystem, options.campaign_briefing_movie,
+            [helper, game_root](std::vector<std::byte> source, std::shared_ptr<std::atomic_bool> cancelled) {
+                return open_bink_child(helper, game_root, std::move(source), std::move(cancelled));
+            },
+            [](std::string file, std::string layer, std::string movie) {
+                enqueue_bink_load_note(std::move(file), std::move(layer), std::move(movie));
+            });
         if (loading && hud->hud()) {
             const auto identity = static_cast<uint64_t>(hud->hud()->get_instance_id());
             loading->hold_dismiss([identity] {
@@ -423,6 +478,9 @@ bool MapMode::State::build_hud(Node3D& host, const std::optional<std::string>& c
     // #454: an ability button's release becomes the battle input's ability request (a report line
     // until #76); scripted ability=N gestures find the N-th shown button.
     if (battle && live_session) {
+        battle->set_ability_icon([this](const ui::CardUnit& unit, const bool second) -> std::string_view {
+            return hud ? std::string_view(hud->ability_button_icon(unit.type, second ? unit.second_ability : unit.ability)) : std::string_view{};
+        });
         if (EawrAbilityButtons* abilities = hud->ability_buttons()) {
             BattleInput* input = battle.get();
             const LiveSessionView* live = live_session.get();
@@ -1055,13 +1113,18 @@ void MapMode::State::open_loading_screen(Node3D& host, const assets::Map& map) {
 
 void MapMode::State::load_report(const std::size_t stage, const std::uint64_t done, const std::uint64_t total) {
     load_progress.report(stage, done, total);
+    if (GodotRenderer::texture_census_enabled()) {
+        if (done == total) TextureCensusJournal::snapshot(("stage" + std::to_string(stage)).c_str());
+        else TextureCensusJournal::periodic("load_periodic");
+    }
     if (done == total && MenuTimeline::active()) {
         const std::string label = "battle_stage" + std::to_string(stage);
         MenuTimeline::mark(label.c_str());
     }
     if (done == total && MemoryAttribution::enabled()) {
         const std::string label = "stage" + std::to_string(stage);
-        MemoryAttribution::load_mark(label.c_str(), filesystem ? scene::VfsAssetCache(*filesystem).model_stats().cache_retained_bytes : 0);
+        const auto stats = filesystem ? scene::VfsAssetCache(*filesystem).model_stats() : scene::VfsAssetCache::ModelStats{};
+        MemoryAttribution::load_mark(label.c_str(), stats.cache_retained_bytes, stats.capacity.total_bytes());
     }
     if (loading != nullptr) loading->report(load_progress);
 }

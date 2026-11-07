@@ -1,4 +1,5 @@
 #include "../../support/check.hpp"
+#include "eawr/vfs/vfs.hpp"
 #include "../../support/self_test.hpp"
 #include "eawr/presentation/animation/animation.hpp"
 #include "eawr/presentation/animation/player_share.hpp"

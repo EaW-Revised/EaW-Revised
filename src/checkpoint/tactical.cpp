@@ -371,7 +371,8 @@ core::Result<TacticalRestore> load_tactical_checkpoint(const std::span<const std
     for (const auto& section : checkpoint.sections) {
         const auto id = static_cast<SectionId>(section.id);
         if (known_section(section.id) && id != SectionId::seats && id != SectionId::child_log
-            && id != SectionId::child_state && id != SectionId::land_state && id != SectionId::presentation_hints) {
+            && id != SectionId::child_state && id != SectionId::land_state && id != SectionId::tactical_host
+            && id != SectionId::presentation_hints) {
             return inconsistent("section " + std::string(section_name(section.id)) + " belongs to a galaxy, not a tactical checkpoint");
         }
     }

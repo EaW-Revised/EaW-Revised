@@ -9,6 +9,7 @@ namespace eawr::net {
 
 // ADR-023: staging and match entry share one command-seat capacity.
 inline constexpr std::uint32_t max_lobby_seats = static_cast<std::uint32_t>(max_match_seats);
+inline constexpr std::size_t max_lobby_mod_description_bytes = 64U * 1024U;
 inline constexpr std::size_t max_lobby_payload_bytes = max_setup_bytes > max_batch_bytes + 5
     ? max_setup_bytes : max_batch_bytes + 5;
 inline constexpr std::size_t max_lobby_frame_bytes = max_lobby_payload_bytes + 256;
@@ -18,6 +19,7 @@ inline constexpr std::uint8_t lobby_snapshot_kind = 72, lobby_request_kind = 73;
 inline constexpr std::uint8_t lobby_chat_request_kind = 74, lobby_chat_kind = 75;
 inline constexpr std::uint8_t lobby_setup_kind = 76, lobby_cancel_kind = 77;
 inline constexpr std::uint8_t lobby_closed_kind = 78, lobby_rejected_kind = 79;
+inline constexpr std::uint8_t lobby_mod_review_ack_kind = 99;
 
 enum class LobbyPhase : std::uint8_t { staging, starting, committed, closed };
 enum class LobbyReason : std::uint8_t {
@@ -54,6 +56,7 @@ struct LobbySnapshot {
     LobbyPhase phase{LobbyPhase::staging};
     LobbyGame game;
     std::vector<LobbySeat> seats; // Host first, then ascending stable seat IDs.
+    std::vector<std::uint8_t> mounted_mods; // Host description for display, not simulation.
     friend bool operator==(const LobbySnapshot&, const LobbySnapshot&) = default;
 };
 enum class LobbyAction : std::uint8_t { select, ready, unready, leave, snapshot };
@@ -85,6 +88,8 @@ using LobbyFrame = std::variant<LobbySnapshot, LobbyRequest, LobbyChatRequest, L
     LobbySetupFrame, LobbyCancel, LobbyClosed, LobbyRejected>;
 
 [[nodiscard]] std::string sanitize_lobby_text(std::string_view value, std::size_t limit);
+// True when the room frame codec accepts these mounted-mod bytes (empty means "not known"). The host checks before it opens a room.
+[[nodiscard]] bool valid_lobby_mod_description(std::span<const std::uint8_t> bytes);
 [[nodiscard]] core::Result<std::vector<std::uint8_t>> encode_lobby_frame(const LobbyFrame& frame);
 [[nodiscard]] core::Result<LobbyFrame> decode_lobby_frame(std::span<const std::uint8_t> frame);
 [[nodiscard]] core::Diagnostic lobby_diagnostic(LobbyReason reason, std::string message);
@@ -101,6 +106,14 @@ struct LobbySetupContext {
     std::shared_ptr<void> lifetime; // Optional owner of per-attempt monitors/executors/provider inputs.
 };
 struct LobbyHooks {
+    std::vector<std::uint8_t> mounted_mods;
+    // Optional mode-specific staging traffic, consumed before ordinary lobby decoding.
+    std::function<bool(MessageTransport&, const LobbySnapshot&, const Received&, std::uint64_t)> application_frame;
+    // Returns true only for a changed host selection; the room clears all readiness.
+    std::function<bool(MessageTransport&, const LobbySnapshot&, std::uint64_t)> application_pump;
+    // Trusted mode provider maps ephemeral peers onto saved logical seats.
+    std::function<core::Result<std::vector<SetupSeat>>(const LobbySnapshot&, const std::vector<SetupSeat>&)> bind_setup_seats;
+
     // Mandatory loaded-data validator. Validate choices/owner consistency, map
     // capacity and canonical options; starting=true checks complete teams at
     // Ready, Start and frozen snapshots. Editable staging may be incomplete.
@@ -131,6 +144,9 @@ class LobbyResult final {
 public:
     [[nodiscard]] SetupResult& setup() { return setup_; }
     [[nodiscard]] const LobbySnapshot& snapshot() const;
+    // The transferred stream owns match framing and maps roster indices to
+    // the underlying room peers. It remains valid for this result's lifetime.
+    [[nodiscard]] MessageTransport& transport();
 private:
     friend class LobbySession;
     LobbyResult(std::shared_ptr<LobbyRuntime> lifetime, SetupResult setup)

@@ -1,10 +1,12 @@
 #include "eawr/skirmish/land_start.hpp"
+#include "eawr/vfs/vfs.hpp"
 #include "eawr/skirmish/land_content.hpp"
 #include "eawr/core/sha256.hpp"
 #include "eawr/data/tag_trace.hpp"
 #include "eawr/data/ui/text_database.hpp"
 #include "eawr/sim/tactical/session.hpp"
 #include "eawr/sim/math/trig.hpp"
+#include "eawr/core/load_note.hpp"
 #include "skirmish_internal.hpp"
 
 #include <algorithm>
@@ -16,6 +18,13 @@
 namespace eawr::skirmish {
 namespace {
 core::Diagnostic invalid(std::string text) { return detail::error(diagnostic_codes::fixture, std::move(text)); }
+// LC-70: both behaviors and relevance come from the effective authored type.
+bool land_base_component_relevant(const units::LandStaticObject& row) {
+    return (row.victory_relevant || row.land_victory_relevant)
+        && std::any_of(row.behaviors.begin(), row.behaviors.end(), [](const auto& behavior) {
+            return detail::iequals(behavior, "DUMMY_LAND_BASE_LEVEL_COMPONENT");
+        });
+}
 std::string prefix(std::uint32_t team) {
     return "Team_" + std::string(team < 10 ? "0" : "") + std::to_string(team) + "_";
 }
@@ -199,6 +208,30 @@ core::Result<LandStartInputs> read_land_start_inputs(const Fixture& fixture, con
     return Result::success(std::move(result));
 }
 
+std::vector<std::string> land_vehicle_start_forces(std::string_view faction) {
+    // Stock vehicle companies per playable faction (catalog scan: no Create_Team_Type, vehicle collision classes).
+    if (detail::iequals(faction, "Rebel")) return {"Rebel_Light_Tank_Brigade", "Rebel_Heavy_Tank_Brigade"};
+    if (detail::iequals(faction, "Empire")) return {"Imperial_Armor_Group", "Imperial_Anti_Infantry_Brigade"};
+    if (detail::iequals(faction, "Underworld")) return {"MZ8_Pulse_Cannon_Tank_Company", "MAL_Rocket_Vehicle_Company"};
+    return {};
+}
+
+bool is_land_vehicle_company(const units::LandCompany& company) noexcept {
+    if (company.members.empty() || company.locomotion.size() != company.members.size()) return false;
+    if (!detail::iequals(company.team_locomotor, "TEAM_LOCOMOTOR")) return false;
+    return std::all_of(company.locomotion.begin(), company.locomotion.end(), [](const units::LandLocomotionData& row) {
+        return row.collision_class == units::LandCollisionGroup::vehicle
+            || row.collision_class == units::LandCollisionGroup::large_vehicle
+            || row.collision_class == units::LandCollisionGroup::giant_vehicle;
+    });
+}
+
+void set_land_vehicles_only(LandStartInputs& inputs, bool enabled) {
+    inputs.human_vehicles_only = enabled;
+    for (auto& faction : inputs.factions)
+        faction.vehicle_forces = enabled ? land_vehicle_start_forces(faction.faction) : std::vector<std::string>{};
+}
+
 core::Result<std::vector<SetupMap>> land_setup_maps(const vfs::Vfs& filesystem,
     const data::Catalog& catalog, SetupMapQuery query) {
     using Result = core::Result<std::vector<SetupMap>>;
@@ -285,7 +318,7 @@ core::Result<LandStart> build_land_start(const Fixture& fixture, const LandStart
     auto& start = result.start;
     start.setup.domain = BattleDomain::land;
     start.setup.units.clear();
-    start.victory_condition = fixture.victory_condition.value_or(VictoryCondition::none);
+    start.victory_condition = fixture.victory_condition.value_or(inputs.common.land_victory_condition);
     result.content.domain = BattleDomain::land;
     result.content.land = bindings.land;
     result.content.durability = bindings.durability;
@@ -308,6 +341,10 @@ core::Result<LandStart> build_land_start(const Fixture& fixture, const LandStart
     };
     result.notes = bindings.static_notes;
     std::set<std::uint32_t> colours;
+    // #3207 G1-c (WLAI-56): the lobby AI's land difficulty. Health, shield and damage scales go to the shared
+    // durability and damage paths; credit and build-time multipliers are bound on the player's economy account.
+    std::vector<DifficultyScale> difficulty_scales;
+    core::LoadNoteCollector difficulty_notes;
     for (std::size_t index = 0; index < fixture.slots.size(); ++index) {
         const auto& slot = fixture.slots[index];
         const auto faction = std::find_if(inputs.common.factions.begin(), inputs.common.factions.end(),
@@ -340,6 +377,17 @@ core::Result<LandStart> build_land_start(const Fixture& fixture, const LandStart
         economy.player = slot.slot; economy.ai = !slot.human; economy.start_tech = 1; economy.max_tech = static_cast<std::uint32_t>(start.match.max_tech); // WLEN-54
         economy.population_cap = std::min(capacity->second, static_cast<std::uint32_t>(cap)); // LC-46
         economy.credits = start.match.credits;
+        {
+            core::LoadNoteBuffer buffer;
+            auto land_economy = land_ai_economy(inputs.common, player, buffer);
+            if (!land_economy) return Result::failure(land_economy.error());
+            economy.credit_multiplier = land_economy.value().credit_multiplier;
+            economy.ai_build_time_multiplier = land_economy.value().build_time_multiplier;
+            difficulty_notes.merge(buffer);
+            auto scale = player_difficulty_scale(inputs.common, player);
+            if (!scale) return Result::failure(scale.error());
+            if (scale.value()) difficulty_scales.push_back(*scale.value());
+        }
         result.content.economy.players.push_back(economy);
         std::vector<const MapPlacement*> spawns;
         // SK-11, shared with start.cpp::markers_named: reverse TED creation order.
@@ -375,7 +423,17 @@ core::Result<LandStart> build_land_start(const Fixture& fixture, const LandStart
         for (auto& marker : start.markers) if (marker.record == spawn.record) {
             marker.player = slot.slot; marker.use = MarkerUse::spawn;
         }
-        auto forces = start.match.free_starting_units ? rules->forces : std::vector<std::string>{};
+        const bool vehicles_only = inputs.human_vehicles_only && slot.human;
+        if (vehicles_only && rules->vehicle_forces.empty()) result.notes.push_back("Faction " + rules->faction
+            + " has no vehicles-only company set; its default companies are used.");
+        const bool use_vehicles = vehicles_only && !rules->vehicle_forces.empty();
+        if (use_vehicles && start.match.free_starting_units) for (const auto& name : rules->vehicle_forces) {
+            const auto company = std::find_if(inputs.common.tables->land_companies.begin(), inputs.common.tables->land_companies.end(),
+                [&](const auto& row) { return detail::iequals(row.id, name); });
+            if (company == inputs.common.tables->land_companies.end() || !is_land_vehicle_company(*company))
+                return Result::failure(invalid("vehicles-only start company is not a generic-team vehicle company: " + name));
+        }
+        auto forces = start.match.free_starting_units ? (use_vehicles ? rules->vehicle_forces : rules->forces) : std::vector<std::string>{};
         forces.insert(forces.end(), slot.fleet.begin(), slot.fleet.end());
         for (const auto& name : forces) {
             const auto binding = binding_for(type_id(name));
@@ -395,6 +453,11 @@ core::Result<LandStart> build_land_start(const Fixture& fixture, const LandStart
             start.units.push_back(std::move(unit));
         }
     }
+    for (const auto& note : difficulty_notes.snapshot()) result.notes.push_back(note.code + ": " + note.object + " " + note.tag
+        + " " + note.authored_value + " -> " + note.effective_value + " (" + note.message + ")");
+    std::sort(difficulty_scales.begin(), difficulty_scales.end(),
+        [](const auto& left, const auto& right) { return left.player < right.player; });
+    result.content.durability.difficulty = std::move(difficulty_scales);
     std::sort(start.markers.begin(), start.markers.end(), [](const auto& a, const auto& b) { return a.record < b.record; });
     for (const auto& unit : start.units) {
         if (binding_for(unit.state.type_id) != bindings.land.companies.end()) {
@@ -430,11 +493,31 @@ core::Result<LandStart> build_land_start(const Fixture& fixture, const LandStart
     for (const auto& player : result.content.economy.players) {
         rules_identity += std::to_string(player.player) + ":" + std::to_string(player.population_cap)
             + ":" + std::to_string(player.start_tech) + ":" + std::to_string(player.max_tech)
-            + ":" + std::to_string(player.credits.raw()) + ";";
+            + ":" + std::to_string(player.credits.raw());
+        // Neutral multipliers add nothing, so Normal and human starts keep their identity.
+        const Fixed one = Fixed::from_raw(Fixed::scale);
+        if (player.credit_multiplier != one) rules_identity += ":c" + std::to_string(player.credit_multiplier.raw());
+        if (player.ai_build_time_multiplier != one) rules_identity += ":b" + std::to_string(player.ai_build_time_multiplier.raw());
+        rules_identity += ";";
     }
+    for (const auto& scale : result.content.durability.difficulty)
+        rules_identity += "d" + std::to_string(scale.player) + ":" + std::to_string(scale.health.raw()) + ":"
+            + std::to_string(scale.shield.raw()) + ":" + std::to_string(scale.damage.raw()) + ";";
     start.identity.domains.push_back(sim::identity_domain("land-start-rules", rules_identity));
     start.identity = sim::compute_match_identity(std::move(start.identity));
     start.match.start_tech = 1; // WLEN-54; the maximum stays authored.
+    result.content.victory = victory_rules(start, *inputs.common.tables);
+    if (start.victory_condition == VictoryCondition::enemy_hq_destroyed
+        || start.victory_condition == VictoryCondition::enemy_base_components_destroyed) {
+        auto& types = result.content.victory.starbase_types;
+        types.clear();
+        for (const auto* table : {inputs.common.tables, &inputs.static_tables})
+            for (const auto& row : table->land_static_objects)
+                if (start.victory_condition == VictoryCondition::enemy_hq_destroyed
+                    ? row.hq_victory_relevant : land_base_component_relevant(row)) types.push_back(type_id(row.id));
+        std::sort(types.begin(), types.end());
+        types.erase(std::unique(types.begin(), types.end()), types.end());
+    }
     // P1 retains match/seat metadata in BattleStart. The current SKSU codec only admits
     // space victory selections; do not encode a fictitious space condition for land.
     start.setup.match_identity = start.identity;

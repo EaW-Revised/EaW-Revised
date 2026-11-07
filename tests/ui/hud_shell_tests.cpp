@@ -7,6 +7,7 @@
 #include "eawr/data/xml.hpp"
 #include "eawr/data/retail_values.hpp"
 #include "eawr/presentation/ui/hud_shell.hpp"
+#include "eawr/presentation/ui/ability_buttons.hpp"
 #include "eawr/presentation/ui/hud_flytext.hpp"
 #include "eawr/presentation/ui/unit_cards.hpp"
 #include "eawr/presentation/ui/world_encyclopedia.hpp"
@@ -308,6 +309,9 @@ void shell_parts() {
            "the rebel variant draws its droid, faceplate and radar scan lines, farthest first");
     expect(rebel.meshes[1].blend == ui::ShellBlend::alpha && rebel.meshes[2].blend == ui::ShellBlend::additive,
            "MeshAlpha blends by alpha and MeshAdditive adds");
+    expect(ui::shell_blend("MeshAlphaGloss.fx") == ui::ShellBlend::alpha && ui::shell_blend("meshalpha.fx") == ui::ShellBlend::alpha
+               && ui::shell_blend("MeshAdditive.fx") == ui::ShellBlend::additive && !ui::shell_blend("other.fx"),
+           "a mod shell's MeshAlphaGloss panels blend by alpha like MeshAlpha; unknown shaders draw nothing");
     expect(rebel.meshes[1].texture == "face_rebel.tga" && rebel.meshes[1].triangles.size() == 2U,
            "a mesh keeps its texture and triangles");
     expect(rebel.minimap && *rebel.minimap == (data::ui::ReferenceRect{14.5F, 10.5F, 175, 175}), "the minimap is the radar rect");
@@ -373,6 +377,21 @@ void shell_parts() {
                && partial.panel_buttons.empty() && partial.order_buttons.empty(),
            "a missing faceplate, radar, options button, panel button, planet name, credits and population text and reinforcements "
            "button and six command buttons are reported once each; a shell without queue slots shows no queue");
+
+    // A mod's panel authored with the gloss alpha shader draws like a plain alpha panel; a shader with no blend is
+    // reported once and its mesh is not drawn.
+    data::ui::ShellAnchors gloss;
+    gloss.add(anchor("Panel_Gloss", {0, 0, 100, 50}, "MeshAlphaGloss.fx", "panel.dds", true, -2));
+    const auto base_notes = ui::hud_shell(gloss, catalog, ui::HudFaction::empire).diagnostics.size();
+    const auto drawn = ui::hud_shell(gloss, catalog, ui::HudFaction::empire);
+    expect(!drawn.meshes.empty() && drawn.meshes.front().name == "Panel_Gloss"
+               && drawn.meshes.front().blend == ui::ShellBlend::alpha && drawn.meshes.front().texture == "panel.dds",
+           "a MeshAlphaGloss panel is drawn with alpha blending");
+    gloss.add(anchor("Panel_Odd_One", {0, 0, 10, 10}, "OtherShader.fx", "odd.tga", true, -1));
+    gloss.add(anchor("Panel_Odd_Two", {0, 0, 10, 10}, "OtherShader.fx", "odd2.tga", true, -1));
+    const auto odd = ui::hud_shell(gloss, catalog, ui::HudFaction::empire);
+    expect(odd.meshes.size() == 1U && odd.diagnostics.size() == base_notes + 1U,
+           "a mesh whose shader has no HUD blend is skipped and reported once per shader");
 
     for (const auto* text : {"empire", "Rebel", "UNDERWORLD"}) expect(ui::hud_faction_from(text).has_value(), "factions parse");
     expect(!ui::hud_faction_from("pirate"), "an unknown faction is refused");
@@ -539,12 +558,12 @@ void planet_names() {
 <MP_Encyclopedia_Text> , </MP_Encyclopedia_Text></SpaceUnit>
 <SpaceUnit Name="UnknownMP"><Encyclopedia_Text>TEXT_OBJECT_STAR_SYSTEM_CORUSCANT</Encyclopedia_Text>
 <MP_Encyclopedia_Text>TEXT_UNKNOWN</MP_Encyclopedia_Text></SpaceUnit>
-<UpgradeObject Name="CardUpgrade"><Icon_Name>owner-icon.tga</Icon_Name>
-<Text_ID>TEXT_OBJECT_STAR_SYSTEM_CORUSCANT</Text_ID><Tactical_Build_Cost_Multiplayer>950</Tactical_Build_Cost_Multiplayer>
-<Is_Visible_On_Radar>No</Is_Visible_On_Radar><Radar_Icon_Name>owner-radar.tga</Radar_Icon_Name>
-<Abilities><Combat_Bonus_Ability Name="CardUpgrade"><Icon_Name>ability-icon.tga</Icon_Name>
+<UpgradeObject Name="AbilityHolder"><Abilities><Combat_Bonus_Ability Name="CardUpgrade"><Icon_Name>ability-icon.tga</Icon_Name>
 <Tactical_Build_Cost_Multiplayer>0</Tactical_Build_Cost_Multiplayer><Is_Visible_On_Radar>Yes</Is_Visible_On_Radar>
 <Radar_Icon_Name>ability-radar.tga</Radar_Icon_Name></Combat_Bonus_Ability></Abilities></UpgradeObject>
+<UpgradeObject Name="CardUpgrade"><Icon_Name>owner-icon.tga</Icon_Name>
+<Text_ID>TEXT_OBJECT_STAR_SYSTEM_CORUSCANT</Text_ID><Tactical_Build_Cost_Multiplayer>950</Tactical_Build_Cost_Multiplayer>
+<Is_Visible_On_Radar>No</Is_Visible_On_Radar><Radar_Icon_Name>owner-radar.tga</Radar_Icon_Name></UpgradeObject>
 </Units>)xml");
     const std::array mounts{vfs::MountSpec{"base", tree.root, "data", {}}};
     auto mounted = vfs::Vfs::mount(mounts);
@@ -574,6 +593,29 @@ void planet_names() {
     const auto ability = ui::ability_card_looks("PopupSquadron", ui::ability_index("POWER_TO_WEAPONS"), objects, &text.value());
     expect(ability.name == "Coruscant" && ability.description == "Coruscant" && ability.icon == "overridden-ability.tga",
         "squadron ability hover uses first craft and independently authored localized overrides");
+    const auto kind = ui::ability_index("POWER_TO_WEAPONS");
+    ui::CardUnit card_unit{};
+    card_unit.id = 1;
+    card_unit.type = "Popup";
+    card_unit.ability = kind;
+    const std::vector<ui::CardUnit> cards{card_unit};
+    ui::ReadyAbilities state;
+    state.set_units(cards);
+    state.stage({{1, kind, {ui::AbilityStatus::active, 1.0, false}}});
+    const auto bar_for = [&](const bool present) {
+        const auto icon = ui::resolved_ability_icon("Popup", kind, objects,
+            [present](std::string_view) { return present; });
+        return ui::ability_bar(ui::layout_unit_cards(cards, 24), cards, state,
+            [&](const ui::CardUnit&, bool) -> std::string_view { return icon; });
+    };
+    const auto authored = bar_for(true);
+    expect(authored.buttons.size() == 1 && authored.buttons[0].icon == "overridden-ability.tga"
+        && authored.marks.size() == 1 && authored.marks[0].icon == "overridden-ability.tga",
+        "AB-04: authored icon reaches both the button and mark");
+    const auto missing = bar_for(false);
+    expect(missing.buttons.size() == 1 && missing.buttons[0].icon == ui::ability_icon(kind)
+        && missing.marks.size() == 1 && missing.marks[0].icon == ui::ability_icon(kind),
+        "AB-04: missing authored art falls back for button and mark");
     const auto cycle = ui::ability_card_looks("CycleA", ui::ability_index("POWER_TO_WEAPONS"), objects, &text.value());
     expect(cycle.name.empty() && cycle.description.empty() && cycle.icon.empty(),
         "cyclic squadron ability roster terminates without an encyclopedia");

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "battle_dialog_model.hpp"
+#include "eawr/vfs/vfs.hpp"
 #include "eawr/platform/live_game_session.hpp"
 
 namespace eawr::viewer::galactic {
@@ -98,6 +99,15 @@ private:
     bool available_{};
 };
 
+// #5508: the planet whose radar blip flashes for a pending battle, 0 when none. Same audience as the pending alert
+// (WGM-173): a solo conflict the local player is not part of resolves instantly and never alerts.
+[[nodiscard]] inline sim::galactic::PlanetId pending_battle_radar_planet(const platform::LiveGameFrame& frame,
+    sim::galactic::PlayerId local) {
+    if (!frame.pending_conflict) return 0;
+    const auto& entry = frame.pending_conflict->conflict;
+    const bool multiplayer = frame.latest && frame.latest->victory() && frame.latest->victory()->context.multiplayer;
+    return multiplayer || local == entry.defender || local == entry.invader ? entry.planet : 0;
+}
 // Pure projection of the same publication used by command validation. Summary
 // acknowledgement is presentation state, never a parent ResumeGalaxy command.
 [[nodiscard]] inline BattleDialogView live_battle_dialog_view(const platform::LiveGameFrame& frame,
@@ -151,7 +161,7 @@ private:
             view.pending_visible = pending.alert->visible;
             view.single_button = pending.alert->single_button;
             view.waiting_for_opponent = pending.alert->waiting_for_opponent;
-            if (view.pending_multiplayer) {
+            if (view.pending_multiplayer && !pending.alert->untimed) { // co-op votes have no countdown
                 const auto timeout = pending.alert->timeout_ms / 1000;
                 const auto elapsed = pending.alert->elapsed_wall_ms / 1000;
                 view.pending_countdown = timeout > elapsed ? timeout - elapsed : 0;

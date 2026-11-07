@@ -1,4 +1,5 @@
 #include "eawr/core/json_text.hpp"
+#include "eawr/vfs/vfs.hpp"
 #include "battle_input.hpp"
 
 #include "eawr/presentation/ui/command_sink.hpp"

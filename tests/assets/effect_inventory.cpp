@@ -1,4 +1,5 @@
 #include "eawr/assets/effect.hpp"
+#include "eawr/vfs/vfs.hpp"
 
 #include <filesystem>
 #include <iostream>

@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <exception>
@@ -15,6 +16,7 @@
 #include <map>
 #include <random>
 #include <system_error>
+#include <thread>
 #include <utility>
 
 namespace eawr::presentation::ui {
@@ -280,13 +282,20 @@ bool publish(const fs::path& target, const std::string_view data) {
         fs::remove(temporary, ignored);
         return false;
     }
+    // Another instance may be reading the target or publishing the same bytes: Windows refuses a move over an
+    // open file. Identical bytes already there are success; anything else gets a short bounded retry.
     std::error_code error;
-    fs::rename(temporary, target, error);
-    if (error) {
-        fs::remove(temporary, error);
-        return false;
+    for (int attempt = 0; attempt < 40; ++attempt) {
+        fs::rename(temporary, target, error);
+        if (!error) return true;
+        std::string existing;
+        if (read_file(target, existing) && existing == data) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(25));
     }
-    return true;
+    std::string existing;
+    const bool same = read_file(target, existing) && existing == data;
+    fs::remove(temporary, error);
+    return same;
 }
 
 // The SHA-256 the cache's manifest names as its source, empty when there is no usable manifest.

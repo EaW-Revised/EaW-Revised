@@ -100,7 +100,7 @@ bool GalacticMode::State::build_corruption_hud() {
         if (!texture) { failure = core::format_diagnostic(texture.error()); return false; }
         std::string why; auto pixels = texture_image(texture.value(), why);
         if (pixels.is_null()) { failure = why; return false; }
-        setup.meshes.push_back({mesh.blend, ImageTexture::create_from_image(pixels), mesh.triangles});
+        setup.meshes.push_back({mesh.blend, ImageTexture::create_from_image(pixels), mesh.triangles, {}});
     }
     corruption_menu.panel->setup(std::move(setup), nullptr);
     for (const auto& anchor : corruption_menu.anchors.anchors()) {

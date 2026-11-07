@@ -28,7 +28,8 @@ template<class Rows, class Id, class Key> const auto* find(const Rows& rows, Id 
 bool multiplayer(const gc::GalacticSnapshot& snapshot) {
     // The pinned mode is authoritative. Seat count alone cannot identify a
     // multiplayer save whose second human has dropped out (WGA-127/264).
-    if (snapshot.victory()) return snapshot.victory()->context.multiplayer;
+    if (snapshot.multiplayer()) return true;
+    if (snapshot.victory()) return false;
     return std::count_if(snapshot.seats().begin(), snapshot.seats().end(),
         [](const auto& seat) { return seat.kind == gc::SeatKind::human; }) > 1;
 }
@@ -202,9 +203,112 @@ GalacticAiUsabilityProvider::PlayerFrontier::~PlayerFrontier() {
     frontier_owner_ = previous_owner_; frontier_provider_ = previous_frontier_;
     if (acquired_) acquired_->frontier_active_.store(false, std::memory_order_release);
 }
+struct GalacticAiUsabilityProvider::PhaseSavepoint::Saved {
+    GalacticAiUsabilityProvider* owner{};
+    std::map<std::pair<gc::PlayerId, gc::PlanetId>, std::optional<Reach>> rows;
+    std::map<gc::PlayerId, PreparedInput> prepared;
+    ConnectivityPublication published;
+    std::vector<std::pair<gc::PlayerId, std::uint64_t>> versions;
+    const gc::GalacticSession* session{};
+    const World* world{};
+    std::uint64_t revision{}, epoch{};
+    bool live_stealth{}, story_path{}, incremental{}, reconstructed{}, settled{};
+};
+GalacticAiUsabilityProvider::PhaseSavepoint::PhaseSavepoint(std::unique_ptr<Saved> saved) : saved_(std::move(saved)) {}
+GalacticAiUsabilityProvider::PhaseSavepoint::~PhaseSavepoint() {
+    if (saved_ && !saved_->settled) {
+        saved_->owner->phase_ = nullptr; saved_->owner->phase_abandoned_ = true;
+        saved_->owner->mark_state_changed();
+    }
+}
+std::size_t GalacticAiUsabilityProvider::PhaseSavepoint::retained_rows() const noexcept { return saved_->rows.size(); }
+core::Result<std::unique_ptr<GalacticAiUsabilityProvider::PhaseSavepoint>> GalacticAiUsabilityProvider::begin_phase() {
+    if (phase_ || phase_abandoned_ || frozen_provider_ || selected_frontier() || !decision_frontiers_.empty())
+        return refuse<std::unique_ptr<PhaseSavepoint>>("usability phase requires a healthy joined owner");
+    auto saved = std::make_unique<PhaseSavepoint::Saved>(); saved->owner = this;
+    // Only mod/player coordination headers, never the retained planet domain.
+    for (const auto& [player, prepared] : prepared_through_) saved->prepared.emplace(player, effective_prepared(player, prepared));
+    saved->published = published_; saved->versions = published_versions_;
+    saved->session = observed_session_; saved->world = observed_world_;
+    saved->revision = publication_revision_; saved->epoch = output_epoch_;
+    saved->reconstructed = reconstructed_;
+    saved->live_stealth = live_stealth_unavailable_; saved->story_path = story_path_unavailable_; saved->incremental = incremental_;
+    auto token = std::unique_ptr<PhaseSavepoint>(new PhaseSavepoint(std::move(saved)));
+    phase_ = token->saved_.get();
+    return core::Result<std::unique_ptr<PhaseSavepoint>>::success(std::move(token));
+}
+void GalacticAiUsabilityProvider::retain_phase_reach(const std::pair<gc::PlayerId, gc::PlanetId>& key, const Reach* before) {
+    if (!phase_ || phase_->rows.contains(key)) return;
+    phase_->rows.emplace(key, before ? std::optional<Reach>(*before) : std::nullopt);
+}
+core::Result<void> GalacticAiUsabilityProvider::PhaseSavepoint::commit() {
+    if (saved_->settled || saved_->owner->phase_ != saved_.get()) return refuse<void>("usability phase is not active");
+    saved_->owner->phase_ = nullptr; saved_->settled = true;
+    return core::Result<void>::success();
+}
+core::Result<void> GalacticAiUsabilityProvider::PhaseSavepoint::rollback() {
+    auto& owner = *saved_->owner;
+    if (saved_->settled || owner.phase_ != saved_.get()) return refuse<void>("usability phase is not active");
+    for (auto& [key, before] : saved_->rows) {
+        if (before) owner.retained_.insert_or_assign(key, std::move(*before));
+        else owner.retained_.erase(key);
+    }
+    owner.prepared_through_ = std::move(saved_->prepared); owner.restored_prepared_ = owner.prepared_through_;
+    owner.observed_session_ = saved_->session; owner.observed_world_ = saved_->world;
+    const auto snapshot = owner.observed_session_ ? owner.observed_session_->snapshot() : nullptr;
+    owner.restored_observer_ = snapshot ? snapshot->observer_input_generation() : 0;
+    owner.restored_access_ = snapshot && snapshot->planet_access() ? snapshot->planet_access()->generation : 0;
+    owner.restored_perception_ = owner.observed_world_ ? owner.observed_world_->movement_input_revision() : 0;
+    owner.caches_.clear(); owner.reconstructed_ = !owner.retained_.empty() || saved_->reconstructed;
+    owner.published_ = std::move(saved_->published); owner.published_versions_ = std::move(saved_->versions);
+    owner.publication_revision_ = saved_->revision; owner.output_epoch_ = saved_->epoch;
+    owner.live_stealth_unavailable_ = saved_->live_stealth; owner.story_path_unavailable_ = saved_->story_path; owner.incremental_ = saved_->incremental;
+    owner.stealth_generation_.reset(); owner.stealth_fleets_.clear();
+    owner.records_ = owner.rebuild_records(); // Only fault recovery scans retained rows.
+    owner.fault_rebuild_ = owner.reconstructed_ && owner.observed_session_ && owner.observed_world_;
+    // Canonical world rollback is already complete. Rehydrating here could
+    // rebind that world to the session's newer snapshot outside a transaction.
+    // The next attempt enlists all owners first, then rebuilds derived inputs.
+    owner.mark_state_changed(); owner.phase_ = nullptr; saved_->settled = true;
+    return core::Result<void>::success();
+}
+core::Result<void> GalacticAiUsabilityProvider::rebuild_phase_inputs(const Engine& engine, const sim::PartitionExecutor& executor) {
+    if (!fault_rebuild_) return core::Result<void>::success();
+    if (!phase_ || phase_abandoned_ || !observed_session_ || !observed_world_)
+        return refuse<void>("fault input rebuild requires its newly enlisted usability phase");
+    auto rebuilt = connectivity_publication(*observed_session_, *const_cast<World*>(observed_world_), engine, executor);
+    if (!rebuilt) return core::Result<void>::failure(rebuilt.error());
+    fault_rebuild_ = false;
+    return core::Result<void>::success();
+}
+GalacticAiUsabilityProvider::PreparedInput GalacticAiUsabilityProvider::effective_prepared(gc::PlayerId player, PreparedInput prepared) const {
+    const auto current = observed_session_ ? observed_session_->snapshot() : nullptr;
+    const auto perception = observed_world_ ? observed_world_->movement_input_revision() : 0;
+    if (const auto at = restored_prepared_.find(player); at != restored_prepared_.end()) {
+        prepared = at->second;
+        if (current && observed_world_) {
+            if (!current->planet_access()) prepared.pending_changes |= 3U;
+            else if (current->observer_input_generation() != restored_observer_
+                || current->planet_access()->generation != restored_access_ || perception != restored_perception_)
+                prepared.pending_changes |= 1U;
+        }
+        return prepared;
+    }
+    if (current && observed_world_) {
+        const auto* cached = find_cache(player);
+        if (!cached || !current->planet_access()) prepared.pending_changes |= 3U;
+        if (cached && current->planet_access()) {
+            if (cached->source_changed || cached->observer_generation != current->observer_input_generation()
+                || cached->access_generation != current->planet_access()->generation || cached->perception_revision != perception)
+                prepared.pending_changes |= 1U;
+            if (!cached->connectivity_ready) prepared.pending_changes |= 2U;
+        }
+    }
+    return prepared;
+}
 core::Result<void> GalacticAiUsabilityProvider::prepare_decision_frontiers(const sim::PartitionExecutor& executor,
     std::span<const gc::PlayerId> players) {
-    if (frozen_provider_ || !decision_frontiers_.empty() || selected_frontier())
+    if (phase_ || phase_abandoned_ || frozen_provider_ || !decision_frontiers_.empty() || selected_frontier())
         return refuse<void>("usability frontiers require an unselected barrier owner");
     gc::PlayerId previous{};
     for (const auto player : players) {
@@ -633,6 +737,7 @@ core::Result<const GalacticAiUsabilityProvider::Cache*> GalacticAiUsabilityProvi
         return core::Result<const Cache*>::success(&*player_stage->cache);
     }
     auto [installed, inserted] = caches_.insert_or_assign(owner, std::move(next)); static_cast<void>(inserted);
+    restored_prepared_.erase(owner);
     return core::Result<const Cache*>::success(&installed->second);
 }
 core::Result<void> GalacticAiUsabilityProvider::finish_connectivity(ConnectivityFinish& task, Cache& cache,
@@ -931,7 +1036,7 @@ core::Result<ai::GalacticConnectivity> GalacticAiUsabilityProvider::connectivity
 }
 core::Result<GalacticAiUsabilityProvider::ConnectivityPublication> GalacticAiUsabilityProvider::connectivity_publication(
     const gc::GalacticSession& session, World& world, const Engine& engine, const sim::PartitionExecutor& executor) {
-    if (frozen_provider_ || !decision_frontiers_.empty() || selected_frontier())
+    if (phase_abandoned_ || frozen_provider_ || !decision_frontiers_.empty() || selected_frontier())
         return refuse<ConnectivityPublication>("connectivity publication requires the joined barrier owner");
     observed_session_ = &session; observed_world_ = &world;
     const auto snapshot = session.snapshot(); const auto* graph = session.graph();
@@ -942,6 +1047,7 @@ core::Result<GalacticAiUsabilityProvider::ConnectivityPublication> GalacticAiUsa
     // WGA-185/360: force presence consumes the qualified live aggregate before
     // any selected-player tokens; strength and observation masks keep their owners.
     if (!world.available() || world.observer_input_generation() != snapshot->observer_input_generation()
+        || (!reconstructed_ && world.needs_observation_refresh(session.completed_tick()))
         || world.stealth_fleets() != stealth_fleets_) {
         auto inputs = std::make_shared<ai::GalacticConnectivity>(*published_); inputs->stealth_fleets = stealth_fleets_;
         auto rebound = world.bind_publication(snapshot, std::move(inputs), executor, session.completed_tick(), session.next_entity_id());
@@ -1033,8 +1139,8 @@ core::Result<GalacticAiUsabilityProvider::ConnectivityPublication> GalacticAiUsa
         std::function<void()> discard;
         bool committed{};
         ~CacheTransaction() { if (!committed) discard(); }
-    } transaction{[this, prepared = prepared_through_, &undo, &inserted]() mutable {
-        caches_.clear(); prepared_through_ = std::move(prepared);
+    } transaction{[this, prepared = prepared_through_, restored = restored_prepared_, &undo, &inserted]() mutable {
+        caches_.clear(); prepared_through_ = std::move(prepared); restored_prepared_ = std::move(restored);
         for (auto at = undo.rbegin(); at != undo.rend(); ++at) *at->row = std::move(at->before);
         for (const auto& key : inserted) retained_.erase(key);
     }};
@@ -1133,9 +1239,13 @@ core::Result<GalacticAiUsabilityProvider::ConnectivityPublication> GalacticAiUsa
             return refuse<ConnectivityPublication>("B publication revision is exhausted");
         {
             gc_profile::Scope profile_scope(gc_profile::Phase::usability_record_maintenance);
-            for (const auto& entry : undo) if (*entry.row != entry.before)
+            for (const auto& entry : undo) if (*entry.row != entry.before) {
+                retain_phase_reach(entry.key, &entry.before);
                 records_.set(entry.key.first, 0, entry.key.second, reach_record(entry.key, *entry.row));
-            for (const auto& key : inserted) records_.set(key.first, 0, key.second, reach_record(key, retained_.at(key)));
+            }
+            for (const auto& key : inserted) {
+                retain_phase_reach(key, nullptr); records_.set(key.first, 0, key.second, reach_record(key, retained_.at(key)));
+            }
         }
         ++publication_revision_; mark_state_changed();
     }
@@ -1166,8 +1276,8 @@ core::Result<GalacticAiUsabilityProvider::ConnectivityPublication> GalacticAiUsa
         std::function<void()> discard;
         bool committed{};
         ~CacheTransaction() { if (!committed) discard(); }
-    } transaction{[this, prepared = prepared_through_, &players]() mutable {
-        caches_.clear(); prepared_through_ = std::move(prepared);
+    } transaction{[this, prepared = prepared_through_, restored = restored_prepared_, &players]() mutable {
+        caches_.clear(); prepared_through_ = std::move(prepared); restored_prepared_ = std::move(restored);
         for (auto& task : players) {
             for (auto at = task.undo.rbegin(); at != task.undo.rend(); ++at) *at->row = std::move(at->before);
             for (const auto& key : task.inserted) retained_.erase(key);
@@ -1331,6 +1441,7 @@ core::Result<GalacticAiUsabilityProvider::ConnectivityPublication> GalacticAiUsa
         auto& cache = caches_.at(task.player.player) = std::move(task.cache.value());
         if (task.output_changed || !cache.output_version) cache.output_version = ++output_epoch_;
         if (task.prepared) prepared_through_[task.player.player] = *task.prepared;
+        restored_prepared_.erase(task.player.player);
         if (task.changed) mark_state_changed();
         work_.generations += task.work.generations; work_.planets += task.work.planets;
         work_.searches += task.work.searches; work_.edges += task.work.edges;
@@ -1363,9 +1474,13 @@ core::Result<GalacticAiUsabilityProvider::ConnectivityPublication> GalacticAiUsa
         {
             gc_profile::Scope profile_scope(gc_profile::Phase::usability_record_maintenance);
             for (const auto& task : players) {
-                for (const auto& entry : task.undo) if (*entry.row != entry.before)
+                for (const auto& entry : task.undo) if (*entry.row != entry.before) {
+                    retain_phase_reach(entry.key, &entry.before);
                     records_.set(entry.key.first, 0, entry.key.second, reach_record(entry.key, *entry.row));
-                for (const auto& key : task.inserted) records_.set(key.first, 0, key.second, reach_record(key, retained_.at(key)));
+                }
+                for (const auto& key : task.inserted) {
+                    retain_phase_reach(key, nullptr); records_.set(key.first, 0, key.second, reach_record(key, retained_.at(key)));
+                }
             }
         }
         ++publication_revision_; mark_state_changed();
@@ -1395,7 +1510,6 @@ std::vector<std::uint8_t> GalacticAiUsabilityProvider::reach_record(const std::p
     put(key.first, 4); put(key.second, 8); put(row.shortest, 1); put(row.least_force, 1); put(row.largest, 1);
     for (std::size_t policy = 0; policy < policies.size(); ++policy) {
         put(row.frames[policy].has_value(), 1); if (row.frames[policy]) put(*row.frames[policy], 8);
-        if (policy == 4) continue;
         put(row.sites[policy].size(), 4); for (const auto id : row.sites[policy]) put(id, 8);
     }
     return bytes;
@@ -1425,13 +1539,12 @@ core::RecordDigest GalacticAiUsabilityProvider::rebuild_records() const {
 }
 core::Result<std::string> GalacticAiUsabilityProvider::record_sync_hash(bool cold) const {
     if (const auto* block = selected_frontier()) return block->record_sync_hash(cold);
+    if (phase_abandoned_) return refuse<std::string>("usability phase was abandoned");
     // Pending invalidations are derived by the archive from upstream owners.
     // Re-read only this bounded player header at the completed boundary; the
     // potentially large retained site lists have already updated on publication.
     core::RecordDigest pending;
     core::RecordDigest::Bytes bytes; core::RecordDigest::append(bytes, publication_revision_); pending.set(0, 0, 0, bytes);
-    const auto current = observed_session_ ? observed_session_->snapshot() : nullptr;
-    const auto perception = observed_world_ ? observed_world_->movement_input_revision() : 0;
     std::optional<decltype(prepared_through_)> overlay;
     if (frozen_provider_) {
         overlay.emplace(frozen_provider_->prepared_through_);
@@ -1439,21 +1552,12 @@ core::Result<std::string> GalacticAiUsabilityProvider::record_sync_hash(bool col
     }
     const auto& prepared_inputs = overlay ? *overlay : prepared_through_;
     for (const auto& [player, prepared] : prepared_inputs) {
-        std::uint64_t flags = prepared.pending_changes;
-        if (current && observed_world_) {
-            const auto* cached = find_cache(player);
-            if (!cached || !current->planet_access()) flags |= 3U;
-            if (cached && current->planet_access()) {
-                if (cached->source_changed || cached->observer_generation != current->observer_input_generation()
-                    || cached->access_generation != current->planet_access()->generation || cached->perception_revision != perception) flags |= 1U;
-                if (!cached->connectivity_ready) flags |= 2U;
-            }
-        }
+        const std::uint64_t flags = effective_prepared(player, prepared).pending_changes;
         bytes.clear(); core::RecordDigest::append(bytes, player); core::RecordDigest::append(bytes, prepared.through.repr);
         core::RecordDigest::append(bytes, flags); pending.set(player, 0, 0, bytes);
     }
-    const auto retained = cold ? rebuild_records().digest("GALACTIC_USABILITY")
-        : (frozen_provider_ ? frozen_provider_->records_ : records_).digest("GALACTIC_USABILITY");
+    const auto retained = cold ? rebuild_records().digest("GALACTIC_USABILITY-v2")
+        : (frozen_provider_ ? frozen_provider_->records_ : records_).digest("GALACTIC_USABILITY-v2");
     return core::Result<std::string>::success(ga::compose_native_sync_digests({{"sites", retained}, {"pending", pending.digest("GALACTIC_USABILITY-pending")}}));
 }
 core::Result<ga::NativeState> GalacticAiUsabilityProvider::capture() const {
@@ -1466,8 +1570,6 @@ core::Result<ga::NativeState> GalacticAiUsabilityProvider::capture() const {
     // Save the same pending invalidation that an uninterrupted owner observes.
     // A whole-world fingerprint includes unrelated motion/queue clocks and
     // can falsely spend a producer refresh on the first resumed service.
-    const auto current = observed_session_ ? observed_session_->snapshot() : nullptr;
-    const auto perception = observed_world_ ? observed_world_->movement_input_revision() : 0;
     // WGA-329/GFS-A14: exact flags, ordered site lists and producer deadlines.
     std::optional<decltype(prepared_through_)> overlay;
     if (frozen_provider_) {
@@ -1475,21 +1577,10 @@ core::Result<ga::NativeState> GalacticAiUsabilityProvider::capture() const {
         for (const auto& [player, prepared] : prepared_through_) overlay->insert_or_assign(player, prepared);
     }
     const auto& prepared_inputs = overlay ? *overlay : prepared_through_;
-    put(3, 4); put(publication_revision_, 8); put(prepared_inputs.size(), 4);
+    put(4, 4); put(publication_revision_, 8); put(prepared_inputs.size(), 4);
     for (const auto& [player, prepared] : prepared_inputs) {
         put(player, 4); put(prepared.through.repr, 8);
-        std::uint64_t pending = prepared.pending_changes;
-        if (current && observed_world_) {
-            const auto* cached = find_cache(player);
-            if (!cached || !current->planet_access()) pending |= 3U;
-            if (cached && current->planet_access()) {
-                if (cached->source_changed
-                    || cached->observer_generation != current->observer_input_generation()
-                    || cached->access_generation != current->planet_access()->generation
-                    || cached->perception_revision != perception) pending |= 1U;
-                if (!cached->connectivity_ready) pending |= 2U;
-            }
-        }
+        const auto pending = effective_prepared(player, prepared).pending_changes;
         put(pending, 1);
     }
     const auto& retained = frozen_provider_ ? frozen_provider_->retained_ : retained_;
@@ -1500,7 +1591,6 @@ core::Result<ga::NativeState> GalacticAiUsabilityProvider::capture() const {
         for (std::size_t policy = 0; policy < policies.size(); ++policy) {
             put(row.frames[policy].has_value(), 1);
             if (row.frames[policy]) put(*row.frames[policy], 8);
-            if (policy == 4) continue; // WGA-329: saved stamp, unsaved Single_Hop_Disconnected list.
             put(row.sites[policy].size(), 4);
             for (const auto id : row.sites[policy]) put(id, 8);
         }
@@ -1510,7 +1600,7 @@ core::Result<ga::NativeState> GalacticAiUsabilityProvider::capture() const {
     return core::Result<ga::NativeState>::success(std::move(out));
 }
 core::Result<void> GalacticAiUsabilityProvider::restore(const ga::NativeState& state) {
-    if (frozen_provider_ || !decision_frontiers_.empty() || selected_frontier())
+    if (phase_ || phase_abandoned_ || frozen_provider_ || !decision_frontiers_.empty() || selected_frontier())
         return refuse<void>("usability restore requires the joined barrier owner");
     const auto found = state.components.find("GALACTIC_USABILITY");
     if (state.version != ga::native_state_version || found == state.components.end()
@@ -1523,7 +1613,7 @@ core::Result<void> GalacticAiUsabilityProvider::restore(const ga::NativeState& s
         bytes = bytes.subspan(width); return value;
     };
     const auto flag = [&]() { const auto value = get(1); if (value > 1) bad = true; return value != 0; };
-    if (get(4) != 3) return refuse<void>("unsupported B native component version");
+    if (get(4) != 4) return refuse<void>("unsupported B native component version");
     const auto revision = get(8); const auto deadlines = get(4);
     const auto players = static_cast<std::size_t>(std::count_if(content_->players.begin(), content_->players.end(), [](const auto& row) { return row.ai; }));
     if (deadlines > players || deadlines > bytes.size() / 13) return refuse<void>("invalid B prepared expiry domain");
@@ -1557,8 +1647,7 @@ core::Result<void> GalacticAiUsabilityProvider::restore(const ga::NativeState& s
                 row.frames[policy] = get(8);
                 if (*row.frames[policy] > std::uint64_t(std::numeric_limits<std::int64_t>::max())) bad = true;
             }
-            if (policy == 4) continue;
-            const auto sites = get(4);
+        const auto sites = get(4);
             if (sites > planets.size() || sites > bytes.size() / 8 || (!row.frames[policy] && sites)) { bad = true; break; }
             std::set<gc::PlanetId> unique; std::vector<gc::PlanetId> ids;
             for (std::uint64_t j = 0; j < sites; ++j) {
@@ -1572,7 +1661,7 @@ core::Result<void> GalacticAiUsabilityProvider::restore(const ga::NativeState& s
     }
     if (bad || !bytes.empty()) return refuse<void>("malformed B native component");
     update_reach_records(staged); retained_ = std::move(staged); prepared_through_ = std::move(prepared);
-    publication_revision_ = revision; caches_.clear(); published_ = std::make_shared<const ai::GalacticConnectivity>();
+    publication_revision_ = revision; fault_rebuild_ = false; restored_prepared_.clear(); caches_.clear(); published_ = std::make_shared<const ai::GalacticConnectivity>();
     published_versions_.clear();
     stealth_generation_.reset(); stealth_fleets_.clear();
     observed_session_ = nullptr; observed_world_ = nullptr;

@@ -6,8 +6,8 @@
     "statuses": {
       "bound": 12,
       "forbidden": 1,
-      "missing": 226,
-      "partial": 12,
+      "missing": 220,
+      "partial": 20,
       "script": 142,
       "unresolved": 18
     },
@@ -10466,9 +10466,9 @@
       ],
       "receiver_expressions": [],
       "registered_engine_name": true,
-      "status": "missing",
+      "status": "partial",
       "symbol": "FindPlanet",
-      "target": "galactic host adapters (legacy #1991)"
+      "target": "src/campaign/galactic_story_scripts.cpp"
     },
     {
       "call_count": 19,
@@ -12573,9 +12573,9 @@
       ],
       "receiver_expressions": [],
       "registered_engine_name": true,
-      "status": "missing",
+      "status": "partial",
       "symbol": "Find_First_Object",
-      "target": "galactic host adapters (legacy #1991)"
+      "target": "src/campaign/galactic_story_scripts.cpp"
     },
     {
       "call_count": 1,
@@ -16032,9 +16032,9 @@
       ],
       "receiver_expressions": [],
       "registered_engine_name": true,
-      "status": "missing",
+      "status": "partial",
       "symbol": "Find_Object_Type",
-      "target": "galactic host adapters (legacy #1991)"
+      "target": "src/campaign/galactic_story_scripts.cpp"
     },
     {
       "call_count": 2,
@@ -17496,18 +17496,9 @@
       "target": "stock dependency closure"
     },
     {
-      "call_count": 9,
+      "call_count": 6,
       "call_kind": "member",
       "locations": [
-        {
-          "call_count": 3,
-          "lines": [
-            554,
-            555,
-            601
-          ],
-          "path": "data/scripts/library/pgtaskforce.lua"
-        },
         {
           "call_count": 4,
           "lines": [
@@ -17528,13 +17519,34 @@
         }
       ],
       "receiver_expressions": [
-        "GlobalValue.Get",
         "ThreadValue.Get"
       ],
       "registered_engine_name": true,
       "status": "missing",
       "symbol": "Get",
       "target": "galactic host adapters (legacy #1991)"
+    },
+    {
+      "call_count": 3,
+      "call_kind": "member",
+      "locations": [
+        {
+          "call_count": 3,
+          "lines": [
+            554,
+            555,
+            601
+          ],
+          "path": "data/scripts/library/pgtaskforce.lua"
+        }
+      ],
+      "receiver_expressions": [
+        "GlobalValue.Get"
+      ],
+      "registered_engine_name": true,
+      "status": "partial",
+      "symbol": "Get",
+      "target": "src/script/authoritative/bindings.cpp"
     },
     {
       "call_count": 1,
@@ -18008,7 +18020,27 @@
       "target": "stock dependency closure"
     },
     {
-      "call_count": 12,
+      "call_count": 1,
+      "call_kind": "member",
+      "locations": [
+        {
+          "call_count": 1,
+          "lines": [
+            287
+          ],
+          "path": "data/scripts/library/pgcommands.lua"
+        }
+      ],
+      "receiver_expressions": [
+        "owner.Get_Difficulty"
+      ],
+      "registered_engine_name": true,
+      "status": "missing",
+      "symbol": "Get_Difficulty",
+      "target": "galactic host adapters (legacy #1991)"
+    },
+    {
+      "call_count": 11,
       "call_kind": "member",
       "locations": [
         {
@@ -18054,26 +18086,18 @@
         {
           "call_count": 1,
           "lines": [
-            287
-          ],
-          "path": "data/scripts/library/pgcommands.lua"
-        },
-        {
-          "call_count": 1,
-          "lines": [
             413
           ],
           "path": "data/scripts/library/pgevents.lua"
         }
       ],
       "receiver_expressions": [
-        "PlayerObject.Get_Difficulty",
-        "owner.Get_Difficulty"
+        "PlayerObject.Get_Difficulty"
       ],
       "registered_engine_name": true,
-      "status": "missing",
+      "status": "partial",
       "symbol": "Get_Difficulty",
-      "target": "galactic host adapters (legacy #1991)"
+      "target": "src/campaign/galactic_story_scripts.cpp"
     },
     {
       "call_count": 25,
@@ -29665,9 +29689,9 @@
         "vader.Prevent_AI_Usage"
       ],
       "registered_engine_name": true,
-      "status": "missing",
+      "status": "partial",
       "symbol": "Prevent_AI_Usage",
-      "target": "galactic host adapters (legacy #1991)"
+      "target": "src/campaign/galactic_story_scripts.cpp"
     },
     {
       "call_count": 173,
@@ -34986,9 +35010,9 @@
         "GlobalValue.Set"
       ],
       "registered_engine_name": true,
-      "status": "missing",
+      "status": "partial",
       "symbol": "Set",
-      "target": "galactic host adapters (legacy #1991)"
+      "target": "src/script/authoritative/bindings.cpp"
     },
     {
       "call_count": 34,
@@ -41215,9 +41239,9 @@
       ],
       "receiver_expressions": [],
       "registered_engine_name": true,
-      "status": "missing",
+      "status": "partial",
       "symbol": "Spawn_Unit",
-      "target": "galactic host adapters (legacy #1991)"
+      "target": "src/campaign/galactic_story_scripts.cpp"
     },
     {
       "call_count": 143,

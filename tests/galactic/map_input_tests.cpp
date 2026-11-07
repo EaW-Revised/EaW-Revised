@@ -30,8 +30,9 @@ void selection_and_caller_gates() {
     assert(!input.world_select(planets, 1, CameraState::overview).accepted);
     auto effect = input.select(planets, 1, CameraState::overview);
     assert(effect.changed && effect.tutorial); // Core setter does not own caller lock.
+    assert(effect.sound); // #5503: a new planet selection plays Planet_Dialog_Appears.
     effect = input.select(planets, 1, CameraState::overview);
-    assert(effect.accepted && effect.tutorial && !effect.changed);
+    assert(effect.accepted && effect.tutorial && !effect.changed && !effect.sound);
     effect = input.select(planets, 3, CameraState::inward);
     assert(effect.refocus && effect.changed);
     input.gates.selection_locked = false;
@@ -40,7 +41,10 @@ void selection_and_caller_gates() {
     assert(input.release_widget([](auto) { assert(false); }));
     assert(!input.release_widget([](auto) { assert(false); }));
     assert(!input.cancel_world(planets, CameraState::focused).changed);
-    assert(input.cancel_world(planets, CameraState::overview).changed && input.selected == 0);
+    {
+        const auto cleared = input.cancel_world(planets, CameraState::overview);
+        assert(cleared.changed && !cleared.sound && input.selected == 0); // deselect is silent
+    }
     for (unsigned gate = 0; gate < 4; ++gate) {
         input.gates.active_mode = gate != 0; input.gates.demo = gate == 1;
         input.gates.cinematic = gate == 2; input.gates.victory_pending = gate == 3;
@@ -108,6 +112,12 @@ void rectangle_and_widget_drop_order() {
         {15, 105, 1, 2, 0, true, true, false, true, true},
         {16, 106, 1, 2, 0, true, true, true, false, true},
         {17, 107, 1, 2, 0, true, false, true, true, true}};
+    input.preview_box(widgets);
+    assert((input.multiselection == std::vector<ObjectId>{10, 11}));
+    input.move_box({1, 1});
+    input.preview_box(widgets);
+    assert((input.multiselection == std::vector<ObjectId>{10}));
+    input.move_box({12, 1});
     assert(input.release_box(widgets));
     assert((input.multiselection == std::vector<ObjectId>{10, 11}));
     assert(!input.box_start && !input.box_end);
@@ -279,8 +289,8 @@ void hero_fleet_drop_offers_authored_ability() {
     gc::PoliticalControlSetup control;
     control.players = {{1, false, true}, {2, false, true}};
     control.relations = {{1, 1, true}, {1, 2, false}};
-    control.planets = {{.planet = 1, .landed = {}, .special_control = {}, .caps = {}, .transition_modifiers = {}, .built_structures = {}},
-        {.planet = 2, .landed = {}, .special_control = {}, .caps = {}, .transition_modifiers = {}, .built_structures = {}}};
+    control.planets = {{.planet = 1, .landed = {}, .special_control = {}, .caps = {}, .transition_modifiers = {}, .built_structures = {}, .ground_layout = {}},
+        {.planet = 2, .landed = {}, .special_control = {}, .caps = {}, .transition_modifiers = {}, .built_structures = {}, .ground_layout = {}}};
     control.state.resize(2);
     control.state[0].current_player = control.state[0].target_player = 1;
     control.state[1].current_player = control.state[1].target_player = 2;
@@ -373,8 +383,8 @@ void hero_fleet_drop_offers_authored_ability() {
     }
     // One drag resolves all planets once, including the same own planet with an enemy fleet in orbit.
     test_planets.push_back({3, {}, 2}); test_planets.push_back({4, {}, 0});
-    control.planets.push_back({.planet = 3, .landed = {}, .special_control = {}, .caps = {}, .transition_modifiers = {}, .built_structures = {}});
-    control.planets.push_back({.planet = 4, .landed = {}, .special_control = {}, .caps = {}, .transition_modifiers = {}, .built_structures = {}});
+    control.planets.push_back({.planet = 3, .landed = {}, .special_control = {}, .caps = {}, .transition_modifiers = {}, .built_structures = {}, .ground_layout = {}});
+    control.planets.push_back({.planet = 4, .landed = {}, .special_control = {}, .caps = {}, .transition_modifiers = {}, .built_structures = {}, .ground_layout = {}});
     control.state.resize(4);
     control.state[2].current_player = control.state[2].target_player = 2;
     control.state[3].current_player = control.state[3].target_player = 0;
@@ -907,7 +917,9 @@ void hero_map_collection_is_local_stable_and_live() {
     };
     const auto collect = [&] { return collect_map_heroes(*snapshot(), 1, names, art); };
     auto entries = collect();
-    assert((entries == std::vector<HeroMapEntry>{{7, 22, 1}, {11, 21, 1}}));
+    // Equal ranks: retail slot order is ascending name CRC ("HERO" 0x675b8332 < "SECOND_HERO" 0x994b6bc4), slot 0 is
+    // the right-most portrait, so the display (left to right) order is the reverse.
+    assert((entries == std::vector<HeroMapEntry>{{11, 21, 1}, {7, 22, 1}}));
     assert(collect() == entries); // Stable type order, independent of first-seen type.
     const std::array pending{gc::HeroReturnView{7, 1, 1, 0, 100}};
     assert(collect_map_heroes(*snapshot(), 1, names, art, pending) == entries); // Live entry wins a duplicate schedule.
@@ -928,6 +940,42 @@ void hero_map_collection_is_local_stable_and_live() {
     travelling.fleets->front().motion.transit.emplace();
     const auto transit = collect_map_heroes(*gc::GalacticSnapshot::native_view(base, std::move(travelling)), 1, names, art);
     assert((transit == std::vector<HeroMapEntry>{{7, 23, 1}})); // Parked duplicate remains; no transit destination invented.
+}
+void hero_map_order_follows_retail_slots() {
+    namespace gc = eawr::sim::galactic;
+    static_assert(hero_name_crc("hero") == 0x675b8332U && hero_name_crc("Second_Hero") == 0x994b6bc4U);
+    struct Look { bool named_hero{true}; std::string icon{"x.tga"}; bool hero{true}; std::int64_t hero_rank{25}; };
+    // a..h: rank 30,20,40,10,50,60,25,25; g/h tie (CRC "G" 0x3aba3bbe < "H" 0xaa05262f).
+    const char* ids[] = {"a", "b", "c", "d", "e", "f", "g", "h"};
+    const std::int64_t ranks[] = {30, 20, 40, 10, 50, 60, 25, 25};
+    std::map<gc::TypeId, std::string> names;
+    std::map<std::string, Look> art;
+    std::vector<gc::CensusObject> actors;
+    for (gc::TypeId i = 0; i < 8; ++i) {
+        names.emplace(21 + i, ids[i]);
+        Look look; look.hero_rank = ranks[i];
+        art.emplace(ids[i], look);
+        actors.push_back({40 + i, 21 + i, 1, 1, 10, false, false, 21 + i});
+    }
+    const auto base = std::make_shared<const gc::GalacticSnapshot>(0, gc::GalacticClock{},
+        std::vector<gc::GalacticPlayer>{}, std::vector<gc::Planet>{{1, {}, 1}},
+        std::vector<gc::Route>{}, std::vector<gc::Fleet>{{10, 1, 1, {{30, 8}}}}, std::vector<gc::GalacticEvent>{});
+    const auto collect = [&] {
+        gc::NativeSnapshotChanges changes;
+        changes.actors = std::make_shared<const std::vector<gc::CensusObject>>(actors);
+        return collect_map_heroes(*gc::GalacticSnapshot::native_view(base, std::move(changes)), 1, names, art);
+    };
+    const auto types = [](const std::vector<HeroMapEntry>& rows) {
+        std::vector<gc::TypeId> result;
+        for (const auto& row : rows) result.push_back(row.type);
+        return result;
+    };
+    // Retail slots ascending: d10 b20 g25 h25 a30 c40 | e50 f60 are cut. Display = reversed: c a h g b d.
+    assert((types(collect()) == std::vector<gc::TypeId>{23, 21, 28, 27, 22, 24}));
+    // Ranks below 1 never order against ranked heroes (retail) and here sort after every positive rank, CRC order.
+    art.at("d").hero_rank = 0; art.at("e").hero_rank = -5;
+    // Slots: b20 g25 h25 a30 c40 f60 | d0(CRC a3b36a04) e(-5, CRC d4b45a92) cut. Display reversed.
+    assert((types(collect()) == std::vector<gc::TypeId>{26, 23, 21, 28, 27, 22}));
 }
 void scheduled_hero_map_uses_published_frames() {
     namespace gc = eawr::sim::galactic;
@@ -1083,6 +1131,7 @@ int main() {
     space_proof_selects_reachable_authored_defenders();
     scheduled_hero_map_uses_published_frames();
     hero_map_collection_is_local_stable_and_live();
+    hero_map_order_follows_retail_slots();
     selection_and_caller_gates(); deferred_revalidation(); navigation_and_heroes();
     rectangle_and_widget_drop_order(); wheel_radar_and_typed_commands();
     inward_refocus_immediately_focuses();

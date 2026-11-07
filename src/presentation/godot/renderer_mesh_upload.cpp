@@ -39,6 +39,13 @@ namespace {
 }
 } // namespace
 
+void GodotRenderer::Impl::note_shared_census(const detail::TextureOwnerKind owner_kind, const std::string& name,
+    const detail::GpuItem& item, const assets::Source* source) {
+    if (!detail::TextureCensusRegistry::enabled().load(std::memory_order_relaxed)) return;
+    detail::TextureCensusRegistry::instance().add(this, owner_kind, name, item, source);
+    shared_census_.emplace_back(owner_kind, name, item);
+}
+
 [[nodiscard]] core::Result<void> GodotRenderer::Impl::register_shared_texture(
     const std::string_view name, const assets::Texture& texture) {
     RenderingServer* rendering = RenderingServer::get_singleton();
@@ -57,6 +64,7 @@ namespace {
     }
     shared_gpu_items_.push_back(detail::texture_item(texture));
     detail::gpu_memory_ledger().add(shared_gpu_items_.back());
+    note_shared_census(detail::TextureOwnerKind::shared_named, key, shared_gpu_items_.back(), &texture.source);
     shared_textures_.emplace(key, target);
     return core::Result<void>::success();
 }
@@ -108,6 +116,7 @@ namespace {
     }
     shared_gpu_items_.push_back(detail::texture_array_item(layers, edge));
     detail::gpu_memory_ledger().add(shared_gpu_items_.back());
+    note_shared_census(detail::TextureOwnerKind::shared_array, key, shared_gpu_items_.back(), nullptr);
     shared_textures_.emplace(key, texture);
     return core::Result<void>::success();
 }
@@ -269,6 +278,15 @@ bool GodotRenderer::Impl::apply_texture_drop(RenderingServer& rendering, const s
     RenderingServer& rendering, const ModelView& source, Resource& target, const bool authored_binormals,
     const bool resident) {
     core::load_profile::Scope scope(core::load_profile::Phase::mesh_upload);
+    target.category_triangles = 0;
+    target.diagnostic_surface_names.clear();
+    target.diagnostic_bounds.reset();
+    if (render_categories::ablation == "hull-census") {
+        target.diagnostic_model_meshes = source.original.meshes.size();
+        target.diagnostic_model_submeshes = 0;
+        for (const auto& mesh : source.original.meshes)
+            target.diagnostic_model_submeshes += mesh.submeshes.size();
+    }
     if (resident) target.mesh = rendering.mesh_create();
     target.bone_count = source.bones.size();
     target.skin_used_bones.assign(source.bones.size(), 0);
@@ -315,6 +333,8 @@ bool GodotRenderer::Impl::apply_texture_drop(RenderingServer& rendering, const s
             if (rigid_skinned
                 && static_cast<std::size_t>(mesh.bone) >= source.bones.size()) return false;
             has_surface = true;
+            if (render_categories::ablation != "off") target.diagnostic_surface_names.emplace_back(mesh.diagnostic_name);
+            if (render_categories::ablation != "off") target.category_triangles += submesh.indices.size() / 3;
             if (!detail::prepare_rigid_rest_pose(source.original, rigid_skinned, rest)) return false;
             if (!resident) {
                 target.skinned = target.skinned || palette_skinned || rigid_skinned;
@@ -362,6 +382,11 @@ bool GodotRenderer::Impl::apply_texture_drop(RenderingServer& rendering, const s
                     ? animation::Player::rigid_vertex_to_bind(*rigid_bind, submesh.vertices[index])
                     : submesh.vertices[index];
                 const Vector3 normal = axis_convert(vertex.normal).normalized();
+                if (render_categories::ablation != "off") {
+                    const auto point = axis_convert(vertex.position);
+                    if (!target.diagnostic_bounds) target.diagnostic_bounds = AABB(point, Vector3());
+                    else target.diagnostic_bounds->expand_to(point);
+                }
                 const Vector3 tangent = axis_convert(vertex.tangent).normalized();
                 const Vector3 binormal = axis_convert(vertex.binormal).normalized();
                 vertices.set(static_cast<int64_t>(index), axis_convert(vertex.position));
@@ -430,14 +455,20 @@ bool GodotRenderer::Impl::apply_texture_drop(RenderingServer& rendering, const s
                 arrays[RenderingServer::ARRAY_WEIGHTS] = weights;
             }
             arrays[RenderingServer::ARRAY_INDEX] = indices;
-            rendering.mesh_add_surface_from_arrays(
-                target.mesh, RenderingServer::PRIMITIVE_TRIANGLES, arrays, Array(), Dictionary(),
-                authored_binormals ? static_cast<BitField<RenderingServer::ArrayFormat>>(
-                    static_cast<int64_t>(RenderingServer::ARRAY_CUSTOM_RGB_FLOAT)
-                    << RenderingServer::ARRAY_FORMAT_CUSTOM0_SHIFT) : BitField<RenderingServer::ArrayFormat>(0));
-            rendering.mesh_surface_set_material(
-                target.mesh, rendering.mesh_get_surface_count(target.mesh) - 1,
-                target.material);
+            {
+                core::load_profile::DetailScope add(core::load_profile::Phase::mesh_add_surface);
+                rendering.mesh_add_surface_from_arrays(
+                    target.mesh, RenderingServer::PRIMITIVE_TRIANGLES, arrays, Array(), Dictionary(),
+                    authored_binormals ? static_cast<BitField<RenderingServer::ArrayFormat>>(
+                        static_cast<int64_t>(RenderingServer::ARRAY_CUSTOM_RGB_FLOAT)
+                        << RenderingServer::ARRAY_FORMAT_CUSTOM0_SHIFT) : BitField<RenderingServer::ArrayFormat>(0));
+            }
+            std::int32_t surface_count = 0;
+            {
+                core::load_profile::DetailScope count(core::load_profile::Phase::mesh_surface_count);
+                surface_count = rendering.mesh_get_surface_count(target.mesh);
+            }
+            rendering.mesh_surface_set_material(target.mesh, surface_count - 1, target.material);
             mesh_digest.scalar(mesh.bone);
             mesh_digest.bytes(submesh.vertices.data(), submesh.vertices.size() * sizeof(assets::Vertex));
             mesh_digest.bytes(submesh.indices.data(), submesh.indices.size() * sizeof(std::uint16_t));
@@ -446,7 +477,11 @@ bool GodotRenderer::Impl::apply_texture_drop(RenderingServer& rendering, const s
         }
     }
     if (!resident) return has_surface;
-    if (!target.mesh.is_valid() || rendering.mesh_get_surface_count(target.mesh) == 0) return false;
+    if (!target.mesh.is_valid()) return false;
+    {
+        core::load_profile::DetailScope count(core::load_profile::Phase::mesh_surface_count);
+        if (rendering.mesh_get_surface_count(target.mesh) == 0) return false;
+    }
     target.gpu_items.push_back({detail::GpuCategory::mesh, mesh_digest.value(), 0, mesh_bytes, false});
     detail::gpu_memory_ledger().add(target.gpu_items.back());
     return true;

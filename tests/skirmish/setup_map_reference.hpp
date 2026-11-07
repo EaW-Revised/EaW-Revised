@@ -3,7 +3,9 @@
 // Frozen eager algorithm, retained only to compare map-list values and diagnostics
 // against the metadata-gated implementation. No game assets are embedded here.
 #include "eawr/skirmish/setup.hpp"
+#include "eawr/vfs/vfs.hpp"
 #include "eawr/data/ui/text_database.hpp"
+#include "eawr/scene/scene.hpp"
 #include <algorithm>
 #include <bit>
 #include <charconv>
@@ -139,9 +141,16 @@ inline core::Result<std::vector<SetupMap>> eager_maps(const vfs::Vfs& filesystem
                 }
                 std::sort(entry.teams.begin(), entry.teams.end(), [](const auto& a, const auto& b) { return a.team < b.team; });
                 if (entry.teams.size() < 2) entry.unavailable = "This map has fewer than two supported station teams.";
-                if (entry.metadata.new_markers != true)
-                    entry.unavailable = "Legacy map starts are not supported yet.";
-                else if (!entry.metadata.start_positions || entry.metadata.start_positions->size() < 2)
+                if (entry.metadata.new_markers != true) {
+                    entry.legacy_factions = scene::faction_order(catalog);
+                    entry.teams.clear();
+                    std::vector<std::string> names;
+                    for (const auto& faction : playable_factions) names.push_back(faction.name);
+                    for (std::uint32_t team = 0; team < 2; ++team) entry.teams.push_back({team, names, std::nullopt});
+                    entry.unavailable.clear();
+                    if (entry.legacy_factions.size() < 2)
+                        entry.unavailable = "Legacy map requires at least two authored factions.";
+                } else if (!entry.metadata.start_positions || entry.metadata.start_positions->size() < 2)
                     entry.unavailable = "This map has missing or malformed authored start positions.";
             }
         }

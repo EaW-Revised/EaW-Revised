@@ -15,11 +15,16 @@
 
 #include <atomic>
 #include <deque>
+#include <functional>
 #include <initializer_list>
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <span>
 #include <stdexcept>
+#include <string>
+#include <string_view>
+#include <unordered_map>
 #include <utility>
 
 namespace eawr::campaign { struct ModeTimelineSnapshot; }
@@ -136,6 +141,26 @@ struct GalacticPerceptionSetup {
     std::vector<std::string> markup_diagnostics;
     std::vector<std::string> spawn_diagnostics; // starting-spawn names that resolve to no type, kept as null references
 };
+// Derived, immutable name -> type ID lookup over a setup's type table. The caller passes the table already sorted by
+// type ID; the first row of each upper-cased name wins, exactly as a front-to-back scan would. Never serialized or
+// digested; built once per world and read concurrently without locks.
+class GalacticTypeNames {
+public:
+    GalacticTypeNames() = default;
+    explicit GalacticTypeNames(std::span<const AiType> sorted_types);
+    // Zero when the (upper-cased) name matches no type.
+    [[nodiscard]] tactical::TypeId find(std::string_view upper_cased) const;
+private:
+    struct NameHash {
+        using is_transparent = void;
+        std::size_t operator()(std::string_view text) const noexcept { return std::hash<std::string_view>{}(text); }
+    };
+    std::unordered_map<std::string, tactical::TypeId, NameHash, std::equal_to<>> by_name_;
+};
+// Every PARAMETER_TYPE binding in binding order, each resolved by name (zero when unknown, duplicates kept);
+// nullopt when there is none or one is not a string.
+[[nodiscard]] std::optional<std::vector<tactical::TypeId>> selected_type_ids(
+    const GalacticTypeNames&, const std::vector<Binding>& bindings);
 struct GalacticExecutionRoute {
     tactical::PlayerId player{};
     galactic::PlanetId source{}, candidate{};
@@ -350,6 +375,25 @@ struct GalacticPerceptionWork {
 class GalacticWorld final : public World, public galactic_ai::TrackedStateContributor {
     struct BoundState;
 public:
+    class PhaseSavepoint {
+    public:
+        struct Work { std::size_t player_headers{}, cache_rows{}, visibility_rows{}, flag_rows{}, coefficient_graphs{}; };
+        ~PhaseSavepoint();
+        PhaseSavepoint(const PhaseSavepoint&) = delete;
+        PhaseSavepoint& operator=(const PhaseSavepoint&) = delete;
+        [[nodiscard]] Work work() const noexcept;
+        [[nodiscard]] core::Result<void> commit();
+        [[nodiscard]] core::Result<void> rollback();
+    private:
+        struct Saved;
+        explicit PhaseSavepoint(std::unique_ptr<Saved>);
+        std::unique_ptr<Saved> saved_;
+        friend class GalacticWorld;
+    };
+    // The owner and executor outlive the token; begin/settle are serial and
+    // worker callbacks must join before settlement. Only first-written rows
+    // copy; no native archive or entity-domain scan on begin.
+    [[nodiscard]] core::Result<std::unique_ptr<PhaseSavepoint>> begin_phase(const sim::PartitionExecutor&);
     explicit GalacticWorld(GalacticPerceptionSetup setup);
     [[nodiscard]] core::Result<void> prepare_player_frontiers(const sim::PartitionExecutor&,
         std::span<const tactical::PlayerId> players);
@@ -513,6 +557,11 @@ public:
     [[nodiscard]] std::uint64_t observer_input_generation() const noexcept {
         return bound().snapshot_ ? bound().snapshot_->observer_input_generation() : 0;
     }
+    // Archived visibility can lag the completed snapshot used to construct a load.
+    // Reconcile it on the next ordinary publication, after derived reconstruction.
+    [[nodiscard]] bool needs_observation_refresh(std::uint64_t frame) const noexcept {
+        return bound().observations_restored_at_ && frame > *bound().observations_restored_at_;
+    }
     // Derived B invalidation, independent of unrelated budget/hint cache writes.
     [[nodiscard]] std::uint64_t movement_input_revision() const noexcept {
         const auto lock = query_lock();
@@ -576,7 +625,7 @@ public:
         std::vector<GalacticExecutionRoute>);
     // WGA-493 project seam; retail publication cadence remains unqualified (#4786).
     [[nodiscard]] core::Result<void> publish_path_coefficients(const sim::PartitionExecutor&, bool force = false);
-    [[nodiscard]] std::vector<std::string> take_path_coefficient_diagnostics() { return std::exchange(path_coefficient_diagnostics_, {}); }
+    [[nodiscard]] std::vector<std::string> take_path_coefficient_diagnostics();
     [[nodiscard]] core::Result<void> publish_execution_route_generations(bool available, std::uint64_t revision,
         std::map<tactical::PlayerId, std::shared_ptr<const std::vector<GalacticExecutionRoute>>>);
     // nullopt: production-site relation not supplied; false: known nonmember.
@@ -648,6 +697,12 @@ public:
     void memory_inventory(diagnostics::GcMemory&) const;
 
 private:
+    PhaseSavepoint::Saved* phase_{};
+    bool phase_abandoned_{}, phase_rebuilding_{};
+    void retain_phase_row(tactical::PlayerId, std::uint32_t, std::size_t) const;
+    void note_phase_shard(tactical::PlayerId) const;
+    void retain_path_graph(tactical::PlayerId, std::size_t);
+    void retain_all_path_graphs();
     [[nodiscard]] core::Result<void> bind_publication_impl(std::shared_ptr<const galactic::GalacticSnapshot>,
         std::shared_ptr<const GalacticConnectivity>, const sim::PartitionExecutor&, std::uint64_t,
         sim::EntityId, bool perception_due, bool native_sparse);
@@ -738,6 +793,7 @@ private:
     static thread_local tactical::PlayerId active_player_;
     [[nodiscard]] GalacticVisibility* visibility(tactical::PlayerId, galactic::PlanetId, std::uint32_t mask = 0, bool publish = true) const;
     GalacticPerceptionSetup setup_;
+    GalacticTypeNames type_names_; // derived from setup_.types after the constructor's sort
     // Immutable first-match lookup, derived before sorting identity metadata.
     std::map<std::string, std::map<std::uint32_t, tactical::TypeId>, std::less<>> next_technology_types_;
     std::vector<ReaderTypeTraits> type_traits_;
@@ -811,6 +867,7 @@ private:
         NativeFrontierWork native_frontier_work_;
         tactical::PlayerId native_frontier_player_{};
         mutable std::uint64_t movement_input_revision_{};
+        std::optional<std::uint64_t> observations_restored_at_;
     };
     BoundState bound_state_;
     std::map<tactical::PlayerId, BoundState> player_frontiers_;

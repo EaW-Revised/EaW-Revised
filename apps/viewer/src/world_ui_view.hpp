@@ -2,12 +2,12 @@
 
 #include "live_session_view.hpp"
 
-#include "eawr/data/xml.hpp"
+#include "eawr/data/xml_fwd.hpp"
 #include "eawr/presentation/camera/controller.hpp"
 #include "eawr/presentation/ui/selection.hpp"
 #include "eawr/presentation/ui/world_ui.hpp"
 #include "eawr/presentation/godot/renderer.hpp"
-#include "eawr/vfs/vfs.hpp"
+#include "eawr/vfs/vfs_fwd.hpp"
 
 #include <godot_cpp/classes/image_texture.hpp>
 #include <godot_cpp/classes/font.hpp>

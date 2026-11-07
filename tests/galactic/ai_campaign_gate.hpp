@@ -6,6 +6,7 @@
 #include "eawr/platform/sim_workers.hpp"
 #include "eawr/platform/live_game_session.hpp"
 #include "eawr/core/sha256.hpp"
+#include "eawr/core/gc_profile.hpp"
 #include "eawr/sim/galactic/victory.hpp"
 #include "ai_campaign_gate_access.hpp"
 #include "ai_unattended_input.hpp"
@@ -138,13 +139,17 @@ struct Observations {
     std::set<std::uint32_t> historical_query_workers;
     std::set<std::pair<gc::PlayerId, std::uint64_t>> paid_reserved_goals;
     bool normal_paid_task{};
+    std::uint64_t auto_returns{}, tactical_returns{};
     void battle(const cp::GalacticAiBattleNotice& notice) {
         if (!delivered.emplace(notice.synchronization_tick, notice.conflict.id, notice.kind).second) return;
         if (conflicts.insert(notice.conflict.id).second) {
             if (players.contains(notice.conflict.invader)) ++players.at(notice.conflict.invader).attacks;
             if (players.contains(notice.conflict.defender)) ++players.at(notice.conflict.defender).defences;
         }
-        if (notice.kind == cp::GalacticAiBattleKind::returned) returned.insert(notice.conflict.id);
+        if (notice.kind == cp::GalacticAiBattleKind::returned) {
+            returned.insert(notice.conflict.id);
+            if (notice.auto_resolve) ++auto_returns; else ++tactical_returns;
+        }
         if (notice.kind == cp::GalacticAiBattleKind::returned && !notice.auto_resolve)
             last_tactical_return = notice.conflict;
         for (const auto& force : notice.conflict.forces) if (force.hero && heroes.insert(force.id).second
@@ -372,7 +377,7 @@ struct Report {
 inline Report run(cp::GameSession& game, const cp::GalacticAiRuntimeSetup& setup,
     const eawr::platform::CampaignServiceConfiguration& configuration, const std::shared_ptr<Observations>& observed,
     const std::filesystem::path& directory, const LearningProbe& probe = {}, bool human_encounter_only = false,
-    bool hash_baseline = false) {
+    bool hash_baseline = false, bool tech_evidence = false) {
     const auto interactive = game.record().setup.interactive_seat;
     Report report;
     std::optional<std::uint64_t> answered_frame;
@@ -388,6 +393,18 @@ inline Report run(cp::GameSession& game, const cp::GalacticAiRuntimeSetup& setup
     std::ofstream targeted(directory / "targeted-plan-witnesses.ndjson", std::ios::trunc);
     check(static_cast<bool>(targeted), "campaign targeted-plan output unavailable");
     std::set<gc::PlayerId> targeted_players;
+    // The observer counters are test-only and do not affect authoritative state.
+    // Keep the benchmark's instrumentation policy unchanged.
+    struct RestoreProfile {
+        bool previous;
+        ~RestoreProfile() { eawr::gc_profile::enabled.store(previous, std::memory_order_relaxed); }
+    } restore_profile{eawr::gc_profile::enabled.load(std::memory_order_relaxed)};
+    if (tech_evidence) eawr::gc_profile::enabled.store(true, std::memory_order_relaxed);
+    std::ofstream tech;
+    if (tech_evidence) {
+        tech.open(directory / "tech-decisions.ndjson", std::ios::trunc);
+        check(static_cast<bool>(tech), "technology decision receipt unavailable");
+    }
     const auto started = std::chrono::steady_clock::now();
     check(!observed->runtimes.empty(), "campaign factory did not publish real native runtime owners");
     const auto view = observed->runtimes.front();
@@ -404,7 +421,8 @@ inline Report run(cp::GameSession& game, const cp::GalacticAiRuntimeSetup& setup
     const auto identities = ck::game_identities(game.galaxy().setup());
     std::map<gc::PlanetId, gc::PlayerId> ownership;
     std::map<eawr::sim::EntityId, gc::PlayerId> production_owners;
-    std::optional<std::uint64_t> last_timeline_frame, last_progress_frame;
+    std::optional<std::uint64_t> last_timeline_frame, last_progress_frame, last_tech_frame;
+    std::uint64_t pending_invasion_frames{}, conflict_admission_frames{}, child_frames{}, overlap_frames{};
     for (const auto& planet : game.galaxy().snapshot()->planets()) ownership[planet.id] = planet.owner;
     try {
         while (game.galaxy().clock().galactic_frame < 900U * gc::galactic_frames_per_second) {
@@ -557,6 +575,42 @@ inline Report run(cp::GameSession& game, const cp::GalacticAiRuntimeSetup& setup
                     observed->normal_paid_task = true; break;
                 }
             }
+            // Fixed 30-second sampling and fixed row/name caps bound diagnostic output.
+            // Names are evidence filters only; they never select gameplay behaviour.
+            if (tech_evidence && report.galactic_frames && report.galactic_frames % (30U * gc::galactic_frames_per_second) == 0
+                && last_tech_frame != report.galactic_frames) {
+                last_tech_frame = report.galactic_frames;
+                const auto refusals = engine->galactic_refusals();
+                for (const auto& selected : setup.lifecycle.players) {
+                    tech << "{\"frame\":" << report.galactic_frames << ",\"player\":" << selected.player
+                        << ",\"filter\":\"TECH\",\"goals\":[";
+                    std::size_t written{}, matching{};
+                    for (const auto& goal : engine->galactic_goal_observations(selected.player)) {
+                        if (eawr::script::foc::ai::upper_case(goal.function).find("TECH") == std::string::npos
+                            && eawr::script::foc::ai::upper_case(goal.plan).find("TECH") == std::string::npos) continue;
+                        ++matching;
+                        if (written == 64) continue;
+                        if (written++) tech << ',';
+                        tech << "{\"function\":"; json_string(tech, goal.function.substr(0, 128));
+                        tech << ",\"plan\":"; json_string(tech, goal.plan.substr(0, 128));
+                        tech << ",\"desire\":"; json_string(tech, goal.desire.substr(0, 128));
+                        tech << ",\"active\":" << (goal.active ? "true" : "false")
+                            << ",\"planned\":" << (goal.planned ? "true" : "false")
+                            << ",\"running\":" << goal.running_plan << '}';
+                    }
+                    tech << "],\"matching_goals\":" << matching << ",\"refusals\":[";
+                    written = 0; matching = 0;
+                    for (const auto& [key, count] : refusals) {
+                        if (key.first != selected.player || eawr::script::foc::ai::upper_case(key.second).find("TECH") == std::string::npos) continue;
+                        ++matching;
+                        if (written == 64) continue;
+                        if (written++) tech << ',';
+                        tech << "{\"reason\":"; json_string(tech, key.second.substr(0, 128));
+                        tech << ",\"count\":" << count << '}';
+                    }
+                    tech << "],\"matching_refusals\":" << matching << "}" << std::endl;
+                }
+            }
             report.maximum_goals = std::max(report.maximum_goals, goals);
             report.maximum_originals = std::max(report.maximum_originals, static_cast<std::uint64_t>(snapshot->commissioned_originals().size()));
             if (report.galactic_frames >= 600U * gc::galactic_frames_per_second && view.digest_work) {
@@ -595,6 +649,12 @@ inline Report run(cp::GameSession& game, const cp::GalacticAiRuntimeSetup& setup
             const auto* invasion = game.galaxy().pending_native_invasion();
             const bool child = game.mode() == cp::SessionMode::battle;
             const bool blocked = invasion_blocked_by_conflict(game);
+            if (tech_evidence) {
+                if (invasion && invasion->state == gc::GalacticSession::NativeInvasion::State::pending) ++pending_invasion_frames;
+                if (game.has_pending_conflict_for_admission()) ++conflict_admission_frames;
+                if (child) ++child_frames;
+                if (blocked) ++overlap_frames;
+            }
             if (blocked && !captured.contains("blocked-invasion")) {
                 const auto* other = child ? game.conflict() : game.pending_conflict();
                 report.blocked_invasion = BlockedInvasionWitness{game.completed_tick(), invasion->request, invasion->fleet,
@@ -633,6 +693,15 @@ inline Report run(cp::GameSession& game, const cp::GalacticAiRuntimeSetup& setup
     report.correctness = report.failure.empty() && !report.freestore_move_refusals && report.freestore_hop.has_value()
         && report.progression && report.continuation && report.normal_paid_selection && report.historical_queries && report.learning;
     report.passed = report.correctness && report.digest_budget; report.final_hash = game.state_sha256();
+    if (tech_evidence) {
+        std::ofstream witness(directory / "witness-preconditions.json", std::ios::trunc);
+        witness << "{\"pending_invasion_frames\":" << pending_invasion_frames
+            << ",\"conflict_admission_frames\":" << conflict_admission_frames
+            << ",\"child_frames\":" << child_frames << ",\"overlap_frames\":" << overlap_frames
+            << ",\"auto_returns\":" << observed->auto_returns
+            << ",\"tactical_returns\":" << observed->tactical_returns << "}\n";
+        witness.close(); check(static_cast<bool>(witness), "witness preconditions receipt unavailable");
+    }
     std::ofstream summary(directory / "result.json", std::ios::trunc); report.write(summary);
     check(static_cast<bool>(summary), "campaign gate report write failed");
     return report;

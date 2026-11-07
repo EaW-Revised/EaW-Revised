@@ -3,6 +3,8 @@
 // Tactical implementation of the AI world boundary (WGA-01). Borrowed session
 // and snapshot inputs are rebound by the manager before every script barrier.
 #include "ai_engine.hpp"
+#include "eawr/sim/tactical/fighters.hpp"
+#include "ai_mode.hpp"
 
 #include <array>
 
@@ -230,7 +232,7 @@ public:
     bool target_alive(const Target& target) const override {
         return target.object == 0 || host_.view->find(target.object) != nullptr;
     }
-    std::string_view goal_mode() const noexcept override { return "SPACE"; }
+    std::string_view goal_mode() const noexcept override { return ai::ai_mode(host_.setup.domain).goal_mode; }
     std::span<const tactical::Player> players() const noexcept override {
         return host_.world ? host_.world->players() : std::span<const tactical::Player>{};
     }

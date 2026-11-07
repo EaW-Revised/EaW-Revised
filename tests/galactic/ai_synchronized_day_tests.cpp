@@ -10,6 +10,7 @@
 #include <string_view>
 #include <string>
 #include "../support/env.hpp"
+#include "eawr/vfs/vfs.hpp"
 #include "../support/result.hpp"
 // WGA-485: bounded stock observation, sharing the campaign gate's real providers.
 #include "galactic_support.hpp"

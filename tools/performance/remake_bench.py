@@ -13,6 +13,19 @@ back per-frame CSVs into results.json / results.md: one row per scene with the o
 units, private GiB, first-frame seconds). `analyse <rig-run-dir>` re-reads a finished run; `plan` only
 writes the spec. The same host must be used for any before/after comparison.
 
+`run --save-at <tick>` measures from a battle save instead (docs/checkpoint-format.md, "Skirmish battle
+saves"): per live scene and per worker count (1 and 8), a saving run plays to <tick>, writes the save and
+continues --save-load-ticks further; a loading run starts from that save and plays the same ticks. Both
+record every tick hash; save-load.json / save-load.md say whether the loaded battle continues identically,
+which tick and how many units its first frame shows, and the frame times of both runs over the same ticks.
+
+`run --from-save [<tick>]` measures each live scene from a battle save of its own recipe (the scene's
+arguments, its engagement orders and the save tick; by default FROM_SAVE_LEAD ticks before the start of its
+measurement window, so the measured ticks are those of a full run, after a short warm-up, without the approach
+before them). The save is made once per viewer
+build and recipe on the rig and kept in --save-cache; later runs with the same build reuse it. A save of
+another build or content is refused by the viewer, never measured. The heavy saves stay local (out/).
+
 Scenes (see SCENES): stock control, Remake menu backdrop (attract), the real Korriban map,
 provisional additive Devastator fleets (1/2/4 against fixed targets), a fighter-heavy additive
 fleet and one additive scene per ship type. Default forces/stations remain present; these
@@ -24,6 +37,7 @@ Everything here is measurement-only: no game data is copied, mod folders are rea
 from __future__ import annotations
 
 import argparse
+import copy
 from collections import Counter
 import csv
 import hashlib
@@ -39,6 +53,8 @@ import sys
 import time
 import xml.etree.ElementTree as ET
 
+# Engine guard (owner rule 11-03): the accepted patched engines and the known unpatched ones.
+ENGINE_PINS = json.loads((pathlib.Path(__file__).resolve().parents[1] / "engine_pins.json").read_text(encoding="utf-8"))
 REMAKE_CHAIN = "{mod_root}"
 RAW_CHAIN = "{raw_mod_root}"
 SEED = 4645
@@ -74,7 +90,7 @@ var output = ""
 var label = ""
 var previous = 0
 var frame = 0
-var rows = PackedStringArray(["frame,wall_frame_ms,process_ms,render_cpu_ms,render_gpu_ms,draw_calls,engine_max_fps,vsync_mode"])
+var rows = PackedStringArray(["frame,wall_frame_ms,process_ms,render_cpu_ms,render_gpu_ms,draw_calls,engine_max_fps,vsync_mode,primitives"])
 var written = false
 var started = Time.get_ticks_usec()
 func _initialize():
@@ -97,7 +113,7 @@ func observe():
             var first = FileAccess.open(output.path_join(label + ".observer-startup.json"), FileAccess.WRITE)
             first.store_string(JSON.stringify({"first_presented_s": (now - started) / 1000000.0, "backend": {"adapter_name": RenderingServer.get_video_adapter_name()}}))
             first.close()
-        rows.append("%d,%f,%f,%f,%f,%d,%d,%d" % [frame, (now - previous) / 1000.0 if previous else 0, Performance.get_monitor(Performance.TIME_PROCESS) * 1000.0, RenderingServer.viewport_get_measured_render_time_cpu(root.get_viewport_rid()), RenderingServer.viewport_get_measured_render_time_gpu(root.get_viewport_rid()), Performance.get_monitor(Performance.RENDER_TOTAL_DRAW_CALLS_IN_FRAME), Engine.max_fps, DisplayServer.window_get_vsync_mode()])
+        rows.append("%d,%f,%f,%f,%f,%d,%d,%d,%d" % [frame, (now - previous) / 1000.0 if previous else 0, Performance.get_monitor(Performance.TIME_PROCESS) * 1000.0, RenderingServer.viewport_get_measured_render_time_cpu(root.get_viewport_rid()), RenderingServer.viewport_get_measured_render_time_gpu(root.get_viewport_rid()), Performance.get_monitor(Performance.RENDER_TOTAL_DRAW_CALLS_IN_FRAME), Engine.max_fps, DisplayServer.window_get_vsync_mode(), Performance.get_monitor(Performance.RENDER_TOTAL_PRIMITIVES_IN_FRAME)])
         previous = now
         frame += 1
 func write_trace():
@@ -276,7 +292,8 @@ def select(names: str) -> list[str]:
 
 
 def write_spec(path: pathlib.Path, scenes: list[str], pacing: str, mod_root: str | None = None,
-               raw_mod_root: str | None = None, preparations: dict | None = None, prepare: bool = False) -> None:
+               raw_mod_root: str | None = None, preparations: dict | None = None, prepare: bool = False,
+               drawtype_ablate: str | None = None, drawtype_repeats: int = 3) -> None:
     if any(REMAKE_CHAIN in SCENES[n]["args"] for n in scenes) and not mod_root:
         raise SystemExit("Remake scenes require --mod-root with the explicit leaf-first chain")
     if any(RAW_CHAIN in SCENES[n]["args"] for n in scenes) and not raw_mod_root:
@@ -285,14 +302,28 @@ def write_spec(path: pathlib.Path, scenes: list[str], pacing: str, mod_root: str
     path.parent.mkdir(parents=True, exist_ok=True)
     cameras = path.parent / "engagement"
     cameras.mkdir(exist_ok=True)
+    inputs = dict(observer=str((path.parent / "observer").resolve()), engagement=str(cameras.resolve()))
+    if pacing == "free":
+        settings = path.parent / "settings"
+        settings.mkdir(exist_ok=True)
+        (settings / "uncapped.txt").write_text(
+            "eawr-settings 1\nvideo.vsync=0\nvideo.frame_rate_limit=0\n", encoding="utf-8")
+        inputs["settings"] = str(settings.resolve())
     shutil.copyfile(pathlib.Path(__file__).resolve().parents[2] / "apps/viewer/project/config/space-live-camera-bindings.json",
                     cameras / "space-live-camera-bindings.json")
     for name in scenes:
         scene = SCENES[name]
         args = list(scene["args"])
         args = [mod_root if a == REMAKE_CHAIN else raw_mod_root if a == RAW_CHAIN else a for a in args]
-        args += ["--eawr-settings-file", "{out}/" + name + "-settings.cfg",
-                 "--eawr-save-dir", "{out}/saves"]
+        # Launch profiles and battle input can initialize ActiveSettings even in
+        # evidence runs. Isolate free pacing from both defaults and player files.
+        if pacing == "free":
+            args += ["--eawr-settings-file", "{in}/settings/uncapped.txt"]
+        else:
+            args += ["--eawr-settings-file", "{out}/" + name + "-settings.cfg"]
+        args += ["--eawr-save-dir", "{out}/saves"]
+        if pacing == "free" and scene["kind"] == "live":
+            args += ["--eawr-live-audio-pace", "off"]
         engine = (["--max-fps", "120"] if pacing == "audio" else ["--max-fps", "0"])
         engine += ["--render-thread", "separate"]
         if pacing == "free":
@@ -333,10 +364,37 @@ def write_spec(path: pathlib.Path, scenes: list[str], pacing: str, mod_root: str
                                         camera="fixed native-spawn midpoint" if recipe else "native initial view"))
         entry.update(driver="perf-sample.ps1", driverArgs=dict(intervalMs=2000, freeFloorGiB=4))
         runs.append(entry)
+    if drawtype_ablate and not prepare:
+        if drawtype_repeats < 2:
+            raise ValueError("draw-type diagnostics require at least two repeats")
+        bands = tuple(f"{role}-band-{cutoff}" for role in ("hardpoint", "particle", "shadows") for cutoff in ("005", "010", "020"))
+        categories = (("fighter-impostor-control", "fighter-impostor-008") if drawtype_ablate == "impostors" else
+                      ("fighter-control", "fighter-hull", "fighter-all", "fighter-shadows") if drawtype_ablate == "fighters" else
+                      ("none", *bands, "groups", "integrated-turret", "other-hull") if drawtype_ablate == "bands" else
+                      ("none", "hull", "hardpoint", "effect", "particle", "debris", "wreck", "shadows")
+                      if drawtype_ablate == "all" else ("none", drawtype_ablate))
+        categories = tuple(dict.fromkeys(categories))
+        expanded = []
+        # Rotate category order each repeat to reduce drift/order bias.
+        for repeat in range(drawtype_repeats):
+            ordered = categories[repeat % len(categories):] + categories[:repeat % len(categories)]
+            for entry in runs:
+                for category in ordered:
+                    run = copy.deepcopy(entry)
+                    original = run["name"]
+                    name = f"{original}--{category}--{repeat + 1}"
+                    run["name"] = name
+                    run["args"] = [arg.replace("{out}/" + original, "{out}/" + name)
+                                   .replace("--bench-label=" + original, "--bench-label=" + name) for arg in run["args"]]
+                    run["args"] += ["--eawr-drawtype-ablate", category]
+                    run["driverArgs"]["drawtypeResources"] = True
+                    run["benchmark"].update(source_scene=original, drawtype_ablate=category, repeat=repeat + 1)
+                    expanded.append(run)
+        runs = expanded
     observer = path.parent / "observer"
     observer.mkdir(exist_ok=True)
     (observer / "menu-observer.gd").write_text(MENU_OBSERVER, encoding="utf-8")
-    path.write_text(json.dumps(dict(runs=runs, inputs=dict(observer=str(observer.resolve()), engagement=str(cameras.resolve()))), indent=2), encoding="utf-8")
+    path.write_text(json.dumps(dict(runs=runs, inputs=inputs), indent=2), encoding="utf-8")
 
 
 def pct(sorted_values: list[float], q: float) -> float | None:
@@ -390,12 +448,16 @@ def process_stats(directory: pathlib.Path, name: str, first_s: float | None) -> 
     rows = read_csv(path)
     if not rows:
         return {}
-    private = [float(r["private_bytes"]) / 2**30 for r in rows]
-    result = dict(private_gib_peak=max(private), private_gib_final=private[-1])
+    memory_rows = [r for r in rows if column([r], "private_bytes") and column([r], "elapsed_ms")]
+    private = [float(r["private_bytes"]) / 2**30 for r in memory_rows]
+    result = dict(process_memory_samples_missing=len(rows) - len(memory_rows),
+                  private_final_scope="last readable process-memory sample; teardown samples can be unavailable")
     # Post-startup samples, not a sample of the narrower native frame/tick window.
     start = (first_s or 0) * 1000
-    steady = [p for r, p in zip(rows, private) if float(r["elapsed_ms"]) >= start] or private[len(private) // 2:]
-    result["private_gib_median"] = statistics.median(steady)
+    if private:
+        result.update(private_gib_peak=max(private), private_gib_final=private[-1])
+        steady = [p for r, p in zip(memory_rows, private) if float(r["elapsed_ms"]) >= start] or private[len(private) // 2:]
+        result["private_gib_median"] = statistics.median(steady)
     log_rows = [r for r in rows if r.get("log_bytes") and float(r["elapsed_ms"]) >= start]
     if len(log_rows) >= 2:
         result["log_growth_post_startup"] = dict(bytes=int(log_rows[-1]["log_bytes"]) - int(log_rows[0]["log_bytes"]),
@@ -500,6 +562,23 @@ def analyse_scene(directory: pathlib.Path, name: str, scene: dict) -> dict:
         row["render_thread_observed"] = "separate rendering thread feature is experimental" in log.lower()
         if not row["render_thread_observed"]:
             row["measurement_error"] = "engine log does not prove Separate rendering"
+    if definition.get("drawtype_ablate"):
+        row.update(drawtype_ablate=definition["drawtype_ablate"], repeat=definition["repeat"], source_scene=definition["source_scene"])
+        samples = []
+        row["engine_build"] = next((line for line in log_path.read_text(encoding="utf-8", errors="replace").splitlines()
+                                   if line.startswith("Godot Engine v")), None) if log_path.exists() else None
+        if log_path.exists():
+            for line in log_path.read_text(encoding="utf-8", errors="replace").splitlines():
+                if "EAWR_RENDER_CATEGORIES " in line:
+                    try:
+                        samples.append(json.loads(line.split("EAWR_RENDER_CATEGORIES ", 1)[1]))
+                    except ValueError:
+                        pass
+        row["producer_samples"] = samples
+        row["producer_scope"] = "process lifetime; no native counter-frame join"
+        row["ablation_observed"] = bool(samples) and all(s.get("ablation") == definition["drawtype_ablate"] for s in samples)
+        if not row["ablation_observed"]:
+            row["measurement_error"] = "draw-type ablation is missing or mismatched in native category samples"
     row["recorded_protocol_window"] = definition.get("window")
     row["analysis_window_post_hoc"] = bool(definition.get("window") and
                                            list(definition["window"]) != list(scene["window"]))
@@ -520,7 +599,9 @@ def analyse_scene(directory: pathlib.Path, name: str, scene: dict) -> dict:
         if scene["kind"] == "live":
             contact = [int(float(f.get("tick", 0))) for f in frames if float(f.get("projectiles", 0) or 0) > 0]
             row["first_projectile_tick"] = min(contact) if contact else None
-            if contact and not scene.get("fixed_window"):
+            # A run loaded from a save sees the fight already under way on its first frame: that is not contact.
+            loaded = definition.get("from_save") is not None and min(contact, default=0) <= int(definition["from_save"]) + 1
+            if contact and not scene.get("fixed_window") and not loaded:
                 low = max(low, min(contact) + 60)
         window = [f for f in frames if low <= int(float(f.get(coordinate, 0) or 0)) <= high]
         row["window_coordinate"] = coordinate
@@ -528,10 +609,16 @@ def analyse_scene(directory: pathlib.Path, name: str, scene: dict) -> dict:
         row["frames_total"] = len(frames)
         row["frames_window"] = len(window)
         row["window_complete"] = any(int(float(f.get(coordinate, 0) or 0)) >= high for f in frames)
+        if definition.get("drawtype_ablate") and scene["kind"] == "live":
+            counter_frames = {int(value) for value in column(window, "render_counter_frame")}
+            row["producer_samples"] = [sample for sample in row["producer_samples"] if sample.get("frame") in counter_frames]
+            row["producer_scope"] = "completed engine samples referenced by the native tick window's render_counter_frame"
+            if not row["producer_samples"]:
+                row["measurement_error"] = "native tick window has no joined draw-type producer samples"
         if window:
             for key, label in (("wall_frame_ms", "frame_ms"), ("viewer_main_ms", "main_ms"),
                                ("process_ms", "process_ms"), ("render_cpu_ms", "render_cpu_ms"),
-                               ("render_gpu_ms", "gpu_ms"), ("draw_calls", "draws"), ("units", "units"),
+                               ("render_gpu_ms", "gpu_ms"), ("draw_calls", "draws"), ("primitives", "primitives"), ("units", "units"),
                                ("tick_ms", "tick_ms"), ("pose_ms", "pose_ms"), ("bookkeeping_ms", "bookkeeping_ms"),
                                ("effects", "effects"), ("effect_particles", "effect_particles"), ("projectiles", "projectiles")):
                 row[label] = stats(column(window, key))
@@ -558,17 +645,25 @@ def analyse_scene(directory: pathlib.Path, name: str, scene: dict) -> dict:
     if scene["kind"] == "live" and not row.get("combat_projectiles_observed"):
         row["measurement_error"] = "fleet engagement not demonstrated by projectiles in the measurement window"
     if definition.get("pacing") == "free":
-        # MapMode resets the settings cap at process entry, before its native
-        # trace. ViewerHost's existing frame_pre_draw override then sets zero.
-        # Observe after drawing, when Godot's limiter actually sees that value.
+        # Both process-entry and post-draw clocks must stay uncapped throughout
+        # the process, including samples outside the selected measurement window.
         clocks_path = directory / f"{name}.observer.csv"
         clocks = read_csv(clocks_path) if clocks_path.exists() else []
         row["post_draw_clock_samples"] = len(clocks)
         row["post_draw_engine_max_fps_values"] = sorted(set(column(clocks, "engine_max_fps")))
         row["post_draw_vsync_mode_values"] = sorted(set(column(clocks, "vsync_mode")))
-        if (len(clocks) < row.get("frames_window", 1) or not clocks
-                or row["post_draw_engine_max_fps_values"] != [0.0] or row["post_draw_vsync_mode_values"] != [0.0]):
-            row["measurement_error"] = "post-draw CSV does not demonstrate uncapped max_fps=0 and vsync=0 for the completed measurement"
+        sources = [("post_draw", clocks)]
+        if scene["kind"] == "live":
+            native_path = directory / f"{name}.csv"
+            sources.append(("native", read_csv(native_path) if native_path.exists() else []))
+        for scope, samples in sources:
+            row[f"{scope}_clock_samples"] = len(samples)
+            values = {key: column(samples, key) for key in ("engine_max_fps", "vsync_mode")}
+            for key, observed in values.items():
+                row[f"{scope}_{key}_values"] = sorted(set(observed))
+            if (not samples or len(samples) < row.get("frames_window", 1)
+                    or any(len(observed) != len(samples) or set(observed) != {0.0} for observed in values.values())):
+                row["measurement_error"] = f"{scope} CSV does not demonstrate uncapped max_fps=0 and vsync=0 for every sample"
     if definition and definition.get("phase") == "measure" and definition.get("observer") != "buffered-post-draw-v2":
         row["measurement_error"] = "superseded observer protocol; periodic observer I/O was not qualified"
     row["log_mode"] = definition.get("log_mode", "file")
@@ -589,6 +684,14 @@ def analyse_scene(directory: pathlib.Path, name: str, scene: dict) -> dict:
                 or collector.get("exit_code") != 0 or collector.get("suppressed_bytes") != 0):
             row["measurement_error"] = "pipe collector did not prove complete output and a successful viewer exit"
     row.update(process_stats(directory, name, first))
+    resources_path = directory / f"{name}.resources.csv"
+    if resources_path.exists():
+        resources = read_csv(resources_path)
+        row["resource_busy_percent"] = {
+            f"{kind}:{identity}": stats(column([r for r in resources if r["kind"] == kind and r["id"] == identity], "busy_pct"))
+            for kind, identity in sorted({(r["kind"], r["id"]) for r in resources})}
+        row["resource_scope"] = "whole machine over process lifetime; includes startup; per-thread/window data retained separately"
+
     if row["log_mode"] == "nul":
         row.pop("log_growth_post_startup", None)
     elif csv_path.exists() and window:
@@ -702,11 +805,15 @@ def per_ship_table(rows: list[dict]) -> str:
 
 
 def analyse(directory: pathlib.Path, meta: dict) -> bool:
-    meta = dict(meta)
-    for filename, label in (("rig.json", "rig"), ("viewer-artifact-source.json", "artifact_source")):
+    previous = directory / "results.json"
+    saved_meta = json.loads(previous.read_text(encoding="utf-8-sig")).get("meta", {}) if previous.is_file() else {}
+    meta = {**saved_meta, **meta}
+    for filename, label in (("rig.json", "rig"), ("viewer-artifact-source.json", "artifact_source"), ("engine-pins.json", "engine_pins"), ("bench-invocation.json", "invocation")):
         path = directory / filename
         if path.exists():
             meta[label] = json.loads(path.read_text(encoding="utf-8-sig"))
+    if "invocation" in meta:
+        meta["exit_code"] = meta["invocation"]["exit_code"]
     if "rig" in meta:
         meta["machine"] = meta["rig"]["machine"]
     if "artifact_source" in meta:
@@ -715,12 +822,25 @@ def analyse(directory: pathlib.Path, meta: dict) -> bool:
         details = json.loads(manifest.read_text(encoding="utf-8-sig")) if manifest.is_file() else source
         meta["viewer"] = details.get("builtCommit", details.get("commit"))
         meta["viewer_dll_sha256"] = details.get("sha256")
+    engine_files = meta.get("engine_pins", {}).get("files", {})
+    gui = {name: value for name, value in engine_files.items() if name.endswith(".exe") and "console" not in name.lower()}
+    if len(gui) == 1:
+        meta["engine_gui_sha256"] = next(iter(gui.values()))
     spec = directory / "_spec.json"
-    requested = [r["name"] for r in json.loads(spec.read_text(encoding="utf-8-sig"))["runs"]] if spec.exists() else []
+    definitions = json.loads(spec.read_text(encoding="utf-8-sig"))["runs"] if spec.exists() else []
+    requested = [r["name"] for r in definitions]
+    pacing = {r.get("benchmark", {}).get("pacing") for r in definitions}
+    if len(pacing) == 1 and None not in pacing:
+        meta["pacing"] = next(iter(pacing))
     rows = []
     for name, scene in SCENES.items():
         if name in requested or any((directory / f"{name}{suffix}").exists() for suffix in (".json", ".csv", ".observer.csv")):
             rows.append(analyse_scene(directory, name, scene))
+    if spec.exists():
+        for definition in json.loads(spec.read_text(encoding="utf-8-sig"))["runs"]:
+            source = definition.get("benchmark", {}).get("source_scene")
+            if source:
+                rows.append(analyse_scene(directory, definition["name"], SCENES[source]))
     if not rows:
         raise SystemExit(f"no scene output in {directory}")
     protocol_errors = []
@@ -728,15 +848,247 @@ def analyse(directory: pathlib.Path, meta: dict) -> bool:
         protocol_errors.append("the rig did not use a private desktop")
     if meta.get("rig", {}).get("timedOut", False):
         protocol_errors.append("the rig timed out")
+    engine_errors, engine_banner = engine_guard_check(meta)
+    protocol_errors += engine_errors
     if any(r.get("render_thread_observed") is False for r in rows):
         protocol_errors.append("engine log does not prove Separate rendering for every scene")
     valid = not any(r.get("measurement_error") for r in rows) and not protocol_errors
     (directory / "results.json").write_text(json.dumps(dict(meta=meta, valid=valid, protocol_errors=protocol_errors, scenes=rows), indent=2, allow_nan=False), encoding="utf-8")
     text = render_markdown(rows, meta) + per_ship_table(rows)
+    text = engine_banner + text
     if protocol_errors:
         text += "\nINVALID run protocol: " + "; ".join(protocol_errors) + "\n"
     (directory / "results.md").write_text(text, encoding="utf-8")
     print(text)
+    return valid
+
+
+def engine_guard_check(meta: dict) -> tuple[list[str], str]:
+    """Engine guard (owner rule 11-03): sets meta engine_label/engine_override; returns (protocol errors, results banner).
+    A rig run must prove our patched engine; EAWR_ALLOW_UNPATCHED_ENGINE=ab-control keeps a labelled control arm valid."""
+    engine_files = meta.get("engine_pins", {}).get("files", {})
+    labels = {engine_guard_label(value) for value in engine_files.values()}
+    meta["engine_label"] = next(iter(labels)) if len(labels) == 1 else None
+    meta["engine_override"] = meta.get("rig", {}).get("engineOverride")
+    if not engine_files:
+        return (["engine pins missing: the run does not prove it used our patched engine"] if "rig" in meta else []), ""
+    if meta["engine_label"] is not None and ENGINE_PINS["engines"].get(meta["engine_label"]):
+        return [], ""
+    name = meta["engine_label"] or "unknown"
+    if meta["engine_override"] == "ab-control":
+        return [], (f"ENGINE CONTROL ARM (EAWR_ALLOW_UNPATCHED_ENGINE=ab-control): engine {name}, NOT our patched engine; "
+                    "compare only inside this A/B series.\n\n")
+    return [f"official Godot detected, not our patched engine (engine {name})"], ""
+
+
+def engine_guard_label(sha256: str) -> str | None:
+    """The tools/engine_pins.json label of an engine exe hash (patched or known unpatched), else None."""
+    for table in (ENGINE_PINS.get("engines", {}), ENGINE_PINS.get("known_unpatched", {})):
+        for label, entry in table.items():
+            if sha256 in entry.get("files", {}).values():
+                return label
+    return None
+
+
+def capture_engine_pins() -> dict:
+    """Read the same pins the rig controller enforces, before launching it."""
+    root = pathlib.Path(__file__).resolve().parents[2]
+    command = ". (Join-Path $env:EAWR_BENCH_REPO_ROOT 'tools/common/EawrHostPaths.ps1'); " \
+              ". (Join-Path $env:EAWR_BENCH_REPO_ROOT 'tools/rig/RigCommon.ps1'); " \
+              "[ordered]@{ label = $script:RigEngineLabel; files = $script:RigPinnedEngine } | ConvertTo-Json -Compress"
+    output = subprocess.check_output(["pwsh", "-NoProfile", "-NonInteractive", "-Command", command],
+        env={**os.environ, "EAWR_BENCH_REPO_ROOT": str(root)}, text=True, encoding="utf-8-sig",
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    captured = json.loads(output)
+    files = captured.get("files") if isinstance(captured, dict) else None
+    if not isinstance(files, dict) or not files or any(not re.fullmatch(r"[0-9a-f]{64}", value) for value in files.values()):
+        raise ValueError("rig engine pins are missing or invalid")
+    return dict(label=captured.get("label"), files=files)
+
+
+SAVE_LOAD_WORKERS = ("1", "8")
+# The loading run's capture: one second of real-time play after the saved tick (units on screen).
+SAVE_LOAD_CAPTURE_AFTER = 30
+
+
+def _set_arg(args: list[str], flag: str, value: str) -> None:
+    if flag in args:
+        args[args.index(flag) + 1] = value
+    else:
+        args += [flag, value]
+
+
+def save_load_spec(path: pathlib.Path, save_at: int, continued: int) -> None:
+    """Rewrites a measurement spec into saving/loading pairs (run --save-at)."""
+    spec = json.loads(path.read_text(encoding="utf-8"))
+    runs = []
+    for entry in spec["runs"]:
+        if "--eawr-live-session" not in entry["args"]:
+            raise ValueError(f"{entry['name']}: --save-at needs a live scene")
+        end = save_at + continued
+        if save_at < 1 or continued < 1 or end > entry["benchmark"]["ticks"]:
+            raise ValueError(f"{entry['name']}: save tick {save_at} + {continued} must lie inside its "
+                             f"{entry['benchmark']['ticks']} ticks")
+        original = entry["name"]
+        for workers in SAVE_LOAD_WORKERS:
+            checkpoint = "{out}/" + f"{original}-w{workers}.eawr-ckp"
+            for phase in ("saved", "loaded"):
+                name = f"{original}-w{workers}-{phase}"
+                run = copy.deepcopy(entry)
+                run["name"] = name
+                args = [arg.replace("{out}/" + original, "{out}/" + name)
+                        .replace("--bench-label=" + original, "--bench-label=" + name) for arg in run["args"]]
+                _set_arg(args, "--eawr-live-workers", workers)
+                args += ["--eawr-live-hashes", "{out}/" + name + ".hashes.csv"]
+                if phase == "saved":
+                    _set_arg(args, "--eawr-live-ticks", str(end))
+                    _set_arg(args, "--eawr-live-capture-ticks", str(end))
+                    args += ["--eawr-live-save-at", f"{save_at}:{checkpoint}"]
+                else:
+                    _set_arg(args, "--eawr-live-ticks", str(continued))
+                    _set_arg(args, "--eawr-live-capture-ticks", str(save_at + SAVE_LOAD_CAPTURE_AFTER))
+                    args += ["--eawr-live-load", checkpoint]
+                run["args"] = args
+                run["benchmark"].update(source_scene=original, workers=int(workers), save_load=phase,
+                                        saved_tick=save_at, ticks=end, window=[save_at + 1, end])
+                runs.append(run)
+    spec["runs"] = runs
+    path.write_text(json.dumps(spec, indent=2), encoding="utf-8")
+
+
+# A save is written once its tick has completed; the saving run plays a little past it so it ends after the save.
+FROM_SAVE_MARGIN = 30
+# The default save tick lies this far before the measurement window: the loaded run warms up (pipelines,
+# streaming) before it is measured, and its first frame's projectiles are not taken for the first contact.
+FROM_SAVE_LEAD = 120
+
+
+def from_save_tick(name: str, override: int | None) -> int:
+    """The recipe's save tick: FROM_SAVE_LEAD ticks before the scene's measurement window unless given."""
+    tick = override if override is not None else int(SCENES[name]["window"][0]) - FROM_SAVE_LEAD
+    if tick < 1 or tick + FROM_SAVE_MARGIN > SCENES[name]["ticks"]:
+        raise ValueError(f"{name}: save tick {tick} must lie inside its {SCENES[name]['ticks']} ticks")
+    return tick
+
+
+def save_recipe(name: str, tick: int, run: dict, viewer_sha256: str) -> dict:
+    """What a cached save depends on: the viewer build, the resolved scene arguments, the orders and the tick."""
+    args = [arg for arg in run["args"] if not arg.startswith("--bench-")]
+    recipe = dict(scene=name, saved_tick=tick, viewer_sha256=viewer_sha256, seed=SEED, args=args)
+    recipe["key"] = hashlib.sha256(json.dumps(recipe, sort_keys=True).encode("utf-8")).hexdigest()
+    return recipe
+
+
+def saving_spec(path: pathlib.Path, ticks: dict[str, int]) -> None:
+    """Rewrites a measurement spec into one saving run per scene (run --from-save, when the cache misses)."""
+    spec = json.loads(path.read_text(encoding="utf-8"))
+    for run in spec["runs"]:
+        name = run["name"]
+        tick = ticks[name]
+        args = list(run["args"])
+        if "--eawr-live-capture-ticks" in args:
+            index = args.index("--eawr-live-capture-ticks")
+            del args[index:index + 2]
+        _set_arg(args, "--eawr-live-ticks", str(tick + FROM_SAVE_MARGIN))
+        args += ["--eawr-live-save-at", f"{tick}:" + "{out}/" + f"{name}.eawr-ckp"]
+        run["args"] = args
+        run["capture"] = False
+        run["benchmark"].update(phase="save", saved_tick=tick, ticks=tick + FROM_SAVE_MARGIN)
+    path.write_text(json.dumps(spec, indent=2), encoding="utf-8")
+
+
+def from_save_spec(path: pathlib.Path, saves: pathlib.Path, recipes: dict[str, dict]) -> None:
+    """Every live run of a measurement spec starts from its scene's save in `saves` ({in}/saves on the rig)."""
+    spec = json.loads(path.read_text(encoding="utf-8"))
+    for run in spec["runs"]:
+        scene = run["benchmark"].get("source_scene") or run["name"]
+        if scene not in recipes:
+            continue
+        recipe = recipes[scene]
+        tick, ticks = recipe["saved_tick"], run["benchmark"]["ticks"]
+        args = run["args"]
+        _set_arg(args, "--eawr-live-ticks", str(ticks - tick))
+        # Capture ticks stay absolute after a load: keep the last tick only.
+        _set_arg(args, "--eawr-live-capture-ticks", str(ticks))
+        args += ["--eawr-live-load", "{in}/saves/" + f"{scene}.eawr-ckp"]
+        run["benchmark"].update(from_save=tick, save_key=recipe["key"], save_sha256=recipe.get("sha256"))
+    spec["inputs"]["saves"] = str(saves.resolve())
+    path.write_text(json.dumps(spec, indent=2), encoding="utf-8")
+
+
+def _tick_hashes(path: pathlib.Path) -> dict[int, str]:
+    if not path.is_file():
+        return {}
+    return {int(row["tick"]): row["sha256"] for row in read_csv(path)}
+
+
+def analyse_save_load(directory: pathlib.Path, meta: dict) -> bool:
+    """save-load.json / .md for a --save-at run: identical continuation, first loaded frame, frame times."""
+    runs = json.loads((directory / "_spec.json").read_text(encoding="utf-8-sig"))["runs"]
+    exit_codes = {}
+    if (directory / "exit-codes.txt").exists():
+        for line in (directory / "exit-codes.txt").read_text().splitlines():
+            parts = line.split()
+            if len(parts) == 2:
+                exit_codes[parts[0]] = int(parts[1])
+    pairs = {}
+    for run in runs:
+        bench = run["benchmark"]
+        if bench.get("save_load"):
+            pairs.setdefault((bench["source_scene"], bench["workers"]), {})[bench["save_load"]] = run
+    rows = []
+    for (scene, workers), pair in sorted(pairs.items()):
+        row = dict(scene=scene, workers=workers)
+        if set(pair) != {"saved", "loaded"}:
+            row["error"] = "incomplete saving/loading pair"
+            rows.append(row)
+            continue
+        saved_tick = pair["saved"]["benchmark"]["saved_tick"]
+        end = pair["saved"]["benchmark"]["ticks"]
+        saved = _tick_hashes(directory / f"{pair['saved']['name']}.hashes.csv")
+        loaded = _tick_hashes(directory / f"{pair['loaded']['name']}.hashes.csv")
+        continued = range(saved_tick + 1, end + 1)
+        differing = [tick for tick in continued if not saved.get(tick) or loaded.get(tick) != saved.get(tick)]
+        checkpoint = directory / f"{scene}-w{workers}.eawr-ckp"
+        row.update(saved_tick=saved_tick, end_tick=end, save_bytes=checkpoint.stat().st_size if checkpoint.is_file() else None,
+                   exit_codes=[exit_codes.get(pair["saved"]["name"]), exit_codes.get(pair["loaded"]["name"])],
+                   hashes_compared=len(continued), hashes_equal=bool(saved) and not differing,
+                   first_difference=differing[0] if differing else None,
+                   loaded_hashes_before_save=sum(1 for tick in range(1, saved_tick + 1) if loaded.get(tick)),
+                   final_hash=saved.get(end),
+                   loaded_capture=sorted(p.name for p in directory.glob(f"{pair['loaded']['name']}*.png")))
+        for phase in ("saved", "loaded"):
+            path = directory / f"{pair[phase]['name']}.csv"
+            frames = read_csv(path) if path.exists() else []
+            window = [f for f in frames if saved_tick < int(float(f.get("tick", 0) or 0)) <= end]
+            frame_ms = sorted(column(window, "wall_frame_ms"))
+            row[phase] = dict(frames=len(window), median_frame_ms=pct(frame_ms, 0.5), p95_frame_ms=pct(frame_ms, 0.95),
+                              units_median=stats(column(window, "units")).get("median"))
+            if phase == "loaded" and frames:
+                first = frames[0]
+                row["loaded_first_frame"] = dict(tick=int(float(first.get("tick", 0) or 0)),
+                                                 units=int(float(first.get("units", 0) or 0)),
+                                                 wall_frame_ms=float(first.get("wall_frame_ms", 0) or 0))
+        first = row.get("loaded_first_frame") or {}
+        row["valid"] = bool(row["hashes_equal"] and row["loaded_hashes_before_save"] == 0 and row["save_bytes"]
+                            and first.get("tick", 0) >= saved_tick and first.get("units", 0) > 0
+                            and all(code == 0 for code in row["exit_codes"]))
+        rows.append(row)
+    valid = bool(rows) and all(row.get("valid") for row in rows)
+    (directory / "save-load.json").write_text(json.dumps(dict(meta=meta, valid=valid, pairs=rows), indent=2, allow_nan=False),
+                                              encoding="utf-8")
+    lines = ["| Scene | workers | saved tick | ticks compared | hashes equal | first loaded frame (tick, units, ms) "
+             "| saving run median/p95 ms | loading run median/p95 ms |", "|---|---|---|---|---|---|---|---|"]
+    for row in rows:
+        first = row.get("loaded_first_frame") or {}
+        both = [row.get(phase) or {} for phase in ("saved", "loaded")]
+        lines.append(f"| {row['scene']} | {row['workers']} | {row.get('saved_tick')} | {row.get('hashes_compared')} "
+                     f"| {row.get('hashes_equal')} | {first.get('tick')}, {first.get('units')}, {first.get('wall_frame_ms')} "
+                     + " ".join(f"| {b.get('median_frame_ms')}/{b.get('p95_frame_ms')}" for b in both) + " |")
+        print(f"SAVE-LOAD,scene={row['scene']},workers={row['workers']},saved={row.get('saved_tick')},"
+              f"ticks={row.get('hashes_compared')},equal={row.get('hashes_equal')},first_tick={first.get('tick')},"
+              f"first_units={first.get('units')},valid={row.get('valid')}", flush=True)
+    (directory / "save-load.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
     return valid
 
 
@@ -748,8 +1100,15 @@ def invoke_rig(args: argparse.Namespace, spec: pathlib.Path, output: pathlib.Pat
     if args.viewer_artifact:
         command += ["-ViewerArtifact", args.viewer_artifact]
     command += ["-Machine", ",".join(args.machine)]
+    pins = capture_engine_pins()
+    before = {p.name for p in output.iterdir() if p.is_dir()} if output.exists() else set()
+    output.mkdir(parents=True, exist_ok=True)
+    (output / "engine-pins.json").write_text(json.dumps(pins, indent=2), encoding="utf-8")
     code = subprocess.run(command, check=False, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)).returncode
-    runs = sorted(p for p in output.glob("*") if p.is_dir() and (p / "rig.json").exists())
+    runs = sorted(p for p in output.glob("*") if p.is_dir() and p.name not in before and (p / "rig.json").exists())
+    if runs:
+        (runs[-1] / "engine-pins.json").write_text(json.dumps(pins, indent=2), encoding="utf-8")
+        (runs[-1] / "bench-invocation.json").write_text(json.dumps(dict(exit_code=code)), encoding="utf-8")
     return code, runs[-1] if runs else None
 
 
@@ -777,6 +1136,52 @@ def remote_rig_hosts() -> set[str]:
             for name in [host["name"], *host.get("aliases", [])]}
 
 
+def prepare_saves(args: argparse.Namespace, live: list[str], preparations: dict | None, spec: pathlib.Path,
+                  out: pathlib.Path) -> int:
+    """run --from-save: reuses or makes each live scene's save, stages them and points the spec at them."""
+    if not live:
+        raise SystemExit("--from-save needs live scenes")
+    viewer_sha256 = ""
+    if args.viewer_artifact:
+        viewer_sha256 = json.loads(pathlib.Path(args.viewer_artifact).read_text(encoding="utf-8-sig")).get("sha256", "")
+    if not viewer_sha256 and not args.plan_only:
+        raise SystemExit("--from-save needs a viewer artifact with its sha256 (saves are made per build)")
+    override = None if args.from_save is None else args.from_save
+    ticks = {name: from_save_tick(name, override) for name in live}
+    # The recipe is the saving run itself (resolved arguments, engagement orders, save tick) and the build.
+    save_spec = out / "save-spec.json"
+    write_spec(save_spec, live, "free", args.mod_root, args.raw_mod_root, preparations=preparations)
+    saving_spec(save_spec, ticks)
+    saving = json.loads(save_spec.read_text(encoding="utf-8"))
+    recipes = {run["name"]: save_recipe(run["name"], ticks[run["name"]], run, viewer_sha256) for run in saving["runs"]}
+    cache = pathlib.Path(args.save_cache).resolve()
+    cached = {name: cache / recipes[name]["key"][:24] / f"{name}.eawr-ckp" for name in live}
+    missing = [name for name in live if not cached[name].is_file()]
+    print(f"battle saves: {len(live) - len(missing)} cached, {len(missing)} to make ({', '.join(missing) or 'none'})", flush=True)
+    if missing and not args.plan_only:
+        saving["runs"] = [run for run in saving["runs"] if run["name"] in missing]
+        save_spec.write_text(json.dumps(saving, indent=2), encoding="utf-8")
+        code, directory = invoke_rig(args, save_spec, out / "save")
+        if directory is None:
+            return code or 1
+        for name in missing:
+            made = directory / f"{name}.eawr-ckp"
+            if not made.is_file() or made.stat().st_size == 0:
+                print(f"battle save not written: {made}", flush=True)
+                return code or 1
+            cached[name].parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(made, cached[name])
+            (cached[name].parent / "recipe.json").write_text(json.dumps(recipes[name], indent=2), encoding="utf-8")
+    staged = out / "saves"
+    staged.mkdir(parents=True, exist_ok=True)
+    for name in live:
+        if cached[name].is_file():
+            shutil.copyfile(cached[name], staged / f"{name}.eawr-ckp")
+            recipes[name]["sha256"] = hashlib.sha256(cached[name].read_bytes()).hexdigest()
+    from_save_spec(spec, staged, recipes)
+    return 0
+
+
 def run(args: argparse.Namespace) -> int:
     allowed = remote_rig_hosts()
     if not args.machine or any(machine.casefold() not in allowed for machine in args.machine):
@@ -801,7 +1206,18 @@ def run(args: argparse.Namespace) -> int:
             if code or directory is None:
                 return code or 1
             preparations = load_preparations(directory, live)
-    write_spec(spec, scenes, args.pacing, args.mod_root, args.raw_mod_root, preparations=preparations)
+    write_spec(spec, scenes, args.pacing, args.mod_root, args.raw_mod_root, preparations=preparations,
+               drawtype_ablate=args.drawtype_ablate, drawtype_repeats=args.drawtype_repeats)
+    if args.from_save is not False:
+        if args.save_at is not None:
+            raise SystemExit("--from-save and --save-at are separate measurements")
+        code = prepare_saves(args, live, preparations, spec, out)
+        if code:
+            return code
+    if args.save_at is not None:
+        if args.drawtype_ablate:
+            raise SystemExit("--save-at and --drawtype-ablate are separate measurements")
+        save_load_spec(spec, args.save_at, args.save_load_ticks)
     print(f"measurement spec {spec} ({len(scenes)} scenes: {', '.join(scenes)})", flush=True)
     if args.plan_only:
         return 0
@@ -809,7 +1225,7 @@ def run(args: argparse.Namespace) -> int:
     if directory is not None:
         meta = dict(id=out.name, machine=args.machine, viewer=args.viewer_artifact, pacing=args.pacing,
                     exit_code=code, seed=SEED)
-        valid = analyse(directory, meta)
+        valid = analyse_save_load(directory, meta) if args.save_at is not None else analyse(directory, meta)
         return code or (0 if valid else 1)
     return code or 1
 
@@ -831,6 +1247,16 @@ def main() -> int:
     p_run.add_argument("--out")
     p_run.add_argument("--timeout", type=int, default=7200)
     p_run.add_argument("--queue-timeout", type=int, default=14400)
+    p_run.add_argument("--drawtype-ablate", choices=("all", "bands", "fighters", "impostors", "fighter-impostor-control", "fighter-impostor-008", "fighter-control", "fighter-hull", "fighter-all", "fighter-shadows", "groups", "integrated-turret", "other-hull", "none", "hull", "hardpoint", "effect", "particle", "debris", "wreck", "shadows",
+                       *(f"{role}-band-{cutoff}" for role in ("hardpoint", "particle", "shadows") for cutoff in ("005", "010", "020"))),
+                       help="matched diagnostic controls and category ablations (same timing instrumentation)")
+    p_run.add_argument("--drawtype-repeats", type=int, default=3)
+    p_run.add_argument("--save-at", type=int, help="measure from a battle save written after this tick (1 and 8 workers)")
+    p_run.add_argument("--save-load-ticks", type=int, default=600, help="ticks both runs play after --save-at")
+    p_run.add_argument("--from-save", nargs="?", type=int, const=None, default=False,
+                       help="measure live scenes from a cached battle save (default tick: FROM_SAVE_LEAD before each scene's window)")
+    p_run.add_argument("--save-cache", default="out/remake-bench/saves",
+                       help="where --from-save keeps its saves, one folder per build and recipe")
     p_run.add_argument("--plan-only", action="store_true")
     p_an = sub.add_parser("analyse", help="analyse a finished rig run directory")
     p_an.add_argument("directory", type=pathlib.Path)
@@ -841,7 +1267,10 @@ def main() -> int:
             print(f"{name:28} {','.join(scene['tags']):14} {scene['note']}")
         return 0
     if parsed.command == "analyse":
-        return 0 if analyse(parsed.directory, dict(id=parsed.directory.name)) else 1
+        runs = json.loads((parsed.directory / "_spec.json").read_text(encoding="utf-8-sig"))["runs"] \
+            if (parsed.directory / "_spec.json").exists() else []
+        analyser = analyse_save_load if any(r.get("benchmark", {}).get("save_load") for r in runs) else analyse
+        return 0 if analyser(parsed.directory, dict(id=parsed.directory.name)) else 1
     return run(parsed)
 
 

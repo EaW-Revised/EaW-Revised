@@ -1,11 +1,15 @@
 #pragma once
 
 #include "eawr/core/result.hpp"
+#include "eawr/vfs/vfs_fwd.hpp"
 
 #include <cstddef>
+#include <array>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -14,11 +18,6 @@
 #include <utility>
 
 namespace eawr::vfs {
-
-enum class AssetOrigin : std::uint8_t {
-    loose,
-    archive,
-};
 
 struct ArchiveSpec {
     std::filesystem::path path;
@@ -35,15 +34,11 @@ struct MountSpec {
     std::vector<ArchiveSpec> active_archives;
 };
 
-struct AssetRecord {
-    std::string canonical_path;
-    std::string original_path;
-    std::string layer_id;
-    AssetOrigin origin{AssetOrigin::loose};
-    std::uint64_t size{0};
-    std::string source_id;
-
-    friend bool operator==(const AssetRecord&, const AssetRecord&) = default;
+// Where a mounted asset's bytes sit on disk: the file (archive or loose) and the byte offset in it. Only for ordering
+// reads; the bytes are read through open().
+struct ReadLocation {
+    std::string source;
+    std::uint64_t offset{0};
 };
 
 struct ArchiveProbe {
@@ -89,6 +84,17 @@ inline constexpr std::string_view manifest_absent = "EAWR-VFS-0012";
 
 using LayerRoot = std::pair<std::string, std::filesystem::path>;
 
+inline constexpr std::string_view revised_layer_id = "builtin:revised";
+inline constexpr std::string_view revised_layer_folder = "Revised";
+inline constexpr std::array<std::string_view, 3> revised_presentation_xml{
+    "data/xml/revisedselectionsfx.xml", "data/xml/selectioncontrols.xml",
+    "data/xml/sfxeventfilesadditions.xml"};
+
+// Inserts the built-in layer before expansion, below all user layers.
+// Returns false only when enabled and the configured/package directory is absent.
+[[nodiscard]] bool insert_revised_layer(std::vector<LayerRoot>& roots, bool enabled,
+    const std::filesystem::path& player_folder, const std::filesystem::path& override_root = {});
+
 // A mod may name its containing folder or the data root itself.
 [[nodiscard]] std::filesystem::path mod_data_root(const std::filesystem::path& root);
 
@@ -127,6 +133,13 @@ public:
     // canonical raw entry name, excluding its logical mount prefix.
     [[nodiscard]] core::Result<std::vector<std::byte>> open(const AssetRecord& candidate,
                                                           std::string_view archive_name = {}) const;
+    // Streams one exact mounted candidate into a caller-owned, nonempty buffer.
+    // Each callback span is valid only during the call and never exceeds buffer.size().
+    // Empty assets succeed without callbacks; failures may follow partial delivery.
+    [[nodiscard]] core::Result<void> read_chunks(const AssetRecord& candidate, std::span<std::byte> buffer,
+        const std::function<void(std::span<const std::byte>)>& consume) const;
+    // The disk location of one exact mounted candidate; nullopt when it is not in the mounted view.
+    [[nodiscard]] std::optional<ReadLocation> read_location(const AssetRecord& candidate) const;
     [[nodiscard]] core::Result<AssetRecord> stat(std::string_view logical_path) const;
     [[nodiscard]] core::Result<std::vector<AssetRecord>> enumerate(
         std::string_view prefix = {},
@@ -137,6 +150,8 @@ public:
         std::string_view extension = {}
     ) const;
     [[nodiscard]] core::Result<std::vector<AssetRecord>> candidates(std::string_view logical_path) const;
+    // Mounted layer IDs in descending precedence, including layers with no assets.
+    [[nodiscard]] std::span<const std::string> layer_ids() const noexcept;
 
     // Immutable decoded resources belong to this mounted content set. The VFS
     // owns their lifetime without depending on the libraries that decode them.
@@ -153,9 +168,5 @@ private:
     explicit Vfs(std::unique_ptr<Impl> impl);
     std::unique_ptr<Impl> impl_;
 };
-
-[[nodiscard]] constexpr std::string_view to_string(const AssetOrigin origin) noexcept {
-    return origin == AssetOrigin::loose ? "loose" : "archive";
-}
 
 } // namespace eawr::vfs

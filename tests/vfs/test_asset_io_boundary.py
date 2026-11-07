@@ -29,6 +29,9 @@ REVIEWED = {
     # Identity-checked native DLL loader; no game-asset or VFS reads.
     "include/eawr/presentation/shader_runtime.hpp": "identity-checked native DLL loader, no asset/VFS reads",
     "src/presentation/shader_runtime.cpp": "identity-checked native DLL loader, no asset/VFS reads",
+    # Asks the OS whether a drive letter's volume is a spinning disk (a storage-property query on the volume device, zero
+    # bytes read, no file of the game); the model prefetch uses it to size its reader pool.
+    "src/units/simulation_model.cpp": "volume seek-penalty query for the reader count, no asset read",
     # An opt-in diagnostic trace file written by the galactic AI barrier; it reads no asset.
     "src/campaign/game_session.cpp": "opt-in oracle trace output, no asset read",
 }
@@ -78,8 +81,17 @@ MODS_HEADERS_ALLOWED = {
 # The one reviewed reader: Steam's libraryfolders.vdf and appworkshop_*.acf, opened read-only.
 MODS_TEXT_READER = "src/mods/steam/library_folders.cpp"
 MODS_TEXT_READER_ALLOWED = {"fstream"}            # header
+# The content digest hashes mod files only through platform::read_native_chunks. Its header holds the worker-thread
+# machinery; thread_priority.cpp is the one platform call (below-normal priority for that worker).
+MODS_DIGEST_THREAD_HEADERS = {"condition_variable", "deque", "mutex", "thread"}
+MODS_PRIORITY_HEADERS = {"windows.h", "sys/resource.h", "sys/syscall.h", "unistd.h"}
 MODS_TEXT_READER_STREAMS = {"ifstream", "istreambuf_iterator"}
 
+# The digest's own cache files in the user-data cache folder: create the folder, replace atomically through the
+# `temporary` sibling, delete that sibling or a stale `partial_path`. Exact identifiers, no other argument.
+_DIGEST_CACHE_CALL = re.compile(
+    r"\bfs::(?:create_directories\(\s*target\.parent_path\(\)\s*,|rename\(\s*temporary\s*,\s*target\s*,|"
+    r"remove\(\s*(?:temporary|partial_path)\s*,)")
 _FS_NAME = re.compile(r"\b(?:std::)?(?:filesystem|fs)::(\w+)")
 _FS_ESCAPE = re.compile(
     r"\busing\s+namespace\s+(?:std::)?filesystem\b|\busing\s+(?:std::)?filesystem::|"
@@ -104,11 +116,17 @@ def mods_violations(relative: str, text: str) -> list[str]:
     profile = relative == "src/mods/profile.cpp"
     windows_profile = relative == "src/mods/profile_windows.cpp"
     index_builder = relative == "src/mods/file_index_build.cpp"
+    digest = relative == "src/mods/content_digest.cpp"
+    digest_header = relative == "include/eawr/mods/content_digest.hpp"
+    priority = relative == "src/mods/thread_priority.cpp"
     index_model = relative in {"src/mods/file_index.cpp", "include/eawr/mods/file_index.hpp"}
     profile_fs = {"canonical", "create_directories", "create_directory", "is_symlink", "rename", "remove"}
     violations: list[str] = []
     for line_number, line in enumerate(text.splitlines(), 1):
         code = line.split("//", 1)[0]
+        if digest:
+            # Only the named cache-path forms; fs::remove(path) / fs::rename(path, x) on anything else stays caught.
+            code = _DIGEST_CACHE_CALL.sub("digest_cache_operation(", code)
         problems: list[str] = []
         for name in _FS_NAME.findall(code):
             if name not in MODS_FS_ALLOWED and not (profile and name in profile_fs):
@@ -119,18 +137,25 @@ def mods_violations(relative: str, text: str) -> list[str]:
             if kind == '"':
                 if not header.startswith(("eawr/mods/", "eawr/core/")) and not (
                         (profile or windows_profile) and header == "profile_io.hpp") and not (
-                        index_builder and header == "eawr/vfs/vfs.hpp"):
+                        index_builder and header == "eawr/vfs/vfs.hpp") and not (
+                        digest and header == "eawr/platform/native_read.hpp") and not (
+                        (digest or priority) and header == "thread_priority.hpp"):
                     problems.append(f"include \"{header}\" is outside the mod core and eawr/core")
             elif not (header in MODS_HEADERS_ALLOWED
                       or (reader and header in MODS_TEXT_READER_ALLOWED)
-                      or (profile and header == "fstream")
+                      or ((profile or digest) and header == "fstream")
+                      or (digest_header and header in MODS_DIGEST_THREAD_HEADERS)
+                      or (priority and header in MODS_PRIORITY_HEADERS)
                       or (windows_profile and header == "windows.h")
                       or (index_model and header in {"iosfwd", "istream", "ostream"})):
                 problems.append(f"include <{header}> is not an allowed header")
         body = _INCLUDE.sub("", code)   # headers are checked above
         for stream in _STREAM.findall(body):
             if not (reader and stream in MODS_TEXT_READER_STREAMS) and not (
-                    profile and stream == "ofstream" and re.search(r"\bstd::ofstream\s+output\s*\(\s*temp\s*,", body)):
+                    profile and stream == "ofstream" and re.search(r"\bstd::ofstream\s+output\s*\(\s*temp\s*,", body)) and not (
+                    digest and stream == "ofstream" and re.search(r"\bstd::ofstream\s+out\s*\(\s*temporary\s*,", body)) and not (
+                    digest and stream == "ifstream" and re.search(r"\bstd::ifstream\s+in\s*\(\s*cache_path\s*,", body)) and not (
+                    digest and stream == "istreambuf_iterator" and re.search(r"\(\s*std::istreambuf_iterator<char>\(in\)\s*\)", body)):
                 problems.append(f"{stream} is a file stream outside the reviewed reader")
         file_calls = body
         if profile:
@@ -193,6 +218,38 @@ MODS_PATH_MUST_FAIL = [
     ("src/mods/profile.cpp", "#include <windows.h>"),
     ("src/mods/profile.cpp", "MoveFileExW(a, b, 0);"),
     ("src/mods/discovery.cpp", "#include <windows.h>"),
+    # The digest may touch only its cache path: a raw read of mod files, other removals, other headers stay caught.
+    ("src/mods/content_digest.cpp", "std::ifstream in(path, std::ios::binary);"),
+    ("src/mods/content_digest.cpp", "std::ifstream in(root / file, std::ios::binary);"),
+    ("src/mods/content_digest.cpp", "std::ofstream out(mod_file, std::ios::binary);"),
+    ("src/mods/content_digest.cpp", "fs::remove_all(path);"),
+    ("src/mods/content_digest.cpp", "fs::remove(path);"),
+    ("src/mods/content_digest.cpp", "fs::remove(path, error);"),
+    ("src/mods/content_digest.cpp", "fs::rename(path, other);"),
+    ("src/mods/content_digest.cpp", "fs::rename(temporary, path, error);"),
+    ("src/mods/content_digest.cpp", "fs::create_directories(mod_root);"),
+    ("src/mods/content_digest.cpp", "fs::create_directories(mod_root, error);"),
+    ("src/mods/content_digest.cpp", "fs::remove(temporary, error); fs::remove(path, error);"),
+    ("src/mods/content_digest.cpp", "fs::last_write_time(path, t);"),
+    ("src/mods/content_digest.cpp", "fs::copy_file(a, b);"),
+    ("src/mods/content_digest.cpp", "std::remove(name);"),
+    ("src/mods/content_digest.cpp", "fopen(name, \"rb\");"),
+    ("src/mods/content_digest.cpp", "#include <windows.h>"),
+    ("src/mods/content_digest.cpp", "#include <thread>"),
+    ("src/mods/content_digest.cpp", "std::string text((std::istreambuf_iterator<char>(stream)), std::istreambuf_iterator<char>());"),
+    ("include/eawr/mods/content_digest.hpp", "#include <fstream>"),
+    ("include/eawr/mods/content_digest.hpp", "#include <windows.h>"),
+    ("src/mods/record.cpp", "#include <thread>"),
+    ("src/mods/record.cpp", "#include <mutex>"),
+    ("src/mods/record.cpp", "#include <deque>"),
+    ("src/mods/record.cpp", "#include <condition_variable>"),
+    ("include/eawr/mods/record.hpp", "#include <thread>"),
+    ("src/mods/thread_priority.cpp", "std::ifstream in(mod_file);"),
+    ("src/mods/thread_priority.cpp", "DeleteFileW(p);"),
+    ("src/mods/discovery.cpp", '#include "thread_priority.hpp"'),
+    ("src/mods/discovery.cpp", '#include "eawr/platform/native_read.hpp"'),
+    ("src/mods/content_digest.cpp", '#include "eawr/vfs/vfs.hpp"'),
+    ("src/mods/discovery.cpp", "#include <sys/resource.h>"),
     ("src/mods/discovery.cpp", "MoveFileExW(a, b, 0);"),
     ("src/mods/discovery.cpp", '#include "profile_io.hpp"'),
     ("src/mods/profile_windows.cpp", "DeleteFileW(p);"),
@@ -200,7 +257,7 @@ MODS_PATH_MUST_FAIL = [
 ]
 MODS_PATH_MUST_PASS = [
     ("src/mods/file_index_build.cpp", '#include "eawr/vfs/vfs.hpp"'),
-    ("src/mods/file_index_build.cpp", "auto bytes = filesystem.open(candidate);"),
+    ("src/mods/file_index_build.cpp", "filesystem.read_chunks(candidate, std::span(buffer.get(), chunk_bytes),"),
     ("src/mods/file_index.cpp", "#include <istream>"),
     ("src/mods/file_index.cpp", "#include <ostream>"),
     ("include/eawr/mods/file_index.hpp", "#include <iosfwd>"),
@@ -208,6 +265,26 @@ MODS_PATH_MUST_PASS = [
     ("src/mods/profile.cpp", '#include "profile_io.hpp"'),
     ("src/mods/profile_windows.cpp", "MoveFileExW(a, b, 0);"),
     ("src/mods/profile_windows.cpp", "#include <windows.h>"),
+    ("src/mods/content_digest.cpp", "std::ifstream in(cache_path, std::ios::binary);"),
+    ("src/mods/content_digest.cpp", "std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());"),
+    ("src/mods/content_digest.cpp", "std::ofstream out(temporary, std::ios::binary | std::ios::trunc);"),
+    ("src/mods/content_digest.cpp", "fs::create_directories(target.parent_path(), error);"),
+    ("src/mods/content_digest.cpp", "fs::rename(temporary, target, error);"),
+    ("src/mods/content_digest.cpp", "fs::remove(partial_path, error);"),
+    ("src/mods/content_digest.cpp", "#include <fstream>"),
+    ("src/mods/content_digest.cpp", '#include "eawr/platform/native_read.hpp"'),
+    ("src/mods/content_digest.cpp", '#include "thread_priority.hpp"'),
+    ("src/mods/content_digest.cpp", "const fs::directory_entry entry(path, error);"),
+    ("include/eawr/mods/content_digest.hpp", "#include <thread>"),
+    ("include/eawr/mods/content_digest.hpp", "#include <mutex>"),
+    ("include/eawr/mods/content_digest.hpp", "#include <deque>"),
+    ("include/eawr/mods/content_digest.hpp", "#include <condition_variable>"),
+    ("src/mods/thread_priority.cpp", "#include <windows.h>"),
+    ("src/mods/thread_priority.cpp", "#include <sys/syscall.h>"),
+    ("src/mods/thread_priority.cpp", "#include <sys/resource.h>"),
+    ("src/mods/thread_priority.cpp", "#include <unistd.h>"),
+    ("src/mods/thread_priority.cpp", "SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);"),
+    ("src/mods/thread_priority.cpp", "setpriority(PRIO_PROCESS, static_cast<id_t>(syscall(SYS_gettid)), 10);"),
 ]
 
 

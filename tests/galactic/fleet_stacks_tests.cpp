@@ -7,6 +7,7 @@
 #include <cassert>
 #include <map>
 #include <limits>
+#include <string>
 #include <vector>
 
 using namespace eawr::viewer::galactic;
@@ -285,6 +286,12 @@ int case_galactic_fleet_stacks_tests() {
         assert(icons.size() == 1 && icons[0].contents.empty());
         const auto alone = fleet_stack_icons({}, health, textures, eawr::sim::galactic::PlayerId{3});
         assert(alone.empty());
+    }
+    {
+        // Stealth mark art (icon_fleet0n alternate): only an all-stealth card with an authored alternate gets one.
+        const std::vector<std::string> alternates{"stealth.tga", "raid.tga"};
+        assert(stealth_mark_art(true, alternates) == "stealth.tga");
+        assert(stealth_mark_art(false, alternates).empty() && stealth_mark_art(true, {}).empty());
     }
     assert(fleet_stack_icons({}, health, textures).empty());
     return 0;

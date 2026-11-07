@@ -1,5 +1,6 @@
 #include "galactic_ai_markup.hpp"
 #include "galactic_ai_world.hpp"
+#include <stdexcept>
 
 namespace eawr::script::foc::ai {
 namespace {
@@ -49,7 +50,54 @@ std::optional<Real> GalacticMarkup::hint(tactical::PlayerId player, std::string_
     const auto found = row->second.defaults.find(key);
     return found == row->second.defaults.end() ? std::nullopt : std::optional{found->second};
 }
-GalacticMarkupState GalacticMarkup::state() const { std::scoped_lock lock(mutex_); return state_; }
+struct GalacticMarkup::PhaseSavepoint::Saved {
+    GalacticMarkup* owner{};
+    std::optional<GalacticMarkupState> state;
+    std::optional<std::set<sim::galactic::PlanetId>> planets;
+    std::shared_ptr<const GalacticMarkupState> snapshot;
+    bool settled{};
+};
+GalacticMarkup::PhaseSavepoint::PhaseSavepoint(std::unique_ptr<Saved> saved) : saved_(std::move(saved)) {}
+GalacticMarkup::PhaseSavepoint::~PhaseSavepoint() {
+    if (!saved_ || saved_->settled) return;
+    std::scoped_lock lock(saved_->owner->mutex_);
+    saved_->owner->phase_ = nullptr; saved_->owner->phase_abandoned_ = true;
+    ++saved_->owner->revision_;
+}
+bool GalacticMarkup::PhaseSavepoint::retained_publication() const noexcept { return saved_ && saved_->state.has_value(); }
+core::Result<void> GalacticMarkup::PhaseSavepoint::commit() {
+    if (!saved_ || saved_->settled) return invalid<void>("markup phase already settled");
+    std::scoped_lock lock(saved_->owner->mutex_);
+    saved_->owner->phase_ = nullptr; saved_->settled = true;
+    saved_->state.reset(); saved_->planets.reset(); saved_->snapshot.reset();
+    return core::Result<void>::success();
+}
+core::Result<void> GalacticMarkup::PhaseSavepoint::rollback() {
+    if (!saved_ || saved_->settled) return invalid<void>("markup phase already settled");
+    auto& owner = *saved_->owner;
+    std::scoped_lock lock(owner.mutex_);
+    if (saved_->state) owner.state_ = std::move(*saved_->state);
+    if (saved_->planets) owner.planets_ = std::move(*saved_->planets);
+    // Only a fault rebuilds the canonical digest inventory.
+    owner.record_digest_ = owner.rebuild_records(); owner.snapshot_ = saved_->snapshot;
+    ++owner.revision_; owner.phase_ = nullptr; saved_->settled = true;
+    saved_->state.reset(); saved_->planets.reset(); saved_->snapshot.reset();
+    return core::Result<void>::success();
+}
+core::Result<std::unique_ptr<GalacticMarkup::PhaseSavepoint>> GalacticMarkup::begin_phase() {
+    std::scoped_lock lock(mutex_);
+    if (phase_ || phase_abandoned_ || query_owner == this)
+        return invalid<std::unique_ptr<PhaseSavepoint>>("markup phase requires its idle serial owner");
+    auto saved = std::make_unique<PhaseSavepoint::Saved>(); saved->owner = this; saved->snapshot = snapshot_;
+    auto phase = std::unique_ptr<PhaseSavepoint>(new PhaseSavepoint(std::move(saved)));
+    phase_ = phase->saved_.get();
+    return core::Result<std::unique_ptr<PhaseSavepoint>>::success(std::move(phase));
+}
+GalacticMarkupState GalacticMarkup::state() const {
+    std::scoped_lock lock(mutex_);
+    if (phase_abandoned_) throw std::logic_error("unsettled markup phase");
+    return state_;
+}
 std::shared_ptr<const GalacticMarkupState> GalacticMarkup::snapshot() const {
     std::scoped_lock lock(mutex_);
     if (!snapshot_) snapshot_ = std::make_shared<const GalacticMarkupState>(state_);
@@ -80,7 +128,11 @@ core::Result<void> GalacticMarkup::validate(const GalacticMarkupState& input) co
 void GalacticMarkup::replace(GalacticMarkupState state) {
     std::scoped_lock lock(mutex_);
     // A restore/write preserves the numeric payload bits, including signed zero.
-    auto previous = std::move(state_); state_ = std::move(state); update_records(&previous); snapshot_.reset(); ++revision_;
+    if (phase_abandoned_) throw std::logic_error("unsettled markup phase");
+    auto previous = std::move(state_); state_ = std::move(state);
+    const auto* before = &previous;
+    if (phase_ && !phase_->state) { phase_->state.emplace(std::move(previous)); before = &*phase_->state; }
+    update_records(before); snapshot_.reset(); ++revision_;
 }
 void GalacticMarkup::subtract_contribution(GalacticMarkupState& state, const GalacticMarkupHandle& handle) const {
     for (const auto& key : handle.targets) if (alive(key)) state.values[key] = state.values[key] - handle.value;
@@ -119,14 +171,18 @@ void GalacticMarkup::retain_planets(std::span<const sim::galactic::Planet> rows)
     std::set<sim::galactic::PlanetId> live;
     for (const auto& row : rows) live.insert(row.id);
     std::scoped_lock lock(mutex_);
+    if (phase_abandoned_) throw std::logic_error("unsettled markup phase");
     if (live == planets_) return;
-    const auto previous = state_;
+    auto previous = state_;
+    if (phase_ && !phase_->planets) phase_->planets.emplace(std::move(planets_));
     planets_ = std::move(live);
     std::erase_if(state_.values, [&](const auto& row) { return !alive(row.first); });
     for (auto& [id, handle] : state_.handles) {
         static_cast<void>(id); std::erase_if(handle.targets, [&](const auto& key) { return !alive(key); });
     }
-    update_records(&previous);
+    const auto* before = &previous;
+    if (phase_ && !phase_->state) { phase_->state.emplace(std::move(previous)); before = &*phase_->state; }
+    update_records(before);
     ++revision_;
     snapshot_.reset();
 }

@@ -1,4 +1,5 @@
 #include "unit_tables_foc_fixtures.hpp"
+#include "eawr/sim/tactical/fighters.hpp"
 #include "eawr/skirmish/start.hpp"
 
 #include <algorithm>

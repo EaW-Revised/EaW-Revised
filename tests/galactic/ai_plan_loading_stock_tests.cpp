@@ -239,6 +239,28 @@ function DifficultyBasedMinPause(difficulty)
 end
 function main() error("definition loading must not run a plan thread") end
 )LUA";
+    // The host needs pacing even when an intervention imports no task-force helper itself.
+    const std::map<std::string, std::string> independent_modules{
+        {"data/scripts/library/pgtaskforce.lua", R"LUA(
+require("PauseDependency")
+function DifficultyBasedMinPause(difficulty) return PauseValues[difficulty] end
+)LUA"},
+        {"data/scripts/library/pausedependency.lua", "PauseValues = {Easy = 23, Normal = 19, Hard = 13}"},
+        {"data/scripts/interventions/independent.lua", R"LUA(
+_CustomScriptMessage("definition", "debug output")
+function Base_Definitions() Category = "One"; TaskForce = {{"Main", "Infantry = 1"}} end
+)LUA"}};
+    const auto independent_plan = must(g::load_plan_catalog({}, independent_modules));
+    expect(independent_plan.skipped_plans.empty() && independent_plan.plans.size() == 1
+        && independent_plan.minimum_pause_seconds.at("Easy") == ai::real(23)
+        && independent_plan.minimum_pause_seconds.at("Normal") == ai::real(19)
+        && independent_plan.minimum_pause_seconds.at("Hard") == ai::real(13),
+        "unrelated plans get mounted-library pacing and a harmless custom debug sink");
+    auto missing_library = independent_modules;
+    missing_library.erase("data/scripts/library/pgtaskforce.lua");
+    const auto refused = must(g::load_plan_catalog({}, missing_library));
+    expect(refused.plans.empty() && refused.skipped_plans.size() == 1,
+        "missing pacing content remains a per-plan load note; no invented pause table");
     std::map<std::string, std::string> modules{{"data/scripts/ai/example.lua", script}};
     const auto catalog = must(g::load_plan_catalog({}, modules));
     const auto& definition = plan(catalog, "EXAMPLE");

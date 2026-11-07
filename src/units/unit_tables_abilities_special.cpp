@@ -1,5 +1,9 @@
 #include "unit_tables_decode.hpp"
 
+#include "eawr/sim/tactical/combat.hpp"
+
+#include <algorithm>
+
 namespace eawr::units::unit_tables_detail {
 
 void Loader::load_special_healing(UnitType& unit, sim::tactical::SpecialAbilityProfile& special, const AbilityFields& child_text) {
@@ -21,6 +25,14 @@ void Loader::load_special_healing(UnitType& unit, sim::tactical::SpecialAbilityP
                 0, sim::tactical::max_ability_frames));
         };
         special.heal_range = std::max(read("Heal_Range"), Fixed{});
+        // #5724: a range above the sim's distance bound (Stargate authors 999999 for a map-wide effect) saturates
+        // at the bound, which is already larger than any map; debug build: only a negative range is refused
+        // (reset to zero), there is no upper bound.
+        if (constexpr auto limit = sim::tactical::max_combat_distance * Fixed::scale; special.heal_range.raw() > limit) {
+            report_.note(unit.id, "Heal_Range", child_text("Heal_Range"),
+                "#5724: saturated at the supported maximum distance " + std::to_string(sim::tactical::max_combat_distance));
+            special.heal_range = Fixed::from_raw(limit);
+        }
         special.heal_percent = std::max(read("Heal_Percent"), Fixed{});
         special.heal_amount = read("Heal_Amount");
         auto interval = read("Heal_Interval_In_Secs");
@@ -84,6 +96,39 @@ void Loader::load_special_beam(UnitType& unit, sim::tactical::SpecialAbilityProf
             && category->raw() / Fixed::scale <= std::numeric_limits<std::uint32_t>::max()) {
             special.concentrate_stacking_category = static_cast<std::uint32_t>(category->raw() / Fixed::scale);
         } else if (!text.empty()) report_.missing(unit.id, "Stacking_Category", text, "not an unsigned integer");
+    }
+}
+
+void Loader::load_special_super_laser(UnitType& unit, sim::tactical::SpecialAbilityProfile& special, const AbilityFields& child_text) {
+    if (special.kind != sim::tactical::SpecialAbilityKind::super_laser) return;
+    // WSPL-01: absent range and damage tags read as 0; a malformed number is reported, not guessed.
+    const auto read = [&](const std::string_view tag) {
+        const auto value = child_text(tag);
+        const auto parsed = number(value);
+        if (!value.empty() && !parsed) report_.missing(unit.id, std::string(tag), value, "not a decimal");
+        return parsed.value_or(Fixed{});
+    };
+    special.beam_min_range = read("Activation_Min_Range");
+    special.beam_max_range = read("Activation_Max_Range");
+    special.damage_per_frame = read("Damage_Per_Frame");
+    // WSPL-03: Fire_Delay seconds x logical frames per second, truncated.
+    const auto delay = std::clamp<std::int64_t>(read("Fire_Delay").raw(), 0,
+        static_cast<std::int64_t>(sim::tactical::max_ability_frames) * Fixed::scale / sim::tactical::logical_frames_per_second);
+    special.fire_delay_frames = static_cast<std::uint32_t>(delay * sim::tactical::logical_frames_per_second / Fixed::scale);
+    special.beam_owner_particle = child_text("Owner_Particle_Effect");
+    special.beam_owner_bone = child_text("Owner_Particle_Bone_Name");
+    // WSPL-06: the authored line colour defaults to white.
+    special.leech_colour.fill(255);
+    special.leech_texture = child_text("Beam_Texture_Name");
+    special.leech_beam_width = read("Line_Width");
+    special.leech_beam_frames = static_cast<std::uint32_t>(std::clamp<std::int64_t>(
+        read("Num_Anim_Frames").raw() / Fixed::scale, 0, sim::tactical::max_ability_frames));
+    constexpr std::string_view tag = "Line_Color";
+    const auto colour = tokens(child_text(tag));
+    for (std::size_t channel = 0; channel < colour.size() && channel < special.leech_colour.size(); ++channel) {
+        const auto parsed = number(colour[channel]);
+        if (!parsed) { report_.missing(unit.id, std::string(tag), colour[channel], "not a decimal"); continue; }
+        special.leech_colour[channel] = static_cast<std::uint8_t>(std::clamp<std::int64_t>(parsed->raw() / Fixed::scale, 0, 255));
     }
 }
 

@@ -1,4 +1,5 @@
 #include "unit_internal.hpp"
+#include "eawr/core/load_profile.hpp"
 #include "eawr/core/text.hpp"
 
 #include "eawr/data/retail_values.hpp"
@@ -481,9 +482,15 @@ std::optional<Object> resolve(const data::Catalog& catalog, const std::string_vi
 }
 
 std::optional<std::size_t> bone_index(const assets::Model& model, const std::string_view bone) {
+    core::load_profile::Scope lookup_scope(core::load_profile::Phase::bone_lookup);
+    core::load_profile::count(core::load_profile::Counter::bone_lookups);
     for (std::size_t index = 0; index < model.bones.size(); ++index) {
-        if (iequals(model.bones[index].name, bone)) return index;
+        if (iequals(model.bones[index].name, bone)) {
+            core::load_profile::count(core::load_profile::Counter::bone_scan_steps, index + 1);
+            return index;
+        }
     }
+    core::load_profile::count(core::load_profile::Counter::bone_scan_steps, model.bones.size());
     return std::nullopt;
 }
 
@@ -887,6 +894,8 @@ core::Result<CollisionBounds> prepare_galactic_collision_bounds(const assets::Mo
 }
 
 core::Result<std::vector<sim::math::Mat3x4>> bind_frames(const assets::Model& model) {
+    core::load_profile::Scope frames_scope(core::load_profile::Phase::bind_frames);
+    const core::load_profile::ModelScope frames_timer(model.source.logical_path, &core::load_profile::ModelCost::bind_ms);
     const auto failure = [&](std::string message) {
         core::Diagnostic diagnostic;
         diagnostic.code = std::string(diagnostic_codes::bone_frame);

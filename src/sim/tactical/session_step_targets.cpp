@@ -1,4 +1,5 @@
 #include "eawr/core/load_profile.hpp"
+#include "eawr/core/tick_profile.hpp"
 #include "eawr/sim/tactical/session.hpp"
 
 #include "eawr/sim/tactical/formation.hpp"
@@ -57,7 +58,10 @@ core::Result<void> session_detail::Tick::prepare_targets() {
     // units, their health and the last published visibility) and write each unit's combat state
     // and events to its own slot; the serial commit below appends the events in ascending ID.
     targets_.emplace();
-    auto& world = targets_.value().world.emplace(impl_->combat_world(moving, starts, tick, executor));
+    auto& world = targets_.value().world.emplace([&] {
+        core::tick_profile::Scope scope("serial.tactical.prepare_targets.world");
+        return impl_->combat_world(moving, starts, tick, executor);
+    }());
     if (!world) {
         return core::Result<void>::failure(world.error());
     }
@@ -79,62 +83,91 @@ core::Result<void> session_detail::Tick::prepare_targets() {
     // boxes serially in ascending ID, as FoC's trees take each object's transform update in turn
     // (the tree's order is its history, so this commit is ordered by nature: O(units) with a short
     // tree walk each). The targeting phase only reads the trees.
+    std::optional<core::tick_profile::Scope> tree_copy("serial.tactical.prepare_targets.tree_copy");
     auto& collection = targets_.value().collection.emplace(impl_->collection);
     auto& projectile_collection = targets_.value().projectile_collection.emplace(impl_->projectile_collection);
+    tree_copy.reset();
     if (!impl_->combat.profiles.empty()) {
-        std::vector<std::optional<detail::CollectionTrees::Member>> boxes(moving.size());
-        std::vector<std::optional<detail::CollectionTrees::Member>> projectile_boxes(moving.size());
-        std::vector<std::optional<core::Diagnostic>> box_errors(moving.size());
+        // Each partition collects its own range's members and collidables in ascending ID, with how each differs from
+        // the committed trees (CO-11): read-only lookups, so they run here and not in the ordered tree update.
+        using Trees = detail::CollectionTrees;
+        auto& scratch = impl_->box_scratch;
+        auto& parts = scratch.parts;
+        for (auto& part : parts) {
+            part.members.clear();
+            part.collidables.clear();
+            part.member_changes.clear();
+            part.collidable_changes.clear();
+            part.error.reset();
+        }
         const auto boxed = executor.execute_phase("collection-boxes", tick_partition_count, [&](const std::size_t partition) {
             const auto range = partition_range(partition, moving.size());
+            auto& part = parts[partition];
             for (auto index = range.begin; index < range.end; ++index) {
+                std::optional<core::tick_profile::JobScope> profile_job;
+                if (core::tick_profile::active_jobs)
+                    profile_job.emplace("job.collection-box", moving[index].state.entity_id, nullptr, moving[index].state.type_id);
                 // A-07/WSQ-45: ordinary space team locomotion uses type attack
                 // extents/radius. A movement formation does not activate the
                 // specialized formation-team geometry reader.
                 auto member = impl_->collection_member(moving[index]);
                 if (!member) {
-                    box_errors[index] = detail::diagnostic(diagnostic_codes::worker_failure,
+                    if (!part.error) part.error = detail::diagnostic(diagnostic_codes::worker_failure,
                         "tick " + std::to_string(tick) + " unit " + std::to_string(moving[index].state.entity_id) + ": "
                             + member.error().message);
                     continue;
                 }
-                boxes[index] = member.value();
                 const auto* profile = world.value().units[index].profile;
+                std::optional<Trees::Member> projectile_box;
                 if (impl_->durability.damage && profile != nullptr && profile->living_projectile_collision && profile->collision) {
                     auto projectile_member = impl_->collection_member(moving[index], true);
                     if (!projectile_member) {
-                        box_errors[index] = detail::diagnostic(diagnostic_codes::worker_failure,
+                        if (!part.error) part.error = detail::diagnostic(diagnostic_codes::worker_failure,
                             "tick " + std::to_string(tick) + " unit " + std::to_string(moving[index].state.entity_id) + ": "
                                 + projectile_member.error().message);
                         continue;
                     }
-                    projectile_boxes[index] = projectile_member.value();
+                    projectile_box = projectile_member.value();
+                }
+                if (!member.value()) continue;
+                part.members.push_back(*member.value());
+                part.member_changes.push_back(collection.classify(*member.value()));
+                // DG-36b: only projectile candidates enclose attached geometry; the ordinary
+                // targeting/blast collection keeps the parent's authored bounds and history.
+                if (projectile_box) {
+                    part.collidables.push_back(*projectile_box);
+                    part.collidable_changes.push_back(projectile_collection.classify(*projectile_box));
                 }
             }
         });
         if (!boxed) {
             return core::Result<void>::failure(boxed.error());
         }
-        for (auto& error : box_errors) {
-            if (error) {
-                return core::Result<void>::failure(std::move(*error));
+        for (auto& part : parts) {
+            if (part.error) {
+                return core::Result<void>::failure(std::move(*part.error));
             }
         }
         mark("collection_boxes_commit", true);
-        std::vector<detail::CollectionTrees::Member> members;
-        std::vector<detail::CollectionTrees::Member> collidables;
-        members.reserve(moving.size());
-        collidables.reserve(moving.size());
-        for (std::size_t index = 0; index < boxes.size(); ++index) {
-            const auto& box = boxes[index];
-            if (!box) continue;
-            members.push_back(*box);
-            // DG-36b: only projectile candidates enclose attached geometry; the ordinary
-            // targeting/blast collection keeps the parent's authored bounds and history.
-            if (projectile_boxes[index]) collidables.push_back(*projectile_boxes[index]);
+        core::tick_profile::Scope box_commit("serial.tactical.prepare_targets.box_commit");
+        // Contiguous copies of the 64 ascending ranges, in range order, are the ascending member lists. The lists and
+        // the parts keep their capacity between ticks (reserve is a no-op once they have grown).
+        auto& members = scratch.members;
+        auto& collidables = scratch.collidables;
+        auto& member_changes = scratch.member_changes;
+        auto& collidable_changes = scratch.collidable_changes;
+        members.clear();
+        collidables.clear();
+        member_changes.clear();
+        collidable_changes.clear();
+        for (const auto& part : parts) {
+            members.insert(members.end(), part.members.begin(), part.members.end());
+            member_changes.insert(member_changes.end(), part.member_changes.begin(), part.member_changes.end());
+            collidables.insert(collidables.end(), part.collidables.begin(), part.collidables.end());
+            collidable_changes.insert(collidable_changes.end(), part.collidable_changes.begin(), part.collidable_changes.end());
         }
-        collection.update(members, tick);
-        projectile_collection.update(collidables, tick);
+        collection.update(members, member_changes, tick);
+        projectile_collection.update(collidables, collidable_changes, tick);
         mark("collection_boxes_commit", false);
         world.value().collection = &collection;
         world.value().projectile_collection = &projectile_collection;
@@ -216,7 +249,10 @@ core::Result<void> session_detail::Tick::refresh_target_inputs(std::vector<LiveU
         const std::map<EntityId, EntityId>& craft_squadron) {
     // WCC-25: rebuild immutable combat inputs after the existing-projectile commit.
     // Preserve prepared geometry and tree history; only health/ability inputs changed.
-    auto refreshed = impl_->combat_world(moving, gather_->starts.value(), tick, executor);
+    auto refreshed = [&] {
+        core::tick_profile::Scope scope("serial.tactical.targets.refresh_world");
+        return impl_->combat_world(moving, gather_->starts.value(), tick, executor);
+    }();
     if (!refreshed) return core::Result<void>::failure(refreshed.error());
     auto& world = targets_->world.value();
     const auto preserved = executor.execute_phase("combat-input-refresh", tick_partition_count, [&](const std::size_t partition) {
@@ -232,6 +268,7 @@ core::Result<void> session_detail::Tick::refresh_target_inputs(std::vector<LiveU
         }
     });
     if (!preserved) return preserved;
+    core::tick_profile::Scope swap_scope("serial.tactical.targets.refresh_swap"); // frees the replaced world
     world = std::move(refreshed);
     world.value().craft_containers = &craft_squadron;
     world.value().collection = &targets_->collection.value();
@@ -244,7 +281,7 @@ void session_detail::Tick::scan_member_targets_partition(const std::size_t& part
         std::vector<std::size_t>& scan_indices, const std::map<EntityId, EntityId>& craft_squadron,
         std::vector<LiveUnit>& moving, const std::map<EntityId, ArrivalState>& arrivals,
         std::map<EntityId, SquadronFrame>& squadron_frames, detail::MapStage<SquadronState>& minds, auto& scans,
-        const detail::CombatWorld& view, detail::CombatWorld& scan_view) {
+        const detail::CombatWorld& view) {
     const auto range = partition_range(partition, scan_indices.size());
     for (auto slot = range.begin; slot < range.end; ++slot) {
         const auto index = scan_indices[slot];
@@ -330,7 +367,7 @@ void session_detail::Tick::scan_member_targets_partition(const std::size_t& part
         output.enabled = frame.scans && view.frame >= state.next_scan_frame;
         const auto target = state.formation ? state.formation->attack_target : invalid_entity_id;
         output.destination = target;
-        output.scanned = output.enabled ? detail::target_combat(scan_view, unit, output.divert,
+        output.scanned = output.enabled ? detail::target_combat(view, unit, output.divert,
             target, output.anchor, &output.formation) : input;
     }
 }
@@ -352,6 +389,7 @@ core::Result<void> session_detail::Tick::prepare_weapon_targets(std::vector<Live
     const auto targeted = executor.execute_phase("targeting", tick_partition_count, [&](const std::size_t partition) {
         const auto range = partition_range(partition, moving.size());
         for (auto index = range.begin; index < range.end; ++index) {
+            core::tick_profile::JobScope owner_job("job.targeting", moving[index].state.entity_id, nullptr, moving[index].state.type_id);
             // #530 PU-39: an arriving unit neither targets nor fires.
             if (!moving[index].combat || arrivals.contains(moving[index].state.entity_id)) {
                 continue;
@@ -394,6 +432,7 @@ core::Result<void> session_detail::Tick::prepare_weapon_targets(std::vector<Live
     if (!targeted) {
         return core::Result<void>::failure(targeted.error());
     }
+    core::tick_profile::Scope pairing_scope("serial.tactical.targets.pairing");
     std::vector<Pairing> pairing_commit;
     for (auto& part : pairings) for (auto& pairing : part) pairing_commit.push_back(std::move(pairing));
     std::sort(pairing_commit.begin(), pairing_commit.end(), [](const Pairing& left, const Pairing& right) {
@@ -425,11 +464,15 @@ core::Result<void> session_detail::Tick::prepare_weapon_targets(std::vector<Live
 core::Result<void> session_detail::Tick::commit_weapon_targets(std::vector<LiveUnit>& moving,
         std::vector<std::optional<detail::CombatStep>>& combat_steps,
         std::vector<std::optional<CombatState>>& weapon_inputs) {
+    core::tick_profile::Scope weapon_commit_scope("serial.tactical.targets.weapon_commit");
     auto& combat_events = targets_.value().combat_events.value();
     auto& aim_offsets = targets_.value().aim_offsets.value();
     // A-04 to A-07: the turns toward ordered targets, in ascending unit ID; planned below.
     auto& combat_turns = targets_.value().combat_turns.value();
     for (std::size_t index = 0; index < moving.size(); ++index) {
+        std::optional<core::tick_profile::JobScope> profile_job;
+        if (core::tick_profile::active_jobs)
+            profile_job.emplace("job.target-commit", moving[index].state.entity_id, nullptr, moving[index].state.type_id);
         if (!combat_steps[index]) {
             continue;
         }
@@ -464,7 +507,7 @@ core::Result<void> session_detail::Tick::commit_weapon_targets(std::vector<LiveU
         for (const auto& feedback : combat_steps[index]->manual_feedback) {
             manual_feedback_.push_back(Event{tick, EventKind::manual_target_timeout, feedback.player, 0,
                 moving[index].state.entity_id, OrderKind::manual_target, RejectReason::none,
-                static_cast<std::uint8_t>(feedback.hardpoint)});
+                feedback.hardpoint});
         }
         auto& produced = combat_steps[index]->events;
         // AB-67 (#561): a craft that fired its ion shot at the target has fired it.
@@ -488,7 +531,12 @@ core::Result<void> session_detail::Tick::targets() {
     auto& squadron_frames = craft_prep_->squadron_frames.value();
     const auto& craft_squadron = craft_prep_->craft_squadron.value();
     const auto& arrivals = staging_->arrivals.value();
-    if (auto result = retry_buzz_targets(moving, minds, squadron_frames, arrivals); !result) return result;
+    // Declared first, so it is destroyed last: emplaced at the end of the body it times the locals' destruction.
+    std::optional<core::tick_profile::Scope> teardown;
+    {
+        core::tick_profile::Scope scope("serial.tactical.targets.buzz");
+        if (auto result = retry_buzz_targets(moving, minds, squadron_frames, arrivals); !result) return result;
+    }
     if (auto result = refresh_target_inputs(moving, craft_squadron); !result) return result;
     auto& world = targets_->world.value();
     const auto& view = world.value();
@@ -506,12 +554,11 @@ core::Result<void> session_detail::Tick::targets() {
         math::Fixed divert{};
         math::Vec3 anchor{};
     };
+    std::optional<core::tick_profile::Scope> members_scope("serial.tactical.targets.members");
     std::vector<MemberScan> scans(moving.size());
     std::vector<std::optional<CombatState>> weapon_inputs(moving.size());
     std::vector<bool> weapon_idle(moving.size());
     std::map<EntityId, std::pair<std::size_t, EntityId>> acquired;
-    auto scan_view = view;
-    scan_view.frame = tick;
     std::map<EntityId, std::vector<CombatState*>> member_states;
     std::map<EntityId, std::vector<std::size_t>> member_indices;
     std::vector<std::size_t> scan_indices;
@@ -526,12 +573,14 @@ core::Result<void> session_detail::Tick::targets() {
             }
         }
     }
+    members_scope.reset();
     // WSQ-42/43: no squadron or no combat table leaves no member scan or phase (as before the
     // ordered commit), so the phase map of a squadron-free session is unchanged.
     std::size_t cursor = squadron_frames.empty() || impl_->combat.profiles.empty() ? 0 : moving.size();
+    std::optional<core::tick_profile::Scope> commit_loop_scope("serial.tactical.targets.squadron_commit");
     while (cursor != 0) {
         const auto scanned = executor.execute_phase("squadron-targets", tick_partition_count, [&](const std::size_t partition) {
-            scan_member_targets_partition(partition, scan_indices, craft_squadron, moving, arrivals, squadron_frames, minds, scans, view, scan_view);
+            scan_member_targets_partition(partition, scan_indices, craft_squadron, moving, arrivals, squadron_frames, minds, scans, view);
         });
         if (!scanned) return core::Result<void>::failure(scanned.error());
         // Only ordered notification/tail commits run here; spatial scans and weapon
@@ -584,10 +633,12 @@ core::Result<void> session_detail::Tick::targets() {
                 || (destination == invalid_entity_id && member.attack_target == invalid_entity_id);
         }
     }
+    commit_loop_scope.reset();
     std::vector<std::optional<detail::CombatStep>> combat_steps(moving.size());
     std::vector<std::optional<core::Diagnostic>> combat_errors(moving.size());
     if (auto result = prepare_weapon_targets(moving, arrivals, craft_squadron, weapon_inputs, weapon_idle, acquired, minds, view, combat_steps, combat_errors); !result) return result;
     if (auto result = commit_weapon_targets(moving, combat_steps, weapon_inputs); !result) return result;
+    teardown.emplace("serial.tactical.targets.teardown");
     return core::Result<void>::success();
 }
 

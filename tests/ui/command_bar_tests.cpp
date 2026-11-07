@@ -3,6 +3,7 @@
 // loaded read-only and its counts pinned against design section 1.1.
 
 #include "eawr/data/ui/command_bar.hpp"
+#include "eawr/vfs/vfs.hpp"
 
 #include "ui_test_support.hpp"
 

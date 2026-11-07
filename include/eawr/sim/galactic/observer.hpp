@@ -84,8 +84,10 @@ struct ObservedPlanet {
     std::optional<PlayerId> apparent_owner;
     std::optional<PlayerId> apparent_allegiance_owner;
     math::Fixed apparent_political_control{};
+    std::vector<GroundLayoutEntry> ground_layout; // present only with ground-content intelligence
     friend bool operator==(const ObservedPlanet&, const ObservedPlanet&) = default;
 };
+void project_ground_layout(std::vector<ObservedPlanet>&, const PoliticalControlSetup*);
 // A requested publication player is local process state, never observer state.
 // Zero requests the canonical all-player queries used by simulation consumers.
 struct ObserverViewContext { PlayerId player{}; };

@@ -1,4 +1,5 @@
 #include "eawr/script/script_host.hpp"
+#include "eawr/vfs/vfs.hpp"
 
 #include "script_host_internal.hpp"
 

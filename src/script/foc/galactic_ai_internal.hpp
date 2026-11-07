@@ -41,6 +41,10 @@ struct Manager::Impl {
     std::vector<ServiceTrace> traces;
     std::uint64_t traces_dropped{};
     std::optional<core::Diagnostic> failure;
+    PhaseSavepoint::Saved* phase{};
+    bool phase_abandoned{}, servicing{}, service_threw{};
+    std::optional<gc::PlayerId> faulted_provider; // diagnostic attribution, reset on rollback/service
+    void retain_player(const PlayerLifecycle&);
     [[nodiscard]] core::Result<bool> positive(const PlayerSelection&, std::string_view) const;
     [[nodiscard]] core::Result<void> initialize(PlayerLifecycle&);
     [[nodiscard]] core::Result<void> templates(PlayerLifecycle&);

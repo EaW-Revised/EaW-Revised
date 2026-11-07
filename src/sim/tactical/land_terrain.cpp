@@ -2,6 +2,7 @@
 #include "eawr/core/sha256.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <array>
 #include <cstdlib>
 #include <limits>

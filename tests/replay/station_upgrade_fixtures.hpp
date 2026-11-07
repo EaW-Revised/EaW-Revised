@@ -32,6 +32,8 @@ void test_order_after_reinforcement();
 void test_destroyed_station();
 void test_replacement_projectiles();
 void test_hangar_replacement();
+void test_solo_craft_free_spot_launch();
+void test_vanilla_ship_launch_ignores_lane_blocker();
 void test_garrison_marked_station_upgrade();
 void test_free_garrison_replenishment();
 void test_free_garrison_timer_order();

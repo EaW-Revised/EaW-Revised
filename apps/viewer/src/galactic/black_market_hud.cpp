@@ -59,7 +59,7 @@ bool GalacticMode::State::build_black_market_hud() {
             std::string why;
             auto pixels = texture_image(texture.value(), why);
             if (pixels.is_null()) { failure = why; return false; }
-            setup.meshes.push_back({mesh.blend, ImageTexture::create_from_image(pixels), mesh.triangles});
+            setup.meshes.push_back({mesh.blend, ImageTexture::create_from_image(pixels), mesh.triangles, {}});
         }
         surface.panel->setup(std::move(setup), nullptr);
         surface.close_name = "market_close";
@@ -197,7 +197,7 @@ void GalacticMode::State::choose_black_market(std::size_t index) {
     market_menu.accepted = BlackMarketSubmission{menu.buyer, menu.planet, offer.index, offer.item, offer.price, menu.absence};
     if (!market_menu.fixture) {
         sim::galactic::PreparedAbility prepared_order{menu.preparation, menu.buyer, menu.planet,
-            sim::galactic::AbilityKind::black_market, offer.index, offer.item, offer.price, menu.absence, offer.owned};
+            sim::galactic::AbilityKind::black_market, offer.index, offer.item, offer.price, menu.absence, offer.owned, {}, {}, {}, {}, {}, true};
         game->submit(platform::LiveGameOrder{sim::SeatId{galaxy->local.seat}, sim::galactic::ExecutePreparedAbility{prepared_order}, {}});
         ++submitted_orders;
     }

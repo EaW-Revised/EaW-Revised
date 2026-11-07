@@ -272,7 +272,7 @@ void register_globals(ScriptScheduler& scripts, const HostPtr& host, std::vector
     });
     add("Script.Debug_Should_Issue_Event_Alert", [](BindingContext&, const ValueList&) { return one(boolean(false)); });
     // Debug output only (PGDebug): no effect on the game.
-    for (const char* name : {"_OuputDebug", "_ScriptMessage", "_MessagePopup", "DumpCallStack"}) add(name, noop());
+    for (const char* name : {"_OuputDebug", "_ScriptMessage", "_CustomScriptMessage", "_MessagePopup", "DumpCallStack"}) add(name, noop());
     add("FogOfWar.Reveal_All", [host](BindingContext& context, const ValueList& arguments) -> core::Result<ValueList> {
         // V-20: tactical only, at least one argument, a player, and no returned value.
         if (!host->view) return fail("FogOfWar.Reveal_All: command only valid in a tactical game");
@@ -444,6 +444,51 @@ void register_methods(ScriptScheduler& scripts, const HostPtr& host, std::vector
         auto fraction = math::divide(*unit->hull, *unit->max_hull);
         if (!fraction) return one(number(LuaNumber(1)));
         return one(number(numeric::from_fixed(fraction.value())));
+    });
+    // TL-03 (debug build): Make_Invulnerable(enabled) takes exactly one boolean (a script error otherwise).
+    // True sets the object's script-invulnerable behaviour unless it is already set (idempotent, no
+    // stacking, no expiry); false clears it; a squadron applies it to each member. The flag is simulation
+    // state, so a valid call queues a replay command for the next tick and answers nothing; a dead object
+    // answers nothing like its siblings. The retail "active mode flag" gate is unverified (fidelity list).
+    object("Make_Invulnerable", [host](BindingContext& context, const ValueList& arguments) -> core::Result<ValueList> {
+        if (live_object(*host, arguments[0]) == nullptr) return none();
+        const std::size_t count = arguments.size() - 1;
+        if (count != 1)
+            return fail("Make_Invulnerable: invalid number of parameters.  Expected 1, got " + std::to_string(count) + ".");
+        if (!std::holds_alternative<bool>(arguments[1].data))
+            return fail("Make_Invulnerable: invalid type for parameter 1.  Expected boolean.");
+        const ViewUnit* unit = live_object(*host, arguments[0]);
+        context.issue_command(std::string(verb_make_invulnerable),
+            {number(LuaNumber(static_cast<std::int64_t>(unit->owner))), arguments[0], arguments[1]});
+        return none();
+    });
+    // WSU-21: stock object scripts call Is_Selectable() with no arguments to ask whether the
+    // object carries the SELECTABLE behaviour; a dead object answers nothing like its siblings.
+    // Dynamic Set_Selectable overrides are not hosted (fidelity list).
+    object("Is_Selectable", [host](BindingContext&, const ValueList& arguments) -> core::Result<ValueList> {
+        const ViewUnit* unit = live_object(*host, arguments[0]);
+        if (unit == nullptr) return none();
+        const AiType* type = host->type(unit->type);
+        return one(boolean(type != nullptr && type->selectable));
+    });
+    // TL-02 (debug build): Play_Animation(name, loop[, index]) validates its 2 or 3 arguments
+    // (string, boolean, number) with a script error per mismatch, then only sets the object's
+    // target animation: a presentation state with no simulation effect. The AI script host has
+    // no animation state, so a valid call is a silent no-op that answers nothing; a dead object
+    // answers nothing like its siblings. The animation name is not checked against the model
+    // animation names (no verified name table; fidelity list).
+    object("Play_Animation", [host](BindingContext&, const ValueList& arguments) -> core::Result<ValueList> {
+        if (live_object(*host, arguments[0]) == nullptr) return none();
+        const std::size_t count = arguments.size() - 1;
+        if (count != 2 && count != 3)
+            return fail("Play_Animation: invalid number of parameters.  Expected 2 or 3, got " + std::to_string(count) + ".");
+        if (as_text(arguments[1]) == nullptr)
+            return fail("Play_Animation: invalid type for parameter 1.  Expected string.");
+        if (!std::holds_alternative<bool>(arguments[2].data))
+            return fail("Play_Animation: invalid type for parameter 2.  Expected boolean.");
+        if (count == 3 && !std::holds_alternative<LuaNumber>(arguments[3].data))
+            return fail("Play_Animation: invalid type for parameter 3.  Expected number.");
+        return none();
     });
     // EX-53: the completed object's engine-enabled state, not its speed.
     object("Are_Engines_Online", [host](BindingContext& context, const ValueList& arguments) -> core::Result<ValueList> {

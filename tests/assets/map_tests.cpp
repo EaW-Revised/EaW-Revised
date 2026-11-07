@@ -1,8 +1,12 @@
 #include <utility>
 #include "../support/check.hpp"
+#include "eawr/vfs/vfs.hpp"
 #include "map_test_support.hpp"
 
 #include "eawr/assets/map.hpp"
+#include "eawr/assets/ui_map_markers.hpp"
+#include "../support/temp_dir.hpp"
+#include "../support/env.hpp"
 
 #include <algorithm>
 #include <array>
@@ -211,7 +215,111 @@ bool near(const float left, const float right) { return std::fabs(left - right) 
 
 using namespace eawr::tests::map_contracts;
 
+void ui_marker_contracts() {
+    using namespace eawr;
+    const auto root = std::filesystem::temp_directory_path() /
+        ("eawr-ui-markers-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    std::filesystem::create_directories(root / "XML");
+    const auto write = [&](const char* name, const std::string& text) { std::ofstream out(root / "XML" / name); out << text; };
+    write("GameObjectFiles.xml", "<Game_Object_Files><File>objects.xml</File></Game_Object_Files>");
+    write("objects.xml", "<Objects>"
+        "<Marker Name=\"IN BASE SPECIAL STRUCTURE POSITION\"><Include_In_UI_Map_Header>Yes</Include_In_UI_Map_Header></Marker>"
+        "<Marker Name=\"OUT BASE SPECIAL STRUCTURE POSITION\"><Include_In_UI_Map_Header>Yes</Include_In_UI_Map_Header></Marker>"
+        "<Marker Name=\"DEFENDING FORCES POSITION\"><Include_In_UI_Map_Header>Yes</Include_In_UI_Map_Header></Marker>"
+        "<Marker Name=\"Specific\"><Include_In_UI_Map_Header>Yes</Include_In_UI_Map_Header><Marker_For_Specific_Object_Type>Fixture</Marker_For_Specific_Object_Type></Marker>"
+        "<Marker Name=\"REINFORCEMENT_POINT_A\"><Include_In_UI_Map_Header>Yes</Include_In_UI_Map_Header></Marker>"
+        "<Marker Name=\"GARRISON_BUNKER_CAPTURABLE\"><Include_In_UI_Map_Header>Yes</Include_In_UI_Map_Header></Marker>"
+        "<Marker Name=\"SKIRMISH_BUILD_PAD\"><Include_In_UI_Map_Header>Yes</Include_In_UI_Map_Header></Marker>"
+        "<Marker Name=\"Hidden\"><Include_In_UI_Map_Header>No</Include_In_UI_Map_Header></Marker></Objects>");
+    const std::array mounts{vfs::MountSpec{"base", root, "data", {}}};
+    const auto mounted = vfs::Vfs::mount(mounts);
+    expect(static_cast<bool>(mounted), "marker fixture mounts");
+    if (!mounted) { testing::remove_temp_directory(root); return; }
+    const auto catalog = data::load_catalog(mounted.value(), data::Profile::foc);
+    expect(static_cast<bool>(catalog), "marker fixture catalog loads");
+    if (!catalog) { testing::remove_temp_directory(root); return; }
+    Fixture fixture; fixture.new_header = true; fixture.records.clear();
+    const auto types = assets::object_type_catalog(catalog.value().catalog);
+    const auto add = [&](const std::string& name, float x, std::uint32_t record) {
+        while (fixture.raw_records.size() < record) fixture.raw_records.push_back(object_record({}));
+        std::vector<std::byte> body;
+        mini(body, 1, integer(assets::object_type_crc(name)));
+        mini(body, 4, vector3(x, 0, 0));
+        fixture.raw_records.push_back(object_record(body));
+    };
+    add("IN BASE SPECIAL STRUCTURE POSITION", -20, 1);
+    add("IN BASE SPECIAL STRUCTURE POSITION", 0, 2);
+    add("IN BASE SPECIAL STRUCTURE POSITION", 20, 3);
+    add("OUT BASE SPECIAL STRUCTURE POSITION", 10, 4);
+    add("Specific", 0, 5);
+    for (std::uint32_t i = 0; i < 12; ++i) add("DEFENDING FORCES POSITION", 0, 10 + i);
+    add("REINFORCEMENT_POINT_A", 0, 30); add("GARRISON_BUNKER_CAPTURABLE", 0, 31);
+    add("SKIRMISH_BUILD_PAD", 0, 32); add("Hidden", 0, 33);
+    auto decoded = load(fixture, types);
+    expect(static_cast<bool>(decoded), "synthetic marker TED loads");
+    if (!decoded) { testing::remove_temp_directory(root); return; }
+    auto map = std::move(decoded).value();
+    expect(assets::ui_map_chunk_count(map) > 0, "parse work counts nested chunks deterministically");
+    const auto markers = assets::ui_map_markers(map, catalog.value().catalog);
+    expect(markers.size() == 18 && markers[0].record == 2 && markers[3].record == 5 && markers[4].record == 4,
+        "marker order, eligibility and unit cap");
+    if (markers.size() != 18) { testing::remove_temp_directory(root); return; }
+    expect(markers[0].x == 0.5F && markers[0].y == 0.5F && markers[3].specific_types == "Fixture",
+        "marker normalisation and specific type");
+    expect(markers[15].kind == assets::UiMarkerKind::reinforcement && markers[16].kind == assets::UiMarkerKind::bunker
+        && markers[17].kind == assets::UiMarkerKind::build_pad, "display-only groups retained");
+    for (std::uint32_t i = 0; i < 90; ++i) add("OUT BASE SPECIAL STRUCTURE POSITION", 0, 100 + i);
+    decoded = load(fixture, types);
+    expect(static_cast<bool>(decoded), "capped synthetic TED loads");
+    if (!decoded) { testing::remove_temp_directory(root); return; }
+    map = std::move(decoded).value();
+    const auto capped = assets::ui_map_markers(map, catalog.value().catalog);
+    expect(std::count_if(capped.begin(), capped.end(), [](const auto& marker) {
+        return marker.kind == assets::UiMarkerKind::in_base || marker.kind == assets::UiMarkerKind::specific
+            || marker.kind == assets::UiMarkerKind::out_base;
+    }) == 80, "build pads cap at 80");
+    map.declared_extents.reset();
+    expect(assets::ui_map_markers(map, catalog.value().catalog).empty(), "missing map size yields no guessed markers");
+    testing::remove_temp_directory(root);
+}
+
+void installed_ui_marker_contracts() {
+    using namespace eawr;
+    const auto root = testing::game_root();
+    if (!root) { std::cout << "installed marker assertions skipped: no game data\n"; return; }
+    std::vector<vfs::MountSpec> mounts;
+    for (const auto& [id, folder] : {std::pair{std::string("expansion"), std::string("corruption")},
+                                     std::pair{std::string("base"), std::string("GameData")}}) {
+        auto manifest = vfs::resolve_manifest_mount(id, std::filesystem::path(*root) / folder / "Data");
+        expect(static_cast<bool>(manifest), "installed marker fixture layer mounts");
+        if (!manifest) return;
+        mounts.push_back(std::move(manifest).value().mount);
+    }
+    auto fs = vfs::Vfs::mount(mounts);
+    expect(static_cast<bool>(fs), "installed marker fixture vfs mounts");
+    if (!fs) return;
+    auto catalog = data::load_catalog(fs.value(), data::Profile::foc);
+    expect(static_cast<bool>(catalog), "installed marker fixture catalog loads");
+    if (!catalog) return;
+    const auto types = assets::object_type_catalog(catalog.value().catalog);
+    auto map = assets::load_map(fs.value(), "data/art/maps/_land_planet_abregadorae_02.ted", types);
+    expect(static_cast<bool>(map), "installed planet map loads");
+    if (!map) return;
+    const auto markers = assets::ui_map_markers(map.value(), catalog.value().catalog);
+    const auto builds = std::count_if(markers.begin(), markers.end(), [](const auto& marker) {
+        return marker.kind == assets::UiMarkerKind::in_base || marker.kind == assets::UiMarkerKind::out_base
+            || marker.kind == assets::UiMarkerKind::specific;
+    });
+    const auto units = std::count_if(markers.begin(), markers.end(), [](const auto& marker) {
+        return marker.kind == assets::UiMarkerKind::defender;
+    });
+    expect(builds > 0 && builds <= 80 && units > 0 && units <= 10, "installed marker class counts are populated and bounded");
+    expect(assets::ui_map_chunk_count(map.value()) > 0, "installed map provides parse work count");
+}
+
 int main() {
+    ui_marker_contracts();
+    installed_ui_marker_contracts();
     terrain_values();
     terrain_failures();
     kind_structure();

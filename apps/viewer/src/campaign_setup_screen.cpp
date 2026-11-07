@@ -9,6 +9,7 @@
 #include "eawr/data/xml.hpp"
 #include "eawr/data/ui/dialog_catalog.hpp"
 #include "eawr/data/ui/text_database.hpp"
+#include "eawr/presentation/ui/faction_display.hpp"
 
 #include <godot_cpp/classes/color_rect.hpp>
 #include <godot_cpp/classes/image.hpp>
@@ -137,8 +138,8 @@ bool CampaignSetupScreen::build(Control& root, const Resources& resources, const
         facts.name = faction.name;
         facts.playable = faction.is_playable.value_or(false);
         facts.displayed_tech_adjustment = faction.displayed_tech_level_adjustment.value_or(0);
-        const std::string key = localized_key(*resources_.catalog, faction.name, data::Category::faction, "Text_ID");
-        facts.title = key.empty() ? faction.name : caption(key);
+        facts.title = resources_.text
+            ? model::faction_display_name(*resources_.catalog, resources_.text, faction.name) : faction.name;
         factions.push_back(std::move(facts));
     }
     model_ = std::make_unique<model::CampaignSetupModel>(std::move(campaigns), std::move(factions), support);

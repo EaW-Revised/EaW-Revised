@@ -1,6 +1,7 @@
 #pragma once
 
 #include "eawr/units/domain_tags.hpp"
+#include "eawr/data/xml.hpp"
 #include "eawr/units/unit_tables.hpp"
 
 #include <map>
@@ -17,7 +18,7 @@ namespace eawr::units::detail {
 
 // AV-05 / WWP-21: the same scaled geometry for movement and combat, with no layer gate.
 [[nodiscard]] core::Result<sim::tactical::Footprint> space_footprint(const std::string& id,
-    const std::optional<Fixed>& scale_factor, const SpaceFootprint& data);
+    const std::optional<Fixed>& scale_factor, const SpaceFootprint& data, core::LoadNoteBuffer& load_notes);
 
 // #71: the X and Y half extents of a model's collision bounds in the bind pose, before
 // Scale_Factor (research E71-18); +-1 without a collidable mesh. Converts the ALO's binary32

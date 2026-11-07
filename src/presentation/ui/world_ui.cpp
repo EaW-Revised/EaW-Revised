@@ -512,8 +512,10 @@ std::optional<HardpointReticleSizes> hardpoint_reticle_sizes(const vfs::Vfs& fil
 
 ReticleRect hardpoint_reticle_rect(const std::array<float, 2> centre, const std::array<float, 2> viewport,
                                   const float screen_size) noexcept {
-    // WU-31: authored screen share, 4/3 height, centred.
-    const float width = screen_size * viewport[0];
+    // WU-31: authored screen share, 4/3 height, centred. Deviation beyond retail's 16:9: both axes
+    // follow the screen HEIGHT (width = share * H * 16/9), so the reticle keeps its 4:3 wide:high shape at
+    // 4:3, 21:9 and 32:9; at 16:9 it equals retail (57.6 x 43.2 at 1920 x 1080).
+    const float width = screen_size * viewport[1] * 16.0F / 9.0F;
     const float height = screen_size * 4.0F / 3.0F * viewport[1];
     return {centre[0] - width * 0.5F, centre[1] - height * 0.5F, width, height};
 }

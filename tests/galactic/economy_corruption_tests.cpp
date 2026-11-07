@@ -8,6 +8,7 @@
 #include <string_view>
 #include <string>
 #include "../support/env.hpp"
+#include "eawr/vfs/vfs.hpp"
 #include "../support/result.hpp"
 #include "galactic_support.hpp"
 #include "eawr/sim/galactic/economy_corruption.hpp"

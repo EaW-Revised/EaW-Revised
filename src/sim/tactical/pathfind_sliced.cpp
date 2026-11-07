@@ -1,5 +1,7 @@
 #include "pathfind_search_internal.hpp"
 
+#include <optional>
+
 namespace eawr::sim::tactical::pathfind_detail {
 
 [[nodiscard]] Fixed reduced_speed(Calc& calc, const MotionProfile& limits, const Vec3 position, const Fixed yaw,

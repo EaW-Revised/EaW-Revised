@@ -1,4 +1,5 @@
 #include "eawr/net/lobby_session.hpp"
+#include "eawr/net/galactic_setup.hpp"
 #include "eawr/net/lan_directory.hpp"
 #include "eawr/net/mesh_policy.hpp"
 
@@ -14,6 +15,7 @@ namespace {
 using Bytes = std::vector<std::uint8_t>;
 constexpr std::size_t name_limit = 64, chat_limit = 512, choice_limit = 256;
 constexpr std::size_t options_limit = 64U * 1024U;
+constexpr std::size_t mod_description_limit = max_lobby_mod_description_bytes;
 
 template<class T> core::Result<T> failure(LobbyReason reason, std::string message) {
     return core::Result<T>::failure(lobby_diagnostic(reason, std::move(message)));
@@ -89,6 +91,23 @@ void validate_snapshot(const LobbySnapshot& value) {
         if (!names.insert(std::move(folded)).second) throw std::runtime_error("duplicate guest name");
     }
 }
+bool valid_mod_description(std::span<const std::uint8_t> bytes) {
+    if (bytes.empty()) return true;
+    if (bytes.size() > mod_description_limit) return false;
+    try {
+        Reader in{bytes};
+        if (in.u8() != 1 || in.u8() > 1) return false;
+        const auto count = in.u32();
+        if (count > 256) return false;
+        for (std::uint32_t i = 0; i < count; ++i) {
+            if (in.u8() > 3) return false;
+            static_cast<void>(in.text(4096)); static_cast<void>(in.text(4096));
+            if (in.boolean()) static_cast<void>(in.text(4096));
+            if (in.boolean()) for (unsigned j = 0; j < 32; ++j) static_cast<void>(in.u8());
+        }
+        return in.at == bytes.size();
+    } catch (const std::runtime_error&) { return false; }
+}
 LobbySelection clean_selection(LobbySelection value) {
     value.name = sanitize_lobby_text(value.name, name_limit);
     return value;
@@ -105,6 +124,7 @@ bool valid_limits(const LobbyLimits& limits) {
 }
 }
 
+bool valid_lobby_mod_description(std::span<const std::uint8_t> bytes) { return valid_mod_description(bytes); }
 core::Diagnostic lobby_diagnostic(LobbyReason reason, std::string message) {
     core::Diagnostic value;
     const unsigned code = reason == LobbyReason::pair_unreachable ? 1762U : reason == LobbyReason::mesh_incomplete ? 1764U
@@ -134,7 +154,7 @@ core::Result<Bytes> encode_lobby_frame(const LobbyFrame& frame) {
         const auto room = room_of(frame);
         if (!valid_room(room)) throw std::runtime_error("invalid room identifier");
         out.u8(static_cast<std::uint8_t>(lobby_snapshot_kind + frame.index()));
-        out.u32(1); out.text(room, 64);
+        out.u32(2); out.text(room, 64);
         std::visit([&](const auto& value) {
             using T = std::decay_t<decltype(value)>;
             if constexpr (std::is_same_v<T, LobbySnapshot>) {
@@ -145,6 +165,8 @@ core::Result<Bytes> encode_lobby_frame(const LobbyFrame& frame) {
                 for (const auto& seat : value.seats) {
                     out.u32(seat.peer); out.u32(seat.seat.value); out.u32(seat.player); out.selection(seat.selection); out.u8(seat.ready ? 1 : 0);
                 }
+                if (!valid_mod_description(value.mounted_mods)) throw std::runtime_error("invalid mounted mods");
+                out.blob(value.mounted_mods, mod_description_limit);
             } else if constexpr (std::is_same_v<T, LobbyRequest>) {
                 if (!value.revision || static_cast<unsigned>(value.action) > static_cast<unsigned>(LobbyAction::snapshot)
                     || (value.action != LobbyAction::select && value.selection != LobbySelection{}))
@@ -173,7 +195,7 @@ core::Result<LobbyFrame> decode_lobby_frame(std::span<const std::uint8_t> bytes)
         if (bytes.size() > max_lobby_frame_bytes) throw std::runtime_error("oversized room frame");
         Reader in{bytes, 0};
         const auto kind = in.u8();
-        if (in.u32() != 1) throw std::runtime_error("unsupported room protocol version");
+        if (in.u32() != 2) throw std::runtime_error("unsupported room protocol version");
         auto room = in.text(64);
         if (!valid_room(room)) throw std::runtime_error("invalid room identifier");
         LobbyFrame result;
@@ -192,6 +214,9 @@ core::Result<LobbyFrame> decode_lobby_frame(std::span<const std::uint8_t> bytes)
                 seat.peer = in.u32(); seat.seat = sim::SeatId{in.u32()}; seat.player = in.u32(); seat.selection = in.selection(); seat.ready = in.boolean();
                 value.seats.push_back(std::move(seat));
             }
+            const auto mods = in.blob(mod_description_limit);
+            if (!valid_mod_description(mods)) throw std::runtime_error("invalid mounted mods");
+            value.mounted_mods.assign(mods.begin(), mods.end());
             validate_snapshot(value); result = std::move(value); break;
         }
         case lobby_request_kind: {
@@ -488,6 +513,11 @@ struct LobbyRuntime {
         context.emplace(std::move(created).value()); context->options.auto_accept = false; context->options.auto_start = false;
         std::vector<SetupSeat> roster;
         for (const auto& value : state.seats) roster.push_back({static_cast<PeerIndex>(roster.size()), value.seat, value.player});
+        if (hooks.bind_setup_seats) {
+            auto bound = hooks.bind_setup_seats(state, roster);
+            if (!bound) { reset_setup(); return core::Result<void>::failure(bound.error()); }
+            roster = std::move(bound).value();
+        }
         auto expected = hooks.offer(state, roster);
         if (!expected) { reset_setup(); return core::Result<void>::failure(expected.error()); }
         auto identify = context->providers.identify;
@@ -495,7 +525,14 @@ struct LobbyRuntime {
         context->providers.identify = [identify = std::move(identify), expected = std::move(expected).value()](const SetupOffer& offered) {
             if (offered.seed != expected.seed || offered.domain != expected.domain || offered.setup != expected.setup
                 || offered.seats != expected.seats || offered.input_delay != expected.input_delay || offered.final_tick_count != expected.final_tick_count)
-                return failure<sim::MatchAgreement>(LobbyReason::setup_failed, "host offer differs from frozen room choices");
+            {
+                std::string message{setup_offer_differs_message};
+                // Name the differing part so the host can tell the player which input to compare.
+                if (offered.domain == galactic_setup_domain && expected.domain == galactic_setup_domain)
+                    if (const auto part = galactic_setup_difference(offered.setup, expected.setup); !part.empty())
+                        message += ": " + std::string(part);
+                return failure<sim::MatchAgreement>(LobbyReason::setup_failed, std::move(message));
+            }
             return identify(offered);
         };
         auto session = SetupSession::join(*stream, context->providers, context->options);
@@ -624,6 +661,7 @@ core::Result<LobbySession> LobbySession::host(MessageTransport& transport, std::
     auto made = make_runtime(transport, std::move(room), transport.self(), std::move(hooks), limits);
     if (!made) return core::Result<LobbySession>::failure(made.error());
     auto value = std::move(made).value(); value->state.capacity = capacity; value->state.game = std::move(game);
+    value->state.mounted_mods = value->hooks.mounted_mods;
     value->state.seats.push_back({transport.self(), sim::SeatId{1}, player, clean_selection(std::move(selection)), false});
     if (auto valid = value->validate(value->state); !valid) return core::Result<LobbySession>::failure(valid.error());
     value->initialized = true; return core::Result<LobbySession>::success(LobbySession(std::move(value)));
@@ -742,6 +780,11 @@ core::Result<void> LobbySession::start(std::uint64_t revision) {
             return failure<void>(LobbyReason::mesh_incomplete, "Every player must be connected to every other player before the game can start.");
     std::vector<SetupSeat> roster;
     for (const auto& seat : value.state.seats) roster.push_back({static_cast<PeerIndex>(roster.size()), seat.seat, seat.player});
+    if (value.hooks.bind_setup_seats) {
+        auto bound = value.hooks.bind_setup_seats(value.state, roster);
+        if (!bound) return core::Result<void>::failure(bound.error());
+        roster = std::move(bound).value();
+    }
     auto frozen = value.state; frozen.phase = LobbyPhase::starting; frozen.frozen_revision = frozen.revision;
     auto offer = value.hooks.offer(frozen, roster);
     if (!offer) {
@@ -824,11 +867,18 @@ core::Result<void> LobbySession::pump(std::uint64_t now) {
             }
         }
     }
+    if (value.hooks.application_pump && value.hooks.application_pump(*value.transport, value.state, now)
+        && value.is_host && value.state.phase == LobbyPhase::staging) {
+        if (auto advanced = value.advance(); !advanced) return advanced;
+        value.clear_ready();
+        if (auto sent = value.broadcast(value.state); !sent) return sent;
+    }
     // Drain a bounded batch before setup can publish commitment. If the batch
     // fills, defer setup/commit to the next pump so queued Unready/Leave wins.
     std::size_t count{};
     for (; count < value.limits.frames_per_pump; ++count) {
         auto raw = value.transport->poll(); if (!raw) break;
+        if (value.hooks.application_frame && value.hooks.application_frame(*value.transport, value.state, *raw, now)) continue;
         const auto sender = raw->from;
         const auto count_drop = [&] { if (value.dropped != std::numeric_limits<std::uint64_t>::max()) ++value.dropped; };
         if (!value.is_host && sender != value.state.host && (raw->frame.empty() || raw->frame.front() != lobby_setup_kind)) {
@@ -902,5 +952,6 @@ const std::optional<LobbyNotice>& LobbySession::notice() const { return runtime_
 std::optional<SetupPhase> LobbySession::setup_phase() const { return runtime_->setup ? std::optional{runtime_->setup->phase()} : std::nullopt; }
 std::uint64_t LobbySession::dropped_frames() const { return runtime_->dropped; }
 const LobbySnapshot& LobbyResult::snapshot() const { return lifetime_->state; }
+MessageTransport& LobbyResult::transport() { return *lifetime_->stream; }
 
 } // namespace eawr::net

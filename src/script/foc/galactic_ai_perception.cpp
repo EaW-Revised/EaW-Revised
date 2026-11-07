@@ -2,6 +2,7 @@
 #include "eawr/core/gc_profile.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <cassert>
 #include <atomic>
 #include <limits>
@@ -299,6 +300,164 @@ std::uint64_t binding_hash(const std::vector<Binding>& bindings) {
 thread_local const GalacticWorld* GalacticWorld::active_world_{};
 thread_local const GalacticWorld* GalacticWorld::active_player_world_{};
 thread_local tactical::PlayerId GalacticWorld::active_player_{};
+struct GalacticWorld::PhaseSavepoint::Saved {
+    struct Header {
+        bool original{true};
+        std::size_t cache{}, visibility{}, flags{}, hints{};
+        std::map<std::size_t, GalacticInternedValue> cache_rows;
+        std::map<std::size_t, GalacticVisibility> visibility_rows;
+        std::map<std::size_t, GalacticStoryFlag> flag_rows;
+    };
+    struct Graph { PathCoefficientInput input; std::map<galactic::PlanetId, Real> values; };
+    GalacticWorld* owner{};
+    const sim::PartitionExecutor* executor{};
+    std::map<tactical::PlayerId, Header> players;
+    std::set<tactical::PlayerId> path_players;
+    std::map<std::pair<tactical::PlayerId, std::size_t>, std::optional<Graph>> graphs;
+    std::shared_ptr<const galactic::GalacticSnapshot> snapshot;
+    std::shared_ptr<const GalacticConnectivity> connectivity;
+    std::shared_ptr<const GalacticEconomyRuntime> economy;
+    std::unique_ptr<GalacticMarkup::PhaseSavepoint> markup;
+    std::optional<std::vector<std::string>> diagnostics;
+    std::size_t diagnostic_count{};
+    std::uint64_t frame{}, period{};
+    std::optional<std::uint64_t> observations_restored_at;
+    sim::EntityId next_id{};
+    bool live{}, settled{};
+};
+GalacticWorld::PhaseSavepoint::PhaseSavepoint(std::unique_ptr<Saved> saved) : saved_(std::move(saved)) {}
+GalacticWorld::PhaseSavepoint::~PhaseSavepoint() {
+    if (!saved_ || saved_->settled) return;
+    saved_->owner->phase_ = nullptr; saved_->owner->phase_abandoned_ = true;
+    saved_->owner->mark_state_changed();
+}
+GalacticWorld::PhaseSavepoint::Work GalacticWorld::PhaseSavepoint::work() const noexcept {
+    Work work;
+    if (!saved_) return work;
+    work.player_headers = saved_->players.size(); work.coefficient_graphs = saved_->graphs.size();
+    for (const auto& [player, header] : saved_->players) {
+        static_cast<void>(player); work.cache_rows += header.cache_rows.size();
+        work.visibility_rows += header.visibility_rows.size(); work.flag_rows += header.flag_rows.size();
+    }
+    return work;
+}
+core::Result<void> GalacticWorld::PhaseSavepoint::commit() {
+    if (!saved_ || saved_->settled) return core::Result<void>::failure(detail::make_error(authoritative::codes::invalid_request, "perception phase already settled"));
+    if (auto committed = saved_->markup->commit(); !committed) return committed;
+    saved_->owner->phase_ = nullptr; saved_->settled = true;
+    saved_->owner->finish_perception_queries();
+    saved_->players.clear(); saved_->graphs.clear(); saved_->diagnostics.reset();
+    return core::Result<void>::success();
+}
+core::Result<void> GalacticWorld::PhaseSavepoint::rollback() {
+    const auto fail = [](std::string message) { return core::Result<void>::failure(detail::make_error(authoritative::codes::invalid_request, std::move(message))); };
+    if (!saved_ || saved_->settled) return fail("perception phase already settled");
+    auto& owner = *saved_->owner;
+    if (owner.partitioned_reads_.load() || owner.owner_reads_.load() || frontier_world_ == &owner)
+        return fail("perception rollback requires joined callbacks and the serial root");
+    owner.phase_ = nullptr;
+    auto supplier = std::move(owner.economy_supplier_);
+    struct Rebuilding {
+        GalacticWorld& owner; EconomySupplier& supplier;
+        ~Rebuilding() { owner.economy_supplier_ = std::move(supplier); owner.phase_rebuilding_ = false; }
+    } rebuilding{owner, supplier};
+    owner.phase_rebuilding_ = true;
+    try {
+        if (auto restored = saved_->markup->rollback(); !restored) {
+            owner.phase_abandoned_ = true; owner.mark_state_changed(); saved_->settled = true; return restored;
+        }
+        const auto restore_rows = [](auto& rows, std::size_t count, auto& originals) {
+            rows.resize(count);
+            for (auto& [index, value] : originals) rows.at(index) = std::move(value);
+        };
+        for (auto& [player, header] : saved_->players) {
+            if (!header.original) { owner.shards_.erase(player); continue; }
+            auto& shard = owner.shards_.at(player);
+            restore_rows(shard.cache, header.cache, header.cache_rows);
+            restore_rows(shard.visibility, header.visibility, header.visibility_rows);
+            restore_rows(shard.flags, header.flags, header.flag_rows);
+            shard.hints.resize(header.hints);
+            shard.cache_index.clear(); shard.visibility_index.clear(); shard.index_dirty = true;
+            shard.force_rows.clear(); shard.first_connected = std::numeric_limits<std::size_t>::max();
+            shard.economy = {}; shard.memo_bindings.clear(); shard.memo_bindings.emplace_back();
+            shard.memo_binding_ids.clear(); shard.memo_bindings_frame.reset();
+            shard.refreshing_visibility = false; shard.trace = nullptr;
+            ++shard.revision; ++shard.movement_revision; ++shard.visibility_stamp;
+        }
+        for (auto& [key, graph] : saved_->graphs) if (graph) {
+            auto& row = owner.path_coefficients_[key.first];
+            row.inputs.at(key.second) = std::move(graph->input); row.values.at(key.second) = std::move(graph->values);
+        }
+        std::erase_if(owner.path_coefficients_, [&](const auto& row) { return !saved_->path_players.contains(row.first); });
+        if (saved_->diagnostics) owner.path_coefficient_diagnostics_ = std::move(*saved_->diagnostics);
+        else owner.path_coefficient_diagnostics_.resize(saved_->diagnostic_count);
+        // Rebuild only derived physical rows, from original immutable inputs.
+        // Canonical observations/pruning/connectivity drops stay suppressed.
+        owner.bound_state_ = BoundState{};
+        owner.bound_state_.live_deltas_ = saved_->live;
+        owner.bound_state_.economy_runtime_ = saved_->economy;
+        owner.perception_period_ = saved_->period;
+        owner.records_ready_ = false;
+        auto rebound = owner.bind_publication(saved_->snapshot, saved_->connectivity, *saved_->executor, saved_->frame, saved_->next_id);
+        if (!rebound) { owner.phase_abandoned_ = true; owner.mark_state_changed(); saved_->settled = true; return rebound; }
+        owner.bound_state_.observations_restored_at_ = saved_->observations_restored_at;
+        owner.mark_state_changed(); saved_->settled = true;
+        saved_->players.clear(); saved_->graphs.clear(); saved_->diagnostics.reset();
+        return core::Result<void>::success();
+    } catch (const std::exception& error) { owner.phase_abandoned_ = true; owner.mark_state_changed(); saved_->settled = true; return fail(error.what()); }
+}
+core::Result<std::unique_ptr<GalacticWorld::PhaseSavepoint>> GalacticWorld::begin_phase(const sim::PartitionExecutor& executor) {
+    using Return = core::Result<std::unique_ptr<PhaseSavepoint>>;
+    if (phase_ || phase_abandoned_ || !available() || !prepared_frontier_players_.empty()
+        || partitioned_reads_.load() || owner_reads_.load() || frontier_world_ == this)
+        return Return::failure(detail::make_error(authoritative::codes::invalid_request, "perception phase requires its idle bound serial root"));
+    auto markup = markup_->begin_phase(); if (!markup) return Return::failure(markup.error());
+    auto saved = std::make_unique<PhaseSavepoint::Saved>(); saved->owner = this; saved->executor = &executor;
+    saved->markup = std::move(markup).value(); saved->snapshot = bound_state_.snapshot_;
+    saved->connectivity = bound_state_.connectivity_; saved->economy = bound_state_.economy_runtime_;
+    saved->frame = bound_state_.synchronized_frame_; saved->next_id = bound_state_.next_id_;
+    saved->observations_restored_at = bound_state_.observations_restored_at_;
+    saved->period = perception_period_; saved->live = bound_state_.live_deltas_;
+    saved->diagnostic_count = path_coefficient_diagnostics_.size();
+    for (const auto& [player, shard] : shards_) {
+        auto& header = saved->players[player];
+        header.cache = shard.cache.size(); header.visibility = shard.visibility.size();
+        header.flags = shard.flags.size(); header.hints = shard.hints.size();
+    }
+    for (const auto& [player, graph] : path_coefficients_) { static_cast<void>(graph); saved->path_players.insert(player); }
+    auto phase = std::unique_ptr<PhaseSavepoint>(new PhaseSavepoint(std::move(saved)));
+    phase_ = phase->saved_.get(); return Return::success(std::move(phase));
+}
+void GalacticWorld::note_phase_shard(tactical::PlayerId player) const {
+    if (phase_) phase_->players[player].original = false;
+}
+void GalacticWorld::retain_phase_row(tactical::PlayerId player, std::uint32_t kind, std::size_t index) const {
+    if (!phase_) return;
+    // Existing player ownership/locks serialize writes within each shard.
+    // Phase headers were created before fan-out; no shared map insertion here.
+    auto& header = phase_->players.at(player); const auto& mine = shards_.at(player);
+    if (kind == 1 && index < header.cache && !header.cache_rows.contains(index)) header.cache_rows.emplace(index, mine.cache.at(index));
+    else if (kind == 2 && index < header.visibility && !header.visibility_rows.contains(index)) header.visibility_rows.emplace(index, mine.visibility.at(index));
+    else if (kind == 3 && index < header.flags && !header.flag_rows.contains(index)) header.flag_rows.emplace(index, mine.flags.at(index));
+}
+void GalacticWorld::retain_path_graph(tactical::PlayerId player, std::size_t graph) {
+    if (!phase_ || phase_->graphs.contains({player, graph})) return;
+    auto [at, inserted] = phase_->graphs.try_emplace({player, graph}); static_cast<void>(inserted);
+    if (phase_->path_players.contains(player)) {
+        auto& row = path_coefficients_.at(player);
+        at->second.emplace(PhaseSavepoint::Saved::Graph{std::move(row.inputs.at(graph)), std::move(row.values.at(graph))});
+    }
+}
+void GalacticWorld::retain_all_path_graphs() {
+    if (phase_) for (const auto& [player, row] : path_coefficients_) {
+        static_cast<void>(row); retain_path_graph(player, 0); retain_path_graph(player, 1);
+    }
+}
+std::vector<std::string> GalacticWorld::take_path_coefficient_diagnostics() {
+    if (phase_ && !phase_->diagnostics)
+        phase_->diagnostics.emplace(path_coefficient_diagnostics_.begin(), path_coefficient_diagnostics_.begin() + static_cast<std::ptrdiff_t>(phase_->diagnostic_count));
+    return std::exchange(path_coefficient_diagnostics_, {});
+}
 GalacticWorld::PlayerReads::PlayerReads(const GalacticWorld& world, tactical::PlayerId player)
     : world_(world), previous_world_(active_world_), previous_player_world_(active_player_world_),
       previous_player_(active_player_) {
@@ -336,6 +495,7 @@ GalacticWorld::Shard& GalacticWorld::shard(tactical::PlayerId owner) const {
     if (found != shards_.end()) return found->second;
     // Only a player outside the setup misses, and inserting into the map is never safe inside a partitioned phase.
     assert(partitioned_reads_.load(std::memory_order_acquire) == 0 && owner_reads_.load(std::memory_order_acquire) == 0);
+    note_phase_shard(owner);
     return shards_[owner];
 }
 const PerceptionToken& GalacticWorld::token_of(const Shard& owner, std::uint64_t id) const {
@@ -554,11 +714,12 @@ std::optional<Real> GalacticWorld::read(const GalacticQueryKey& key, ReadMode mo
             while (owner.cache_index[slot]) slot = (slot + 1) & (owner.cache_index.size() - 1);
             owner.cache_index[slot] = owner.cache.size();
         }
-    } else *found = cached;
+    } else { retain_phase_row(key.player, 1, static_cast<std::size_t>(found - owner.cache.data())); *found = cached; }
     if (record_changed) update_record(key.player, 1, found ? static_cast<std::size_t>(found - owner.cache.data()) : owner.cache.size() - 1);
     if (visible && fogged) {
         auto* row = visibility(key.player, key.planet, mask);
         if (row->last_observed != bound().synchronized_frame_) {
+            retain_phase_row(key.player, 2, static_cast<std::size_t>(row - owner.visibility.data()));
             row->last_observed = bound().synchronized_frame_;
             update_record(key.player, 2, static_cast<std::size_t>(row - owner.visibility.data()));
         }
@@ -853,6 +1014,9 @@ std::optional<Real> GalacticWorld::uncached(const GalacticQueryKey& key, ReadMod
 }
 
 void GalacticWorld::finish_perception_queries() const {
+    // Appended binding spellings are derived metadata. Retain their IDs while
+    // phase undo refers to old rows; reclaim at the successful commit seam.
+    if (phase_ || phase_rebuilding_) return;
     const auto lock = query_lock();
     // This is a reclamation threshold, not a limit on authored bindings. The
     // native record set defines the retained storage; spare growth amortizes GC.
@@ -924,6 +1088,7 @@ Real GalacticWorld::force_cache_deadline(tactical::PlayerId owner, std::uint32_t
     return through;
 }
 core::Result<void> GalacticWorld::restore(GalacticPerceptionState state) {
+    if (phase_ || phase_abandoned_) return core::Result<void>::failure(detail::make_error(authoritative::codes::invalid_request, "cannot restore an active or unsettled perception phase"));
     // F validates the whole container; reject duplicate component identities here.
     std::set<GalacticCacheKey> cache_keys;
     std::set<std::tuple<tactical::PlayerId, galactic::PlanetId, std::uint32_t>> visibility_keys;
@@ -996,6 +1161,10 @@ core::Result<void> GalacticWorld::restore(GalacticPerceptionState state) {
     for (auto& row : state.visibility) shard(row.player).visibility.push_back(row);
     for (auto& row : state.flags) shard(row.player).flags.push_back(std::move(row));
     for (auto& row : state.hints) shard(row.player).hints.push_back(std::move(row));
+    // WGA-65/258: restored rows belong to the last admitted perception publication,
+    // which can precede the completed world used to construct this load. Its
+    // process-local generation does not prove these archived rows were observed.
+    bound().observations_restored_at_ = bound().synchronized_frame_;
     rebuild_records(); records_ready_ = true;
     return core::Result<void>::success();
 }
@@ -1027,6 +1196,7 @@ bool GalacticWorld::check_story_flag(tactical::PlayerId owner, galactic::PlanetI
     if (clear) {
         ++mine.revision;
         const auto index = static_cast<std::size_t>(found - mine.flags.begin());
+        retain_phase_row(owner, 3, index); retain_phase_row(owner, 3, mine.flags.size() - 1);
         if (records_ready_) {
             mine.records.erase(found->player, 3, index);
             if (index + 1 != mine.flags.size()) mine.records.erase(mine.flags.back().player, 3, mine.flags.size() - 1);
@@ -1044,13 +1214,17 @@ void GalacticWorld::visibility_changed(tactical::PlayerId owner, galactic::Plane
     auto& mine = shard(owner);
     ++mine.visibility_stamp;
     auto* observed = visibility(owner, id, mask);
+    retain_phase_row(owner, 2, static_cast<std::size_t>(observed - mine.visibility.data()));
     if (visible || observed->visible) {
         mine.refreshing_visibility = true;
         std::vector<GalacticInternedKey> keys;
         for (const auto& cached : mine.cache) if (cached.key.player == owner && cached.key.planet == id
             && (mask == 0 || galactic_visibility_mask(token_of(mine, cached.key.token).tokens) == mask)) keys.push_back(cached.key);
         for (const auto& key : keys) if (const auto value = uncached(query_key(key))) {
-            if (auto* cached = cached_value(key)) { cached->value = *value; cached->frame = bound().synchronized_frame_; update_record(owner, 1, static_cast<std::size_t>(cached - mine.cache.data())); }
+            if (auto* cached = cached_value(key)) {
+                retain_phase_row(owner, 1, static_cast<std::size_t>(cached - mine.cache.data()));
+                cached->value = *value; cached->frame = bound().synchronized_frame_; update_record(owner, 1, static_cast<std::size_t>(cached - mine.cache.data()));
+            }
         }
         visibility(owner, id, mask)->last_observed = bound().synchronized_frame_;
         mine.refreshing_visibility = false;

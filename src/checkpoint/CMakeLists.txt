@@ -8,6 +8,6 @@ target_include_directories(
     PUBLIC
         "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>"
 )
-target_link_libraries(eawr_checkpoint PUBLIC eawr::core eawr::sim eawr::campaign)
+target_link_libraries(eawr_checkpoint PUBLIC eawr::core eawr::sim eawr::campaign eawr::mods)
 target_compile_features(eawr_checkpoint PUBLIC cxx_std_20)
 eawr_target_project_warnings(eawr_checkpoint)

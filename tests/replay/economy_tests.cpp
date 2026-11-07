@@ -9,10 +9,12 @@
 #include "eawr/platform/sim_workers.hpp"
 #include "eawr/sim/tactical/economy.hpp"
 #include "eawr/sim/tactical/fighters.hpp"
+#include "eawr/sim/tactical/motion.hpp"
 #include "eawr/sim/tactical/replay.hpp"
 #include "eawr/sim/tactical/session.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -24,6 +26,7 @@
 #include <string_view>
 #include <utility>
 #include <vector>
+#include <limits>
 
 namespace economy_test_support {
 
@@ -402,6 +405,186 @@ void test_campaign_reserve_publication() {
         }
         if (baseline.empty()) baseline = trace;
         expect(trace == baseline, "reserve publication retains 1/2/4/8 tactical hash equality");
+    }
+}
+
+// Class C admission is shared by direct sessions and replay creation; diagnostics stay outside bytes.
+void test_economy_load_degradation() {
+    auto authored = rules();
+    authored.load_notes.type_names[station_type] = "Synthetic_Station";
+    authored.players[0].credits = units(-3);
+    authored.players[1].ai_build_time_multiplier = {};
+    authored.menus[0].options[0].price = units(-1);
+    authored.menus[1].options[0].ai_build_frames = 0;
+    authored.income[0].per_frame = units(-5);
+    authored.prevention[0].radius = units(-4);
+    authored.footprints[0].layer_z = Fixed::from_raw(std::numeric_limits<std::int64_t>::min());
+    authored.footprints[0].box->min_x = units(200);
+    authored.collision_distance = units(-2);
+    authored.vulnerability = units(-9);
+    authored.bounty_values = {{ship_type, units(-10)}};
+    tactical::UpgradeProfile upgrade;
+    upgrade.type = upgrade_type;
+    upgrade.stealth_duration.push_back({0, units(-1), false});
+    tactical::UpgradeBonus bonus;
+    bonus.percentages[0] = units(9);
+    upgrade.bonuses.push_back(bonus);
+    tactical::IncomeModifier modifier;
+    modifier.target_source = 123456;
+    upgrade.income_modifiers.push_back(modifier);
+    authored.upgrades.push_back(upgrade);
+    tactical::CommandBonusProfile command;
+    command.type = station_type;
+    command.bonus.percentages[0] = units(12);
+    authored.command_bonuses.push_back(command);
+    authored.pads.neutral = ai;
+    tactical::CaptureProfile capture;
+    capture.type = station_type;
+    capture.radius = units(-1);
+    capture.transition_seconds = units(90000);
+    authored.pads.capture.push_back(capture);
+    authored.pads.respawn.push_back({ship_type, std::numeric_limits<std::uint32_t>::max()});
+    authored.pads.construction.push_back({ship_type, station_type, units(-5), 3, 3});
+    eawr::core::LoadNoteBuffer notes;
+    auto prepared = tactical::prepare_economy(authored, setup().players, notes);
+    expect(static_cast<bool>(prepared), "class C economy values normalize before final validation");
+    if (!prepared) return;
+    const auto& effective = prepared.value();
+    expect(authored.players[0].credits == units(-3), "normalization leaves authored input owned by its caller");
+    expect(effective.players[0].credits == Fixed{} && effective.players[1].ai_build_time_multiplier.raw() == 1,
+        "balances floor at zero and build multipliers retain a positive quantum");
+    expect(!effective.menus[0].options[0].available && !effective.menus[1].options[0].available,
+        "bad price and missing AI build time only disable their offers");
+    expect(effective.pads.construction.empty() && effective.pads.capture[0].radius == Fixed{}
+        && effective.pads.capture[0].transition_seconds == units(86400)
+        && effective.pads.respawn[0].frames == 86400U * 30U, "capture and respawn limits degrade independently of bad construction");
+    expect(effective.footprints[0].box->min_x <= effective.footprints[0].box->max_x
+        && effective.prevention[0].radius == Fixed{} && effective.vulnerability == units(-4),
+        "coordinates reorder without dropping placements and reinforcement constants clamp");
+    expect(effective.upgrades[0].income_modifiers.empty() && effective.disabled_types.contains(upgrade_type)
+        && effective.upgrades[0].stealth_duration[0].percentage.raw() == -one + 1,
+        "invalid modifiers are omitted and unsupported upgrades become unavailable");
+    eawr::core::LoadNoteCollector collected;
+    collected.merge(notes);
+    const auto emitted = collected.snapshot();
+    for (const auto code : {"0355", "0356", "0357", "0358", "0359", "0360", "0361", "0362", "0363", "0364", "0365"})
+        expect(std::any_of(emitted.begin(), emitted.end(), [&](const auto& note) {
+            return note.code == std::string("EAWR-LOAD-") + code && !note.tag.empty()
+                && !note.authored_value.empty() && !note.effective_value.empty()
+                && note.classification == eawr::core::LoadCategory::unknown_degrade;
+        }), std::string("class C note present for ") + code);
+    const std::map<std::string, std::size_t> expected_counts{{"0355", 1}, {"0356", 1}, {"0357", 4},
+        {"0358", 2}, {"0359", 2}, {"0360", 1}, {"0361", 2}, {"0362", 1}, {"0363", 1}, {"0364", 1}, {"0365", 2}};
+    for (const auto& [code, count] : expected_counts)
+        expect(static_cast<std::size_t>(std::count_if(emitted.begin(), emitted.end(), [&](const auto& note) {
+            return note.code == "EAWR-LOAD-" + code;
+        })) == count, "exact class C note count for " + code);
+    const std::map<std::pair<std::string, std::string>, std::size_t> expected_objects{
+        {{"0355", "type#10"}, 1}, {{"0356", "Synthetic_Station"}, 1},
+        {{"0357", "type#10"}, 2}, {{"0357", "Synthetic_Station"}, 2},
+        {{"0358", "player#1"}, 1}, {{"0358", "player#2"}, 1},
+        {{"0359", "Synthetic_Station"}, 1}, {{"0359", "type#90"}, 1},
+        {{"0360", "Synthetic_Station"}, 1}, {{"0361", "type#10"}, 2}, {{"0362", "type#10"}, 1},
+        {{"0363", "type#90"}, 1}, {{"0364", "type#90"}, 1}, {{"0365", "economy rules"}, 2}};
+    for (const auto& [key, count] : expected_objects)
+        expect(static_cast<std::size_t>(std::count_if(emitted.begin(), emitted.end(), [&](const auto& note) {
+            return note.code == "EAWR-LOAD-" + key.first && note.object == key.second;
+        })) == count, "exact note count per code and object");
+    expect(std::any_of(emitted.begin(), emitted.end(), [](const auto& note) {
+        return note.object == "Synthetic_Station" && note.authored_value == "-4" && note.effective_value == "0";
+    }), "notes preserve type names and decimal amounts");
+    eawr::core::LoadNoteBuffer repeated;
+    auto twice = tactical::prepare_economy(effective, setup().players, repeated);
+    eawr::core::LoadNoteCollector repeated_notes;
+    repeated_notes.merge(repeated);
+    expect(twice && twice.value() == effective && repeated_notes.snapshot().empty(), "normalization is idempotent without repeated notes");
+    auto metadata_only = effective;
+    metadata_only.load_notes.pending = emitted;
+    expect(metadata_only == effective, "diagnostic sidecar does not affect economy equality");
+    auto campaign_start = setup();
+    auto campaign_rules = authored;
+    campaign_rules.campaign = true;
+    for (auto& player : campaign_rules.players) player.credit_cap = units(6000);
+    campaign_start.campaign.emplace();
+    campaign_start.campaign->players = campaign_rules.players;
+    campaign_start.first_free_entity_id = 3;
+    auto campaign = tactical::TacticalSession::create(campaign_start, sensors, {}, motion(), std::nullopt,
+        {}, {}, {}, campaign_rules);
+    expect(static_cast<bool>(campaign), "campaign setup pre-validation accepts the same degraded accounts");
+    eawr::sim::InlineExecutor inline_executor;
+    if (campaign) expect(static_cast<bool>(campaign.value().step(inline_executor)), "degraded campaign account session steps");
+    std::string reference;
+    for (const auto workers : {1U, 2U, 4U, 8U}) {
+        eawr::core::LoadNoteBuffer session_notes;
+        auto made = tactical::TacticalSession::create(setup(), sensors, {}, motion(), std::nullopt,
+            {}, {}, {}, authored, {}, &session_notes);
+        expect(static_cast<bool>(made), "class C authored economy creates a session");
+        if (!made) continue;
+        eawr::platform::ThreadWorkerAdapter executor(workers);
+        expect(static_cast<bool>(made.value().step(executor)), "class C economy session steps");
+        if (reference.empty()) reference = made.value().state_sha256();
+        expect(reference == made.value().state_sha256(), "class C degradation is equal on 1/2/4/8 workers");
+        auto replayed = tactical::TacticalSession::from_replay(made.value().record(), sensors, {}, motion(),
+            std::nullopt, {}, {}, {}, authored);
+        expect(replayed && replayed.value().step(executor), "replay creation uses the same normalizer");
+        if (replayed) expect(replayed.value().state_sha256() == reference, "replayed degradation preserves state identity");
+        auto direct = session(metadata_only);
+        expect(direct && direct->step(executor), "diagnostic-only content creates and steps");
+        if (direct) expect(direct->state_sha256() == reference, "diagnostic sidecar does not enter canonical state");
+    }
+}
+
+void test_economy_load_boundaries() {
+    const auto check = [](const auto& mutate, const char* code, const auto& inspect) {
+        auto authored = rules();
+        mutate(authored);
+        eawr::core::LoadNoteBuffer buffer;
+        auto prepared = tactical::prepare_economy(authored, setup().players, buffer);
+        expect(prepared && inspect(prepared.value()), "economy row has its exact effective value");
+        eawr::core::LoadNoteCollector collector;
+        collector.merge(buffer);
+        const auto notes = collector.snapshot();
+        expect(notes.size() == 1 && notes[0].code == code && !notes[0].object.empty(),
+            std::string("exactly one note for isolated row ") + code);
+    };
+    check([](auto& r) { r.players[0].credit_cap = units(-1); }, "EAWR-LOAD-0358",
+        [](const auto& r) { return r.players[0].credit_cap == Fixed{}; });
+    check([](auto& r) { r.players[1].strategic_credits = units(-1); }, "EAWR-LOAD-0358",
+        [](const auto& r) { return r.players[1].strategic_credits == Fixed{}; });
+    check([](auto& r) { r.players[1].credit_multiplier = units(-1); }, "EAWR-LOAD-0358",
+        [](const auto& r) { return r.players[1].credit_multiplier == Fixed{}; });
+    check([](auto& r) {
+        r.campaign = true;
+        tactical::CommandBonusProfile profile; profile.type = station_type; profile.battlefield = true;
+        profile.reveal_delta = units(9); r.command_bonuses.push_back(profile);
+    }, "EAWR-LOAD-0356", [](const auto& r) { return r.command_bonuses[0].reveal_delta == units(8); });
+    check([](auto& r) {
+        tactical::UpgradeProfile profile; profile.type = upgrade_type;
+        tactical::UpgradeProfile::Bounty bounty; bounty.percentage = units(-1);
+        profile.bounties.push_back(bounty); r.upgrades.push_back(profile);
+    }, "EAWR-LOAD-0362", [](const auto& r) { return r.upgrades[0].bounties[0].percentage == Fixed{}; });
+    check([](auto& r) { r.pads.respawn.push_back({ship_type, 86401U * 30U}); }, "EAWR-LOAD-0357",
+        [](const auto& r) { return r.pads.respawn[0].frames == 86400U * 30U; });
+    check([](auto& r) {
+        tactical::UpgradeProfile profile; profile.type = upgrade_type;
+        profile.stealth_duration.push_back({0, units(-1), false}); r.upgrades.push_back(profile);
+    }, "EAWR-LOAD-0363", [](const auto& r) { return r.upgrades[0].stealth_duration[0].percentage.raw() == -one + 1; });
+    for (const auto vulnerability : {-4, 0}) {
+        auto boundary = rules();
+        boundary.vulnerability = units(vulnerability);
+        boundary.collision_distance = units(tactical::max_motion_coordinate);
+        boundary.menus[0].options[0].price = units(std::int64_t{1} << 32);
+        boundary.pads.respawn.push_back({ship_type, 86400U * 30U});
+        tactical::UpgradeProfile upgrade; upgrade.type = upgrade_type;
+        tactical::UpgradeBonus bonus; bonus.percentages[0] = units(8); upgrade.bonuses.push_back(bonus);
+        upgrade.stealth_duration.push_back({0, Fixed::from_raw(-one + 1), false});
+        boundary.upgrades.push_back(upgrade);
+        eawr::core::LoadNoteBuffer buffer;
+        auto prepared = tactical::prepare_economy(boundary, setup().players, buffer);
+        eawr::core::LoadNoteCollector collector; collector.merge(buffer);
+        expect(prepared && prepared.value() == boundary && collector.snapshot().empty(),
+            "86400 seconds, +8 bonus, -1 plus quantum, -4/0 vulnerability, maximum collision and price stay unchanged");
+        expect(prepared && !prepared.value().disabled_types.contains(upgrade_type), "exactly +8 does not disable upgrade");
     }
 }
 
@@ -803,6 +986,8 @@ int main(const int argc, char** argv) {
     test_arrival_placement();
     test_vertical_arrival_blocker();
     test_determinism();
+    test_economy_load_boundaries();
+    test_economy_load_degradation();
     test_validation();
     test_reserved_reinforcement();
     test_campaign_reserve_publication();

@@ -25,6 +25,10 @@ class CompileInfo(c.Structure):
                 ("option_count", c.c_uint), ("log_level", c.c_int), ("source_name", c.c_char_p)]
 
 
+class CompileOption(c.Structure):
+    _fields_ = [("name", c.c_int), ("value", c.c_uint)]
+
+
 def bind(dll, name, result, *arguments):
     function = getattr(dll, name)
     function.restype = result
@@ -76,12 +80,16 @@ def probe(folder: Path):
         info = CompileInfo(0, None, Code(c.cast(source, c.c_void_p), c.sizeof(source)), 3, 1,
                            None, 0, 3, b"invented-abi-control")
         output, messages = Code(), c.c_void_p()
+        compiled_ok = False
         try:
-            require(compile_stage(c.byref(info), c.byref(output), c.byref(messages)) == 0, "vkd3d compile")
+            result = compile_stage(c.byref(info), c.byref(output), c.byref(messages))
+            compiled_ok = result >= 0
+            require(result == 0, "vkd3d compile")
             binary = c.string_at(output.code, output.size)
             require(len(binary) > 20 and binary[:4] == b"\x03\x02\x23\x07", "SPIR-V output")
         finally:
-            free_code(c.byref(output))
+            if compiled_ok:
+                free_code(c.byref(output))
             free_messages(messages)
         context = c.c_void_p()
         require(create(c.byref(context)) == 0 and context.value, "context create")
@@ -112,12 +120,38 @@ def probe(folder: Path):
         bad = (c.c_uint * 1)(0)
         info.source = Code(c.cast(bad, c.c_void_p), c.sizeof(bad))
         output, messages = Code(), c.c_void_p()
+        compiled_ok = False
         try:
-            require(compile_stage(c.byref(info), c.byref(output), c.byref(messages)) < 0, "invalid bytecode refusal")
+            result = compile_stage(c.byref(info), c.byref(output), c.byref(messages))
+            compiled_ok = result >= 0
+            require(result < 0, "invalid bytecode refusal")
             require(messages.value and c.string_at(messages), "vkd3d error allocation")
         finally:
-            free_code(c.byref(output))
+            if compiled_ok:
+                free_code(c.byref(output))
             free_messages(messages)
+    # Failure transfers no code ownership, even if internally freed output
+    # fields remain nonnull. Exercise both default and nondefault late failures.
+    late_failure = [0xfffe0200, 0x0200001f, 0x80000000, 0x900f0000,
+                    0x02000001, 0xa00f0000, 0x90e40000, 0xffff]
+    for words, api in ((late_failure, None), (vertex, 21)):
+        source = (c.c_uint * len(words))(*words)
+        rejected_options = (CompileOption * 1)(CompileOption(4, api or 0))
+        info = CompileInfo(0, None, Code(c.cast(source, c.c_void_p), c.sizeof(source)), 3, 1,
+                           c.cast(rejected_options, c.c_void_p) if api is not None else None,
+                           1 if api is not None else 0, 3, b"invented-error-ownership")
+        output, messages = Code(), c.c_void_p()
+        compiled_ok = False
+        try:
+            result = compile_stage(c.byref(info), c.byref(output), c.byref(messages))
+            compiled_ok = result >= 0
+            require(result < 0 and output.code and messages.value,
+                    "late compiler refusal with non-owned output fields")
+        finally:
+            if compiled_ok:
+                free_code(c.byref(output))
+            free_messages(messages)
+    print("default/nondefault failed compile transfers no code ownership; originating-DLL messages released")
     print("public C ABI: versions, 8 compile/create/release/destroy cycles and both error ownership controls passed")
 
 

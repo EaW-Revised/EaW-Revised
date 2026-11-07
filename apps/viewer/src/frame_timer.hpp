@@ -27,4 +27,21 @@ private:
     Clock::time_point start_{};
 };
 
+// Per-stage sums over a frame: mark(i) ADDS the ms since the previous mark/restart to slots[i]. A null array reads no clock.
+class SumLapTimer final {
+public:
+    explicit SumLapTimer(double* slots) : slots_(slots) { if (slots_) last_ = Clock::now(); }
+    void restart() { if (slots_) last_ = Clock::now(); }
+    void mark(const std::size_t index) {
+        if (!slots_) return;
+        const auto now = Clock::now();
+        slots_[index] += std::chrono::duration<double, std::milli>(now - last_).count();
+        last_ = now;
+    }
+private:
+    using Clock = std::chrono::steady_clock;
+    double* slots_{};
+    Clock::time_point last_{};
+};
+
 } // namespace eawr::presentation::godot_backend

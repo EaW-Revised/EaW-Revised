@@ -1,5 +1,6 @@
 #include "eawr/core/load_profile.hpp"
 #include "battle_effects.hpp"
+#include "eawr/presentation/particles/lane_guard.hpp"
 
 #include "eawr/presentation/space/space.hpp"
 #include "eawr/scene/scene.hpp"
@@ -29,12 +30,14 @@ BattleEffects::BattleEffects(godot::Node3D& host, const vfs::Vfs& filesystem, co
     // #638: nothing here reads the streams' hashes, so the frames do not compute them.
     registry_->set_stream_hashes(false);
     backend_->set_emitter_reuse(true);
+    backend_->set_merge_additive(GodotParticleBackend::merge_additive_default());
 }
 
 BattleEffects::~BattleEffects() { release(); }
 
 void BattleEffects::move_feedback(const sim::math::Vec3& point, const ui::OrderMode mode,
                                   const bool double_click, const std::uint64_t tick) {
+    particles::lane::guard_main(); // L1.2: counts a main-thread call while a lane job owns this state; never aborts
     if (released_) return;
     const std::size_t index = mode == ui::OrderMode::attack_move ? 2U
         : mode == ui::OrderMode::guard ? 3U : double_click ? 1U : 0U;

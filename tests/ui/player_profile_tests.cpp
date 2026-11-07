@@ -5,6 +5,7 @@
 #include "eawr/presentation/ui/player_profile.hpp"
 #include "eawr/presentation/ui/text_file.hpp"
 #include "ui_test_support.hpp"
+#include "../../apps/viewer/src/setup_profile_policy.hpp"
 
 #include <algorithm>
 #include <filesystem>
@@ -46,6 +47,20 @@ void test_defaults() {
     const ui::ProfileLoad missing = ui::load_profile_file(std::filesystem::temp_directory_path() / "eawr-no-such-profile.cfg");
     expect(missing.defaulted && missing.notes.empty() && missing.profile == profile,
            "ST-S1: a missing file is the defaults with no note");
+}
+
+void test_setup_profile_policy() {
+    using eawr::presentation::godot_backend::setup_uses_player_profile;
+    expect(setup_uses_player_profile(false, true, true, false, false),
+           "interactive launcher front end loads its profile even with a report");
+    expect(!setup_uses_player_profile(false, false, true, false, false),
+           "a reported standalone fixture does not load the user profile");
+    expect(!setup_uses_player_profile(false, true, true, true, false),
+           "a capture stays isolated even in the front end");
+    expect(!setup_uses_player_profile(false, true, true, false, true),
+           "a synthetic run stays isolated even in the front end");
+    expect(setup_uses_player_profile(true, false, true, true, true),
+           "an explicitly named profile is honored in a fixture");
 }
 
 ui::PlayerProfile changed_profile() {
@@ -206,6 +221,7 @@ void test_failed_replace_keeps_old_file() {
 } // namespace
 
 int main() {
+    test_setup_profile_policy();
     test_failed_replace_keeps_old_file();
     test_defaults();
     test_round_trip();

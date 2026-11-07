@@ -16,6 +16,7 @@
 #include "eawr/presentation/ui/pads.hpp"
 #include "eawr/presentation/ui/overview_ui.hpp"
 #include "eawr/presentation/ui/selection.hpp"
+#include "eawr/presentation/ui/settings.hpp"
 #include "eawr/presentation/ui/special_weapon.hpp"
 #include "eawr/presentation/ui/unit_cards.hpp"
 
@@ -87,7 +88,7 @@ public:
     // attack acknowledgements, docs/behaviour/battle-audio.md BA-20 to BA-23), oldest first. The
     // battle audio takes them after each frame.
     struct Acknowledgement final {
-        enum class Kind : std::uint8_t { select, move, attack, stop, guard };
+        enum class Kind : std::uint8_t { select, move, attack, stop, guard, select_all, select_screen };
         Kind kind{Kind::select};
         std::vector<sim::EntityId> units;  // the selection it speaks for
         sim::EntityId target{sim::invalid_entity_id};
@@ -159,6 +160,9 @@ public:
     // AbilityCommands sink. Until the simulation has ability state (#76) the state is the stand-in
     // ui::ReadyAbilities and the sink only adds a report line; set_abilities() takes #76's instead.
     [[nodiscard]] const ui::AbilityBar& ability_bar() const noexcept { return ability_bar_; }
+    void set_ability_icon(std::function<std::string_view(const ui::CardUnit&, bool)> icon) {
+        ability_icon_ = std::move(icon);
+    }
     bool ability_click(std::size_t index, bool right, const LiveSessionView& live);
     void set_abilities(const ui::AbilityState* state, ui::AbilityCommands* commands) noexcept {
         ability_state_ = state;
@@ -192,6 +196,7 @@ public:
     void set_overview_probe(std::function<std::string()> probe) { overview_probe_ = std::move(probe); }
 
 private:
+    ui::PlayerSettings selection_fallback_{};
     struct Drag final {
         std::array<float, 2> start{};
         std::array<float, 2> end{};
@@ -218,6 +223,8 @@ private:
     ui::Vec3f acceptance_recovery_anchor_{};
     struct AcceptanceAttempt { std::uint64_t tick{}; unsigned stage{}; std::string result; std::size_t candidates{}; };
     std::vector<AcceptanceAttempt> acceptance_attempts_;
+    // #5217: the host viewport's final (content-scale) transform; identity without a viewport.
+    [[nodiscard]] std::array<float, 6> final_transform() const;
     // A scripted middle-button gesture: Ctrl key, button and motion events through the engine queue.
     void replay_middle(const LiveSessionView::ScriptedInput& scripted, const std::string& name);
     void draw();
@@ -245,6 +252,7 @@ private:
     std::vector<ui::CardUnit> card_units_;
     const units::UnitTables* card_tables_{};
     std::map<sim::tactical::TypeId, const units::UnitType*> card_types_;
+    std::function<std::string_view(const ui::CardUnit&, bool)> ability_icon_;
     std::shared_ptr<const sim::tactical::TacticalSnapshot> cards_snapshot_;
     std::uint64_t cards_pending_revision_{};
     std::vector<sim::EntityId> cards_selection_;

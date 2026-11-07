@@ -1,9 +1,10 @@
 #pragma once
 
 #include "eawr/core/result.hpp"
-#include "eawr/vfs/vfs.hpp"
+#include "eawr/vfs/vfs_fwd.hpp"
 
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <string>
 #include <vector>

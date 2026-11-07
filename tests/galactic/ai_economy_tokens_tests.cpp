@@ -9,6 +9,7 @@
 #include <string>
 #include <optional>
 #include "../support/env.hpp"
+#include "eawr/vfs/vfs.hpp"
 #include "../support/result.hpp"
 // WGA-284..299: economy readers consume immutable completed inputs.
 #include "galactic_support.hpp"
@@ -139,14 +140,22 @@ struct Host {
             {"COUNTQ", "Variable_Target.StructureCount {Parameter_Type=\"TYPE200\",Parameter_Type=\"TYPE200\"}"},
             {"COUNTDONE", "Variable_Target.StructureCount {Parameter_Type=\"TYPE200\",Parameter_Only_Consider_Complete=1}"},
             {"COUNTFLAG2", "Variable_Target.StructureCount {Parameter_Type=\"TYPE200\",Parameter_Only_Consider_Complete=2}"},
+            {"COUNTFLAG0", "Variable_Target.StructureCount {Parameter_Type=\"TYPE200\",Parameter_Only_Consider_Complete=0}"},
+            {"COUNTFLAGHALF", "Variable_Target.StructureCount {Parameter_Type=\"TYPE200\",Parameter_Only_Consider_Complete=0.5}"},
             {"STRUCT", "Variable_Self.HasStructure {Parameter_Type=\"TYPE100\",Parameter_Count=2}"},
             {"HEAD", "Variable_Target.HasStructure {Parameter_Type=\"TYPE300\"}"},
             {"TAIL", "Variable_Target.HasStructure {Parameter_Type=\"TYPE400\"}"},
             {"DONE", "Variable_Target.HasStructure {Parameter_Type=\"TYPE300\",Parameter_Only_Consider_Complete=1}"},
+            {"HEAD0", "Variable_Target.HasStructure {Parameter_Type=\"TYPE300\",Parameter_Only_Consider_Complete=0}"},
+            {"HEADHALF", "Variable_Target.HasStructure {Parameter_Type=\"TYPE300\",Parameter_Only_Consider_Complete=0.5}"},
+            {"HEAD2", "Variable_Target.HasStructure {Parameter_Type=\"TYPE300\",Parameter_Only_Consider_Complete=2}"},
             {"UNIT", "Variable_Self.HasUnit {Parameter_Type=\"TYPE900\",Parameter_Only_Consider_Complete=1}"},
             {"UNITFRACTION", "Variable_Self.HasUnit {Parameter_Type=\"TYPE900\",Parameter_Count=1.9,Parameter_Only_Consider_Complete=1}"},
             {"UNITQ", "Variable_Self.HasUnit {Parameter_Type=\"TYPE300\"}"},
             {"UNITDONE", "Variable_Self.HasUnit {Parameter_Type=\"TYPE300\",Parameter_Only_Consider_Complete=2}"},
+            {"UNIT0", "Variable_Self.HasUnit {Parameter_Type=\"TYPE300\",Parameter_Only_Consider_Complete=0}"},
+            {"UNITHALF", "Variable_Self.HasUnit {Parameter_Type=\"TYPE300\",Parameter_Only_Consider_Complete=0.5}"},
+            {"UNIT1", "Variable_Self.HasUnit {Parameter_Type=\"TYPE300\",Parameter_Only_Consider_Complete=1}"},
             {"EMPTYCOUNT", "Variable_Self.HasUnit {Parameter_Type=\"MISSING\",Parameter_Count=0}"},
             {"TECH", "Variable_Self.HasTechToProduce {Parameter_Type=\"TYPE500\"}"},
             {"UNLOCK", "Variable_Self.HasTechToProduce {Parameter_Type=\"TYPE400\"}"},
@@ -330,9 +339,9 @@ std::string contracts(unsigned workers) {
     check("MAXG", ai::parse_real("0.5").value()); check("MAXS", ai::parse_real("0.5").value());
     check("NUMG", real(1)); check("NUMS", real(2)); check("HASG", real(1)); check("HASS", real(0));
     check("COUNT", real(5)); check("COUNTQ", real(3)); check("COUNTDONE", real(1)); check("STRUCT", real(1));
-    check("COUNTFLAG2", real(2)); check("UNITFRACTION", real(1));
-    check("HEAD", real(1)); check("TAIL", real(0)); check("DONE", real(0));
-    check("UNIT", real(1)); check("UNITQ", real(1)); check("UNITDONE", real(0)); check("EMPTYCOUNT", real(1));
+    check("COUNTFLAG0", real(2)); check("COUNTFLAGHALF", real(2)); check("COUNTFLAG2", real(2)); check("UNITFRACTION", real(1));
+    check("HEAD", real(1)); check("HEAD0", real(1)); check("HEADHALF", real(1)); check("HEAD2", real(1)); check("TAIL", real(0)); check("DONE", real(0));
+    check("UNIT", real(1)); check("UNITQ", real(1)); check("UNIT0", real(1)); check("UNITHALF", real(0)); check("UNIT1", real(0)); check("UNITDONE", real(0)); check("EMPTYCOUNT", real(1));
     check("TECH", real(1)); check("UNLOCK", real(1)); check("ADVANCE", real(1));
     const auto maintenance = ai::parse_real("0.375").value();
     check("RAWMAINT", maintenance); check("GROSS", real(100)); check("MAINT", maintenance / real(100)); check("NET", real(100) - maintenance);
@@ -409,6 +418,46 @@ std::string contracts(unsigned workers) {
     expect(!foc::galactic_ai::decode_funding_state(old_version), "old funding format has no compatibility reader");
     return std::to_string(host.query("SPACE")->repr) + ":" + std::to_string(host.query("RAWMAINT")->repr)
         + ":" + std::to_string(host.query("ADVANCE")->repr) + ":" + eawr::core::sha256_hex(bytes);
+}
+// The original resolver, kept here as the independent oracle for the name index.
+std::optional<std::vector<eawr::sim::tactical::TypeId>> reference_selected_types(const std::vector<foc::AiType>& types,
+    const std::vector<ai::Binding>& bindings) {
+    std::vector<eawr::sim::tactical::TypeId> out;
+    for (const auto& binding : bindings) if (binding.parameter == "PARAMETER_TYPE") {
+        const auto* text = std::get_if<std::string>(&binding.value); if (!text) return {};
+        const auto name = ai::upper_case(*text);
+        const auto at = std::find_if(types.begin(), types.end(), [&](const auto& row) { return ai::upper_case(row.name) == name; });
+        out.push_back(at == types.end() ? 0 : at->type_id);
+    }
+    if (out.empty()) return {};
+    return out;
+}
+
+void type_name_index() {
+    std::vector<foc::AiType> types;
+    for (const auto& [id, name] : std::vector<std::pair<std::uint32_t, std::string>>{{100, "Alpha"}, {150, "ALPHA"}, {200, "beta"},
+        {250, "Beta"}, {300, ""}, {400, "Gamma_Ship"}, {500, "alpha"}}) { foc::AiType row; row.type_id = id; row.name = name; types.push_back(row); }
+    const ai::GalacticTypeNames indexed(types);
+    const auto type = [](std::string name) { return ai::Binding{"PARAMETER_TYPE", std::move(name)}; };
+    const std::vector<std::vector<ai::Binding>> cases{
+        {}, {type("Alpha")}, {type("alpha")}, {type("ALPHA")}, {type("Beta")}, {type("BETA")}, {type("")}, {type("Missing")},
+        {type("Gamma_Ship")}, {type("gamma_ship")}, {type("Gamma_Shi")}, {type("Gamma_Ship ")},
+        {type("Alpha"), type("Alpha")}, {type("Missing"), type("Beta"), type("Missing"), type("Alpha"), type("Beta")},
+        {{"PARAMETER_COUNT", real(2)}, type("Beta"), {"PARAMETER_LEVEL", real(1)}, type("Gamma_Ship"), {"PARAMETER_COUNT", real(3)}},
+        {{"PARAMETER_COUNT", real(2)}}, {type("Alpha"), {"PARAMETER_TYPE", real(1)}}, {{"PARAMETER_TYPE", real(1)}, type("Alpha")},
+        {{"PARAMETER_TYPE_", std::string("Alpha")}}, {{"parameter_type", std::string("Alpha")}}};
+    for (const auto& bindings : cases) {
+        const auto want = reference_selected_types(types, bindings);
+        expect(ai::selected_type_ids(indexed, bindings) == want, "name index equals the original setup-type scan");
+    }
+    // First insertion wins for names colliding after upper-casing: the lowest type ID.
+    expect(ai::selected_type_ids(indexed, {type("alpha")}) == std::vector<eawr::sim::tactical::TypeId>{100}, "case collision keeps the lowest type ID");
+    expect(ai::selected_type_ids(indexed, {type("beta")}) == std::vector<eawr::sim::tactical::TypeId>{200}, "second collision keeps the lowest type ID");
+    expect((ai::selected_type_ids(indexed, {type("Missing"), type("Alpha"), type("Missing")})
+        == std::vector<eawr::sim::tactical::TypeId>{0, 100, 0}), "unknown names stay zero in place and duplicates are kept");
+    expect(ai::selected_type_ids(indexed, {type("")}) == std::vector<eawr::sim::tactical::TypeId>{300}, "an empty name resolves like the scan");
+    expect(!ai::selected_type_ids(indexed, {{"PARAMETER_COUNT", real(1)}}) && !ai::selected_type_ids(ai::GalacticTypeNames{}, {}), "no type binding is nullopt");
+    expect(ai::GalacticTypeNames{}.find("ALPHA") == 0, "an empty index finds nothing");
 }
 void generations(unsigned workers) {
     auto galaxy = must(gc::GalacticSession::create(gc::synthetic_galaxy({42, 4, 2, 1, 1, true, false})));
@@ -710,6 +759,7 @@ int case_galactic_ai_economy_tokens_tests(int argc, char** argv) {
             "aggregate observation continuation is identical on 1/2/4/8 workers");
         for (const auto workers : {1U, 2U, 4U, 8U}) cached_bases(workers);
         for (const auto workers : {1U, 2U, 4U, 8U}) generations(workers);
+        type_name_index();
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
     return galactic_test::failures ? 1 : 0;
 }

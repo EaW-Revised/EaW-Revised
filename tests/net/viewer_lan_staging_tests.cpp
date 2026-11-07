@@ -1,4 +1,5 @@
 #include "viewer_lan_fixtures.hpp"
+#include "eawr/vfs/vfs.hpp"
 #include "lan_match.hpp"
 #include "skirmish_prepare.hpp"
 #include "eawr/sim/tactical/session.hpp"
@@ -16,6 +17,7 @@
 #include <set>
 #include <span>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -551,11 +553,12 @@ void seat_controls_three_peers(bool drop_during_formation) {
     matches[1]->join("127.0.0.1:" + std::to_string(host.view().port));
     matches[2]->join("127.0.0.1:" + std::to_string(host.view().port));
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
-    const auto wait = [&](const auto& predicate) {
+    const auto wait = [&](const auto& predicate, std::string_view step) {
         do {
             for (auto& match : matches) match->pump_setup(options());
             if (predicate()) return;
-            expect(std::chrono::steady_clock::now() < deadline, "seat controls three-peer deadline");
+            expect(std::chrono::steady_clock::now() < deadline, std::string("seat controls three-peer deadline: ")
+                + (drop_during_formation ? "drop/" : "normal/") + std::string(step));
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         } while (true);
     };
@@ -565,11 +568,11 @@ void seat_controls_three_peers(bool drop_during_formation) {
                 && !match->lobby_state()->identity_pending;
         });
     };
-    wait([&] { return host.lobby_state()->snapshot.seats.size() == 3 && synced(); });
+    wait([&] { return host.lobby_state()->snapshot.seats.size() == 3 && synced(); }, "initial sync");
     auto chosen_host = host.lobby_state()->snapshot.seats.front().selection;
     chosen_host.faction = "Empire"; // Explicitly choose something other than team 0's loaded default.
     expect(host.lobby_select(chosen_host), "human chooses a non-default faction");
-    wait([&] { return host.lobby_state()->snapshot.seats.front().selection == chosen_host && synced(); });
+    wait([&] { return host.lobby_state()->snapshot.seats.front().selection == chosen_host && synced(); }, "host choice");
     auto current = require(viewer::decode_lan_lobby_game(host.lobby_state()->snapshot));
     expect(current.slots->size() == 4 && current.open_slots == std::vector<std::uint32_t>{6},
         "two arrivals take distinct Open rows and neither AI nor Closed rows");
@@ -583,7 +586,7 @@ void seat_controls_three_peers(bool drop_during_formation) {
     for (const auto kind : {viewer::LanSeatKind::ai, viewer::LanSeatKind::closed, viewer::LanSeatKind::open}) {
         require(viewer::select_lan_seat_kind(selection, map, 6, 9, kind));
         expect(host.lobby_game(options()), "host changes another vacant row after humans choose factions");
-        wait(synced);
+        wait(synced, "row edit sync");
         for (const auto& match : matches) expect(match->lobby_state()->snapshot.seats == human_choices,
             "other row Open AI Closed edits preserve every human's chosen faction team and colour on all peers");
     }
@@ -599,21 +602,21 @@ void seat_controls_three_peers(bool drop_during_formation) {
     selection.slots = *current.slots; selection.open_slots = current.open_slots;
     require(viewer::select_lan_seat_kind(selection, map, 2, 9, viewer::LanSeatKind::open));
     expect(host.lobby_game(options()), "host makes an AI seat available to a player");
-    wait(synced);
+    wait(synced, "row edit sync");
     const auto old_slot = matches[1]->lobby_state()->snapshot.seats[1].selection.slot;
     choice = matches[1]->lobby_state()->snapshot.seats[1].selection; choice.slot = 2;
     expect(matches[1]->lobby_select(choice), "guest takes the newly Open former AI row");
-    wait([&] { return host.lobby_state()->snapshot.seats[1].selection.slot == 2 && synced(); });
+    wait([&] { return host.lobby_state()->snapshot.seats[1].selection.slot == 2 && synced(); }, "guest move");
     current = require(viewer::decode_lan_lobby_game(host.lobby_state()->snapshot));
     expect(viewer::lan_seat_kind(current, old_slot) == viewer::LanSeatKind::open && current.slots->size() == 3,
         "moving a human leaves Open and removes the replaced AI from match player count");
     for (auto& match : matches) expect(match->lobby_ready(true), "three humans accept the final rows");
-    wait([&] { return host.view().start_enabled; });
+    wait([&] { return host.view().start_enabled; }, "ready");
     host.start(current);
     expect(!host.take_start(), "Host keeps polling native formation before synchronous scene handover");
     if (drop_during_formation) {
         matches[2]->cancel();
-        wait([&] { return host.view().phase == viewer::LanPhase::ended; });
+        wait([&] { return host.view().phase == viewer::LanPhase::ended; }, "formation loss");
         expect(host.view().diagnostic_code == "EAWR-NET-1301", "A guest lost before mesh-open has a named formation failure");
         for (const auto& match : matches) expect(!match->take_start(), "Formation failure cannot hand stale choices to any scene loader");
         for (auto& match : matches) match->cancel();
@@ -621,7 +624,7 @@ void seat_controls_three_peers(bool drop_during_formation) {
     }
     wait([&] { return std::all_of(matches.begin(), matches.end(), [](const auto& match) {
         return match->lobby_state()->snapshot.phase == net::LobbyPhase::starting;
-    }); });
+    }); }, "formation starting");
     std::vector<Bytes> bytes;
     for (const auto& match : matches) {
         const auto start = match->take_start(); expect(start && start->slots->size() == 3, "launch uses occupied rows only");
@@ -662,7 +665,7 @@ void seat_controls_three_peers(bool drop_during_formation) {
         for (std::size_t peer = 0; peer < 3; ++peer)
             if (worlds[peer].completed_tick() < 10) require(drivers[peer](contexts[peer], {}, clock()));
         return std::all_of(worlds.begin(), worlds.end(), [](const auto& world) { return world.completed_tick() == 10; });
-    });
+    }, "live ticks");
     expect(worlds[0].state_sha256() == worlds[1].state_sha256() && worlds[1].state_sha256() == worlds[2].state_sha256(),
         "Three actual humans commit and advance identical state below six-seat native capacity with Closed rows");
     for (auto& match : matches) match->cancel();
@@ -716,9 +719,12 @@ void authoritative_staging(bool play, std::optional<net::LobbyReason> end_during
     expect(!host->view().credential_provider_available && !host->view().reconnect_enabled,
         "authoritative staging disables the legacy default credential/recovery provider");
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+    std::string_view wait_step = "initial admission";
     const auto wait = [&](const auto& predicate) {
         while (!predicate()) {
-            expect(std::chrono::steady_clock::now() < deadline, "staging bridge deadline");
+            expect(std::chrono::steady_clock::now() < deadline, std::string("staging bridge deadline: ")
+                + (!play ? "no-play/" : !end_during_start ? "play/" : *end_during_start == net::LobbyReason::kicked ? "kick/" : "host-left/")
+                + std::string(wait_step));
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
     };
@@ -739,13 +745,16 @@ void authoritative_staging(bool play, std::optional<net::LobbyReason> end_during
     expect(!host->lobby_select(duplicate_colour) && host->lobby_state()->snapshot.revision == distinct_revision,
         "duplicate owner colours are refused before publishing a revision");
     expect(host->lobby_ready(true) && join->lobby_ready(true), "each human explicitly readies the current revision");
+    wait_step = "ready";
     wait([&] { pump(); return host->view().start_enabled; });
     const auto old_revision = host->lobby_state()->snapshot.revision;
     auto choice = join->lobby_state()->snapshot.seats[1].selection; choice.name = "Bobby";
     expect(join->lobby_select(choice), "own name request");
+    wait_step = "name revision";
     wait([&] { pump(); return host->lobby_state()->snapshot.revision > old_revision; });
     expect(host->view().start_enabled, "name-only edit preserves all readiness");
     expect(join->lobby_chat("room message"), "admitted room chat");
+    wait_step = "chat";
     wait([&] { pump(); return host->lobby_state()->chat.size() == 1 && join->lobby_state()->chat.size() == 1; });
     expect(host->lobby_state()->chat.front().name == "Bobby", "host stamps the authoritative sender label");
     auto edited = selected; edited.match->allow_heroes = !edited.match->allow_heroes;
@@ -761,6 +770,7 @@ void authoritative_staging(bool play, std::optional<net::LobbyReason> end_during
     expect(host->lobby_state()->snapshot.game == host_game_before && join->lobby_state()->snapshot.game == host_game_before,
         "a refused guest options edit leaves every peer's game blob unchanged");
     expect(host->lobby_game(edited), "host changes loaded application options");
+    wait_step = "options sync";
     wait([&] { pump(); return !join->lobby_state()->local_ready; });
     expect(!host->view().start_enabled, "consequential options clear both ready icons and Start");
     expect(join->offered_setup()->match == edited.match,
@@ -777,6 +787,7 @@ void authoritative_staging(bool play, std::optional<net::LobbyReason> end_during
     if (!play) {
         expect(!join->lobby_kick(0), "joiner cannot kick host");
         expect(host->lobby_kick(1), "host kicks admitted joiner");
+        wait_step = "kick";
         wait([&] { pump(); return join->view().phase == viewer::LanPhase::ended; });
         expect(join->lobby_state()->notice && join->lobby_state()->notice->reason == net::LobbyReason::kicked, "typed kick reaches the removed player");
         expect(host->lobby_state()->snapshot.seats.size() == 1 && !host->view().start_enabled, "kick clears readiness and removes exactly one seat");
@@ -784,6 +795,7 @@ void authoritative_staging(bool play, std::optional<net::LobbyReason> end_during
         host->pump_setup(edited); host->pump_setup(edited);
         auto fresh = make_match(); fresh->configure_lobby("Carol", 4, {map}, builder);
         fresh->join("127.0.0.1:" + std::to_string(host->view().port));
+        wait_step = "fresh admission";
         wait([&] { host->pump_setup(edited); fresh->pump_setup({});
             return host->lobby_state()->snapshot.seats.size() == 2 && host->lobby_state()->snapshot.seats.back().selection.name == "Carol"; });
         expect(fresh->view().seat == 1 && host->lobby_state()->snapshot.seats.back().seat.value > 2, "a fresh edge refills the same transport index with a new stable seat identity");
@@ -793,6 +805,7 @@ void authoritative_staging(bool play, std::optional<net::LobbyReason> end_during
     // Human pacing opens a fresh bounded request window.
     std::this_thread::sleep_for(std::chrono::milliseconds(2001)); pump();
     expect(host->lobby_ready(true) && join->lobby_ready(true), "reaccept edited revision");
+    wait_step = "ready";
     wait([&] { pump(); return host->view().start_enabled; });
     auto canonical = require(builder(*host->offered_setup()));
     const auto staging_bytes = require(net::encode_skirmish_setup(canonical));
@@ -806,16 +819,20 @@ void authoritative_staging(bool play, std::optional<net::LobbyReason> end_during
     host->start(edited);
     if (!end_during_start) {
         std::optional<eawr::skirmish::FixtureOptions> handover;
+        wait_step = "host handover";
         wait([&] { pump(); handover = host->take_start(); return handover.has_value(); });
         expect(handover.has_value(), "host hands frozen choices to the live loader after native formation");
     }
     // Pump the outer stream without core/tick-zero publication until the live bind.
+    wait_step = "join starting";
     wait([&] { host->pump_setup(edited); join->pump_setup({}); return join->lobby_state()->snapshot.phase == net::LobbyPhase::starting; });
     expect(join->take_start().has_value(), "joiner hands frozen choices to the same live loader");
     if (end_during_start) {
         if (*end_during_start == net::LobbyReason::kicked) expect(host->lobby_kick(1), "host kick before its own handover cancels Start");
         else host->lobby_leave();
         host->pump_setup(edited);
+        // Give the loading owner time to receive the ordered notice and close.
+        std::this_thread::sleep_for(std::chrono::milliseconds(1000));
         expect(!host->take_start(), "aborted Start cannot hand stale choices or a deleted setup stream to the live loader");
     }
     sim::InlineExecutor executor;
@@ -833,6 +850,7 @@ void authoritative_staging(bool play, std::optional<net::LobbyReason> end_during
     }
     const auto clock = [] { return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count()); };
     if (end_during_start) {
+        wait_step = "terminal notice";
         wait([&] { host->pump_setup(edited); auto driven = drivers[1](contexts[1], {}, clock());
             return !driven && join->view().phase == viewer::LanPhase::ended; });
         expect(join->view().message == (*end_during_start == net::LobbyReason::kicked ? "TEXT_INTERNET_PLAYER_KICKED" : "TEXT_HOST_LEFT_GAME"), "Start-phase terminal notice uses its distinct localized key");
@@ -842,6 +860,7 @@ void authoritative_staging(bool play, std::optional<net::LobbyReason> end_during
     for (unsigned round = 0; round < 20; ++round) for (std::size_t peer = 0; peer < 2; ++peer) require(drivers[peer](contexts[peer], {}, clock()));
     expect(worlds[0].completed_tick() == 0 && worlds[1].completed_tick() == 0, "live load holds tick zero until both peers may advance");
     for (auto& context : contexts) context.advance_allowed = true;
+    wait_step = "live ticks";
     wait([&] { for (std::size_t peer = 0; peer < 2; ++peer) if (worlds[peer].completed_tick() < 10) require(drivers[peer](contexts[peer], {}, clock())); return worlds[0].completed_tick() == 10 && worlds[1].completed_tick() == 10; });
     expect(worlds[0].state_sha256() == worlds[1].state_sha256(), "LobbySession commits through SetupSession into identical battle state");
     host->cancel(); join->cancel();

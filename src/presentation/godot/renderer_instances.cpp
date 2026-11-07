@@ -1,6 +1,8 @@
 #include "renderer_internal.hpp"
 #include "eawr/presentation/skin_pose.hpp"
+#include "eawr/core/json_text.hpp"
 
+#include <algorithm>
 #include <limits>
 #include <new>
 #include <set>
@@ -91,8 +93,14 @@ GodotRenderer::ProxyResult GodotRenderer::reserve_proxy_instances(
         impl_->proxy_.budget->release(ResourceKind::gpu_proxy, bytes);
     };
     try {
-        impl_->instances_.reserve(impl_->instances_.size() + requested.size());
-        impl_->proxy_.charges.reserve(impl_->proxy_.charges.size() + requested.size());
+        // Grow geometrically: an exact reserve rehashes every existing entry on each growth.
+        const auto grow = [&](auto& table) {
+            const auto wanted = table.size() + requested.size();
+            if (static_cast<double>(wanted) > static_cast<double>(table.bucket_count()) * table.max_load_factor())
+                table.reserve(std::max(wanted, table.size() * 2));
+        };
+        grow(impl_->instances_);
+        grow(impl_->proxy_.charges);
         for (std::size_t index = 0; index < requested.size(); ++index) {
             if (allocation_gate && !allocation_gate()) {
                 rollback();
@@ -115,7 +123,8 @@ GodotRenderer::ProxyResult GodotRenderer::reserve_proxy_instances(
             rendering->instance_set_scenario(instance.rid, impl_->scenario_);
             rendering->instance_set_visible(instance.rid, false);
             instance.visible = false;
-            if (impl_->non_casting_.contains(proxy.asset))
+            instance.applied_visible = false;
+            if (impl_->non_casting_.contains(proxy.asset) || !render_categories::engine_casts(true))
                 rendering->instance_geometry_set_cast_shadows_setting(instance.rid, RenderingServer::SHADOW_CASTING_SETTING_OFF);
             if (render_categories::enabled)
                 instance.category_surfaces = rendering->mesh_get_surface_count(resource.mesh);
@@ -182,6 +191,7 @@ void GodotRenderer::Impl::copy_instance_pose(const sim::EntityId source, const s
 }
 
 void GodotRenderer::Impl::forget_instance_pose(const sim::EntityId entity_id) {
+    if (render_categories::ablation != "off") diagnostic_owners_.erase(entity_id);
     if (render_categories::enabled) category_roles_.erase(entity_id);
     // Retirement is explicit, unlike absence from a submitted snapshot. Drop the
     // instance and skeleton now, including when another entity retains its mesh.
@@ -197,11 +207,26 @@ void GodotRenderer::Impl::set_render_category(const sim::EntityId entity_id, con
     if (!render_categories::enabled) return;
     category_roles_.insert_or_assign(entity_id, role);
     const auto instance = instances_.find(entity_id);
-    if (instance != instances_.end()) instance->second.category_role = role;
+    if (instance != instances_.end()) {
+        instance->second.category_role = role;
+        if (auto* rendering = RenderingServer::get_singleton())
+            apply_visibility(*rendering, instance->second, instance->second.visible);
+    }
 }
 
 void GodotRenderer::set_render_category(const sim::EntityId entity_id, const render_categories::Role role) {
     impl_->set_render_category(entity_id, role);
+}
+
+void GodotRenderer::set_diagnostic_owner(const sim::EntityId entity_id, const std::uint64_t unit,
+                                       const std::string_view model, const render_categories::HullPart part,
+                                       const std::string_view object, const std::string_view layer,
+                                       const std::string_view categories, const std::string_view xml_type,
+                                       const std::string_view kind) {
+    if (render_categories::ablation != "off")
+        impl_->diagnostic_owners_.insert_or_assign(entity_id, Impl::DiagnosticOwner{
+            unit, std::string(model), part, std::string(object), std::string(layer),
+            std::string(categories), std::string(xml_type), std::string(kind)});
 }
 
 void GodotRenderer::write_churn_census(std::ostream& output) const {
@@ -250,7 +275,80 @@ void GodotRenderer::Impl::write_churn_census(std::ostream& output) const {
             output << (i ? "," : "") << key.colour_opacity_light[i];
         output << "]}"; first = false;
     }
-    output << "]}";
+    output << "]";
+    if (render_categories::ablation == "hull-census") {
+        output << ",\"hull_census\":{\"scope\":\"retained at capture; not GPU submissions\",\"camera\":";
+        const auto camera = distance_band::cameras.find(scenario_.get_id());
+        if (camera == distance_band::cameras.end()) output << "null";
+        else {
+            const auto& c = camera->second;
+            const auto vector = [&output](const auto& v) {
+                output << '[' << v[0] << ',' << v[1] << ',' << v[2] << ']';
+            };
+            output << "{\"eye\":"; vector(c.eye);
+            output << ",\"target\":"; vector(c.target);
+            output << ",\"up\":"; vector(c.up);
+            output << ",\"fov\":" << c.vertical_fov_degrees << ",\"near\":" << c.near_plane
+                << ",\"far\":" << c.far_plane << ",\"width\":" << c.width << ",\"height\":" << c.height << '}';
+        }
+        output << ",\"pieces\":[";
+        bool first_piece = true;
+        // Report-only allocation and formatting, including requested-hidden resources.
+        for (const auto& [entity, instance] : instances_) {
+            const auto resource = resources_.find(instance.asset_id);
+            if (resource == resources_.end()) continue;
+            const auto& r = resource->second;
+            const auto owner = diagnostic_owners_.find(entity);
+            const auto fog = fog_consumers_.find(instance.asset_id);
+            const auto material = fog != fog_consumers_.end() && fog->second.material.is_valid() ? fog->second.material : r.material;
+            const auto shader = fog != fog_consumers_.end() && fog->second.shader.is_valid() ? fog->second.shader : r.shader;
+            const auto role = static_cast<std::size_t>(instance.category_role);
+            output << (first_piece ? "" : ",") << "{\"entity\":" << entity << ",\"asset\":" << instance.asset_id
+                << ",\"mesh_rid\":" << r.mesh.get_id() << ",\"material\":" << material.get_id()
+                << ",\"shader\":" << shader.get_id() << ",\"role\":"
+                << core::json_quote(render_categories::names[role < render_categories::role_count ? role : 0])
+                << ",\"unit\":" << (owner == diagnostic_owners_.end() ? 0 : owner->second.unit);
+            if (owner != diagnostic_owners_.end()) {
+                const auto& o = owner->second;
+                output << ",\"model\":" << core::json_quote(o.model) << ",\"object\":" << core::json_quote(o.object)
+                    << ",\"layer\":" << core::json_quote(o.layer) << ",\"categories\":" << core::json_quote(o.categories)
+                    << ",\"xml_type\":" << core::json_quote(o.xml_type) << ",\"kind\":" << core::json_quote(o.kind)
+                    << ",\"hull_part\":" << static_cast<unsigned>(o.part);
+            }
+            if (r.recipe) {
+                const auto& recipe = r.recipe->model;
+                const auto* retained = recipe.retained();
+                const auto& source = retained ? retained->source : recipe.source();
+                output << ",\"source_model\":" << core::json_quote(source.logical_path);
+                if (recipe.surface()) output << ",\"source_mesh\":" << recipe.surface()->mesh
+                    << ",\"source_submesh\":" << recipe.surface()->submesh;
+            }
+            output << ",\"program\":" << core::json_quote(r.description.program)
+                << ",\"technique\":" << core::json_quote(r.description.technique)
+                << ",\"pass_name\":" << core::json_quote(r.description.pass_name)
+                << ",\"pass\":" << static_cast<unsigned>(r.pass)
+                << ",\"model_meshes\":" << r.diagnostic_model_meshes << ",\"model_submeshes\":" << r.diagnostic_model_submeshes
+                << ",\"skin\":" << r.skinned << ",\"billboard\":" << !r.billboard_modes.empty()
+                << ",\"requested_visible\":" << instance.visible << ",\"applied_visible\":" << instance.applied_visible
+                << ",\"casts\":" << instance.category_casts << ",\"surfaces\":" << instance.category_surfaces
+                << ",\"triangles\":" << r.category_triangles << ",\"mesh_names\":[";
+            for (std::size_t i = 0; i < r.diagnostic_surface_names.size(); ++i)
+                output << (i ? "," : "") << core::json_quote(r.diagnostic_surface_names[i]);
+            output << "],\"world_bounds\":";
+            const auto bounds = diagnostic_world_bounds_.find(entity);
+            if (bounds != diagnostic_world_bounds_.end() && bounds->second
+                && bounds->second->position.is_finite() && bounds->second->size.is_finite()) {
+                const auto& b = *bounds->second;
+                output << '[' << b.position.x << ',' << b.position.y << ',' << b.position.z << ','
+                    << b.size.x << ',' << b.size.y << ',' << b.size.z << ']';
+            }
+            else output << "null";
+            output << '}';
+            first_piece = false;
+        }
+        output << "]}";
+    }
+    output << '}';
 }
 
 std::vector<std::uint8_t> GodotRenderer::Impl::skin_geometry_bones(const sim::AssetId asset_id) const {
@@ -307,6 +405,11 @@ std::span<const std::uint8_t> GodotRenderer::Impl::skin_geometry_bones_view(cons
 
 core::Result<void> GodotRenderer::Impl::bind_skin_pose(const sim::EntityId entity_id,
     const sim::AssetId asset_id, const Resource& resource, std::shared_ptr<const SkinPosePalette<Transform3D>> prepared) {
+    const auto owner = render_categories::fighter_experiment() ? diagnostic_owners_.find(entity_id) : diagnostic_owners_.end();
+    const bool fighter = owner != diagnostic_owners_.end() && render_categories::authored_fighter(owner->second.categories);
+    if (fighter) render_categories::begin_fighter_frame(static_cast<std::uint64_t>(Engine::get_singleton()->get_process_frames()));
+    SkinPoseTimer fighter_binding(fighter ? &render_categories::fighter_work.binding_cpu_ms : nullptr);
+    if (fighter) ++render_categories::fighter_work.bindings;
     SkinPoseTimer binding(skin_profile_ ? &skin_work_.binding_ms : nullptr);
     if (skin_profile_) ++skin_work_.bindings;
     if (prepared) {
@@ -401,9 +504,13 @@ void GodotRenderer::Impl::apply_unit_opacity(
     // Geometry transparency does not attenuate a shadow. Suppress the opaque
     // silhouette while fading, then restore this asset's original policy.
     rendering.instance_geometry_set_cast_shadows_setting(instance.rid,
-        clamped < 1.0F || non_casting_.contains(instance.asset_id)
+        clamped < 1.0F || non_casting_.contains(instance.asset_id) || !render_categories::engine_casts(true)
             ? RenderingServer::SHADOW_CASTING_SETTING_OFF : RenderingServer::SHADOW_CASTING_SETTING_ON);
-    if (render_categories::enabled) instance.category_casts = clamped >= 1.0F && !non_casting_.contains(instance.asset_id);
+    if (render_categories::enabled) {
+        instance.category_casts = clamped >= 1.0F && !non_casting_.contains(instance.asset_id);
+        // Opacity can override the policy last sent by the opt-in traversal.
+        instance.diagnostic_cast_rid = {};
+    }
 }
 
 core::Result<void> GodotRenderer::Impl::set_material_priority(const sim::AssetId asset_id, const std::int32_t priority) {
@@ -577,8 +684,288 @@ void GodotRenderer::Impl::set_instance_visible(const sim::EntityId entity, const
     RenderingServer* rendering = RenderingServer::get_singleton();
     const auto instance = instances_.find(entity);
     if (!rendering || instance == instances_.end() || instance->second.visible == visible) return;
-    rendering->instance_set_visible(instance->second.rid, visible);
-    instance->second.visible = visible;
+    apply_visibility(*rendering, instance->second, visible);
+}
+
+void GodotRenderer::Impl::update_diagnostic_impostors(RenderingServer& rendering) {
+    // Both control and treatment do the same opt-in bounds/quad bookkeeping.
+    // Pose sampling, simulation, emitters and projectiles continue unchanged.
+    struct UnitBounds final { std::optional<AABB> bounds; bool complete{true}, hull{}; };
+    std::map<std::uint64_t, UnitBounds> units;
+    diagnostic_impostor_units_.clear();
+    for (const auto& [entity, instance] : instances_) {
+        if (!instance.visible) continue;
+        const auto owner = diagnostic_owners_.find(entity);
+        if (owner == diagnostic_owners_.end() || !render_categories::authored_fighter(owner->second.categories)) continue;
+        auto& unit = units[owner->second.unit];
+        unit.hull = unit.hull || instance.category_role == render_categories::Role::hull;
+        const auto resource = resources_.find(instance.asset_id);
+        auto bounds = resource == resources_.end() ? std::optional<AABB>{} : resource->second.diagnostic_bounds;
+        if (bounds && resource->second.skinned) {
+            const auto pose = skin_poses_.find(entity);
+            if (pose != skin_poses_.end()) {
+                std::optional<AABB> posed;
+                const auto& palette = pose->second.active_palette();
+                if (pose->second.asset_id == instance.asset_id && palette.size() == resource->second.bone_count) {
+                    for (std::size_t bone = 0; bone < palette.size(); ++bone) {
+                        if (bone >= resource->second.skin_used_bones.size() || !resource->second.skin_used_bones[bone]) continue;
+                        const auto moved = transform_from(palette[bone]).xform(*bounds);
+                        posed = posed ? posed->merge(moved) : moved;
+                    }
+                }
+                bounds = posed; // An inconsistent explicit pose keeps the geometry.
+            } else if (!instance.skeleton.is_valid() || resource->second.bone_count == 0
+                       || !resource->second.billboard_modes.empty()) {
+                bounds.reset();
+            }
+            // With no explicit pose, bind_instance_skin initializes every bone
+            // to identity. The bind bounds are known for that ordinary case;
+            // missing skeletons and camera-facing bone changes stay conservative.
+        }
+        if (bounds) bounds = instance.object_transform.xform(*bounds);
+        unit.complete = unit.complete && bounds.has_value();
+        if (bounds) unit.bounds = unit.bounds ? unit.bounds->merge(*bounds) : bounds;
+    }
+    const auto camera = distance_band::cameras.find(scenario_.get_id());
+    if (camera != distance_band::cameras.end()) {
+        for (const auto& [unit, bounds] : units) {
+            if (bounds.hull && bounds.complete && bounds.bounds && render_categories::fighter_impostor_small(
+                    distance_band::coverage(*bounds.bounds, Transform3D(), camera->second), camera->second.height))
+                diagnostic_impostor_units_.insert(unit);
+        }
+    }
+    diagnostic_groups_.fighter_impostor_candidates = diagnostic_impostor_units_.size();
+    if (!diagnostic_impostor_units_.empty() && !diagnostic_quad_mesh_.is_valid()) {
+        diagnostic_quad_shader_ = rendering.shader_create();
+        rendering.shader_set_code(diagnostic_quad_shader_,
+            "shader_type spatial; render_mode unshaded, cull_disabled; void fragment() { ALBEDO = vec3(0.7); }");
+        diagnostic_quad_material_ = rendering.material_create();
+        rendering.material_set_shader(diagnostic_quad_material_, diagnostic_quad_shader_);
+        diagnostic_quad_mesh_ = rendering.mesh_create();
+        PackedVector3Array vertices;
+        vertices.push_back(Vector3(-0.5F, -0.5F, 0)); vertices.push_back(Vector3(0.5F, -0.5F, 0));
+        vertices.push_back(Vector3(0.5F, 0.5F, 0)); vertices.push_back(Vector3(-0.5F, 0.5F, 0));
+        PackedInt32Array indices;
+        for (const auto index : {0, 1, 2, 0, 2, 3}) indices.push_back(index);
+        Array arrays;
+        arrays.resize(RenderingServer::ARRAY_MAX);
+        arrays[RenderingServer::ARRAY_VERTEX] = vertices;
+        arrays[RenderingServer::ARRAY_INDEX] = indices;
+        rendering.mesh_add_surface_from_arrays(diagnostic_quad_mesh_, RenderingServer::PRIMITIVE_TRIANGLES, arrays);
+        rendering.mesh_surface_set_material(diagnostic_quad_mesh_, 0, diagnostic_quad_material_);
+    }
+    for (const auto unit : diagnostic_impostor_units_) {
+        auto& quad = diagnostic_quads_[unit];
+        if (!quad.rid.is_valid()) {
+            quad.rid = rendering.instance_create();
+            rendering.instance_set_base(quad.rid, diagnostic_quad_mesh_);
+            rendering.instance_set_scenario(quad.rid, scenario_);
+            rendering.instance_set_visible(quad.rid, false);
+            rendering.instance_geometry_set_cast_shadows_setting(quad.rid, RenderingServer::SHADOW_CASTING_SETTING_OFF);
+        }
+        // Camera-facing conservative square, not an appearance or occupancy estimate.
+        const auto& bounds = *units.at(unit).bounds;
+        Transform3D transform;
+        transform.basis = view_transform_.basis.scaled(Vector3(1, 1, 1) * bounds.size.length());
+        transform.origin = bounds.get_center();
+        if (transform != quad.transform) {
+            rendering.instance_set_transform(quad.rid, transform);
+            quad.transform = transform;
+        }
+    }
+    for (auto current = diagnostic_quads_.begin(); current != diagnostic_quads_.end();) {
+        auto& quad = current->second;
+        const bool visible = render_categories::ablation == "fighter-impostor-008"
+            && diagnostic_impostor_units_.contains(current->first);
+        if (visible != quad.visible) {
+            rendering.instance_set_visible(quad.rid, visible);
+            quad.visible = visible;
+        }
+        if (visible) ++diagnostic_groups_.fighter_impostor_quads;
+        if (!units.contains(current->first)) {
+            rendering.free_rid(quad.rid);
+            current = diagnostic_quads_.erase(current);
+        } else ++current;
+    }
+}
+
+void GodotRenderer::Impl::update_diagnostic_instances(RenderingServer& rendering) {
+    // This entire traversal is opt-in. It observes retained producer state, not
+    // engine frustum/occlusion visibility or final shadow-pass submissions.
+    if (render_categories::ablation == "off") return;
+    if (render_categories::fighter_experiment()) {
+        diagnostic_groups_ = {};
+        if (render_categories::fighter_impostor_experiment()) update_diagnostic_impostors(rendering);
+        std::set<std::uint64_t> units;
+        for (auto& [entity, instance] : instances_) {
+            const auto opacity = opacities_.find(entity);
+            instance.category_casts = !non_casting_.contains(instance.asset_id)
+                && (opacity == opacities_.end() || opacity->second >= 1.0F);
+            const auto owner = diagnostic_owners_.find(entity);
+            const bool fighter = owner != diagnostic_owners_.end()
+                && render_categories::authored_fighter(owner->second.categories);
+            if (fighter && instance.visible) {
+                units.insert(owner->second.unit);
+                if (instance.category_role == render_categories::Role::hull) diagnostic_groups_.fighter_hull_surfaces += instance.category_surfaces;
+                if (instance.category_role == render_categories::Role::hardpoint) diagnostic_groups_.fighter_attachment_surfaces += instance.category_surfaces;
+                if (instance.category_role == render_categories::Role::effect) diagnostic_groups_.fighter_effect_surfaces += instance.category_surfaces;
+                if (instance.category_casts) diagnostic_groups_.fighter_requested_casters += instance.category_surfaces;
+            }
+            instance.part_hidden = render_categories::fighter_hidden(fighter, instance.category_role);
+            if (render_categories::ablation == "fighter-impostor-008" && fighter)
+                instance.part_hidden = diagnostic_impostor_units_.contains(owner->second.unit);
+            apply_visibility(rendering, instance, instance.visible);
+            apply_diagnostic_casting(rendering, instance,
+                instance.category_casts && !instance.part_hidden && render_categories::engine_casts(true) ? RenderingServer::SHADOW_CASTING_SETTING_ON
+                                                               : RenderingServer::SHADOW_CASTING_SETTING_OFF);
+        }
+        diagnostic_groups_.fighter_units = units.size();
+        return;
+    }
+    struct Unit final {
+        std::vector<std::pair<std::string, sim::EntityId>> pieces;
+        std::uint64_t surfaces{};
+        bool hull{}, compatible{true};
+        std::optional<AABB> world_bounds;
+        bool complete_bounds{true};
+    };
+    std::map<std::uint64_t, Unit> units;
+    std::map<sim::EntityId, std::optional<AABB>> world_bounds;
+    diagnostic_groups_ = {};
+    if (render_categories::ablation == "hull-census") diagnostic_world_bounds_.clear();
+    for (auto& [entity, instance] : instances_) {
+        const auto resource = resources_.find(instance.asset_id);
+        if (resource == resources_.end()) continue;
+        const auto& asset = resource->second;
+        const auto opacity = opacities_.find(entity);
+        instance.category_casts = !non_casting_.contains(instance.asset_id)
+            && (opacity == opacities_.end() || opacity->second >= 1.0F);
+        auto bounds = asset.diagnostic_bounds;
+        const auto pose = skin_poses_.find(entity);
+        if (bounds && asset.skinned && pose != skin_poses_.end()) {
+            // Any used bone may move any point of the bind bounds. Unioning
+            // these boxes overestimates size rather than hiding uncertain art.
+            std::optional<AABB> posed;
+            const auto& palette = pose->second.active_palette();
+            for (std::size_t bone = 0; bone < palette.size(); ++bone) {
+                if (bone >= asset.skin_used_bones.size() || !asset.skin_used_bones[bone]) continue;
+                const auto moved = transform_from(palette[bone]).xform(*bounds);
+                posed = posed ? posed->merge(moved) : moved;
+            }
+            bounds = posed;
+        }
+        if (bounds) bounds = instance.object_transform.xform(*bounds);
+        if (render_categories::ablation == "hull-census") diagnostic_world_bounds_.emplace(entity, bounds);
+        world_bounds.emplace(entity, bounds);
+        instance.group_hidden = false;
+        const auto owner = diagnostic_owners_.find(entity);
+        if (owner == diagnostic_owners_.end()) continue;
+        auto& unit = units[owner->second.unit];
+        unit.complete_bounds = unit.complete_bounds && bounds.has_value();
+        if (bounds) unit.world_bounds = unit.world_bounds ? unit.world_bounds->merge(*bounds) : *bounds;
+        unit.hull = unit.hull || (instance.visible && instance.category_role == render_categories::Role::hull);
+        unit.compatible = unit.compatible && asset.billboard_modes.empty();
+        // Length-prefixed, exact state bytes avoid hash collisions and delimiter
+        // aliases. Asset identity includes model surface, materials and shaders.
+        std::string key;
+        const auto append = [&key](const auto& value) {
+            key.append(reinterpret_cast<const char*>(&value), sizeof(value));
+        };
+        append(owner->second.model.size());
+        key += owner->second.model;
+        append(instance.asset_id);
+        append(instance.visible);
+        append(instance.category_casts);
+        append(instance.category_role);
+        append(owner->second.part);
+        const auto append_override = [&](const auto& values) {
+            const auto found = values.find(entity);
+            const bool present = found != values.end();
+            append(present);
+            if (present) append(found->second);
+        };
+        append_override(opacities_);
+        append_override(colorizations_);
+        append_override(light_scales_);
+        const std::size_t bones = pose == skin_poses_.end() ? 0 : pose->second.active_palette().size();
+        append(bones);
+        if (pose != skin_poses_.end()) for (const auto& matrix : pose->second.active_palette()) append(matrix);
+        unit.pieces.emplace_back(std::move(key), entity);
+        if (instance.visible) unit.surfaces += instance.category_surfaces;
+    }
+    std::map<std::string, std::uint64_t> representatives;
+    std::map<std::uint64_t, std::uint64_t> sizes;
+    for (auto& [id, unit] : units) {
+        if (!unit.hull || !unit.compatible) continue;
+        ++diagnostic_groups_.eligible_units;
+        std::sort(unit.pieces.begin(), unit.pieces.end());
+        const auto anchor_piece = std::find_if(unit.pieces.begin(), unit.pieces.end(), [&](const auto& piece) {
+            return instances_.at(piece.second).category_role == render_categories::Role::hull;
+        });
+        if (anchor_piece == unit.pieces.end()) continue;
+        const auto& anchor = instances_.at(anchor_piece->second).object_transform;
+        if (!anchor.is_finite() || std::abs(anchor.basis.determinant()) < 1e-8F) continue;
+        const auto inverse = anchor.affine_inverse();
+        std::string signature;
+        for (const auto& [key, entity] : unit.pieces) {
+            const auto size = key.size();
+            signature.append(reinterpret_cast<const char*>(&size), sizeof(size));
+            signature += key;
+            const auto& transform = instances_.at(entity).object_transform;
+            const auto local = transform == anchor ? Transform3D() : inverse * transform;
+            // Local attachment/turret placements are state; only the common
+            // world transform of a whole unit may vary within a group.
+            for (int column = 0; column < 4; ++column) {
+                const auto value = column < 3 ? local.basis.get_column(column) : local.origin;
+                for (int axis = 0; axis < 3; ++axis) {
+                    const double scalar = value[axis];
+                    signature.append(reinterpret_cast<const char*>(&scalar), sizeof(scalar));
+                }
+            }
+        }
+        const auto [found, first] = representatives.emplace(std::move(signature), id);
+        const auto representative = found->second;
+        ++sizes[representative];
+        if (first) continue;
+        diagnostic_groups_.potential_colour_saving += unit.surfaces;
+        if (render_categories::ablation == "groups") {
+            ++diagnostic_groups_.group_hidden_units;
+            for (const auto& [key, entity] : unit.pieces) {
+                static_cast<void>(key);
+                instances_.at(entity).group_hidden = true;
+            }
+        }
+    }
+    for (const auto& [id, count] : sizes) {
+        static_cast<void>(id);
+        if (count < 2) continue;
+        ++diagnostic_groups_.compatible_groups;
+        diagnostic_groups_.grouped_units += count;
+    }
+    for (auto& [entity, instance] : instances_) {
+        const auto owner = diagnostic_owners_.find(entity);
+        const auto part = owner == diagnostic_owners_.end() ? render_categories::HullPart::unclassified : owner->second.part;
+        const bool hull = instance.category_role == render_categories::Role::hull;
+        instance.part_hidden = hull && ((render_categories::ablation == "integrated-turret" && part == render_categories::HullPart::turret)
+            || (render_categories::ablation == "other-hull" && part == render_categories::HullPart::body));
+        const bool hardpoint_band = render_categories::ablation.starts_with("hardpoint-band-")
+            && (instance.category_role == render_categories::Role::hardpoint || (hull && part == render_categories::HullPart::turret));
+        const bool shadow_band = render_categories::ablation.starts_with("shadows-band-");
+        auto bounds = world_bounds.contains(entity) ? world_bounds.at(entity) : std::optional<AABB>{};
+        // Distance bands apply to the composed owning unit's diameter, not a
+        // tiny surface on a nearby capital ship. Missing ownership stays visible.
+        if (owner != diagnostic_owners_.end()) {
+            const auto& unit = units.at(owner->second.unit);
+            bounds = unit.complete_bounds ? unit.world_bounds : std::optional<AABB>{};
+        } else if (hardpoint_band) bounds.reset();
+        instance.band_hidden = (hardpoint_band || shadow_band) && bounds && render_categories::band_hidden(
+            distance_band::coverage(*bounds, Transform3D(), scenario_.get_id()), instance.band_hidden);
+        apply_visibility(rendering, instance, instance.visible);
+        if (render_categories::ablation.starts_with("shadows-band-"))
+            rendering.instance_geometry_set_cast_shadows_setting(instance.rid,
+                instance.category_casts && !instance.band_hidden ? RenderingServer::SHADOW_CASTING_SETTING_ON
+                                                               : RenderingServer::SHADOW_CASTING_SETTING_OFF);
+    }
 }
 
 void GodotRenderer::Impl::submit(std::shared_ptr<const sim::RenderSnapshot> snapshot) {
@@ -663,13 +1050,13 @@ void GodotRenderer::Impl::submit(std::shared_ptr<const sim::RenderSnapshot> snap
             const RID rid = rendering->instance_create();
             rendering->instance_set_base(rid, resource->mesh);
             rendering->instance_set_scenario(rid, scenario_);
-            if (non_casting_.contains(source.asset_id)) {
+            if (non_casting_.contains(source.asset_id) || !render_categories::engine_casts(true)) {
                 rendering->instance_geometry_set_cast_shadows_setting(
                     rid, RenderingServer::SHADOW_CASTING_SETTING_OFF);
             }
             instance = instances_.emplace(
                 source.entity_id, Instance{.asset_id = source.asset_id, .rid = rid,
-                    .skeleton = {}, .object_transform = {}, .placement = {}}).first;
+                    .skeleton = {}, .object_transform = {}, .placement = {}, .diagnostic_cast_rid = {}}).first;
             if (render_categories::enabled) {
                 const auto role = category_roles_.find(source.entity_id);
                 instance->second.category_role = role == category_roles_.end() ? render_categories::Role::unknown : role->second;
@@ -698,8 +1085,7 @@ void GodotRenderer::Impl::submit(std::shared_ptr<const sim::RenderSnapshot> snap
         }
         presence.retain(instance->second.placement);
         if (instance->second.reserved_proxy && !instance->second.visible) {
-            rendering->instance_set_visible(instance->second.rid, true);
-            instance->second.visible = true;
+            apply_visibility(*rendering, instance->second, true);
         }
         const bool rebound = transition != detail::InstanceTransition::retain;
         if (!rebound) {
@@ -718,6 +1104,7 @@ void GodotRenderer::Impl::submit(std::shared_ptr<const sim::RenderSnapshot> snap
             ++work_.billboard_refreshes;
         }
         if (render_categories::enabled) {
+            apply_visibility(*rendering, instance->second, instance->second.visible);
             instance->second.category_submit_frame = category_frame;
             // Surfaces are immutable for this upload; query only on create/replacement.
             if (transition != detail::InstanceTransition::retain) {
@@ -736,13 +1123,13 @@ void GodotRenderer::Impl::submit(std::shared_ptr<const sim::RenderSnapshot> snap
     presence.sweep(instances_, [&](const InstanceMap::iterator current) {
         if (current->second.reserved_proxy) {
             if (current->second.visible) {
-                rendering->instance_set_visible(current->second.rid, false);
-                current->second.visible = false;
+                apply_visibility(*rendering, current->second, false);
             }
             return std::next(current);
         }
         return remove_instance(rendering, current);
     }, work_);
+    if (render_categories::ablation != "off") update_diagnostic_instances(*rendering);
     if (fog_) {
         // Only the immutable grid set is kept (for a team switch without a
         // new snapshot); camera, transform and tick changes with identical

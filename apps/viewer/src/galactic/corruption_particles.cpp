@@ -1,4 +1,5 @@
 #include "corruption_particles.hpp"
+#include "eawr/data/xml.hpp"
 #include "eawr/core/diagnostic.hpp"
 
 #include <cmath>

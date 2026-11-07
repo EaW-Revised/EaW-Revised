@@ -1,5 +1,7 @@
 #include "eawr/presentation/ui/command_sink.hpp"
 
+#include "eawr/sim/tactical/durability.hpp"
+
 #include <algorithm>
 #include <iterator>
 #include <mutex>
@@ -204,7 +206,8 @@ core::Result<tactical::CommandPayload> command_payload(const TacticalIntent& int
                 || intent.unit_ability == tactical::AbilityKind::concentrate_fire
                 || intent.unit_ability == tactical::AbilityKind::energy_weapon
                 || intent.unit_ability == tactical::AbilityKind::tractor_beam
-                || intent.unit_ability == tactical::AbilityKind::leech_shields)
+                || intent.unit_ability == tactical::AbilityKind::leech_shields
+                || intent.unit_ability == tactical::AbilityKind::super_laser)
                 && intent.ability_action == tactical::AbilityAction::activate) {
                 if (intent.target == sim::invalid_entity_id) {
                     return Payload::failure(failure(diagnostic_codes::invalid_intent, "this ability needs a target unit"));
@@ -217,7 +220,7 @@ core::Result<tactical::CommandPayload> command_payload(const TacticalIntent& int
         return Payload::failure(failure(diagnostic_codes::unsupported_intent,
             "targeted special abilities have no tactical command yet"));
     case TacticalVerb::repair_hardpoint:
-        if (intent.hardpoint >= 255) return Payload::failure(failure(diagnostic_codes::invalid_intent, "invalid repair hardpoint"));
+        if (intent.hardpoint >= tactical::max_hardpoints_per_type) return Payload::failure(failure(diagnostic_codes::invalid_intent, "invalid repair hardpoint"));
         return Payload::success(tactical::RepairHardpointPayload{intent.hardpoint});
     case TacticalVerb::buy: return Payload::success(tactical::BuyPayload{intent.type});
     case TacticalVerb::pad_build: return Payload::success(tactical::PadBuildPayload{intent.type});

@@ -11,6 +11,7 @@ sys.path.insert(0, str(ROOT / 'tools'))
 from native_cpp_fixture import compile_fixture, select_toolchain
 
 POPULATION = r'''
+#include <algorithm>
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
@@ -33,8 +34,18 @@ namespace space {
 struct PopulationIndex {
     std::vector<std::vector<std::size_t>> rows;
     std::span<const std::size_t> pieces(std::size_t ship) const { return rows.at(ship); }
+    std::size_t ship_count() const { return rows.size(); }
+    void truncate(std::size_t ships) { if (rows.size() > ships) rows.resize(ships); }
 };
-struct AttachmentMarks { std::size_t size{}; template<class T> void configure(const T& states) { size = states.size(); } };
+struct AttachmentMarks {
+    std::size_t size{};
+    template<class T> void extend(const T& states) { size = states.size(); }
+    std::size_t decisions() const { return size; }
+    void truncate(std::size_t decisions) { if (size > decisions) size = decisions; }
+};
+}
+template<class Vector> void reserve_geometric(Vector& values, const std::size_t wanted) {
+    if (wanted > values.capacity()) values.reserve(std::max(wanted, values.capacity() * 2));
 }
 struct GodotRenderer {
     using ProxyOutcome = ::ProxyOutcome;
@@ -81,6 +92,10 @@ struct SpacePopulation {
     void rebuild_piece_index() {
         piece_index_.rows.assign(options_.placed_ships.size(), {});
         for (std::size_t index = 0; index < pieces_.size(); ++index) piece_index_.rows[*pieces_[index].live].push_back(index);
+    }
+    void append_piece_index(std::size_t first_piece, std::size_t) {
+        piece_index_.rows.resize(options_.placed_ships.size());
+        for (std::size_t index = first_piece; index < pieces_.size(); ++index) piece_index_.rows[*pieces_[index].live].push_back(index);
     }
     ProxyResult append_model_proxies(GodotRenderer&, std::size_t, std::span<const Ship>);
 };

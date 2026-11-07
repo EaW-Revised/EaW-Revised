@@ -82,6 +82,12 @@ struct GalacticLobbyOptions {
     const sim::galactic::MpLobbyCampaign& campaign, std::string_view difficulty, std::uint64_t seed,
     std::uint64_t input_delay = 3, bool two_sides = true);
 
+// The stock AI caption level a room difficulty name stands for ("Easy_Default" -> easy, "Normal_Default" -> normal,
+// "Hard_Default" -> hard; case-insensitive prefix). Nothing for a mod's own name: the lobby shows that name as authored.
+// The room has one difficulty, so every AI seat caption comes from this, never from a fixed "Medium".
+enum class GalacticAiCaption : std::uint8_t { easy, normal, hard };
+[[nodiscard]] std::optional<GalacticAiCaption> galactic_ai_caption(std::string_view difficulty) noexcept;
+
 // The human side (1 or 2) a faction row forms: the row's rank among the host's human rows. Nothing for an AI row
 // or a player ID the room does not list. A seat's `team` is this value; a seat's `faction` is the row's name.
 [[nodiscard]] std::optional<sim::galactic::HumanSideId> galactic_lobby_side(const GalacticLobbyOptions& options,

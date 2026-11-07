@@ -68,6 +68,9 @@ struct VideoSettings final {
     int window_height{600};
     bool windowed{false};
     RenderThreadSetting render_thread{RenderThreadSetting::separate}; // Applied at the next launch.
+    int particle_threads{}; // 0 selects the existing automatic rule.
+    int simulation_threads{}; // 0 selects the existing automatic rule.
+    bool depth_prepass{true}; // Read once before renderer startup.
     bool vsync{true}; // ST-V5: owner-requested FIFO default; stored choices stay unchanged.
     // ST-P2: owner-requested render limit; 0 is Off, -1 follows the display.
     int frame_rate_limit{120};
@@ -82,6 +85,13 @@ struct VideoSettings final {
 
     friend bool operator==(const VideoSettings&, const VideoSettings&) = default;
 };
+
+// A launch or profile count wins; zero leaves the automatic rule in charge.
+[[nodiscard]] constexpr std::optional<std::size_t> resolve_thread_override(
+    const std::optional<std::size_t> chosen, const int saved) noexcept {
+    if (chosen || saved <= 0) return chosen;
+    return static_cast<std::size_t>(saved);
+}
 
 // ST-P2: presentation pacing only. The live simulation keeps its elapsed-time tick clock.
 [[nodiscard]] constexpr int frame_rate_cap(const VideoSettings& video, const int refresh_rate,
@@ -103,6 +113,7 @@ struct GameplaySettings final {
     bool absolute_scrolling{true};
     bool delay_tooltips{false};
     bool reinforcement_areas_only_while_placing{true}; // PD-01: presentation only.
+    bool animated_loading_background{false};
     int hover_owner_names{-1}; // #5130: -1 follows mode (MP on, solo off), 0 off, 1 on.
     bool right_button_scroll{false};
     bool both_buttons_rotate{false};
@@ -152,19 +163,49 @@ struct NetworkSettings final {
 // is valid for storage but cannot open Online. Malformed trust never falls back.
 [[nodiscard]] std::optional<core::Diagnostic> validate_online_settings(const NetworkSettings&, bool require_service = false);
 
+// SH-03: transient layer defaults; only player overrides are serialized.
+struct SelectionActionConfig final {
+    std::string default_key;
+    std::map<std::string, std::string> faction_events;
+    std::map<std::string, std::string> default_faction_events;
+    std::map<std::string, std::string> advisor_events;
+    bool include_heroes{true}; // Include_Heroes: heroes (and team heroes) join this bulk selection
+    friend bool operator==(const SelectionActionConfig&, const SelectionActionConfig&) = default;
+};
+struct SelectionConfig final {
+    bool enabled{};
+    std::array<SelectionActionConfig, 2> actions{{{"Ctrl+Q", {}, {}, {}, true}, {"Q", {}, {}, {}, true}}};
+    friend bool operator==(const SelectionConfig&, const SelectionConfig&) = default;
+};
+
 struct PlayerSettings final {
+    bool revised_layer_enabled{true};
+    std::optional<std::string> revised_layer_path;
     AudioSettings audio;
     VideoSettings video;
     GameplaySettings gameplay;
     NetworkSettings network;
     // ST-K3: optional physical WASD pan; the default keeps retail arrow keys.
     bool camera_wasd{};
+    SelectionConfig selection_config;
+    bool selection_hotkeys_authored{};
+    bool selection_hotkeys{}; // SH-01: optional presentation deviation, default off.
     // Command name -> key text overrides of the keyboard pages. Empty keeps the project's
-    // keys; rebinding is not built yet (ST-K1), so nothing writes here today.
+    // keys; SH-01 writes only its two feature-specific binding overrides.
     std::map<std::string, std::string> keys;
 
     friend bool operator==(const PlayerSettings&, const PlayerSettings&) = default;
 };
+
+// SH-01: verified unoccupied physical chords, shared by the editor and dispatcher.
+inline constexpr std::array<std::string_view, 4> selection_key_choices{"Q", "Ctrl+Q", "Ctrl+U", "Ctrl+Y"};
+inline constexpr std::array<std::string_view, 2> selection_commands{"SELECT_OWN_ALL", "SELECT_OWN_SCREEN"};
+[[nodiscard]] std::string_view selection_key(const PlayerSettings&, std::size_t action) noexcept;
+// Reject occupied/duplicate chords without changing the saved binding.
+bool set_selection_key(PlayerSettings&, std::size_t action, std::string_view chord);
+// No action while disabled, and exact modifier matching (Meta is never admitted).
+[[nodiscard]] std::optional<std::size_t> selection_action(const PlayerSettings&, char physical,
+    bool shift, bool ctrl, bool alt, bool meta = false, bool free_camera = false) noexcept;
 
 // Brings numeric fields into their bounds (NaN-free by construction). Online
 // service fields use validate_online_settings and fail closed instead of clamping.

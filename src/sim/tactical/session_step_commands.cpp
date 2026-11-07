@@ -817,6 +817,25 @@ core::Result<void> session_detail::Tick::commands() {
             if (auto applied = handlers.economy(command); !applied) return applied;
             continue;
         }
+        if (const auto* invulnerable = std::get_if<ScriptInvulnerablePayload>(&command.payload)) {
+            // TL-03: boolean, idempotent, no expiry. A dead or unknown unit is skipped silently (the
+            // retail wrapper does nothing for it); a squadron applies the flag to each live member.
+            const auto apply = [&](const EntityId id) {
+                const auto found = staged.find(id);
+                if (found != staged.end()) found->second.script_invulnerable = invulnerable->enabled;
+            };
+            const auto& born_squadrons = staging_->arrived_squadrons.value();
+            for (const auto id : command.units) {
+                apply(id);
+                const auto group = std::lower_bound(impl_->squadrons.begin(), impl_->squadrons.end(), id,
+                    [](const auto& row, const EntityId value) { return row.container < value; });
+                if (group != impl_->squadrons.end() && group->container == id)
+                    for (const auto member : group->members) apply(member);
+                for (const auto& arrival : born_squadrons)
+                    if (arrival.container == id) for (const auto member : arrival.members) apply(member);
+            }
+            continue;
+        }
         const auto* damage = std::get_if<DamagePayload>(&command.payload);
         auto command_reason = RejectReason::none;
         bool attack_assignment_allowed = true;
@@ -1065,7 +1084,7 @@ Event session_detail::Tick::destruction_event(const std::uint64_t event_tick, co
         .unit = unit.entity_id,
         .order = OrderKind::none,
         .reason = RejectReason::none,
-        .hardpoint = static_cast<std::uint8_t>(hardpoint),
+        .hardpoint = hardpoint,
     };
 }
 

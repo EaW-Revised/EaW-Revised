@@ -34,6 +34,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "tests/presentation/renderer"))
 from viewer_mode_sources import source_text  # noqa: E402
 from dialog_rectangles import assert_dialog_rectangles  # noqa: E402
+from test_load_game import checkpoint_fixture  # noqa: E402
 
 SRC = ROOT / "apps/viewer/src"
 TOOL = ROOT / "tools/fonts/extract_eaw_fonts.py"
@@ -43,6 +44,45 @@ GAME_ROOT = os.environ.get("EAWR_EAW_GAME_ROOT")
 
 
 class LanLobbyStructure(unittest.TestCase):
+    def test_empty_faction_list_has_no_selectable_placeholder(self):
+        refresh = (SRC / "lan_lobby_screen_refresh.cpp").read_text(encoding="utf-8")
+        combo = refresh.split("if (faction != nullptr) {", 1)[1].split("if (colour != nullptr)", 1)[0]
+        self.assertEqual(combo.count("faction->add_item("), 1)
+        self.assertIn("for (const std::string& value : factions)", combo)
+        self.assertIn("faction->set_disabled(!choices_editable || factions.empty())", combo)
+
+    def test_host_setup_faction_captions_come_from_the_active_text_chain(self):
+        # #5452: the online host setup showed identities (Rebel/Empire) instead of the mod's own faction text.
+        refresh = (SRC / "lan_lobby_screen_refresh.cpp").read_text(encoding="utf-8")
+        combo = refresh.split("if (faction != nullptr) {", 1)[1].split("if (colour != nullptr)", 1)[0]
+        self.assertIn("faction_display_name(", combo)
+        self.assertNotIn("faction->add_item(text(value))", combo)
+        selected = (SRC / "lan_lobby_screen.cpp").read_text(encoding="utf-8")
+        # A picked entry maps back to the identity by position, never by reading the caption.
+        self.assertNotIn("choice.faction = utf8(combo->get_item_text", selected)
+        self.assertNotIn("record->faction = utf8(combo->get_item_text", selected)
+
+    def test_staging_faction_choices_always_use_playable_catalog(self):
+        source = (SRC / "lan_lobby_screen_refresh.cpp").read_text(encoding="utf-8")
+        roster = source.split("void EawrLanLobby::refresh_staging_roster(", 1)[1].split(
+            "void EawrLanLobby::", 1)[0]
+        faction_list = roster.split("std::vector<std::string> factions;", 1)[1].split("impl.row_states.clear();", 1)[0]
+        self.assertIn("skirmish::setup_factions(*resources.content->catalog)", faction_list)
+        self.assertNotIn("if (map", faction_list)
+        faction_control = roster.split("if (faction != nullptr)", 1)[1].split("if (colour != nullptr)", 1)[0]
+        self.assertNotIn("add_item(text(row.faction))", faction_control)
+
+    def test_galactic_options_use_the_gc_publication_path_and_refresh_on_difficulty(self):
+        options = (SRC / "lan_lobby_screen_options.cpp").read_text(encoding="utf-8")
+        close = options.split("void EawrLanLobby::close_galactic_options(", 1)[1].split("void EawrLanLobby::open_options()", 1)[0]
+        self.assertIn("match_->lobby_galactic_game(edited)", close)
+        self.assertNotIn("publish_staging_selection", close)
+        self.assertNotIn("accept_setup_options", close)
+        galactic = (SRC / "lan_lobby_screen_galactic.cpp").read_text(encoding="utf-8")
+        signature = galactic.split("if (options) {\n        signature +=", 1)[1].split("impl.rows = rows", 1)[0]
+        self.assertIn("options->difficulty", signature)
+        self.assertIn("button->set_visible(impl.host)", galactic)
+
     def test_production_multiplayer_lan_discovery_is_lazy_and_released(self):
         production = (SRC / "skirmish_setup_mode.cpp").read_text(encoding="utf-8")
         online = production.split("void SkirmishSetupMode::enter_online(", 1)[1].split("void SkirmishSetupMode::enter(", 1)[0]
@@ -241,6 +281,15 @@ class LanLobbyStructure(unittest.TestCase):
         self.assertIn("--eawr-online-room", mode)
         self.assertIn("FixedOnlineLobbySource", mode)
 
+    def test_a_campaign_room_defaults_to_two_humans_and_lists_the_campaign_title(self):
+        # A campaign room opens its mesh only when every configured human joined: the skirmish
+        # transport capacity must not become its default seat count, or a joiner waits at Connecting.
+        staging = (SRC / "lan_lobby_screen_staging.cpp").read_text(encoding="utf-8")
+        self.assertIn("requested_count == 0 ? impl_->galactic_humans : requested_count", staging)
+        self.assertIn("std::uint32_t galactic_humans{2};", (SRC / "lan_lobby_screen_internal.hpp").read_text(encoding="utf-8"))
+        chat = (SRC / "lan_lobby_screen_chat.cpp").read_text(encoding="utf-8")
+        self.assertIn("campaign_display_name(impl_->galactic_campaign)", chat)
+
     def test_the_online_join_attaches_the_room_scope_with_the_directory_admission(self):
         screen = source_text("apps/viewer/src/lan_lobby_screen.cpp")
         pump = (SRC / "lan_lobby_screen_list.cpp").read_text(encoding="utf-8").split("void EawrLanLobby::pump_online()", 1)[1].split("// ---- Host options", 1)[0]
@@ -300,7 +349,7 @@ def free_udp_ports(count):
     return ports
 
 
-def command(cache, name, directory, picture, *extra, resolution="1280x720"):
+def command(cache, name, directory, picture, *extra, resolution="1280x720", engine=()):
     executable = os.environ.get("EAWR_GODOT_EXECUTABLE")
     assert executable, "EAWR_GODOT_EXECUTABLE must name the pinned Godot binary"
     # Every launch gets its own profile and settings file, so no run reads or writes the player's
@@ -312,7 +361,7 @@ def command(cache, name, directory, picture, *extra, resolution="1280x720"):
             own = directory / f"{name}.{suffix}.cfg"
             own.unlink(missing_ok=True)
             isolated += [flag, str(own)]
-    return [executable, "--resolution", resolution, "--max-fps", "30", "--path", str(ROOT / "apps/viewer/project"),
+    return [executable, "--resolution", resolution, "--max-fps", "30", *engine, "--path", str(ROOT / "apps/viewer/project"),
             "--", "--eawr-lan-lobby", "--eawr-game-root", GAME_ROOT, "--eawr-font-cache", str(cache),
             "--eawr-report", str(directory / f"{name}.json"), "--eawr-capture", str(picture), *isolated, *extra]
 
@@ -933,11 +982,258 @@ class LanLobbyGraphical(unittest.TestCase):
         self.assertTrue(report["closed"], report["actions"])
         self.assertNotIn("ERROR:", completed.stdout)
 
+    def test_campaign_host_options_validate_cancel_and_restore_defaults(self):
+        name = "campaign-host-options"
+        steps = ("host_options", "host_dropdown:game_type=TEXT_GAME_TYPE_CAMPAIGN", "host:Campaign options", "wait:staging@60",
+                 "snapshot", "options:open", "snapshot", "options:custom=on", "options:credits=6500",
+                 "options:start_tech=2", "options:max_tech=4", "options:heroes=off",
+                 "options:difficulty=Hard_Default", "options:auto_resolve=3", "options:cancel", "snapshot",
+                 "options:open", "options:custom=on", "options:credits=6500", "options:start_tech=2",
+                 "options:max_tech=1", "options:accept", "snapshot", "options:max_tech=4",
+                 "options:credits=9223372036854775808", "options:accept", "snapshot",
+                 "options:credits=6500", "options:heroes=off", "options:difficulty=Hard_Default",
+                 "options:auto_resolve=3", "options:accept", "sleep:3", "snapshot",
+                 "options:open", "options:defaults", "options:cancel", "snapshot",
+                 "options:open", "options:defaults", "options:accept", "sleep:3", "snapshot",
+                 "cancel", "cancel")
+        completed = subprocess.run(
+            command(self.cache, name, self.pictures, self.pictures / (name + ".png"),
+                    "--eawr-lan-name", "Solo", "--eawr-lan-game-port", "0",
+                    *[arg for step in steps for arg in ("--eawr-lan-do", step)]),
+            cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=False, timeout=600)
+        self.assertEqual(completed.returncode, 0, completed.stdout[-3000:])
+        report = load(self, self.pictures, name, completed.stdout)
+        initial, opened, cancelled, invalid_range, overflow, accepted, reset_cancelled, reset = report["snapshots"]
+        self.assertNotIn("IDC_SELECT_OPTIONS", initial["hidden"])
+        self.assertTrue(opened["options_open"])
+        self.assertFalse(cancelled["options_open"] or cancelled["credits_custom"])
+        self.assertTrue(invalid_range["options_open"])
+        self.assertTrue(overflow["options_open"])
+        self.assertTrue(invalid_range["options_error"])
+        self.assertTrue(overflow["options_error"])
+        self.assertEqual(initial["galactic_options"], cancelled["galactic_options"])
+        self.assertEqual(initial["galactic_options"], invalid_range["galactic_options"])
+        self.assertEqual(initial["galactic_options"], overflow["galactic_options"])
+        for snapshot in (accepted, reset_cancelled):
+            self.assertFalse(snapshot["options_open"])
+            self.assertTrue(snapshot["credits_custom"])
+            self.assertEqual(snapshot["credits"], 6500)
+            self.assertEqual(snapshot["galactic_options"], {"custom": True, "credits": 6500,
+                             "starting_tech": 2, "maximum_tech": 4, "difficulty": "Hard_Default",
+                             "heroes": False, "auto_resolve": 3})
+        self.assertEqual(initial["galactic_options"], reset["galactic_options"])
+        self.assertFalse(reset["options_open"] or reset["credits_custom"])
+        self.assertNotIn("ERROR:", completed.stdout)
+
+    def test_campaign_host_and_load_game_never_block_the_ui_thread(self):
+        # #5512: Host (Campaign) and the staging Load Game press used to run the campaign content load on the UI thread,
+        # and the owner's host ended with a lobby whose buttons did nothing. The script waits on frames, so a blocked
+        # thread shows as one long gap between two frames and a frozen one ends in the subprocess deadline below.
+        # Both render-thread models run.
+        for render_thread in ("safe", "separate"):
+            with self.subTest(render_thread=render_thread):
+                name = "campaign-load-game-frames-" + render_thread
+                saves = self.pictures / (name + "-saves")
+                shutil.rmtree(saves, ignore_errors=True)
+                saves.mkdir(parents=True)
+                steps = ("host_options", "host_dropdown:game_type=TEXT_GAME_TYPE_CAMPAIGN", "host:Campaign load",
+                         "wait:staging@60", "snapshot", "load_game", "wait:load_list@60", "snapshot", "sleep:30",
+                         "load_cancel", "wait:load_list_closed@30", "snapshot", "load_game", "wait:load_list@60", "snapshot",
+                         "load_cancel", "wait:load_list_closed@30", "snapshot")
+                completed = subprocess.run(
+                    command(self.cache, name, self.pictures, self.pictures / (name + ".png"),
+                            "--eawr-lan-name", "Solo", "--eawr-lan-colour", "1", "--eawr-save-dir", str(saves),
+                            "--eawr-lan-broadcast-port", str(free_udp_ports(1)[0]), "--eawr-lan-game-port", "0",
+                            *[arg for step in steps for arg in ("--eawr-lan-do", step)],
+                            engine=("--render-thread", render_thread)),
+                    cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=False, timeout=240)
+                self.assertEqual(completed.returncode, 0, completed.stdout[-3000:])
+                report = load(self, self.pictures, name, completed.stdout)
+                shots = report["snapshots"]
+                self.assertEqual(len(shots), 5, report["actions"])
+                before, opened, closed, reopened, closed_again = shots
+                self.assertEqual(before["page"], "staging")
+                # While the list is open it is a distinct canvas layer above the lobby (equal layers draw and hit-test in
+                # an arbitrary order) and under the message boxes (100); once closed the lobby is back on its own layer
+                # and Load Game works again, twice. A fresh host with no saves gets the empty list, not a dead lobby.
+                self.assertFalse(before["load_game_disabled"])
+                self.assertEqual(before["list_layer"], -1)
+                for shot in (opened, reopened):
+                    self.assertTrue(shot["list_visible"], shot)
+                    self.assertGreater(shot["list_layer"], shot["lobby_layer"], shot)
+                    self.assertLess(shot["list_layer"], 100, shot)
+                for shot in (closed, closed_again):
+                    self.assertEqual(shot["list_layer"], -1, shot)
+                    self.assertEqual(shot["lobby_layer"], before["lobby_layer"], shot)
+                    self.assertFalse(shot["load_game_disabled"], shot)
+                    self.assertEqual(shot["list_note"], "", shot)
+                self.assertLess(report["max_frame_gap_ms"], 1000, report["actions"])
+                self.assert_no_engine_errors(completed.stdout)
+
+    def assert_no_engine_errors(self, output):
+        # The Separate render thread logs a harmless empty-image texture update while it runs and a render-thread finalize
+        # complaint at exit (engine shutdown, after the viewer host is freed); neither is a lobby fault.
+        benign = ("p_image.is_null() || p_image->is_empty()", "This function (finalize) can only be called from the render thread")
+        errors = [line for line in output.splitlines() if "ERROR:" in line and not any(text in line for text in benign)]
+        self.assertEqual(errors, [], output[-3000:])
+
+    # #5512: the real-click cases. The scripted steps above call a button's handler; hover, click and click_row push
+    # real mouse events through the viewport, so the GUI's hit test decides what is reached, as for the owner's click.
+    HOST_CAMPAIGN = ("host_options", "host_dropdown:game_type=TEXT_GAME_TYPE_CAMPAIGN", "host:Campaign click", "wait:staging@60",
+                     "wait:content_ready@120")
+    LOBBY_BUTTONS = ("EAWR_GC_LOAD_GAME", "EAWR_GC_NEW_CAMPAIGN", "IDC_LAN_START_GAME_BUTTON", "IDC_LAN_CANCEL_BUTTON")
+
+    def populated_saves(self, name):
+        # Readable checkpoint headers (no campaign recorded, so the rows list and cannot load) under reserved and plain names.
+        saves = self.pictures / (name + "-saves")
+        shutil.rmtree(saves, ignore_errors=True)
+        saves.mkdir(parents=True)
+        for index, save in enumerate(("Auto Save", "Alpha", "Bravo", "Charlie")):
+            (saves / f"{save}.eawrsave").write_bytes(checkpoint_fixture(30 * (index + 1)))
+        (saves / "Damaged.eawrsave").write_bytes(b"not a checkpoint at all")
+        return saves
+
+    def run_clicks(self, name, steps, saves, render_thread, *extra):
+        completed = subprocess.run(
+            command(self.cache, name, self.pictures, self.pictures / (name + ".png"),
+                    "--eawr-lan-name", "Solo", "--eawr-lan-colour", "1", "--eawr-save-dir", str(saves),
+                    "--eawr-lan-broadcast-port", str(free_udp_ports(1)[0]), "--eawr-lan-game-port", "0", *extra,
+                    *[arg for step in steps for arg in ("--eawr-lan-do", step)],
+                    engine=("--render-thread", render_thread)),
+            cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=False, timeout=300)
+        self.assertEqual(completed.returncode, 0, completed.stdout[-3000:])
+        report = load(self, self.pictures, name, completed.stdout)
+        self.assert_no_engine_errors(completed.stdout)
+        return report
+
+    def assert_one_top_modal(self, shot):
+        # Two input-stopping modal layers on the topmost canvas layer tie in an order nobody chose: one of them can sit
+        # over the other with its dialog invisible while it eats every click. The top layer holds exactly one, and it
+        # holds a visible dialog.
+        modals = [modal for modal in shot["pointer"]["modals"] if modal["visible"]]
+        top = max(modal["layer"] for modal in modals)
+        on_top = [modal for modal in modals if modal["layer"] == top]
+        self.assertEqual(len(on_top), 1, shot["pointer"]["modals"])
+        self.assertGreater(on_top[0]["content"], 0, shot["pointer"]["modals"])
+
+    def test_load_game_dialog_fits_the_window_at_every_size(self):
+        # #5512 (B's rig run): the Load Game list was built for the window size but with the lobby's 1920x1080 theme and
+        # without the lobby's letterbox transform, so at 1280x720 it ran off the right/bottom edge and its Cancel button
+        # could not be clicked. The Cancel button's centre, in window pixels, must lie inside the window.
+        for resolution in ("1280x720", "1920x1080"):
+            with self.subTest(resolution=resolution):
+                name = "load-game-fits-" + resolution
+                saves = self.pictures / (name + "-saves")
+                shutil.rmtree(saves, ignore_errors=True)
+                saves.mkdir(parents=True)
+                steps = ("resize:" + resolution, "sleep:10", "host_options",
+                         "host_dropdown:game_type=TEXT_GAME_TYPE_CAMPAIGN", "host:Campaign fit", "wait:staging@60",
+                         "load_game", "wait:load_list@60", "sleep:10", "snapshot")
+                completed = subprocess.run(
+                    command(self.cache, name, self.pictures, self.pictures / (name + ".png"),
+                            "--eawr-lan-name", "Solo", "--eawr-lan-colour", "1", "--eawr-save-dir", str(saves),
+                            "--eawr-lan-broadcast-port", str(free_udp_ports(1)[0]), "--eawr-lan-game-port", "0",
+                            *[arg for step in steps for arg in ("--eawr-lan-do", step)], resolution=resolution),
+                    cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=False, timeout=240)
+                self.assertEqual(completed.returncode, 0, completed.stdout[-3000:])
+                shot = load(self, self.pictures, name, completed.stdout)["snapshots"][-1]
+                width, height = shot["window"]
+                self.assertEqual([width, height], [int(v) for v in resolution.split("x")], shot)
+                x, y = shot["list_cancel"]
+                self.assertTrue(0 <= x <= width and 0 <= y <= height, f"Cancel centre {x},{y} outside {width}x{height}")
+
+        # The list's own message box (here: the notice for a save folder that cannot be listed) takes the list's transform
+        # (#5575 review: a child canvas layer does not inherit it) so it is not drawn off-screen at other sizes.
+        for resolution in ("1280x720", "1024x768"):
+            with self.subTest(resolution=resolution, box="notice"):
+                name = "load-game-box-fits-" + resolution
+                unreadable = self.pictures / (name + "-not-a-folder")
+                unreadable.write_text("not a directory", encoding="utf-8")
+                steps = ("resize:" + resolution, "sleep:10", "host_options",
+                         "host_dropdown:game_type=TEXT_GAME_TYPE_CAMPAIGN", "host:Campaign box", "wait:staging@60",
+                         "load_game", "wait:load_list@60", "sleep:10", "snapshot")
+                completed = subprocess.run(
+                    command(self.cache, name, self.pictures, self.pictures / (name + ".png"),
+                            "--eawr-lan-name", "Solo", "--eawr-lan-colour", "1", "--eawr-save-dir", str(unreadable),
+                            "--eawr-lan-broadcast-port", str(free_udp_ports(1)[0]), "--eawr-lan-game-port", "0",
+                            *[arg for step in steps for arg in ("--eawr-lan-do", step)], resolution=resolution),
+                    cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=False, timeout=240)
+                self.assertEqual(completed.returncode, 0, completed.stdout[-3000:])
+                shot = load(self, self.pictures, name, completed.stdout)["snapshots"][-1]
+                self.assertGreater(shot["list_box_scale"], 0.0, "the unreadable folder opens a notice box over the list")
+                self.assertAlmostEqual(shot["list_box_scale"], shot["list_scale"], places=4)
+
+    def test_a_hung_saved_game_listing_is_abandoned_with_a_visible_note(self):
+        # #5575: --eawr-lan-fault listing-hang blocks the listing worker for good; --eawr-lan-listing-timeout-ms shortens the
+        # 30 s limit. The lobby must give up, say so in the header note, keep Start usable and let Load Game run again.
+        name = "load-game-listing-hang"
+        saves = self.pictures / (name + "-saves")
+        shutil.rmtree(saves, ignore_errors=True)
+        saves.mkdir(parents=True)
+        steps = ("host_options", "host_dropdown:game_type=TEXT_GAME_TYPE_CAMPAIGN", "host:Campaign hang", "wait:staging@60",
+                 "load_game", "snapshot", "sleep:150", "snapshot", "load_game", "snapshot")
+        completed = subprocess.run(
+            command(self.cache, name, self.pictures, self.pictures / (name + ".png"),
+                    "--eawr-lan-name", "Solo", "--eawr-lan-colour", "1", "--eawr-save-dir", str(saves),
+                    "--eawr-lan-fault", "listing-hang", "--eawr-lan-listing-timeout-ms", "1500",
+                    "--eawr-lan-broadcast-port", str(free_udp_ports(1)[0]), "--eawr-lan-game-port", "0",
+                    *[arg for step in steps for arg in ("--eawr-lan-do", step)]),
+            cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=False, timeout=240)
+        self.assertEqual(completed.returncode, 0, completed.stdout[-3000:])
+        pending, abandoned, retried = load(self, self.pictures, name, completed.stdout)["snapshots"]
+        self.assertTrue(pending["load_game_disabled"], "the listing is pending: Load Game waits")
+        self.assertEqual(abandoned["list_layer"], -1)
+        self.assertIn("took too long", abandoned["list_note"])
+        self.assertFalse(abandoned["load_game_disabled"], "Load Game is usable again after the abandon")
+        self.assertTrue(retried["load_game_disabled"], "a second press starts a new listing")
+
+    def test_load_game_list_and_lobby_buttons_take_real_clicks(self):
+        # The owner's host pressed Load Game and nothing answered again: the list's modal layer sat over the lobby and the
+        # chat edit kept focus. (a) the list is up, its row and Cancel take a click, (b) after Cancel the lobby buttons
+        # (Load Game, New Campaign, Start, Leave) are reached again, and Load Game opens the list a second time.
+        for render_thread in ("safe", "separate"):
+            with self.subTest(render_thread=render_thread):
+                name = "campaign-real-clicks-" + render_thread
+                saves = self.populated_saves(name)
+                steps = (*self.HOST_CAMPAIGN, "sleep:10", "snapshot",
+                         "click:EAWR_GC_LOAD_GAME", "wait:load_list@60", "sleep:10", "snapshot",
+                         "hover:load:IDC_LOAD_CANCEL_BUTTON", "click_row:0", "sleep:5", "snapshot",
+                         "click:load:IDC_LOAD_CANCEL_BUTTON", "wait:load_list_closed@30", "sleep:10", "snapshot",
+                         *("hover:" + button for button in self.LOBBY_BUTTONS), "snapshot",
+                         "click:EAWR_GC_LOAD_GAME", "wait:load_list@60", "sleep:10", "snapshot",
+                         "click:load:IDC_LOAD_CANCEL_BUTTON", "wait:load_list_closed@30",
+                         "click:IDC_LAN_CANCEL_BUTTON", "wait:page:lobby@30")
+                report = self.run_clicks(name, steps, saves, render_thread)
+                staging, opened, row, closed, lobby, reopened = report["snapshots"]
+                for shot in report["snapshots"]:
+                    self.assert_one_top_modal(shot)
+                self.assertFalse(staging["pointer"]["load_list"]["open"])
+                self.assertFalse(staging["pointer"]["load_game_disabled"], staging["pointer"])
+                # (a) the list is on screen and the click reached it: the hover on Cancel ended on Cancel, the row click
+                # selected row 0. A list that is up needs no visible error.
+                self.assertTrue(opened["pointer"]["load_list"]["open"], opened["pointer"])
+                self.assertTrue(opened["pointer"]["load_list"]["visible"], opened["pointer"])
+                self.assertGreaterEqual(opened["pointer"]["load_list"]["rows"], 3, opened["pointer"])
+                (cancel_hover,) = [entry for entry in row["pointer"]["log"] if entry["verb"] == "hover"]
+                self.assertTrue(cancel_hover["found"] and cancel_hover["visible"] and cancel_hover["reaches"], cancel_hover)
+                (row_click,) = [entry for entry in row["pointer"]["log"] if entry["verb"] == "click_row"]
+                self.assertTrue(row_click["reaches"], row_click)
+                self.assertEqual(row["pointer"]["load_list"]["selected"], 0, row["pointer"])
+                # (b) Cancel closed the list, and the lobby's buttons are reached again.
+                self.assertFalse(closed["pointer"]["load_list"]["open"], closed["pointer"])
+                self.assertFalse(closed["pointer"]["load_game_disabled"], closed["pointer"])
+                hovers = [entry for entry in lobby["pointer"]["log"] if entry["verb"] == "hover" and not entry["target"].startswith("load:")]
+                self.assertEqual([entry["target"] for entry in hovers], list(self.LOBBY_BUTTONS), hovers)
+                for entry in hovers:
+                    self.assertTrue(entry["found"] and entry["visible"] and entry["reaches"], entry)
+                self.assertTrue(reopened["pointer"]["load_list"]["open"], reopened["pointer"])
+                self.assertGreaterEqual(reopened["pointer"]["load_list"]["rows"], 3, reopened["pointer"])
+
     def test_a_campaign_room_lists_readable_names_and_describes_the_selected_campaign(self):
         # #4553: the host's campaign list shows the Text_ID names, not the raw IDs, and the selected campaign's
         # Description_Text fills the panel where the map preview sits.
         name = "campaign-names"
-        steps = ("host_options", "host_dropdown:game_type=TEXT_GAME_TYPE_CAMPAIGN", "host:Campaign night", "snapshot",
+        steps = ("host_options", "host_dropdown:game_type=TEXT_GAME_TYPE_CAMPAIGN", "host:Campaign night", "wait:staging@60", "snapshot",
                  "shot:" + name, "cancel", "cancel")
         completed = subprocess.run(
             command(self.cache, name, self.pictures, self.pictures / (name + ".png"),
@@ -1135,6 +1431,17 @@ class LanLobbyGraphical(unittest.TestCase):
         self.assertTrue(join["settings_read_only"])
         self.assertEqual(len(join["settings"]), 6, join["settings"])
         self.assertTrue(all(": " in line for line in join["settings"]), join["settings"])
+        # #4542: the row the guest left (row 2) is Open again at its full authored width, not the narrow
+        # combo the guest's own row used; the guest's new row 7 is human and readable.
+        vacated, moved = join["rows"][1], join["rows"][6]
+        self.assertEqual(vacated["kind"], "open")
+        self.assertGreater(vacated["name_authored_width"], 0)
+        self.assertAlmostEqual(vacated["name_width"], vacated["name_authored_width"], delta=1.0,
+                               msg="the vacated row keeps its full Open caption width")
+        self.assertEqual(moved["kind"], "human")
+        self.assertGreater(moved["name_authored_width"], 0)
+        self.assertLess(moved["name_width"], moved["name_authored_width"] - 1.0,
+                        "the guest's own row keeps the narrow seat combo")
         self.assertFalse(join["local_ready"], "no Accept was needed to populate the screen")
         self.assertFalse(host["start"]["enabled"])
         self.assertNotIn("IDC_IMAGE", join["hidden"])

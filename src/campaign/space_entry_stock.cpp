@@ -1,10 +1,12 @@
 #include "eawr/campaign/space_entry.hpp"
+#include "eawr/vfs/vfs.hpp"
 #include "eawr/battle/start.hpp"
 #include "eawr/campaign/standalone_replay.hpp"
 #include "eawr/campaign/space_rules.hpp"
 #include "eawr/campaign/starting_forces.hpp"
 #include "eawr/campaign/tactical_return_live.hpp"
 #include "eawr/core/sha256.hpp"
+#include "eawr/core/gc_load_trace.hpp"
 #include "eawr/data/retail_values.hpp"
 #include "eawr/data/tag_trace.hpp"
 #include "eawr/scene/scene.hpp"
@@ -20,6 +22,24 @@
 #include <tuple>
 
 namespace eawr::campaign {
+bool stock_name_skippable(const core::Diagnostic& error) {
+    return error.code == data::diagnostic_codes::variant_missing_base;
+}
+namespace {
+std::string key(std::string_view value);
+core::LoadNote unresolved_name_note(const data::Catalog&, const core::Diagnostic&, const std::string&, std::string_view);
+}
+bool StockNameSkips::contains(const std::string_view name) const { return names.contains(key(name)); }
+core::Result<std::optional<data::EffectiveObject>> resolve_stock_name(const data::Catalog& catalog, const std::string_view name,
+    const data::Category category, const std::string_view tag, StockNameSkips& skips) {
+    using Out = core::Result<std::optional<data::EffectiveObject>>;
+    auto resolved = catalog.resolve(name, category);
+    if (resolved) return Out::success(std::optional<data::EffectiveObject>(std::move(resolved).value()));
+    if (!stock_name_skippable(resolved.error())) return Out::failure(resolved.error());
+    // One note per name, however many sites ask for it.
+    if (skips.names.insert(key(name)).second) skips.notes.push_back(unresolved_name_note(catalog, resolved.error(), std::string(name), tag));
+    return Out::success(std::optional<data::EffectiveObject>{});
+}
 namespace {
 namespace gc = sim::galactic;
 namespace tt = sim::tactical;
@@ -35,6 +55,30 @@ std::string key(std::string_view value) {
     std::string out(value.substr(first, value.find_last_not_of(" \t\r\n") - first + 1));
     for (auto& c : out) if (c >= 'a' && c <= 'z') c = static_cast<char>(c - 'a' + 'A');
     return out;
+}
+// CGS-22: an object type the stock content names but that cannot be loaded (its variant base is absent, CGS-13) is a
+// null reference: it is left out and listed with its defining layer, file and line; preparation continues.
+core::LoadNote unresolved_name_note(const data::Catalog& catalog, const core::Diagnostic& error, const std::string& name,
+    std::string_view tag) {
+    core::LoadNote note;
+    note.code = error.code;
+    note.classification = core::LoadCategory::unknown_degrade;
+    note.object = name;
+    note.tag = std::string(tag);
+    note.authored_value = name;
+    note.action = core::LoadAction::skipped_object;
+    note.effective_value = "left out";
+    note.diagnostic_code = error.code;
+    note.message = error.message;
+    if (const auto* definition = catalog.find(name, data::Category::game_object)) {
+        note.layer.mod_id = definition->root.source.layer_id;
+        note.file = definition->root.source.logical_path;
+        note.line = definition->root.source.line;
+    } else {
+        if (error.logical_path) note.file = *error.logical_path;
+        note.line = error.line;
+    }
+    return note;
 }
 std::string text(const data::EffectiveObject& object, std::string_view tag) {
     const auto* value = object.value(tag);
@@ -278,6 +322,7 @@ struct StockSpaceEntry::Impl {
     std::vector<SpaceEntrySide> sides;
     std::vector<SpaceEntryRelation> relations{};
     std::set<gc::PlayerId> missing_caps;
+    StockNameSkips skips; // names that resolve to no loadable object (CGS-22), skipped; notes are skips.notes
     std::map<std::string, MapContent> maps;
     std::map<std::string, core::Diagnostic> type_refusals;
     std::map<gc::PlanetId, std::string> planet_maps;
@@ -323,6 +368,16 @@ void StockSpaceEntry::memory_inventory(diagnostics::GcMemory& m) const {
     }
 }
 
+std::vector<core::LoadNote> StockSpaceEntry::load_notes() const {
+    core::LoadNoteCollector collector;
+    for (const auto& note : impl_->skips.notes) collector.append(note);
+    for (const auto& [path, map] : impl_->maps) {
+        (void)path;
+        for (const auto& note : map.inputs.placement_load_notes) collector.append(note);
+    }
+    return collector.snapshot();
+}
+
 StockSpaceEntry::StockSpaceEntry(std::shared_ptr<const Impl> impl) : impl_(std::move(impl)) {}
 
 core::Result<std::shared_ptr<const StockSpaceEntry>> prepare_stock_space_entry(const vfs::Vfs& filesystem,
@@ -343,8 +398,10 @@ core::Result<std::shared_ptr<const StockSpaceEntry>> prepare_stock_space_entry(c
     for (const auto& binding : plan.type_bindings()) {
         const auto* type = galactic.find(binding.original_type);
         if (!type) return fail<std::shared_ptr<const StockSpaceEntry>>("unbound galactic type");
-        auto object = catalog.resolve(type->name, data::Category::game_object);
-        if (!object) return Result::failure(object.error());
+        auto resolved_type = resolve_stock_name(catalog, type->name, data::Category::game_object, "galactic type", impl->skips);
+        if (!resolved_type) return Result::failure(resolved_type.error());
+        if (!resolved_type.value()) continue; // CGS-13/22: an unloadable type is left out of every table below
+        const auto& object = *resolved_type.value();
         SpaceEntryType row;
         row.galactic = binding.id; row.tactical = type->name;
         row.population = units::population_in_space(type->population_value, type->space_override_population_value);
@@ -355,14 +412,14 @@ core::Result<std::shared_ptr<const StockSpaceEntry>> prepare_stock_space_entry(c
         row.unique_space_unit = type->unique_space_unit;
         row.named_hero = type->named_hero.value_or(false);
         row.generic_hero = key(type->object_class) == "GENERICHEROUNIT";
-        row.attach_to_flagship = data::retail::boolean(text(object.value(), "Attach_To_Flagship_During_Space_Battle")).value_or(false);
+        row.attach_to_flagship = data::retail::boolean(text(object, "Attach_To_Flagship_During_Space_Battle")).value_or(false);
         row.orbital = behavior(*type, "DUMMY_ORBITAL_STRUCTURE");
-        row.special_weapon = data::retail::boolean(text(object.value(), "Is_Special_Weapon_In_Space")).value_or(false);
-        row.additional_structure = text(object.value(), "Tactical_Additional_Structure_Type");
-        row.every_marker_type = text(object.value(), "Place_Other_Type_At_Every_Specific_Marker_Position");
-        row.base_position = text(object.value(), "Base_Position");
-        if (const auto hover = data::retail::leading_number(text(object.value(), "Hover_Offset"))) row.hover_offset = hover->value;
-        row.escorts = tokens(text(object.value(), "Space_Escort_Unit_Types"));
+        row.special_weapon = data::retail::boolean(text(object, "Is_Special_Weapon_In_Space")).value_or(false);
+        row.additional_structure = text(object, "Tactical_Additional_Structure_Type");
+        row.every_marker_type = text(object, "Place_Other_Type_At_Every_Specific_Marker_Position");
+        row.base_position = text(object, "Base_Position");
+        if (const auto hover = data::retail::leading_number(text(object, "Hover_Offset"))) row.hover_offset = hover->value;
+        row.escorts = tokens(text(object, "Space_Escort_Unit_Types"));
         // WGP-188, WGCH-162/163: planet-held upgrades are a separate creation
         // family, including automatic corruption types and authored mission rewards.
         if (behavior(*type, "DUMMY_UPGRADE")) load_types.insert(type->name);
@@ -418,10 +475,12 @@ core::Result<std::shared_ptr<const StockSpaceEntry>> prepare_stock_space_entry(c
         auto path = map_path(planet->space_tactical_map);
         // Preserve a per-conflict refusal for generic maps without a selection producer; this must
         // not prevent an otherwise usable campaign's automatic/land paths from starting.
+        auto located = resolve_stock_name(catalog, location.original_type, data::Category::game_object, "planet", impl->skips);
+        if (!located) return Result::failure(located.error());
+        if (!located.value()) continue; // CGS-13/22: a planet type that cannot be loaded gets no map and no upgrades here
         if (path) { impl->planet_maps.emplace(location.planet->id, path.value()); maps.insert(path.value()); }
-        auto object = catalog.resolve(location.original_type, data::Category::game_object);
-        if (!object) return Result::failure(object.error());
-        if (const auto* abilities = object.value().value("Abilities")) {
+        const auto& object = *located.value();
+        if (const auto* abilities = object.value("Abilities")) {
             for (const auto& ability : abilities->value.children) if (key(ability.name) == "GALAXY_WIDE_UPGRADE_ABILITY") {
                 bool global = true;
                 std::string upgrade;
@@ -436,10 +495,17 @@ core::Result<std::shared_ptr<const StockSpaceEntry>> prepare_stock_space_entry(c
     for (const auto& [planet, declarations] : impl->global_upgrades) {
         (void)planet;
         for (const auto& name : declarations) {
-            auto upgrade = catalog.resolve(name, data::Category::game_object);
+            auto upgrade = resolve_stock_name(catalog, name, data::Category::game_object, "Space_Upgrade_Type", impl->skips);
             if (!upgrade) return Result::failure(upgrade.error());
-            if (!text(upgrade.value(), "Previous_Upgrade_Level_Type").empty()) impl->nonfirst_upgrades.push_back(name);
+            if (!upgrade.value()) continue;
+            if (!text(*upgrade.value(), "Previous_Upgrade_Level_Type").empty()) impl->nonfirst_upgrades.push_back(name);
         }
+    }
+    // CGS-13/22: one cut for the unit-table loader. A named type whose variant base is absent never reaches it (it would
+    // be reported as a missing type and refuse the start); other resolve failures stay for the loader to report.
+    for (auto at = load_types.begin(); at != load_types.end();) {
+        auto probe = resolve_stock_name(catalog, *at, data::Category::game_object, "stock type name", impl->skips);
+        if (probe && !probe.value()) at = load_types.erase(at); else ++at;
     }
     if (maps.size() > 128 || load_types.size() > gc::galactic_max_objects)
         return fail<std::shared_ptr<const StockSpaceEntry>>("campaign content preparation limit exceeded");
@@ -453,11 +519,13 @@ core::Result<std::shared_ptr<const StockSpaceEntry>> prepare_stock_space_entry(c
         for (const auto& placement : decoded.value().placements)
             if (placement.type_resolution == assets::TypeResolution::unique && placement.type_candidates.size() == 1) {
                 const auto& name = placement.type_candidates.front().logical_name;
-                auto object = catalog.resolve(name, data::Category::game_object);
-                if (!object) return Result::failure(object.error());
-                const auto is_marker = data::retail::boolean(text(object.value(), "Is_Marker")).value_or(false);
-                const auto behavior_names = tokens(text(object.value(), "Behavior"));
-                if (key(object.value().type_name) == "MARKER" || is_marker
+                auto placed = resolve_stock_name(catalog, name, data::Category::game_object, "map placement", impl->skips);
+                if (!placed) return Result::failure(placed.error());
+                if (!placed.value()) continue;
+                const auto& object = *placed.value();
+                const auto is_marker = data::retail::boolean(text(object, "Is_Marker")).value_or(false);
+                const auto behavior_names = tokens(text(object, "Behavior"));
+                if (key(object.type_name) == "MARKER" || is_marker
                     || std::any_of(behavior_names.begin(), behavior_names.end(), [](const auto& name) { return key(name) == "MARKER"; })) continue;
                 obstacles.insert(name);
             }
@@ -469,14 +537,27 @@ core::Result<std::shared_ptr<const StockSpaceEntry>> prepare_stock_space_entry(c
     impl->replay_source.types = load.types; impl->replay_source.obstacles = load.obstacles;
     auto tables = units::load_unit_tables(load);
     if (!tables) return Result::failure(tables.error());
-    tables.value().campaign_multiplayer = plan.mode() == CampaignSetupMode::multiplayer;
+    tables.value().campaign_multiplayer = plan.rules_flavour() == CampaignRulesFlavour::multiplayer;
     // Raw campaign metadata is frozen once. Only each battle's reachable subset
     // is converted to validated tactical content; unrelated prototypes are not inputs.
     auto pinned = std::make_shared<const units::UnitTables>(std::move(tables).value());
+    const bool measure_reachable = core::gc_load::trace.active();
+    const auto reachable_origin = core::gc_load::Clock::now();
+    core::gc_load::Clock::duration reachable_time{};
+    std::size_t reachable_calls{};
+    const auto diagnose = [&](std::set<std::string> roots, const std::vector<battle::MapPlacement>& placements) {
+        const auto start = measure_reachable ? core::gc_load::Clock::now() : core::gc_load::Clock::time_point{};
+        auto result = reachable_tables(*pinned, std::move(roots), placements, true, true);
+        if (measure_reachable) {
+            reachable_time += core::gc_load::Clock::now() - start;
+            ++reachable_calls;
+        }
+        return result;
+    };
     // Cache independent reachable capability diagnostics once, without building
     // combat content or allowing unrelated types to poison another battle.
     for (const auto& type : pinned->units) {
-        const auto diagnostic = reachable_tables(*pinned, {key(type.id)}, {}, true, true);
+        const auto diagnostic = diagnose({key(type.id)}, {});
         if (!diagnostic) impl->type_refusals.emplace(key(type.id), diagnostic.error());
     }
     script::foc::AiSetup ai;
@@ -485,7 +566,7 @@ core::Result<std::shared_ptr<const StockSpaceEntry>> prepare_stock_space_entry(c
     if (!modules) return Result::failure(modules.error());
     impl->ai_xml = std::move(ai.xml);
     impl->ai_modules = std::move(modules).value();
-    if (plan.mode() == CampaignSetupMode::multiplayer && !multiplayer_difficulty.empty()) {
+    if (plan.rules_flavour() == CampaignRulesFlavour::multiplayer && !multiplayer_difficulty.empty()) {
         // D10: freeze authored mappings, but resolve only actual AI participants.
         // A human or inactive faction need not declare a tactical AI player type.
         std::vector<std::string> paths;
@@ -529,9 +610,14 @@ core::Result<std::shared_ptr<const StockSpaceEntry>> prepare_stock_space_entry(c
         for (const auto& side : impl->sides) fixture.slots.push_back({side.player, side.faction, 0, side.human, {}});
         auto inputs = skirmish::read_start_inputs(fixture, filesystem, catalog, *pinned, *data_identity);
         if (!inputs) return Result::failure(inputs.error());
-        const auto diagnostic = reachable_tables(*pinned, {}, inputs.value().placements, true, true);
+        const auto diagnostic = diagnose({}, inputs.value().placements);
         impl->maps.emplace(path, StockSpaceEntry::Impl::MapContent{pinned, std::move(inputs).value(),
             diagnostic ? std::optional<core::Diagnostic>{} : diagnostic.error()});
+    }
+    if (measure_reachable) {
+        // Aggregate elapsed validation spans, excluding the interleaved map/module IO.
+        core::gc_load::trace.span("prep.space_entry.reachable_tables.total", reachable_origin, reachable_origin + reachable_time);
+        core::gc_load::trace.mark("prep.space_entry.reachable_tables.calls=" + std::to_string(reachable_calls));
     }
     return Result::success(std::shared_ptr<const StockSpaceEntry>(new StockSpaceEntry(std::move(impl))));
 }
@@ -606,7 +692,10 @@ core::Result<ResolvedConflictEntry> StockSpaceEntry::resolve(const ConflictRecor
             }
             source_tables.units.push_back(std::move(rated));
         }
-    auto source_durability = units::durability_table(source_tables);
+    for (const auto& note : input.map.tables->hardpoint_health_defaults)
+        if (source_tables.find(note.object)) source_tables.hardpoint_health_defaults.push_back(note);
+    core::LoadNoteBuffer source_load_notes;
+    auto source_durability = units::durability_table(source_tables, nullptr, &source_load_notes);
     if (!source_durability) return core::Result<ResolvedConflictEntry>::failure(source_durability.error());
     for (auto& type : input.types) if (const auto* table = input.map.tables->find(type.tactical)) {
         if (const auto* profile = source_durability.value().find(battle::type_id(type.tactical))) {
@@ -862,6 +951,10 @@ core::Result<ResolvedConflictEntry> StockSpaceEntry::resolve(const ConflictRecor
     if (auto rules_bound = bind_space_rules(entry.value().conflict.tactical, input.map, rebound.value()); !rules_bound)
         return core::Result<ResolvedConflictEntry>::failure(rules_bound.error());
     entry.value().content = std::move(rebound).value();
+    core::LoadNoteCollector source_note_collector;
+    source_note_collector.merge(source_load_notes);
+    for (const auto& note : entry.value().content.load_notes) source_note_collector.append(note);
+    entry.value().content.load_notes = source_note_collector.snapshot();
     if (auto bound = impl_->returning.bind(entry.value().conflict, entry.value().content); !bound)
         return core::Result<ResolvedConflictEntry>::failure(bound.error());
     entry.value().start.setup = entry.value().conflict.tactical;

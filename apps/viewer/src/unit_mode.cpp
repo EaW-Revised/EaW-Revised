@@ -1,3 +1,4 @@
+#include "revised_layer.hpp"
 #include "viewer_profile_arguments.hpp"
 #include "eawr/core/ascii.hpp"
 #include "eawr/core/diagnostic.hpp"
@@ -219,6 +220,7 @@ bool UnitMode::State::plan(Node3D& host) {
     }
     roots.emplace_back("base", base);
     std::vector<vfs::MountSpec> specs;
+    mount_revised_layer(roots);
     auto chain = vfs::resolve_manifest_chain(roots);
     if (!chain) return fail(core::format_diagnostic(chain.error()));
     for (auto& manifest : chain.value()) {
@@ -253,7 +255,7 @@ bool UnitMode::State::plan(Node3D& host) {
         const assets::Submesh& submesh = mesh.submeshes[surface.submesh];
         const scene::AssetAccess effect_access{
             .exists = [this](const std::string_view path) { return static_cast<bool>(filesystem->stat(path)); },
-        };
+         .model = {}, .sha256 = {}, .particle_system = {}};
         const bool effect_missing = scene::missing_material_effect(effect_access, submesh.shader);
         if (scene::material_selector(submesh.shader, effect_missing) == nullptr) {
             skipped.push_back(mesh.name + "/" + std::to_string(surface.submesh) + " " + submesh.shader

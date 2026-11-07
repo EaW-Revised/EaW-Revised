@@ -1,4 +1,33 @@
 find_package(Threads REQUIRED)
+add_executable(eawr_shader_material_contracts shader_material_tests.cpp)
+target_link_libraries(eawr_shader_material_contracts PRIVATE eawr::presentation)
+target_compile_features(eawr_shader_material_contracts PRIVATE cxx_std_20)
+eawr_target_project_warnings(eawr_shader_material_contracts)
+add_test(NAME shader_material_contracts COMMAND eawr_shader_material_contracts)
+add_executable(eawr_shader_material_activation_contracts shader_material_activation_tests.cpp)
+target_link_libraries(eawr_shader_material_activation_contracts PRIVATE eawr::presentation)
+target_compile_features(eawr_shader_material_activation_contracts PRIVATE cxx_std_20)
+eawr_target_project_warnings(eawr_shader_material_activation_contracts)
+add_test(NAME shader_material_activation_contracts COMMAND eawr_shader_material_activation_contracts)
+if(WIN32)
+    add_test(NAME shader_material_activation_package COMMAND eawr_shader_material_activation_contracts --package-env)
+    set_tests_properties(shader_material_activation_package PROPERTIES SKIP_RETURN_CODE 77 RESOURCE_LOCK shader_runtime_package)
+endif()
+add_executable(eawr_shader_technique_contracts shader_technique_tests.cpp)
+target_link_libraries(eawr_shader_technique_contracts PRIVATE eawr::presentation)
+target_compile_features(eawr_shader_technique_contracts PRIVATE cxx_std_20)
+eawr_target_project_warnings(eawr_shader_technique_contracts)
+add_test(NAME shader_technique_contracts COMMAND eawr_shader_technique_contracts)
+add_executable(eawr_shader_state_contracts shader_state_tests.cpp)
+target_link_libraries(eawr_shader_state_contracts PRIVATE eawr::presentation)
+target_compile_features(eawr_shader_state_contracts PRIVATE cxx_std_20)
+eawr_target_project_warnings(eawr_shader_state_contracts)
+add_test(NAME shader_state_contracts COMMAND eawr_shader_state_contracts)
+add_executable(eawr_shader_lowering_contracts shader_lowering_tests.cpp)
+target_link_libraries(eawr_shader_lowering_contracts PRIVATE eawr::presentation)
+target_compile_features(eawr_shader_lowering_contracts PRIVATE cxx_std_20)
+eawr_target_project_warnings(eawr_shader_lowering_contracts)
+add_test(NAME shader_lowering_contracts COMMAND eawr_shader_lowering_contracts)
 add_executable(eawr_shader_binding_contracts shader_binding_tests.cpp)
 target_link_libraries(eawr_shader_binding_contracts PRIVATE eawr::presentation)
 target_compile_features(eawr_shader_binding_contracts PRIVATE cxx_std_20)
@@ -12,6 +41,20 @@ target_link_libraries(eawr_texture_recipe_contracts PRIVATE eawr::core)
 target_compile_features(eawr_texture_recipe_contracts PRIVATE cxx_std_20)
 eawr_target_project_warnings(eawr_texture_recipe_contracts)
 add_test(NAME texture_recipe_contracts COMMAND eawr_texture_recipe_contracts)
+
+add_executable(eawr_texture_census_contracts texture_census_tests.cpp)
+target_include_directories(eawr_texture_census_contracts PRIVATE
+    "${PROJECT_SOURCE_DIR}/include" "${PROJECT_SOURCE_DIR}/src/presentation/godot")
+target_link_libraries(eawr_texture_census_contracts PRIVATE eawr::core)
+target_compile_features(eawr_texture_census_contracts PRIVATE cxx_std_20)
+eawr_target_project_warnings(eawr_texture_census_contracts)
+add_test(NAME texture_census_contracts COMMAND eawr_texture_census_contracts)
+
+add_executable(eawr_journal_append_contracts journal_append_tests.cpp)
+target_include_directories(eawr_journal_append_contracts PRIVATE "${PROJECT_SOURCE_DIR}/apps/viewer/src")
+target_compile_features(eawr_journal_append_contracts PRIVATE cxx_std_20)
+eawr_target_project_warnings(eawr_journal_append_contracts)
+add_test(NAME journal_append_contracts COMMAND eawr_journal_append_contracts)
 
 add_executable(eawr_model_recipe_contracts model_recipe_tests.cpp)
 target_include_directories(eawr_model_recipe_contracts PRIVATE
@@ -27,8 +70,21 @@ target_compile_features(eawr_particle_reuse_contracts PRIVATE cxx_std_20)
 eawr_target_project_warnings(eawr_particle_reuse_contracts)
 add_test(NAME particle_reuse_contracts COMMAND eawr_particle_reuse_contracts)
 
+add_executable(eawr_particle_batch_census_contracts particle_batch_census_tests.cpp)
+target_include_directories(eawr_particle_batch_census_contracts PRIVATE "${PROJECT_SOURCE_DIR}/src/presentation/godot")
+target_compile_features(eawr_particle_batch_census_contracts PRIVATE cxx_std_20)
+eawr_target_project_warnings(eawr_particle_batch_census_contracts)
+add_test(NAME particle_batch_census_contracts COMMAND eawr_particle_batch_census_contracts)
+
+add_executable(eawr_particle_merge_contracts particle_merge_tests.cpp)
+target_include_directories(eawr_particle_merge_contracts PRIVATE "${PROJECT_SOURCE_DIR}/src/presentation/godot")
+target_compile_features(eawr_particle_merge_contracts PRIVATE cxx_std_20)
+eawr_target_project_warnings(eawr_particle_merge_contracts)
+add_test(NAME particle_merge_contracts COMMAND eawr_particle_merge_contracts)
+
 add_executable(eawr_renderer_contracts
     main.cpp
+    test_report_privacy.cpp
     renderer_resource_tests.cpp
     "${PROJECT_SOURCE_DIR}/src/presentation/animation/animation.cpp"
     renderer_submission_tests.cpp
@@ -80,6 +136,11 @@ target_compile_features(eawr_owner_census_real_contracts PRIVATE cxx_std_20)
 eawr_target_project_warnings(eawr_owner_census_real_contracts)
 add_test(NAME owner_census_real_contracts COMMAND "${Python3_EXECUTABLE}"
     "${CMAKE_CURRENT_SOURCE_DIR}/run_owner_census_real.py" "$<TARGET_FILE:eawr_owner_census_real_contracts>")
+add_executable(eawr_depth_prepass_option_contracts depth_prepass_option_tests.cpp)
+target_include_directories(eawr_depth_prepass_option_contracts PRIVATE "${PROJECT_SOURCE_DIR}/apps/viewer/src")
+target_compile_features(eawr_depth_prepass_option_contracts PRIVATE cxx_std_20)
+eawr_target_project_warnings(eawr_depth_prepass_option_contracts)
+add_test(NAME depth_prepass_option_contracts COMMAND eawr_depth_prepass_option_contracts)
 if(WIN32)
     add_executable(eawr_crash_handler_probe crash_handler_probe.cpp
         "${PROJECT_SOURCE_DIR}/apps/viewer/src/crash_handler.cpp")
@@ -200,6 +261,10 @@ eawr_add_python_contract(python_presentation_renderer_front_end tests.presentati
 eawr_add_python_contract(python_presentation_renderer_front_end_campaign tests.presentation.renderer.test_front_end_campaign)
 eawr_add_python_contract(python_presentation_renderer_ingame_menu tests.presentation.renderer.test_ingame_menu)
 
+set_property(TEST APPEND PROPERTY LABELS "gpu")
+eawr_add_python_contract(python_presentation_renderer_skirmish_save_menu tests.presentation.renderer.test_skirmish_save_menu)
+set_property(TEST python_presentation_renderer_skirmish_save_menu APPEND PROPERTY LABELS "gpu")
+
 eawr_add_python_contract(python_presentation_renderer_map_attached_effects tests.presentation.renderer.test_map_attached_effects)
 eawr_add_python_contract(python_presentation_renderer_map_camera tests.presentation.renderer.test_map_camera NEEDS PIL)
 eawr_add_python_contract(python_presentation_renderer_map_fog tests.presentation.renderer.test_map_fog)
@@ -293,6 +358,7 @@ eawr_add_python_contract(python_presentation_renderer_reserve_warm_plan tests.pr
 eawr_add_python_contract(python_presentation_renderer_live_slot_identity tests.presentation.renderer.test_live_slot_identity)
 
 eawr_add_python_contract(python_presentation_renderer_terminal_wrecks tests.presentation.renderer.test_terminal_wrecks)
+eawr_add_python_contract(python_presentation_renderer_retire_after_effects tests.presentation.renderer.test_retire_after_effects)
 eawr_add_python_contract(python_presentation_renderer_projectile_model_growth tests.presentation.renderer.test_projectile_model_growth)
 
 eawr_add_python_contract(python_presentation_renderer_viewer_galactic_hero_bar_runtime tests.presentation.renderer.test_viewer_galactic_hero_bar_runtime)
@@ -300,3 +366,4 @@ set_tests_properties(python_presentation_renderer_viewer_galactic_hero_bar_runti
 
 eawr_add_python_contract(python_presentation_renderer_gc_hologram_movies tests.presentation.renderer.test_gc_hologram_movies)
 set_tests_properties(python_presentation_renderer_gc_hologram_movies PROPERTIES LABELS gpu)
+eawr_add_python_contract(python_presentation_renderer_load_job tests.presentation.renderer.test_load_job)

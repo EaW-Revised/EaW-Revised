@@ -28,6 +28,7 @@ UnitEmitters::UnitEmitters(godot::Node3D& host, const vfs::Vfs& filesystem,
           host, [this](const std::string_view name) { return resolve_texture(name); },
           GodotParticleBackend::FogCallbacks{}, 512, 96U * 1024U * 1024U)),
       registry_(std::make_unique<particles::EffectRegistry>(*backend_)) {
+    backend_->set_merge_additive(GodotParticleBackend::merge_additive_default());
     // IS-09: only types carrying ION_STUN_EFFECT initialize their ion emitters hidden.
     for (const auto& profile : durability) {
         if (profile.ion_stun_effect) ion_stun_types_.push_back(profile.type_id);

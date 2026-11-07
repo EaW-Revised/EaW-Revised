@@ -73,6 +73,8 @@ struct Chain {
     std::string fingerprint;
     bool launchable = true;
 };
+// The record a chain layer key names: exact key, case-insensitive mods: keys, and "<key>:<variant name>" forms.
+[[nodiscard]] const ModRecord* find_chain_record(std::span<const ModRecord> records, const std::string& key);
 // Pure resolver: read_mod_metadata supplies the metadata and launch-hint slots first.
 [[nodiscard]] Chain resolve_chain(std::string_view leaf, std::span<const ModRecord> records,
                                   const KnownChains& known, const PlayerEdges& player_edges = {});

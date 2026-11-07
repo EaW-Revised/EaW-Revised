@@ -1,7 +1,7 @@
 #pragma once
 #include "eawr/script/script_host.hpp"
 
-#include "eawr/vfs/vfs.hpp"
+#include "eawr/vfs/vfs_fwd.hpp"
 
 extern "C" {
 #include "lauxlib.h"

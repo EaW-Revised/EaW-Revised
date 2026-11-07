@@ -6,6 +6,8 @@
 
 #include "foc_ai_contract_fixtures.hpp"
 #include "ai_script_evaluators.hpp"
+#include "../../support/result.hpp"
+#include "eawr/platform/sim_workers.hpp"
 
 #include <cctype>
 #include <cstdint>
@@ -153,6 +155,51 @@ void retained_state_and_cleanup() {
         "WGA-453: the cleanup also runs after a failed Evaluate (Evaluate ran for a, b, c; Evaluator_Clean_Up ran after a, b and the failed call: 3*100+3)");
 }
 
+void evaluator_phase_rollback() {
+    using eawr::testing::must;
+    for (const unsigned workers : {1U, 2U, 4U, 8U}) {
+        eawr::platform::ThreadWorkerAdapter executor(workers);
+        EvaluatorRig rig, oracle;
+        expect(rig.eval("CountA") == ai::real(100) && oracle.eval("CountA") == ai::real(100), "evaluator phase begins with actual retained Lua globals");
+        const auto original_view = rig.world.view; const auto before = rig.evaluators->stats();
+        const auto work = [](EvaluatorRig& owner) {
+            std::vector<std::optional<Real>> values{owner.eval("CountB"), owner.eval("BoundEq"), owner.eval("BrokenEq")};
+            auto next = std::make_shared<ai::WorldView>(*owner.world.view); ++next->tick;
+            owner.world.view = next; owner.world.host->view = next;
+            values.push_back(owner.eval("CountC"));
+            return values;
+        };
+        const auto expected = work(oracle);
+        for (const bool throws : {false, true}) for (const bool mutate : {false, true}) {
+            auto phase = must(rig.evaluators->begin_phase(executor));
+            expect(phase->retained_modules() == 0 && !rig.evaluators->begin_phase(executor), "evaluator phase retains no modules until first write and refuses nesting");
+            bool failed{};
+            try {
+                const auto injected = [&]() -> eawr::core::Result<void> {
+                    if (mutate) {
+                        expect(work(rig) == expected && phase->retained_modules() > 0, "speculative evaluator calls retain changed module headers and original counter globals");
+                    }
+                    if (throws) throw std::runtime_error("injected evaluator phase fault");
+                    eawr::core::Diagnostic error; error.code = "INJECTED"; return eawr::core::Result<void>::failure(std::move(error));
+                }();
+                failed = !injected;
+            } catch (const std::runtime_error&) { failed = true; }
+            expect(failed, "evaluator Result/exception fault reached before/after mutation");
+            rig.world.view = original_view; rig.world.host->view = original_view;
+            must(phase->rollback());
+            expect(rig.evaluators->stats() == before, "evaluator rollback restores exact report counters, module fault state and private clock");
+        }
+        auto phase = must(rig.evaluators->begin_phase(executor));
+        expect(work(rig) == expected, "evaluator retry equals independent uninterrupted Lua state and cleanup sequence");
+        must(phase->commit());
+        expect(rig.evaluators->stats() == oracle.evaluators->stats(), "evaluator retry publishes each call and module load once");
+        { auto abandoned = must(rig.evaluators->begin_phase(executor)); static_cast<void>(abandoned); }
+        bool refused{};
+        try { (void)rig.eval("CountA"); } catch (const eawr::script::foc::tactical_ai_detail::EvaluatorInfrastructureError&) { refused = true; }
+        expect(refused, "abandoned evaluator phase fails closed as infrastructure");
+    }
+}
+
 void memo_key_is_typed() {
     EvaluatorRig rig;
     if (!rig.evaluators) return;
@@ -237,6 +284,7 @@ void goal_pass() {
 void script_evaluator_contracts() {
     numeric_and_failures();
     retained_state_and_cleanup();
+    evaluator_phase_rollback();
     memo_key_is_typed();
     bound_context_and_helpers();
     serial_only();

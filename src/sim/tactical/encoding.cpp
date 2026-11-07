@@ -1,6 +1,7 @@
 #include "tactical_internal.hpp"
 
 #include "../replay_internal.hpp"
+#include "eawr/sim/tactical/durability.hpp"
 
 #include <algorithm>
 #include <optional>
@@ -12,6 +13,7 @@ namespace eawr::sim::tactical {
 std::string_view to_string(const OrderKind kind) noexcept {
     switch (kind) {
     case OrderKind::battle_control: return "battle_control";
+    case OrderKind::script_invulnerable: return "script_invulnerable";
     case OrderKind::gift: return "gift";
     case OrderKind::none:
         return "none";
@@ -190,6 +192,7 @@ std::size_t payload_prefix_size(const std::uint8_t opcode) noexcept {
     case opcode_special_fire:
         return 16;
     case opcode_gift: // ADR-020: recipient seat and reserved word
+    case opcode_script_invulnerable: // TL-03: enabled flag and zero reserved word
     case 9:  // #530 buy: type
     case opcode_retreat: // action and reserved word
     case opcode_retreat_cinematic:
@@ -218,6 +221,7 @@ std::size_t payload_prefix_size(const std::uint8_t opcode) noexcept {
 
 std::uint8_t command_opcode(const PlayerCommand& command) noexcept {
     if (std::holds_alternative<BattleControlPayload>(command.payload)) return opcode_battle_control;
+    if (std::holds_alternative<ScriptInvulnerablePayload>(command.payload)) return opcode_script_invulnerable;
     if (std::holds_alternative<GiftPayload>(command.payload)) return opcode_gift;
     if (std::holds_alternative<RetreatPayload>(command.payload)) return opcode_retreat;
     if (std::holds_alternative<RetreatCinematicPayload>(command.payload)) return opcode_retreat_cinematic;
@@ -331,6 +335,9 @@ void append_command(std::vector<std::uint8_t>& bytes, const PlayerCommand& comma
     if (const auto* control = std::get_if<BattleControlPayload>(&command.payload)) {
         sim::detail::append_u32(bytes, control->departed.value);
         append_controller_policy(bytes, control->policy, 4);
+    } else if (const auto* invulnerable = std::get_if<ScriptInvulnerablePayload>(&command.payload)) {
+        sim::detail::append_u32(bytes, invulnerable->enabled ? 1U : 0U);
+        sim::detail::append_u32(bytes, 0);
     } else if (const auto* gift = std::get_if<GiftPayload>(&command.payload)) {
         sim::detail::append_u32(bytes, gift->recipient.value);
         sim::detail::append_u32(bytes, 0);
@@ -451,7 +458,14 @@ void append_event(std::vector<std::uint8_t>& bytes, const Event& event) {
     bytes.push_back(static_cast<std::uint8_t>(event.kind));
     bytes.push_back(static_cast<std::uint8_t>(event.order));
     bytes.push_back(static_cast<std::uint8_t>(event.reason));
-    bytes.push_back(event.hardpoint);
+    // Escape encoding (a clean u32 replaces it at the next format bump): indices below 255 stay one byte so
+    // stock event bytes and digests are unchanged; 0xFF is followed by the u32 index.
+    if (event.hardpoint < event_hardpoint_escape) {
+        bytes.push_back(static_cast<std::uint8_t>(event.hardpoint));
+    } else {
+        bytes.push_back(static_cast<std::uint8_t>(event_hardpoint_escape));
+        sim::detail::append_u32(bytes, event.hardpoint);
+    }
     sim::detail::append_u64(bytes, event.sequence);
     sim::detail::append_u64(bytes, event.unit);
     if (event.kind == EventKind::special_weapon_fired) sim::detail::append_u32(bytes, event.special_pulse);
@@ -493,9 +507,9 @@ core::Result<void> validate_command_shape(
         return core::Result<void>::failure(diagnostic(diagnostic_codes::invalid_command,
             std::string(context) + ": gift requires a recipient seat", logical_path));
     if (const auto* repair = std::get_if<RepairHardpointPayload>(&command.payload);
-        repair != nullptr && (command.units.size() != 1 || repair->hardpoint >= 255)) {
+        repair != nullptr && (command.units.size() != 1 || repair->hardpoint >= max_hardpoints_per_type)) {
         return core::Result<void>::failure(diagnostic(diagnostic_codes::invalid_command,
-            std::string(context) + ": repair requires one station and a hardpoint below 255", logical_path));
+            std::string(context) + ": repair requires one station and a hardpoint below the per-type bound", logical_path));
     }
     // #530: a buy lists exactly its station; a cancel or reinforce lists no unit.
     if ((std::holds_alternative<BuyPayload>(command.payload) || std::holds_alternative<PadBuildPayload>(command.payload)
@@ -552,9 +566,9 @@ core::Result<void> validate_command_shape(
             std::string(context) + ": attack target is entity ID zero", logical_path));
     }
     if (const auto* manual = std::get_if<ManualTargetPayload>(&command.payload);
-        manual != nullptr && (manual->target == invalid_entity_id || manual->hardpoint >= 255)) {
+        manual != nullptr && (manual->target == invalid_entity_id || manual->hardpoint >= max_hardpoints_per_type)) {
         return core::Result<void>::failure(diagnostic(diagnostic_codes::invalid_command,
-            std::string(context) + ": manual target requires a nonzero entity and hardpoint below 255", logical_path));
+            std::string(context) + ": manual target requires a nonzero entity and hardpoint below the per-type bound", logical_path));
     }
     if (const auto* special = std::get_if<SpecialFirePayload>(&command.payload);
         special != nullptr && (command.units.size() != 1 || special->target == invalid_entity_id
@@ -594,7 +608,8 @@ core::Result<void> validate_command_shape(
         // AB-61, WHE-26/27, WLS-01: targeted activation always carries an object.
         const bool aims = (ability->ability == AbilityKind::ion_cannon_shot
             || ability->ability == AbilityKind::concentrate_fire || ability->ability == AbilityKind::energy_weapon
-            || ability->ability == AbilityKind::tractor_beam || ability->ability == AbilityKind::leech_shields)
+            || ability->ability == AbilityKind::tractor_beam || ability->ability == AbilityKind::leech_shields
+            || ability->ability == AbilityKind::super_laser)
             && ability->action == AbilityAction::activate;
         if (aims != (ability->target != invalid_entity_id)
             || (ability->target == invalid_entity_id && ability->target_hardpoint != 0xffffffffU)) {

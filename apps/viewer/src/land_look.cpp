@@ -1,4 +1,5 @@
 #include "land_look.hpp"
+#include "eawr/vfs/vfs.hpp"
 #include "eawr/core/text.hpp"
 #include "land_look_shaders.hpp"
 

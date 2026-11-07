@@ -5,7 +5,7 @@ eawr_add_galactic_area_case(
     NAME galactic_fleet_stacks_tests
     SOURCES fleet_stacks_tests.cpp
     INCLUDE_DIRS "${PROJECT_SOURCE_DIR}/include" "${PROJECT_SOURCE_DIR}/apps/viewer/src"
-    LIBS eawr::sim_galactic
+    LIBS eawr::sim_galactic eawr::ui_data
     TESTS galactic_fleet_stacks_contracts
 )
 
@@ -16,6 +16,8 @@ set_tests_properties(python_presentation_renderer_galactic_hud_perf_runtime PROP
 
 eawr_add_python_contract(python_presentation_renderer_galactic_command_bar_runtime tests.presentation.renderer.test_viewer_galactic_command_bar_runtime)
 set_tests_properties(python_presentation_renderer_galactic_command_bar_runtime PROPERTIES LABELS gpu)
+eawr_add_python_contract(python_presentation_renderer_galactic_time_controls_runtime tests.presentation.renderer.test_viewer_galactic_time_controls_runtime)
+set_tests_properties(python_presentation_renderer_galactic_time_controls_runtime PROPERTIES LABELS gpu)
 
 eawr_add_python_contract(python_presentation_renderer_galactic_production_runtime tests.presentation.renderer.test_viewer_galactic_production_runtime)
 set_tests_properties(python_presentation_renderer_galactic_production_runtime PROPERTIES LABELS gpu)

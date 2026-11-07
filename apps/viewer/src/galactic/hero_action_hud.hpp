@@ -19,7 +19,7 @@ struct HeroActionSurface {
     std::string close_name;
 };
 struct HeroActionHudState {
-    std::array<HeroActionSurface, 2> surfaces;
+    std::array<HeroActionSurface, 1> surfaces;
     godot::Control* blocker{};
     std::shared_ptr<const sim::galactic::GalacticSnapshot> fixture, publication;
     std::optional<sim::galactic::HeroActionMenus> facts;

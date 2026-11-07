@@ -2,9 +2,11 @@
 #include "lan_match.hpp"
 #include "loading_screen.hpp"
 #include "options_screen.hpp"
+#include "particle_workers.hpp"
 #include "startup_trace.hpp"
 #include "crash_handler.hpp"
 #include "crash_log_path.hpp"
+#include "depth_prepass_option.hpp"
 #include "viewer_path.hpp"
 #include "eawr/core/build_identity.hpp"
 #include "gpu_memory_trace.hpp"
@@ -37,7 +39,26 @@ using namespace godot;
 
 namespace {
 
+// Runs once at SERVERS initialization, before the engine creates the renderer, which reads the setting a single
+// time: the opt-in `--eawr-depth-prepass on|off` user argument overrides the project's
+// rendering/driver/depth_prepass/enable. No per-frame work.
+void apply_depth_prepass_option() {
+    const auto arguments = OS::get_singleton()->get_cmdline_user_args();
+    const auto selected = eawr::presentation::godot_backend::select_depth_prepass(
+        static_cast<std::size_t>(arguments.size()), [&](const std::size_t index) {
+            return std::string(arguments[static_cast<int64_t>(index)].utf8().get_data());
+        });
+    if (!selected.error.empty()) {
+        // Loud, like the other --eawr-* options: the value is not applied and the project setting stays in charge.
+        UtilityFunctions::printerr(String::utf8(("EAWR: " + selected.error + "; the project setting is used").c_str()));
+        UtilityFunctions::push_error(String::utf8(selected.error.c_str()));
+    }
+    if (selected.value.has_value())
+        ProjectSettings::get_singleton()->set_setting("rendering/driver/depth_prepass/enable", *selected.value);
+}
+
 void initialize_eawr_viewer(const ModuleInitializationLevel level) {
+    if (level == MODULE_INITIALIZATION_LEVEL_SERVERS) apply_depth_prepass_option();
     if (level == MODULE_INITIALIZATION_LEVEL_SCENE) {
         using namespace eawr::presentation::godot_backend;
 #ifdef _WIN32
@@ -80,6 +101,12 @@ void initialize_eawr_viewer(const ModuleInitializationLevel level) {
 
 void uninitialize_eawr_viewer(const ModuleInitializationLevel level) {
     if (level == MODULE_INITIALIZATION_LEVEL_SCENE) {
+        // L1.3: every particle lane thread was joined by MapMode::State::~State; a thread still alive here would end the
+        // process with a non-zero exit code (std::terminate on a joinable thread). Report it, never abort.
+        if (const int leaked = eawr::presentation::godot_backend::ParticleWorkers::live_lane_threads(); leaked != 0) {
+            UtilityFunctions::printerr("EAWR-VIEWER-LANE-LEAK ", leaked);
+            UtilityFunctions::print("EAWR-VIEWER-LANE-LEAK ", leaked);
+        }
         eawr::presentation::godot_backend::gpu_memory_trace.shutdown_journal();
         eawr::presentation::godot_backend::shutdown_lan_drains();
         eawr::presentation::godot_backend::uninstall_crash_handler();
@@ -111,6 +138,7 @@ extern "C" GDExtensionBool GDE_EXPORT eawr_viewer_library_init(
     GDExtensionBinding::InitObject init(get_proc_address, library, initialization);
     init.register_initializer(initialize_eawr_viewer);
     init.register_terminator(uninitialize_eawr_viewer);
-    init.set_minimum_library_initialization_level(MODULE_INITIALIZATION_LEVEL_SCENE);
+    // SERVERS: the depth pre-pass option must land before the renderer is created.
+    init.set_minimum_library_initialization_level(MODULE_INITIALIZATION_LEVEL_SERVERS);
     return init.init();
 }

@@ -368,7 +368,7 @@ core::Result<CampaignPlacementContext> prepare_context(const vfs::Vfs& filesyste
     CampaignPlacementContext context;
     std::vector<MovementPlayerBinding> players;
     for (const auto& binding : plan.player_bindings()) players.push_back({binding.player.player_id, binding.faction});
-    auto movement = prepare_initial_movement_inputs(p.starting, p.data, players);
+    auto movement = prepare_initial_movement_inputs(p.starting, p.data, players, &p.load_buffer);
     if (!movement) return core::Result<CampaignPlacementContext>::failure(movement.error());
     context.movement.types = movement.value().types; context.movement.players = movement.value().players;
     context.movement.mode_modifier = movement.value().base_mode_modifier;
@@ -479,7 +479,25 @@ core::Result<CampaignPlacementContext> prepare_context(const vfs::Vfs& filesyste
         if (model.empty()) return refuse<CampaignPlacementContext>("campaign_planet_model_bounds: missing model " + source->name);
         if (key(model).ends_with(".ALO")) model.resize(model.size() - 4);
         auto geometry = assets::load_model(filesystem, "data/art/models/" + model + ".alo");
-        if (!geometry) return core::Result<CampaignPlacementContext>::failure(geometry.error());
+        if (!geometry) {
+            // CGS-23: a galactic planet model that fails to load (any load_model error) is a logged load error, not a start
+            // failure. The planet keeps a zero collision radius (EAWR recovery policy; the debug build's handling of a
+            // missing planet model is unverified) and the miss is listed as a load note.
+            core::LoadNote note;
+            note.code = geometry.error().code;
+            note.classification = core::LoadCategory::unknown_degrade;
+            note.file = source->file;
+            note.object = source->name;
+            note.tag = "Galactic_Model_Name";
+            note.authored_value = source->galactic_model_name;
+            note.action = core::LoadAction::default_used;
+            note.effective_value = "zero collision radius";
+            note.diagnostic_code = geometry.error().code;
+            note.message = geometry.error().message;
+            p.load_buffer.append(std::move(note));
+            context.movement.planets.push_back({control.planet, Fixed{}, false});
+            continue;
+        }
         auto bounds = prepare_initial_movement_planet(control.planet, geometry.value(), source->scale_factor.value_or(one));
         if (!bounds) return core::Result<CampaignPlacementContext>::failure(bounds.error());
         context.movement.planets.push_back(bounds.value());
@@ -829,10 +847,21 @@ void install_live_ability_services(CampaignSetupServices& services,
             auto sabotage_cost = number(data::retail::single(original, "Sabotage_Cost_Credits"), Fixed{});
             if (!sabotage_cost || sabotage_cost.value().raw() < 0) return refuse<gc::GalacticAbilitySetup>("invalid sabotage cost");
             if (sabotage_cost.value().raw() > 0) result.sabotage_costs.push_back({binding.id, sabotage_cost.value()});
-            auto cost = number(data::retail::single(original, "Neutralization_Cost"), Fixed{});
-            if (!cost || cost.value().raw() < 0) return refuse<gc::GalacticAbilitySetup>("invalid neutralization cost");
-            if (cost.value().raw() == 0) continue;
-            gc::NeutralizationTarget row; row.type = binding.id; row.cost = cost.value();
+            const auto* cost_node = data::retail::single(original, "Neutralization_Cost");
+            const auto parsed_cost = cost_node ? data::retail::float_value(cost_node->raw_text) : std::nullopt;
+            if (parsed_cost) data::tag_trace::used(cost_node);
+            const auto cost = parsed_cost ? parsed_cost->value : Fixed{};
+            if (parsed_cost && !parsed_cost->exact) {
+                campaign_load_note(&owned->load_buffer, "EAWR-LOAD-1233", cost_node, binding.original_type,
+                    "Neutralization_Cost", std::to_string(cost.raw()) + "/" + std::to_string(Fixed::scale),
+                    "retail float parse", core::LoadCategory::retail_accepts, core::LoadAction::accepted);
+            }
+            else if (cost.raw() < 0)
+                campaign_load_note(&owned->load_buffer, "EAWR-LOAD-1233", cost_node, binding.original_type,
+                    "Neutralization_Cost", cost_node->raw_text, "negative cost retained",
+                    core::LoadCategory::retail_accepts, core::LoadAction::accepted);
+            if (cost.raw() == 0) continue;
+            gc::NeutralizationTarget row; row.type = binding.id; row.cost = cost;
             row.major_allowed = row.minor_allowed = false;
             for (const auto& [name, flag] : {std::pair{"Can_Be_Neutralized_By_Major_Heroes", &row.major_allowed},
                 std::pair{"Can_Be_Neutralized_By_Minor_Heroes", &row.minor_allowed}})
@@ -944,11 +973,17 @@ void install_live_ability_services(CampaignSetupServices& services,
                 std::pair{destroyer, gc::AbilityKind::planet_destruction}, std::pair{saboteur, gc::AbilityKind::structure_sabotage},
                 std::pair{neutralizer, gc::AbilityKind::hero_neutralization}}) {
                 if (!ability) continue;
+                // WGCH-187: theft is always ground-activated: an omitted style keeps its class default and any other
+                // authored style is forced back. The black-market and neutralize classes share that default and stay
+                // unlisted here until their AI landing behaviour is settled (named seam, see the walk).
+                const bool theft = kind == gc::AbilityKind::technology_theft;
+                bool ground = theft;
                 for (const auto& value : ability->children) if (key(value.name) == "ACTIVATION_STYLE") {
                     data::tag_trace::used(&value);
                     const auto style = words(value.raw_text);
-                    if (style.size() == 1 && key(style.front()) == "GROUND_ACTIVATED") profile.ground_activated.push_back(kind);
+                    ground = theft || (style.size() == 1 && key(style.front()) == "GROUND_ACTIVATED");
                 }
+                if (ground) profile.ground_activated.push_back(kind);
             }
             if (spy) {
                 const auto validated = gc::validated_spy({gc::SpyStyle::ground_activated, spy->duration, spy->mask});
@@ -985,8 +1020,20 @@ void install_live_ability_services(CampaignSetupServices& services,
                     low = a.value(); high = b.value(); return true;
                 };
                 const auto curve = [&](const data::XmlNode& value, std::vector<gc::AbilityCurvePoint>& points) {
-                    data::tag_trace::used(&value); auto parsed = gc::parse_income_curve(value.raw_text);
+                    data::tag_trace::used(&value); auto parsed = gc::parse_income_curve(value.raw_text, true);
                     if (!parsed) return false;
+                    const auto& curve_points = parsed.value();
+                    bool duplicate = false, different = false;
+                    for (std::size_t i = 1; i < curve_points.size(); ++i) {
+                        if (curve_points[i - 1].x != curve_points[i].x) continue;
+                        duplicate = true;
+                        different |= curve_points[i - 1].y != curve_points[i].y;
+                    }
+                    if (duplicate) campaign_load_note(&owned->load_buffer, "EAWR-LOAD-1238", &value,
+                        binding.original_type, value.name, "stable authored-order ties",
+                        different ? "tie order unverified, capture needed" : "accepts identical points",
+                        different ? core::LoadCategory::unknown_degrade : core::LoadCategory::retail_accepts,
+                        core::LoadAction::accepted);
                     points = std::move(parsed).value(); return true;
                 };
                 const auto flag = [&](const data::XmlNode& value, bool& target) {
@@ -1010,7 +1057,13 @@ void install_live_ability_services(CampaignSetupServices& services,
                     else if (tag == "CAN_NEUTRALIZE_MINOR_HEROES") ok = flag(value, n.can_minor);
                     else if (tag == "CAN_NEUTRALIZE_MAJOR_HEROES") ok = flag(value, n.can_major);
                     else if (tag == "INITIALLY_ENABLED") ok = flag(value, n.initially_enabled);
-                    if (!ok) return refuse<gc::GalacticAbilitySetup>("invalid neutralization ability " + value.name);
+                    if (!ok) {
+                        core::Diagnostic error; error.code = std::string(gc::diagnostic_codes::invalid_setup);
+                        error.message = "stock campaign setup: invalid neutralization ability " + value.name + " for " + binding.original_type;
+                        error.logical_path = value.source.logical_path; error.line = value.source.line;
+                        error.column = value.source.column; error.source_id = value.source.source_id;
+                        return core::Result<gc::GalacticAbilitySetup>::failure(std::move(error));
+                    }
                 }
             }
             if (destroyer) {

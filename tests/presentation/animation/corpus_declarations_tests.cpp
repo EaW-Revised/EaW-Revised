@@ -323,40 +323,40 @@ void test_duplicate_inheritance() {
     TempTree tree;
     registries(tree.root, "<File>units.xml</File>");
     write(tree.root / "XML" / "units.xml", R"xml(<GameObjects>
-<GroundInfantry Name="D1_UNIT"><Land_Model_Name>D1.ALO</Land_Model_Name></GroundInfantry>
 <GroundInfantry Name="D1_UNIT"><Land_Model_Name>D1.ALO</Land_Model_Name>
   <Land_Model_Anim_Override_Name>D1_Heavy.ALO</Land_Model_Anim_Override_Name></GroundInfantry>
+<GroundInfantry Name="D1_UNIT"><Land_Model_Name>D1.ALO</Land_Model_Name></GroundInfantry>
+<GroundInfantry Name="D2_UNIT"><Land_Model_Name>D2.ALO</Land_Model_Name></GroundInfantry>
 <GroundInfantry Name="D2_UNIT"><Land_Model_Name>D2.ALO</Land_Model_Name>
   <Land_Model_Anim_Override_Name>D2_Heavy.ALO</Land_Model_Anim_Override_Name></GroundInfantry>
-<GroundInfantry Name="D2_UNIT"><Land_Model_Name>D2.ALO</Land_Model_Name></GroundInfantry>
 <GroundInfantry Name="D3_LINKS"><Land_Model_Name>D3.ALO</Land_Model_Name>
   <Land_Model_Anim_Override_Name>D3_Heavy.ALO</Land_Model_Anim_Override_Name></GroundInfantry>
 <GroundInfantry Name="D3_PLAIN"><Land_Model_Name>D3.ALO</Land_Model_Name></GroundInfantry>
-<GroundInfantry Name="D3_UNIT"><Variant_Of_Existing_Type>D3_PLAIN</Variant_Of_Existing_Type></GroundInfantry>
 <GroundInfantry Name="D3_UNIT"><Variant_Of_Existing_Type>D3_LINKS</Variant_Of_Existing_Type></GroundInfantry>
+<GroundInfantry Name="D3_UNIT"><Variant_Of_Existing_Type>D3_PLAIN</Variant_Of_Existing_Type></GroundInfantry>
 <GroundInfantry Name="D4_LINKS"><Land_Model_Name>D4.ALO</Land_Model_Name>
   <Land_Model_Anim_Override_Name>D4_Heavy.ALO</Land_Model_Anim_Override_Name></GroundInfantry>
 <GroundInfantry Name="D4_PLAIN"><Land_Model_Name>D4.ALO</Land_Model_Name></GroundInfantry>
-<GroundInfantry Name="D4_UNIT"><Variant_Of_Existing_Type>D4_LINKS</Variant_Of_Existing_Type></GroundInfantry>
 <GroundInfantry Name="D4_UNIT"><Variant_Of_Existing_Type>D4_PLAIN</Variant_Of_Existing_Type></GroundInfantry>
+<GroundInfantry Name="D4_UNIT"><Variant_Of_Existing_Type>D4_LINKS</Variant_Of_Existing_Type></GroundInfantry>
 <GroundInfantry Name="D5_A"><Land_Model_Name>D5.ALO</Land_Model_Name>
   <Land_Model_Anim_Override_Name>D5_Heavy.ALO</Land_Model_Anim_Override_Name></GroundInfantry>
 <GroundInfantry Name="D5_B"><Model_Name>D5.ALO</Model_Name>
   <Land_Model_Anim_Override_Name>D5_Heavy.ALO</Land_Model_Anim_Override_Name></GroundInfantry>
-<GroundInfantry Name="D5_UNIT"><Variant_Of_Existing_Type>D5_B</Variant_Of_Existing_Type></GroundInfantry>
 <GroundInfantry Name="D5_UNIT"><Variant_Of_Existing_Type>D5_A</Variant_Of_Existing_Type></GroundInfantry>
-<GroundInfantry Name="D6_BASE"><Land_Model_Anim_Override_Name>D6_Heavy.ALO</Land_Model_Anim_Override_Name></GroundInfantry>
+<GroundInfantry Name="D5_UNIT"><Variant_Of_Existing_Type>D5_B</Variant_Of_Existing_Type></GroundInfantry>
 <GroundInfantry Name="D6_BASE"><Icon_Name>d6</Icon_Name></GroundInfantry>
+<GroundInfantry Name="D6_BASE"><Land_Model_Anim_Override_Name>D6_Heavy.ALO</Land_Model_Anim_Override_Name></GroundInfantry>
 <GroundInfantry Name="D6_UNIT"><Variant_Of_Existing_Type>D6_BASE</Variant_Of_Existing_Type>
   <Land_Model_Name>D6.ALO</Land_Model_Name></GroundInfantry>
-<GroundInfantry Name="D7_UNIT"><Variant_Of_Existing_Type>D7_GONE</Variant_Of_Existing_Type>
-  <Land_Model_Name>D7.ALO</Land_Model_Name></GroundInfantry>
 <GroundInfantry Name="D7_UNIT"><Land_Model_Name>D7.ALO</Land_Model_Name>
   <Land_Model_Anim_Override_Name>D7_Heavy.ALO</Land_Model_Anim_Override_Name></GroundInfantry>
-<GroundInfantry Name="D8_UNIT"><Variant_Of_Existing_Type>D8_UNIT</Variant_Of_Existing_Type>
-  <Land_Model_Name>D8.ALO</Land_Model_Name></GroundInfantry>
+<GroundInfantry Name="D7_UNIT"><Variant_Of_Existing_Type>D7_GONE</Variant_Of_Existing_Type>
+  <Land_Model_Name>D7.ALO</Land_Model_Name></GroundInfantry>
 <GroundInfantry Name="D8_UNIT"><Land_Model_Name>D8.ALO</Land_Model_Name>
   <Land_Model_Anim_Override_Name>D8_Heavy.ALO</Land_Model_Anim_Override_Name></GroundInfantry>
+<GroundInfantry Name="D8_UNIT"><Variant_Of_Existing_Type>D8_UNIT</Variant_Of_Existing_Type>
+  <Land_Model_Name>D8.ALO</Land_Model_Name></GroundInfantry>
 <GroundInfantry Name="D9_UNIT"><Land_Model_Name>D9.ALO</Land_Model_Name>
   <Land_Model_Anim_Override_Name>D9_Heavy.ALO</Land_Model_Anim_Override_Name></GroundInfantry>
 <GroundInfantry Name="D9_UNIT"><Land_Model_Name>D9.ALO</Land_Model_Name>
@@ -391,10 +391,10 @@ void test_duplicate_inheritance() {
             && item->conflicts.front().reason.find(text) != std::string::npos;
     };
 
-    // An earlier model-only duplicate does not borrow the later winner's override.
-    const auto* d1 = conflicting("d1_heavy_idle_00", "earlier model-only duplicate of a linking winner conflicts");
+    // A later model-only duplicate does not borrow the first winner's override.
+    const auto* d1 = conflicting("d1_heavy_idle_00", "later model-only duplicate of a linking winner conflicts");
     expect(d1 != nullptr && d1->evidence.size() == 1, "the winner's link is still recorded as evidence");
-    const auto* d2 = conflicting("d2_heavy_idle_00", "earlier linking duplicate of a model-only winner conflicts");
+    const auto* d2 = conflicting("d2_heavy_idle_00", "later linking duplicate of a model-only winner conflicts");
     expect(d2 != nullptr && d2->evidence.empty(), "the model-only winner does not link");
     // Distinct variant parents, in both orders.
     conflicting("d3_heavy_idle_00", "winner inheriting the link over a duplicate with another parent conflicts");

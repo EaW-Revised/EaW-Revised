@@ -4,6 +4,7 @@
 // test_live_session.py.
 
 #include "eawr/presentation/ui/battle_messages.hpp"
+#include "eawr/data/xml.hpp"
 #include "eawr/presentation/ui/time_controls.hpp"
 #include "ui_test_support.hpp"
 

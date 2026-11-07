@@ -1,8 +1,10 @@
 #include "ability_fixtures.hpp"
+#include "eawr/sim/tactical/fighters.hpp"
 #include "../../src/sim/tactical/combat_internal.hpp"
 #include "../../src/sim/tactical/blast_internal.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <array>
 #include <cstddef>
 #include <cstdint>

@@ -1,0 +1,204 @@
+#include "load_job.hpp"
+
+#include <chrono>
+#include <cstddef>
+#include <cstdint>
+#include <cstdlib>
+#include <iostream>
+#include <optional>
+#include <stdexcept>
+#include <string>
+#include <vector>
+
+using eawr::presentation::godot_backend::LoadJob;
+
+namespace {
+void require(const bool condition, const char* message) {
+    if (!condition) throw std::runtime_error(message);
+}
+
+struct Context final {
+    std::vector<int>& trace;
+    int& destroyed;
+    std::unique_ptr<std::string> owner = std::make_unique<std::string>("map");
+    const std::string& borrowed = *owner;
+    const bool* host_destroyed{};
+    Context(std::vector<int>& events, int& count, const bool* host_gone = nullptr)
+        : trace(events), destroyed(count), host_destroyed(host_gone) {}
+    ~Context() {
+        if (host_destroyed && *host_destroyed) std::abort();
+        ++destroyed;
+    }
+};
+using Job = LoadJob<Context>;
+
+std::vector<Job::Step> steps() {
+    std::vector<Job::Step> result;
+    for (int index = 0; index < 11; ++index) {
+        result.push_back([index](Context& context) {
+            require(context.borrowed == "map", "heap-owned referenced input expired");
+            context.trace.push_back(index);
+            return true;
+        });
+    }
+    return result;
+}
+
+struct Node {
+    Node* get_parent() { return nullptr; }
+    void remove_child(Node*) {}
+    virtual ~Node() = default;
+};
+struct Node3D final : Node {
+    bool& destroyed;
+    explicit Node3D(bool& value) : destroyed(value) {}
+    ~Node3D() override { destroyed = true; }
+};
+struct UtilityFunctions {
+    static bool is_instance_id_valid(std::int64_t) { return true; }
+};
+template<class T> void memdelete(T* value) { delete value; }
+struct Mode final {
+    Job job;
+    Mode(std::vector<int>& events, int& destroyed, const bool& host_destroyed)
+        : job(std::make_unique<Context>(events, destroyed, &host_destroyed), steps()) {}
+};
+struct Menu final {
+    std::unique_ptr<Mode> map;
+    Node3D* host{};
+    std::uint64_t host_id{};
+    bool loading{};
+    double reveal_elapsed{};
+    std::optional<std::size_t> map_index{};
+    std::string map_path;
+    void free_battle() {
+__FREE_BATTLE__
+    }
+};
+}
+
+int main() {
+    try {
+        std::vector<int> synchronous;
+        int destroyed = 0;
+        Job sync(std::make_unique<Context>(synchronous, destroyed), steps());
+        require(sync.run_to_completion(), "synchronous completion failed");
+        require(destroyed == 1, "completed context not released");
+        require(sync.run_to_completion() && synchronous.size() == 11, "completion repeated work");
+
+        std::vector<int> sliced;
+        int slices_destroyed = 0;
+        Job slices(std::make_unique<Context>(sliced, slices_destroyed), steps());
+        for (std::size_t index = 0; index < synchronous.size(); ++index) {
+            const auto status = slices.run_for(std::chrono::steady_clock::duration::zero());
+            require(sliced.size() == index + 1, "zero-budget frame did not execute exactly one step");
+            require((status == Job::Status::complete) == (index + 1 == synchronous.size()),
+                    "premature completion");
+        }
+        require(sliced == synchronous && slices_destroyed == 1, "sliced order differs from synchronous");
+
+        // Pending input starts no callback; idle frames then run the same work in the same order.
+        {
+            std::vector<int> deferred;
+            int deferred_destroyed = 0;
+            Job job(std::make_unique<Context>(deferred, deferred_destroyed), steps());
+            const auto budget = std::chrono::steady_clock::duration::zero();
+            for (int frame = 0; frame < 50; ++frame)
+                require(job.run_for(budget, true) == Job::Status::pending && deferred.empty(),
+                        "a callback started while input was pending");
+            require(job.run_for(budget, false) == Job::Status::pending && deferred.size() == 1, "idle frame did not resume");
+            while (job.run_for(budget, deferred.size() % 2 == 0) == Job::Status::pending) {}
+            require(deferred == synchronous && deferred_destroyed == 1, "deferral changed the order or the work");
+
+            // A long interaction cannot starve the load: one callback runs after max_deferred_pumps deferred pumps.
+            std::vector<int> starved;
+            int starved_destroyed = 0;
+            Job stuck(std::make_unique<Context>(starved, starved_destroyed), steps());
+            for (std::size_t frame = 0; frame < Job::max_deferred_pumps; ++frame) static_cast<void>(stuck.run_for(budget, true));
+            require(starved.empty(), "starvation cap reached early");
+            static_cast<void>(stuck.run_for(budget, true));
+            require(starved.size() == 1, "starvation cap did not release a callback");
+
+            // The observer sees every callback once, in execution order, nested children included; unset it costs nothing.
+            std::vector<int> observed_trace;
+            int observed_destroyed = 0;
+            std::vector<std::size_t> ordinals;
+            Job observed(std::make_unique<Context>(observed_trace, observed_destroyed), steps());
+            observed.observe_steps([&ordinals](std::size_t ordinal, std::chrono::steady_clock::duration took) {
+                require(took.count() >= 0, "negative duration");
+                ordinals.push_back(ordinal);
+            });
+            require(observed.run_to_completion() && ordinals.size() == synchronous.size(), "observer missed a callback");
+            for (std::size_t index = 0; index < ordinals.size(); ++index) require(ordinals[index] == index, "observer order");
+        }
+
+        std::vector<int> nested_trace;
+        int nested_destroyed = 0;
+        Job* active = nullptr;
+        Job nested(std::make_unique<Context>(nested_trace, nested_destroyed), {
+            [&active](Context& context) {
+                context.trace.push_back(0);
+                active->append([&active](Context& child) {
+                    child.trace.push_back(1);
+                    active->append([](Context& grandchild) { grandchild.trace.push_back(2); return true; });
+                    return true;
+                });
+                active->append([](Context& sibling) { sibling.trace.push_back(3); return true; });
+                return true;
+            },
+            [](Context& context) { context.trace.push_back(4); return true; },
+        });
+        active = &nested;
+        require(nested.run_to_completion() && nested_trace == std::vector<int>({0, 1, 2, 3, 4}),
+                "nested work ran after its parent's finalizer");
+
+        // Leaving the menu at every boundary drops its pending context and never invokes later work.
+        for (std::size_t boundary = 0; boundary < synchronous.size(); ++boundary) {
+            std::vector<int> partial;
+            int cancelled = 0;
+            {
+                Job menu(std::make_unique<Context>(partial, cancelled), steps());
+                for (std::size_t index = 0; index < boundary; ++index)
+                    require(menu.advance() == Job::Status::pending, "unexpected terminal step");
+                require(cancelled == 0, "pending context released too soon");
+            }
+            require(cancelled == 1 && partial.size() == boundary, "menu cancellation leaked or ran work");
+
+            std::vector<int> menu_trace;
+            int menu_destroyed = 0;
+            bool host_destroyed = false;
+            Menu menu;
+            menu.host = new Node3D(host_destroyed);
+            menu.host_id = 1;
+            menu.loading = true;
+            menu.map = std::make_unique<Mode>(menu_trace, menu_destroyed, host_destroyed);
+            for (std::size_t index = 0; index < boundary; ++index)
+                require(menu.map->job.advance() == Job::Status::pending, "menu job ended early");
+            menu.free_battle();
+            require(menu_destroyed == 1 && host_destroyed && !menu.map && !menu.host && !menu.loading,
+                    "production menu teardown did not cancel before destroying the host");
+            menu.free_battle();
+            require(menu_destroyed == 1, "repeated teardown destroyed a cancelled job twice");
+        }
+
+        std::vector<int> failed;
+        int failed_destroyed = 0;
+        auto failing_steps = steps();
+        failing_steps[3] = [](Context& context) { context.trace.push_back(3); return false; };
+        Job failure(std::make_unique<Context>(failed, failed_destroyed), std::move(failing_steps));
+        require(!failure.run_to_completion(), "failure reported success");
+        require(!failure.run_to_completion() && failed.size() == 4 && failed_destroyed == 1,
+                "failed job retained state or invoked later callbacks");
+
+        std::vector<int> empty_trace;
+        int empty_destroyed = 0;
+        Job empty(std::make_unique<Context>(empty_trace, empty_destroyed), {});
+        require(empty.run_to_completion() && empty_destroyed == 1, "empty job did not release state");
+        Job missing(nullptr, steps());
+        require(!missing.run_to_completion(), "missing context accepted");
+        std::cout << "LoadJob ordering, cancellation, failure and heap ownership PASS\n";
+    } catch (const std::exception& error) {
+        std::cerr << error.what() << '\n';
+        return 1;
+    }
+}

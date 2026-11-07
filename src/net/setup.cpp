@@ -331,7 +331,7 @@ struct SetupRuntime final : SessionMonitor, MessageTransport {
     core::Result<void> record(std::uint64_t tick, std::string_view hash,
         std::span<const std::uint8_t> state, std::span<const std::uint8_t> input, bool end) override {
         auto result = providers.monitor->record(tick, hash, state, input, end);
-        if (result && tick == 0) zero_recorded = true;
+        if (result && tick == options.session.initial_tick) zero_recorded = true;
         return result;
     }
     core::Result<void> receive(const Received& received) override { return providers.monitor->receive(received); }
@@ -384,6 +384,11 @@ struct SetupRuntime final : SessionMonitor, MessageTransport {
             auto setup = decode_skirmish_setup(offer.setup);
             if (!setup) return fail(SetupReason::malformed, setup.error().message);
             if (auto rejected = skirmish_start_refusal(setup.value())) return refuse(std::move(*rejected));
+        }
+        if (offer.domain == galactic_setup_domain) {
+            auto payload = decode_galactic_setup(offer.setup);
+            if (!payload) return fail(SetupReason::malformed, payload.error().message);
+            options.session.initial_tick = payload.value().initial_tick;
         }
         auto local = providers.identify(offer);
         if (!local) return fail(SetupReason::local_build, local.error().message);
@@ -559,7 +564,7 @@ core::Result<void> SetupSession::pump(std::uint64_t now) {
     // Preview/accept/host Start are human-paced. Only offer delivery and the
     // started tick-zero exchange have deadlines; transport detects dead peers.
     const bool offer_pending = value.phase == SetupPhase::awaiting_offer || (value.transport->self() == 0
-        && !std::all_of(value.previewed.begin(), value.previewed.end(), [](bool seen) { return seen; }));
+        && !value.options.untimed_preview_wait && !std::all_of(value.previewed.begin(), value.previewed.end(), [](bool seen) { return seen; }));
     const unsigned timed_phase = offer_pending ? 1U : (value.started && value.phase != SetupPhase::ready ? 2U : 0U);
     if (timed_phase != value.timed_phase || !value.since) value.since = now;
     value.timed_phase = timed_phase;

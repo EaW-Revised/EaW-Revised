@@ -13,6 +13,7 @@
 #include "motion_internal.hpp"
 #include "orders_internal.hpp"
 #include "staging.hpp"
+#include "session_release.hpp"
 #include "session_tick.hpp"
 #include "session_services.hpp"
 #include "tactical_internal.hpp"
@@ -75,11 +76,16 @@ core::Result<TacticalTick> TacticalSession::step(const PartitionExecutor& execut
             "tick " + std::to_string(tick) + " reached the tactical tick limit"));
     }
     if (impl_->land) return impl_->step_land(*this, executor);
+    // Declared before the Tick, so it is destroyed after it: emplaced once the tick ran, it times ~Tick and the
+    // destruction of every per-tick stage vector.
+    std::optional<core::tick_profile::Scope> teardown;
     auto context = [&] {
         core::tick_profile::Scope scope("serial.tactical.setup");
         return session_detail::Tick(*this, impl_.get(), executor);
     }();
-    return context.run();
+    auto result = context.run();
+    teardown.emplace("serial.tactical.teardown");
+    return result;
 }
 
 // The gather buffers return with their capacity; only units are cleared. The next tick refills them.
@@ -91,8 +97,21 @@ session_detail::Tick::~Tick() {
         if (gather_->starts) scratch.starts = std::move(*gather_->starts);
         if (gather_->gathered_crafts) scratch.crafts = std::move(*gather_->gathered_crafts);
     }
-    for (auto* units : {gather_ && gather_->moving ? &*gather_->moving : nullptr,
-             surviving_ && surviving_->survivors ? &*surviving_->survivors : nullptr}) {
+    const std::array<std::vector<LiveUnit>*, 2> unit_vectors{
+        gather_ && gather_->moving ? &*gather_->moving : nullptr,
+        surviving_ && surviving_->survivors ? &*surviving_->survivors : nullptr};
+    {
+        // The units own most of the tick's heap memory (weapons, paths, histories). Freeing it in the 64 fixed
+        // index ranges takes it off the coordinator; the clear() and the member destruction below then walk
+        // empty elements. No ordered effect: each range touches only its own elements.
+        core::tick_profile::Scope units_scope("serial.tactical.teardown.units");
+        std::array<std::vector<LiveUnit>*, 2> held{};
+        std::size_t held_count = 0;
+        for (auto* units : unit_vectors) if (units != nullptr) held[held_count++] = units;
+        static_cast<void>(release_elements<LiveUnit>(
+            executor, "teardown", std::span<std::vector<LiveUnit>* const>(held.data(), held_count)));
+    }
+    for (auto* units : unit_vectors) {
         if (units == nullptr || units->capacity() <= scratch.units.capacity()) continue;
         units->clear();
         scratch.units = std::move(*units);

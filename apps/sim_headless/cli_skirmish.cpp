@@ -4,7 +4,11 @@
 #include "eawr/platform/live_ai.hpp"
 #include "eawr/platform/live_scripts.hpp"
 #include "eawr/script/foc/tactical_ai.hpp"
+#include "eawr/skirmish/setup.hpp"
 
+#include "eawr/assets/map.hpp"
+
+#include <algorithm>
 #include <cstdint>
 #include <map>
 #include <set>
@@ -147,7 +151,14 @@ int run_ai_battle(const Options& options, const LoadedTables& loaded,
     if (!content) return fail(content.error());
     for (const auto& warning : skipped) std::cerr << eawr::core::format_diagnostic(warning) << '\n';
     if (!options.mod_root.empty()) std::cerr << "mod content: session bound, " << sk::content_load_summary(skipped) << '\n';
-    if (auto placed = sk::refuse_skipped_starts(start, skipped); !placed) return fail(placed.error());
+    {
+        eawr::core::LoadNoteCollector collector;
+        for (const auto& note : content.value().load_notes) collector.append(note);
+        for (const auto& note : start.load_notes) collector.append(note);
+        content.value().load_notes = collector.snapshot();
+    }
+    sk::drop_skipped_starts(start, skipped, &content.value().load_notes);
+    for (const auto& note : content.value().load_notes) std::cerr << eawr::core::format_diagnostic(eawr::core::load_note_diagnostic(note)) << '\n';
     const auto skipped_types = sk::skipped_type_ids(skipped);
     sk::bind_skipped_types(start, skipped_types);
     if (auto bound = sk::bind_difficulty(content.value(), start, inputs); !bound) return fail(bound.error());
@@ -191,9 +202,27 @@ int run_ai_battle(const Options& options, const LoadedTables& loaded,
     std::string final_hash;
     std::ostringstream hashes;
     hashes << "tick,state-hash,world-state-hash\n";
+    std::ostringstream command_log;
+    command_log << "tick,issuer,script_sequence,verb,submitted,key_tick,key_player,key_sequence\n";
+    std::map<tactical::TypeId, std::string> probe_names;
+    std::map<tactical::TypeId, std::size_t> probe_baseline;
+    if (!options.probe_carriers.empty()) for (const auto& unit : tables.units) probe_names.emplace(eawr::assets::object_type_crc(unit.id), unit.id);
     for (std::uint64_t tick = 0; tick < options.ticks; ++tick) {
         auto result = session.value().step(executor);
         if (!result) return fail(result.error());
+        if (!probe_names.empty() && (tick == 0 || tick + 1 == 31 || (tick + 1) % 300 == 0 || tick + 1 == options.ticks)) {
+            std::map<tactical::TypeId, std::size_t> counts;
+            for (const auto& instance : result.value().world.snapshot->instances()) ++counts[instance.type_id];
+            if (tick == 0) probe_baseline = counts;
+            std::cerr << "PROBE tick " << tick + 1 << ':';
+            for (const auto& [type, count] : counts) {
+                const auto base = probe_baseline.find(type);
+                if (tick != 0 && base != probe_baseline.end() && base->second == count) continue;
+                const auto name = probe_names.find(type);
+                std::cerr << ' ' << (name == probe_names.end() ? "crc:" + std::to_string(type) : name->second) << '=' << count;
+            }
+            std::cerr << '\n';
+        }
         final_hash = result.value().state_sha256;
         hashes << result.value().world.completed_tick << ',' << final_hash << ','
             << result.value().world.state_sha256 << '\n';
@@ -204,6 +233,9 @@ int run_ai_battle(const Options& options, const LoadedTables& loaded,
         for (const auto& command : result.value().script_input) {
             ++commands[command.command.verb];
             if (command.submitted) ++routed;
+            if (!options.commands_path.empty()) command_log << result.value().world.completed_tick << ',' << command.command.issuer << ',' << command.command.sequence << ','
+                << command.command.verb << ',' << (command.submitted ? 1 : 0) << ',' << command.key.tick << ','
+                << command.key.player_id << ',' << command.key.sequence << '\n';
         }
         for (const auto& event : result.value().world.snapshot->events()) {
             if (event.kind == tactical::EventKind::order_accepted) ++accepted;
@@ -265,6 +297,7 @@ int run_ai_battle(const Options& options, const LoadedTables& loaded,
     report << "]}\n";
     std::vector<eawr::platform::PublishedFile> outputs{{"AI report", options.ai_report_path, report.str()}};
     if (!options.hash_path.empty()) outputs.push_back({"AI hashes", options.hash_path, hashes.str()});
+    if (!options.commands_path.empty()) outputs.push_back({"AI commands", options.commands_path, command_log.str()});
     if (tracing) outputs.push_back({"AI trace", options.ai_trace_path, trace.json(*journal, session.value().completed_tick())});
     if (!options.census_path.empty()) {
         auto census = sk::census_json(start.setup, &start, content.value().sensors);
@@ -309,6 +342,9 @@ int run_ai_battle(const Options& options, const LoadedTables& loaded,
     if (!catalog) return LoadResult::failure(catalog.error());
     if (!catalog.value().health.clean()) {
         std::cerr << "sim_headless: catalog load: " << eawr::data::describe_load_health(catalog.value().health) << '\n';
+    }
+    for (const auto& diagnostic : catalog.value().diagnostics) {
+        std::cerr << eawr::core::format_diagnostic(diagnostic) << '\n';
     }
     loaded->catalog.emplace(std::move(catalog).value());
     eawr::scene::VfsAssetCache cache(*loaded->filesystem);
@@ -372,11 +408,45 @@ int run_skirmish(const Options& options) {
     const auto& filesystem = *loaded.value()->filesystem;
     const auto& catalog = loaded.value()->catalog->catalog;
     auto& tables = *loaded.value()->tables;
+    if (!options.setup_inventory_path.empty()) {
+        skirmish::SetupMapQuery query;
+        query.custom.reset(); // Inventory both authored and custom space maps.
+        auto maps = skirmish::setup_maps(filesystem, catalog, query);
+        if (!maps) return fail(maps.error());
+        std::ostringstream out;
+        out << "{\"factions\":[";
+        const auto factions = skirmish::setup_factions(catalog);
+        for (std::size_t i = 0; i < factions.size(); ++i)
+            out << (i ? "," : "") << eawr::core::json_quote(factions[i].name);
+        out << "],\"maps\":[";
+        for (std::size_t i = 0; i < maps.value().size(); ++i) {
+            const auto& map = maps.value()[i];
+            out << (i ? "," : "") << "{\"path\":" << eawr::core::json_quote(map.path)
+                << ",\"unavailable\":" << eawr::core::json_quote(map.unavailable) << ",\"teams\":[";
+            for (std::size_t j = 0; j < map.teams.size(); ++j) {
+                const auto& team = map.teams[j];
+                out << (j ? "," : "") << "{\"team\":" << team.team << ",\"factions\":[";
+                for (std::size_t k = 0; k < team.factions.size(); ++k)
+                    out << (k ? "," : "") << eawr::core::json_quote(team.factions[k]);
+                out << "]}";
+            }
+            out << "]}";
+        }
+        out << "]}\n";
+        return publish({{"setup inventory output", options.setup_inventory_path, out.str()}});
+    }
     // #4589: a mod start may name its own space map; the map's actual SHA-256 is bound as the viewer's lobby does.
     skirmish::Fixture selected = skirmish::m2_fixture();
-    if (!options.map_path.empty()) {
+    if (!options.map_path.empty() || !options.seat1_faction.empty() || !options.slots.empty() || options.seed) {
         skirmish::FixtureOptions fixture_options;
-        fixture_options.map = options.map_path;
+        if (!options.map_path.empty()) fixture_options.map = options.map_path;
+        if (options.seed) fixture_options.seed = options.seed;
+        if (!options.slots.empty()) fixture_options.slots = options.slots;
+        else if (!options.seat1_faction.empty()) {
+            fixture_options.slots = std::vector<skirmish::LobbySlot>{
+                {1, options.seat1_faction, options.seat1_team.value_or(0), !options.both_ai, {}},
+                {2, options.seat2_faction, options.seat2_team.value_or(1), false, {}}};
+        }
         auto bound = skirmish::fixture_from_options(fixture_options, filesystem, catalog);
         if (!bound) return fail(bound.error());
         selected = std::move(bound).value();
@@ -386,7 +456,8 @@ int run_skirmish(const Options& options) {
     if (!inputs) return fail(inputs.error());
     // SC-01 / #5304: the selected start can require types outside the M2 roots.
     // Share the viewer's collector and retain the old table bytes when none are missing.
-    const auto missing = skirmish::missing_start_types(fixture, inputs.value(), tables);
+    auto missing = skirmish::missing_start_types(fixture, inputs.value(), tables);
+    for (const auto& type : options.probe_carriers) missing.insert(type); // #5559
     if (!missing.empty()) {
         eawr::scene::VfsAssetCache cache(filesystem);
         eawr::units::LoadInput unit_input;
@@ -404,6 +475,26 @@ int run_skirmish(const Options& options) {
     }
     auto start = skirmish::build_start(fixture, inputs.value());
     if (!start) return fail(start.error());
+    for (const auto& type : options.probe_carriers) { // #5559: one carrier per probe type, beside seat 1's first unit
+        const auto anchor = std::find_if(start.value().units.begin(), start.value().units.end(),
+            [](const auto& unit) { return unit.state.owner == 1; });
+        if (anchor == start.value().units.end()) {
+            std::cerr << "error: --probe-carrier: seat 1 has no unit to place the carrier beside\n";
+            return 3;
+        }
+        eawr::battle::StartUnit probe = *anchor;
+        probe.state.entity_id = static_cast<eawr::sim::EntityId>(start.value().units.size() + 1U);
+        probe.state.type_id = eawr::assets::object_type_crc(type);
+        probe.state.position.x = eawr::sim::math::Fixed::from_raw(
+            probe.state.position.x.raw() + static_cast<std::int64_t>(start.value().units.size() + 1U) * 2500 * eawr::sim::math::Fixed::scale);
+        probe.type = type;
+        probe.role = eawr::battle::UnitRole::fleet;
+        probe.state.garrison_enabled = true;
+        probe.craft = 0;
+        probe.craft_type.clear();
+        start.value().setup.units.push_back(probe.state);
+        start.value().units.push_back(std::move(probe));
+    }
     if (!options.ai_report_path.empty()) return run_ai_battle(options, *loaded.value(), fixture, inputs.value(), std::move(start).value());
     // The unit tables' sensor table (#68) drives the tick-zero snapshot's visibility.
     const auto sensors = skirmish::sensor_table(tables);
@@ -420,13 +511,23 @@ int run_skirmish(const Options& options) {
         auto content = skirmish::session_content(tables, humans, {}, eawr::units::ContentErrors::skip_object, &skipped);
         if (!content) return fail(content.error());
         for (const auto& warning : skipped) std::cerr << "warning: mod content: " << eawr::core::format_diagnostic(warning) << '\n';
-        // #4589: a skipped type the start places fails the start.
-        if (auto placed = skirmish::refuse_skipped_starts(start.value(), skipped); !placed) return fail(placed.error());
+        {
+            eawr::core::LoadNoteCollector collector;
+            for (const auto& note : content.value().load_notes) collector.append(note);
+            for (const auto& note : start.value().load_notes) collector.append(note);
+            content.value().load_notes = collector.snapshot();
+        }
+        skirmish::drop_skipped_starts(start.value(), skipped, &content.value().load_notes);
+        for (const auto& note : content.value().load_notes)
+            std::cerr << eawr::core::format_diagnostic(eawr::core::load_note_diagnostic(note)) << '\n';
         skirmish::bind_skipped_types(start.value(), skirmish::skipped_type_ids(skipped)); // recordings carry the skip set
         auto modded = eawr::sim::tactical::TacticalSession::create(start.value().setup, content.value().sensors,
             content.value().durability, content.value().motion, std::nullopt, content.value().combat,
             eawr::sim::tactical::VictoryRules{}, content.value().abilities);
         if (!modded) return fail(modded.error());
+        // Tick-zero export keeps its sensor-only hash contract, using the retained placements.
+        session = eawr::sim::tactical::TacticalSession::create(start.value().setup, sensors);
+        if (!session) return fail(session.error());
         std::cerr << "mod content: session bound, " << skirmish::content_load_summary(skipped) << '\n';
     }
 

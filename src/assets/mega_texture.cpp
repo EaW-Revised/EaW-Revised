@@ -1,4 +1,5 @@
 #include "asset_internal.hpp"
+#include "eawr/vfs/vfs.hpp"
 
 #include <algorithm>
 #include <limits>
@@ -221,6 +222,47 @@ core::Result<MegaTextureAtlas> bind_mega_texture(MegaTexture directory,
     }
     return core::Result<MegaTextureAtlas>::success(
         MegaTextureAtlas{std::move(directory), std::move(page)});
+}
+
+core::Result<std::optional<MegaTextureAtlas>> load_shadowed_atlas_entry(
+    const vfs::Vfs& filesystem, const std::string_view mtd_path, const std::string_view entry) {
+    using Result = core::Result<std::optional<MegaTextureAtlas>>;
+    auto directories = filesystem.candidates(mtd_path);
+    if (!directories) return Result::failure(directories.error());
+    // The effective directory is already searched by the caller.
+    for (std::size_t i = 1; i < directories.value().size(); ++i) {
+        const auto& record = directories.value()[i];
+        auto bytes = filesystem.open(record);
+        if (!bytes) return Result::failure(bytes.error());
+        auto directory = load_mega_texture(bytes.value(), source_from(record));
+        if (!directory) return Result::failure(directory.error());
+        if (!directory.value().find(entry)) continue;
+        std::vector<vfs::AssetRecord> pages;
+        for (const auto suffix : {".dds", ".tga"}) {
+            auto found = filesystem.candidates(directory.value().backing_page_stem + suffix);
+            if (!found) {
+                if (found.error().code == vfs::diagnostic_codes::not_found) continue;
+                return Result::failure(found.error());
+            }
+            pages.insert(pages.end(), found.value().begin(), found.value().end());
+        }
+        // Prefer the page in the same archive/loose source, then its layer.
+        auto page = std::find_if(pages.begin(), pages.end(), [&](const auto& candidate) {
+            return candidate.layer_id == record.layer_id && candidate.source_id == record.source_id;
+        });
+        if (page == pages.end()) page = std::find_if(pages.begin(), pages.end(), [&](const auto& candidate) {
+            return candidate.layer_id == record.layer_id;
+        });
+        if (page == pages.end()) continue;
+        auto page_bytes = filesystem.open(*page);
+        if (!page_bytes) return Result::failure(page_bytes.error());
+        auto texture = load_texture(page_bytes.value(), source_from(*page));
+        if (!texture) return Result::failure(texture.error());
+        auto atlas = bind_mega_texture(std::move(directory.value()), std::move(texture.value()));
+        if (!atlas) return Result::failure(atlas.error());
+        return Result::success(std::move(atlas.value()));
+    }
+    return Result::success(std::nullopt);
 }
 
 core::Result<MegaTextureAtlas> load_mega_texture_atlas(

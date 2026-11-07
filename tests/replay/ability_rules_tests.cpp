@@ -1,4 +1,5 @@
 #include "ability_fixtures.hpp"
+#include "eawr/sim/tactical/fighters.hpp"
 
 #include <algorithm>
 #include <array>
@@ -141,7 +142,9 @@ void test_names_and_validation() {
     expect(!tactical::validate_abilities(doubled), "two abilities of one kind are rejected");
     auto stalled = table;
     stalled.profiles[0].abilities[0].modifiers.speed = Fixed{};
-    expect(!tactical::validate_abilities(stalled), "a zero speed multiplier is rejected");
+    expect(static_cast<bool>(tactical::validate_abilities(stalled)), "a zero speed multiplier is accepted");
+    stalled.profiles[0].abilities[0].modifiers.speed = units(-1);
+    expect(!tactical::validate_abilities(stalled), "a negative speed multiplier is rejected");
     auto huge = table;
     huge.profiles[0].abilities[0].modifiers.shield_regen = units(65);
     expect(!tactical::validate_abilities(huge), "a multiplier beyond 64 is rejected");
@@ -189,7 +192,9 @@ void test_names_and_validation() {
     aura_table.profiles[0].special.back().heal_percent = Fixed::from_raw(-1);
     expect(!tactical::validate_abilities(aura_table), "WSH-09: a negative heal percent stays rejected");
     aura_table.profiles[0].special.back().heal_percent = Fixed::from_raw(Fixed::scale / 10);
-    expect(!tactical::validate_abilities(aura_table), "WSH-09: a negative amount with a positive percent is rejected");
+    // #5696/#5704: retail adds percent x maximum and amount (WSH-04), so the table check accepts the combination; only a
+    // strict ability_table() load refuses it (unit_tables_ability_limits_tests).
+    expect(static_cast<bool>(tactical::validate_abilities(aura_table)), "WSH-09: a negative amount with a positive percent is a valid table");
     auto defaults = table;
     defaults.autofire_defaults = {1};
     expect(static_cast<bool>(tactical::validate_abilities(defaults)), "a human creation preference is valid");

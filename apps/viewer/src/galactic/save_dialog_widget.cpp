@@ -210,7 +210,17 @@ void GalacticSaveControls::open_options() {
     options_->show(*state_.host, EawrOptionsScreen::Page::hub);
 }
 void GalacticSaveControls::options_closed() {
+    centre_dialogs();
     if (escape_dialog_ && screen_ == Screen::escape) escape_dialog_->frame->show();
+}
+void GalacticSaveControls::centre_dialogs() {
+    const auto size = state_.host->get_viewport()->get_visible_rect().size;
+    for (auto* dialog : {&escape_dialog_, &save_dialog_, &load_dialog_, &modal_dialog_}) {
+        if (*dialog && (*dialog)->frame) {
+            auto* frame = (*dialog)->frame;
+            frame->set_position((size - frame->get_size()) * 0.5F);
+        }
+    }
 }
 void GalacticSaveControls::show_screen(Screen screen) {
     if (modal_ != Modal::none) return;

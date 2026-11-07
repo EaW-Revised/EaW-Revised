@@ -244,7 +244,13 @@ core::Result<SpaceRuleReturn> space_rule_return(const tactical::TacticalSetup& s
     const units::UnitTables& tables, const std::span<const tactical::EconomyView> accounts) {
     if (!setup.campaign) return fail<SpaceRuleReturn>("campaign setup required on return");
     SpaceRuleReturn result;
-    for (const auto& p : setup.campaign->players) {
+    // Return reads the same effective accounts as tactical admission. The session
+    // seam already reports their load notes; this copy only preserves that binding.
+    tactical::EconomyRules effective;
+    effective.players = setup.campaign->players;
+    core::LoadNoteBuffer notes;
+    tactical::normalize_economy(effective, notes);
+    for (const auto& p : effective.players) {
         const auto account = std::find_if(accounts.begin(), accounts.end(), [&](const auto& a) { return a.player == p.player; });
         if (account == accounts.end()) return fail<SpaceRuleReturn>("final campaign account missing");
         auto balance = account->credits;

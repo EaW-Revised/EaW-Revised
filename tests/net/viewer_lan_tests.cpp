@@ -12,6 +12,7 @@
 #include "eawr/sim/tactical/session.hpp"
 #include "fake_transport.hpp"
 #include "eawr/net/lobby_session.hpp"
+#include "eawr/net/reconnect.hpp"
 #include "eawr/net/match_options.hpp"
 #include "eawr/net/transport.hpp"
 #include "eawr/presentation/ui/lan_lobby.hpp"
@@ -426,8 +427,46 @@ void canonical_join_ping_key() {
     }
 }
 
+// #6014: what a stranger really reads first from a host whose match runs. After its seat left, the host repairs the closed edge
+// (the retained listener) and sends the seat-credential challenge to whoever connects; a lobby joiner must classify that frame.
+void running_host_first_frame() {
+    stage = "running host first frame";
+    net::TcpOptions options; options.build_identity = "running-host-first-frame";
+    options.keepalive = std::chrono::milliseconds(20); options.timeout = std::chrono::milliseconds(1000);
+    auto host = require(net::TcpTransport::host("127.0.0.1", 0, options));
+    auto seat = require(net::TcpTransport::connect("127.0.0.1", host->port(), options));
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    const auto until = [&](const auto& done) {
+        while (!done()) {
+            expect(std::chrono::steady_clock::now() < deadline, "running host frame deadline");
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    };
+    until([&] { (void)host->poll(); (void)seat->poll(); return host->link(1) == net::LinkState::open && seat->link(0) == net::LinkState::open; });
+    seat->cancel(); // the co-op seat quits
+    until([&] { (void)host->poll(); return host->link(1) == net::LinkState::closed; });
+    net::TcpRejoinAuth auth; auth.match_identity.fill(42); auth.epoch = 1;
+    auth.seat_tokens.resize(2); auth.seat_tokens[0].fill(77); auth.seat_tokens[1].fill(77);
+    expect(static_cast<bool>(host->repair_closed_links(auth)), "the running host keeps listening for its seat");
+    auto stranger = require(net::TcpTransport::connect("127.0.0.1", host->port(), options));
+    std::optional<net::Received> first;
+    until([&] { (void)host->poll(); first = stranger->poll(); return first.has_value(); });
+    expect(first->from == 0 && viewer::lan_host_match_running(first->frame),
+        "the first frame a stranger reads from a running host is match traffic, not a lobby frame");
+    expect(first->frame.front() == net::rejoin_hello_kind, "and it is the seat-credential challenge");
+}
+
 void transport_failure_copy() {
     stage = "legacy transport failure copy";
+    {
+        auto first = make_match(); first->host(0);
+        const auto port = first->view().port;
+        expect(port != 0, "first host acquires a port");
+        auto second = make_match(); second->host(port);
+        expect(second->view().phase == viewer::LanPhase::ended, "occupied port fails without waiting");
+        expect(viewer::lan_message(second->view()).find(std::to_string(port)) != std::string::npos,
+               "occupied port failure names the port");
+    }
     for (const bool version : {false, true}) {
         net::TcpOptions options; options.build_identity = eawr::core::build_identity();
         if (version) ++options.protocol_version; else options.build_identity += "-different";
@@ -509,6 +548,39 @@ void connect_failure_copy() {
     }
 }
 
+void loading_peer_loss_reaches_driver() {
+    stage = "peer loss during scene loading";
+    auto initial = setup();
+    auto host = make_match(), join = make_match();
+    host->host(0); join->join("127.0.0.1:" + std::to_string(host->view().port));
+    eawr::skirmish::FixtureOptions selected;
+    selected.map = initial.skirmish->map;
+    selected.slots = std::vector<eawr::skirmish::LobbySlot>{
+        {1, "Rebel", 1, true, {}}, {2, "Empire", 2, true, {}}};
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (!host->view().connected || !join->view().connected) {
+        host->pump_setup(selected); join->pump_setup(selected);
+        expect(std::chrono::steady_clock::now() < deadline, "loading loss peers connect");
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    host->start(selected); expect(host->take_start().has_value(), "loading loss hands over host");
+    join->cancel();
+    std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+    eawr::platform::LiveSession::Options options;
+    options.workers = 1; options.initially_paused = true;
+    options.pacing = eawr::platform::LiveSession::Pacing::real_time;
+    options.step_driver = host->driver(initial);
+    auto world = require(eawr::platform::LiveSession::start(initial, content(), options));
+    while (host->view().phase != viewer::LanPhase::ended) {
+        expect(std::chrono::steady_clock::now() < deadline, "loading loss reaches the live driver");
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    world->stop();
+    expect(world->failure() && host->view().phase == viewer::LanPhase::ended && !viewer::lan_message(host->view()).empty(),
+        "a lost peer fails the live driver with readable status");
+    host->cancel();
+}
+
 void threaded_loading_pair(int abort_side = -1, bool before_accept = false, bool admission_race = false) {
     stage = "threaded loading and review handover";
     auto initial = setup();
@@ -533,6 +605,14 @@ void threaded_loading_pair(int abort_side = -1, bool before_accept = false, bool
     };
     wait([&] { host->pump_setup(selected); join->pump_setup(selected); return host->view().connected && join->view().connected; });
     host->start(selected); expect(host->take_start().has_value(), "host scene handover");
+    if (abort_side < 0) {
+        const auto load_end = std::chrono::steady_clock::now() + std::chrono::milliseconds(1200);
+        while (std::chrono::steady_clock::now() < load_end) {
+            join->pump_setup(selected);
+            expect(join->view().phase != viewer::LanPhase::ended, "reviewer stays connected while host loads");
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+    }
     eawr::platform::LiveSession::Options options;
     options.workers = 2; options.initially_paused = true;
     options.pacing = eawr::platform::LiveSession::Pacing::real_time;
@@ -556,6 +636,10 @@ void threaded_loading_pair(int abort_side = -1, bool before_accept = false, bool
         return;
     }
     join->accept(); expect(join->take_start().has_value(), "accepted join scene handover");
+    if (abort_side < 0) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1200));
+        expect(host->view().phase != viewer::LanPhase::ended, "ready host stays connected while joiner loads");
+    }
     options.step_driver = join->driver(initial);
     auto join_world = require(eawr::platform::LiveSession::start(initial, content(), options));
     wait([&] { return host_world->failure() || join_world->failure() ||
@@ -767,6 +851,35 @@ static void long_session_contracts() {
         expect(viewer::online_refusal_text({{0, net::encode_lobby_frame(other_reason).value()}}, {}, 2, true).find("Quinn") == std::string::npos,
             "only a pair-unreachable notice is shown as the refusal");
     }
+    // #6014: a stranger dialling a running host reads match traffic first, not a lobby snapshot; it is told in words.
+    {
+        const std::vector<std::uint8_t> proof{net::rejoin_hello_kind, 0, 0, 0}, input{net::sealed_batch_kind, 1};
+        expect(viewer::lan_host_match_running(proof) && viewer::lan_host_match_running(input),
+            "rejoin proofs and lockstep input mean the host's match is running");
+        net::LobbyClosed closing; closing.room = "room"; closing.revision = 2; closing.reason = net::LobbyReason::host_closed; closing.message = "closed";
+        net::LobbySnapshot first; first.room = "room"; first.capacity = 4;
+        first.seats.resize(2);
+        first.seats[0].peer = 0; first.seats[0].seat = sim::SeatId{1}; first.seats[0].player = 1; first.seats[0].selection.name = "Host";
+        first.seats[1].peer = 2; first.seats[1].seat = sim::SeatId{2}; first.seats[1].player = 2; first.seats[1].selection.name = "Rex";
+        const auto first_frame = net::encode_lobby_frame(first), closing_frame = net::encode_lobby_frame(closing);
+        expect(first_frame.has_value() && closing_frame.has_value(), "the lobby frames encode");
+        expect(!viewer::lan_host_match_running(first_frame.value()) && !viewer::lan_host_match_running(closing_frame.value()),
+            "lobby frames are not match traffic");
+        expect(!viewer::lan_host_match_running({}), "an empty frame stays malformed");
+        expect(std::string(viewer::lan_match_running_refusal).find("already running") != std::string::npos
+            && std::string(viewer::lan_match_running_refusal).find("EAWR") == std::string::npos, "the refusal is plain words");
+        // What the joiner is shown: set_failure keeps a 1600-range LAN refusal's own message and its code, and lan_message adds
+        // the code once under it (the support hook every network error carries).
+        const auto refusal = net::lobby_diagnostic(net::LobbyReason::frozen, viewer::lan_match_running_refusal);
+        viewer::LanView shown;
+        shown.phase = viewer::LanPhase::ended; shown.reason = viewer::LanReason::refused;
+        shown.message = refusal.message; shown.diagnostic_code = refusal.code;
+        const auto text = viewer::lan_message(shown);
+        expect(text == std::string(viewer::lan_match_running_refusal) + "\n" + refusal.code,
+            "the joiner sees the plain sentence with its code once underneath");
+        expect(text.find("authoritative") == std::string::npos && text.find("EAWR-NET-1600") == std::string::npos,
+            "the old malformed-lobby wording is gone");
+    }
     // Service lease warning: a renewable lease is silent until its last two minutes; a final lease warns earlier.
     const auto now = std::chrono::steady_clock::now();
     net::GnsSessionLease lease; lease.renewable = true; lease.ends = now + std::chrono::minutes(30);
@@ -816,8 +929,132 @@ static void long_session_contracts() {
 }
 using namespace viewer_lan_test;
 
+static void load_transport_pump_contracts() {
+    using Clock = std::chrono::steady_clock;
+    using namespace std::chrono_literals;
+    struct Pair {
+        viewer::lan_detail::BufferedTransport host;
+        std::unique_ptr<net::TcpTransport> peer;
+        Pair() {
+            net::TcpOptions options; options.build_identity = "load-pump-test";
+            options.keepalive = 50ms; options.timeout = 1000ms;
+            auto listener = require(net::TcpTransport::host("127.0.0.1", 0, options));
+            const auto port = listener->port();
+            host.tcp = std::make_unique<viewer::MatchTransport>(std::move(listener));
+            peer = require(net::TcpTransport::connect("127.0.0.1", port, options));
+            const auto deadline = Clock::now() + 5s;
+            do {
+                (void)host.tcp->poll(); (void)peer->poll();
+                if (host.tcp->link(1) == net::LinkState::open && peer->link(0) == net::LinkState::open) return;
+                expect(Clock::now() < deadline, "load pump pair connects");
+                std::this_thread::sleep_for(1ms);
+            } while (true);
+        }
+    };
+    {
+        Pair pair;
+        viewer::lan_detail::LoadTransportPump pump(pair.host);
+        net::MeshLinkReport report;
+        std::vector<std::vector<std::uint8_t>> expected;
+        const auto started = Clock::now();
+        for (std::uint64_t revision = 0; revision < 320; ++revision) {
+            report.revision = revision;
+            expected.push_back(require(net::encode_mesh_report(report, 0, 3)));
+            expect(static_cast<bool>(pair.peer->send(0, expected.back())), "ready peer queues a mesh report");
+            (void)pair.peer->poll();
+            std::this_thread::sleep_for(10ms);
+        }
+        const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - started);
+        expect(elapsed > 1000ms && pair.peer->link(0) == net::LinkState::open,
+            "ready peer remains connected while loading exceeds timeout");
+        std::cout << "loading reports=" << expected.size() << " bytes=" << expected.front().size()
+                  << " elapsed_ms=" << elapsed.count() << '\n';
+        // Flush the final report and give the sole loading owner a chance to read it.
+        for (unsigned i = 0; i < 20; ++i) { (void)pair.peer->poll(); std::this_thread::sleep_for(10ms); }
+        pump.stop();
+        expect(!pump.failure(), "loading pump did not fail");
+        for (const auto& sent : expected) {
+            auto received = pair.host.poll();
+            expect(received && received->frame == sent, "handover replays every report in order");
+        }
+    }
+    {
+        Pair pair;
+        viewer::lan_detail::LoadTransportPump pump(pair.host);
+        pair.peer.reset();
+        std::this_thread::sleep_for(1800ms);
+        pump.stop();
+        expect(!pump.failure(), "peer loss is left for the next transport owner");
+        expect(pair.host.link(1) == net::LinkState::closed, "the next owner observes the closed link");
+    }
+    {
+        Pair pair;
+        const auto start = Clock::now();
+        { viewer::lan_detail::LoadTransportPump pump(pair.host); }
+        expect(Clock::now() - start < 1s, "cancelling load joins the transport worker");
+        (void)pair.host.tcp->poll(); // ownership returned to this thread
+    }
+    // A slow local derivation (the campaign session build) on the thread that owns the stream. The peer polls and
+    // sends throughout, as a live lobby does; the fake load is far past the 1 s link timeout.
+    const auto slow_load = [](Pair& pair, std::vector<std::vector<std::uint8_t>>& sent, bool fail) {
+        net::MeshLinkReport report;
+        const auto until = Clock::now() + 2500ms;
+        for (std::uint64_t revision = 0; Clock::now() < until; ++revision) {
+            report.revision = revision;
+            sent.push_back(require(net::encode_mesh_report(report, 0, 3)));
+            if (revision % 10 == 0) (void)pair.peer->send(0, sent.back());
+            else sent.pop_back();
+            (void)pair.peer->poll();
+            std::this_thread::sleep_for(10ms);
+        }
+        if (fail) {
+            eawr::core::Diagnostic failure; failure.code = "EAWR-TEST-0042"; failure.message = "fake build failed";
+            return eawr::core::Result<int>::failure(std::move(failure));
+        }
+        return eawr::core::Result<int>::success(7);
+    };
+    {   // Control: without the pump the same load drops the link. This is the campaign-start bug.
+        Pair pair;
+        std::vector<std::vector<std::uint8_t>> sent;
+        const auto loaded = slow_load(pair, sent, false);
+        expect(loaded && pair.peer->link(0) == net::LinkState::closed,
+            "control: an unserviced stream times out during a slow load");
+    }
+    {   // Pumped: the peer stays connected, the result passes through, queued frames replay in order.
+        Pair pair;
+        std::vector<std::vector<std::uint8_t>> sent;
+        auto loaded = viewer::lan_detail::while_pumping<int>(pair.host, [&] { return slow_load(pair, sent, false); });
+        expect(loaded && loaded.value() == 7, "the slow load's result passes through the pump");
+        expect(pair.peer->link(0) == net::LinkState::open && pair.host.link(1) == net::LinkState::open,
+            "both seats stay connected across a load longer than the link timeout");
+        for (unsigned i = 0; i < 20; ++i) { (void)pair.peer->poll(); std::this_thread::sleep_for(10ms); }
+        // The pump is joined: the owner thread polls again, queued frames first, in send order.
+        for (const auto& frame : sent) {
+            auto received = pair.host.poll();
+            expect(received && received->frame == frame, "frames that arrived during the load replay in order");
+        }
+        expect(!pair.host.poll(), "nothing extra or duplicated after the replay");
+    }
+    {   // A failed build reports its own error and still joins the worker.
+        Pair pair;
+        std::vector<std::vector<std::uint8_t>> sent;
+        auto loaded = viewer::lan_detail::while_pumping<int>(pair.host, [&] { return slow_load(pair, sent, true); });
+        expect(!loaded && loaded.error().code == "EAWR-TEST-0042", "a failed build keeps its own diagnostic");
+        expect(pair.peer->link(0) == net::LinkState::open, "a failed slow build still kept the link alive");
+        (void)pair.host.tcp->poll(); // ownership is back on this thread
+    }
+    {   // No transport yet: the load simply runs.
+        viewer::lan_detail::BufferedTransport empty;
+        auto loaded = viewer::lan_detail::while_pumping<int>(empty, [] { return eawr::core::Result<int>::success(3); });
+        expect(loaded && loaded.value() == 3, "a load without a stream runs inline");
+    }
+}
+
 int main(int argc, char** argv) {
     try {
+        if (argc == 2 && std::string_view(argv[1]) == "--load-pump") {
+            load_transport_pump_contracts(); viewer::shutdown_lan_drains(); return 0;
+        }
         if (argc == 2 && std::string_view(argv[1]) == "--pause") {
             multiplayer_pause_contracts(); viewer::shutdown_lan_drains(); return 0;
         }
@@ -835,6 +1072,7 @@ int main(int argc, char** argv) {
             std::cout << "transient-repair loop passed\n";
             return 0;
         }
+        load_transport_pump_contracts();
         long_session_contracts();
         viewer::LanView measured;
         measured.connected = true; measured.remote_endpoint = "127.0.0.1:47624";
@@ -895,7 +1133,8 @@ int main(int argc, char** argv) {
         for (const auto count : {3U, 4U, 9U}) separate_mesh(count, false);
         for (const auto workers : {1U, 2U, 4U, 8U}) separate_mesh(8, false, false, workers);
         separate_mesh(4, true);
-        canonical_join_ping_key(); transport_failure_copy(); connect_failure_copy();
+        canonical_join_ping_key(); running_host_first_frame(); transport_failure_copy(); connect_failure_copy();
+        loading_peer_loss_reaches_driver();
         threaded_loading_pair();
         expect(viewer::live_begin_barrier(false) && !viewer::live_begin_barrier(true), "SP Begin, LAN readiness");
         expect(!viewer::lan_can_abort(viewer::make_fake_lan_match("waiting")->view()), "running quit uses agreement");

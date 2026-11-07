@@ -43,7 +43,7 @@ struct CampaignResult {
     CampaignResultRoute route{CampaignResultRoute::score};
 };
 [[nodiscard]] std::optional<CampaignResult> campaign_result(const VictoryState&, PlayerId local,
-    bool dialog_active, bool movie_playing);
+    bool dialog_active, bool movie_playing, std::optional<bool> networked_transport = {});
 [[nodiscard]] core::Result<void> validate_victory(const VictoryState&);
 namespace detail {
 void encode_victory(std::vector<std::uint8_t>&, const VictoryState&);

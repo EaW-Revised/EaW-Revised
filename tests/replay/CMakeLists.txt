@@ -210,6 +210,15 @@ add_test(
     NAME tactical_collection_contracts
     COMMAND tactical_collection_tests
 )
+# The tick's teardown phase: partitioned release of the survivors' heap memory (work counts, not timing).
+add_executable(tactical_teardown_release_tests teardown_release_tests.cpp)
+target_link_libraries(tactical_teardown_release_tests PRIVATE eawr::sim eawr::platform)
+target_compile_features(tactical_teardown_release_tests PRIVATE cxx_std_20)
+eawr_target_project_warnings(tactical_teardown_release_tests)
+add_test(
+    NAME tactical_teardown_release_contracts
+    COMMAND tactical_teardown_release_tests
+)
 # #80: the viewer's live session (own thread, #276 pool) against the headless goldens.
 add_executable(tactical_live_session_tests live_session_tests.cpp)
 target_link_libraries(tactical_live_session_tests PRIVATE eawr::sim eawr::platform)
@@ -219,6 +228,12 @@ add_test(
     NAME tactical_live_session_contracts
     COMMAND tactical_live_session_tests "${EAWR_REPLAY_FIXTURES}"
 )
+# Skirmish battle saves in a live session: save at a tick, load it, continue with equal hashes (1 and 8 workers).
+add_executable(live_save_tests live_save_tests.cpp)
+target_link_libraries(live_save_tests PRIVATE eawr::checkpoint eawr::platform)
+target_compile_features(live_save_tests PRIVATE cxx_std_20)
+eawr_target_project_warnings(live_save_tests)
+add_test(NAME live_save_contracts COMMAND live_save_tests "${EAWR_REPLAY_FIXTURES}")
 add_test(
     NAME tactical_replay_oracle_fixtures
     COMMAND "${Python3_EXECUTABLE}" "${EAWR_REPLAY_FIXTURES}/generate_tactical_fixture.py" --check
@@ -245,6 +260,11 @@ add_test(
 add_test(
     NAME sim_bench_worker_equality
     COMMAND sim_bench --units 1500 --ticks 6 --warmup 2 --repeat 1
+)
+# Fog-enabled synthetic battle: preserve worker equality with the grid active.
+add_test(
+    NAME sim_bench_fog_worker_equality
+    COMMAND sim_bench --units 1500 --ticks 6 --warmup 2 --repeat 1 --fog on --hash on
 )
 add_test(
     NAME replay_hash_comparator_contracts

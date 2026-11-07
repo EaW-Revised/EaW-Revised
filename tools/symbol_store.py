@@ -129,6 +129,7 @@ def import_archive(source, store):
             if not re.fullmatch(r"[A-Za-z0-9_.+-]+", value) or value in (".", ".."):
                 raise ValueError("invalid symbol archive identity")
         paths = {}
+        pdb_keys = {}
         for entry in manifest["files"]:
             for kind in ("binary", "pdb"):
                 name = entry[kind]
@@ -148,23 +149,33 @@ def import_archive(source, store):
                     or entry["binary"] != f"{binary_name}/{image_key}/{binary_name}"
                     or inspect(paths[entry["pdb"]], pdb_identity) != key):
                 raise ValueError("symbol archive identity mismatch")
+            pdb_keys[entry["pdb"]] = key
         if not paths:
             raise ValueError("empty symbol archive")
         for name, path in paths.items():
-            retain(path, store / name)
+            retain(path, store / name, pdb_key=pdb_keys.get(name))
         target = store / "builds" / manifest["build_id"] / (manifest["label"] + ".json")
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
         return target
 
 
-def retain(source, destination):
+def retain(source, destination, pdb_key=None):
     destination.parent.mkdir(parents=True, exist_ok=True)
     expected = digest(source)
-    if destination.exists():
-        if digest(destination) != expected:
+
+    def check_existing():
+        stored = digest(destination)
+        if stored != expected:
+            if (pdb_key is not None and inspect(source, pdb_identity) == pdb_key
+                    and inspect(destination, pdb_identity) == pdb_key):
+                print(f"retaining existing PDB: {destination.name}")
+                return stored
             raise ValueError(f"symbol identity collision: {destination.name}")
-        return expected
+        return stored
+
+    if destination.exists():
+        return check_existing()
     with tempfile.NamedTemporaryFile(dir=destination.parent, delete=False) as output:
         temporary = Path(output.name)
         with Path(source).open("rb") as stream:
@@ -175,8 +186,7 @@ def retain(source, destination):
         try:
             os.link(temporary, destination)
         except FileExistsError:
-            if digest(destination) != expected:
-                raise ValueError(f"symbol identity collision: {destination.name}")
+            return check_existing()
     finally:
         temporary.unlink(missing_ok=True)
     return expected
@@ -198,7 +208,7 @@ def archive(store, build_id, binaries, label="build", release=False):
         image_relative = Path(binary.name) / image_key / binary.name
         entries.append({"binary": image_relative.as_posix(), "pdb": pdb_relative.as_posix(),
                         "binary_sha256": retain(binary, store / image_relative),
-                        "pdb_sha256": retain(symbols, store / pdb_relative)})
+                        "pdb_sha256": retain(symbols, store / pdb_relative, pdb_key=key)})
     if not entries:
         raise ValueError("no symbol pairs to retain")
     manifest = {"schema": "eawr-symbols/1", "build_id": build_id, "label": label,

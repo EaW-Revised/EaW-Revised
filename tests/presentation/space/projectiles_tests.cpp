@@ -4,6 +4,7 @@
 #include "../../support/check.hpp"
 #include "eawr/presentation/live/projectiles.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstddef>
@@ -35,6 +36,23 @@ void expect(const bool condition, const std::string& message) {
 }
 
 [[nodiscard]] Vec3 vec(const double x, const double y, const double z) { return {fixed(x), fixed(y), fixed(z)}; }
+
+// #5835 WPJ-31: only a ground-contact expiry takes the ground detonation route.
+void test_terminal_particle() {
+    tactical::CombatEvent expired;
+    expired.kind = tactical::CombatEventKind::projectile_expired;
+    for (const auto reason : {tactical::ProjectileExpiryReason::none, tactical::ProjectileExpiryReason::travel_limit,
+                              tactical::ProjectileExpiryReason::lifetime, tactical::ProjectileExpiryReason::target_radius,
+                              tactical::ProjectileExpiryReason::rocket_path_exhausted,
+                              tactical::ProjectileExpiryReason::explicit_request}) {
+        expired.outcome = static_cast<std::uint32_t>(reason);
+        expect(live::terminal_particle(expired) == live::TerminalParticle::lifetime, "space expiry keeps the lifetime particle");
+    }
+    expired.outcome = static_cast<std::uint32_t>(tactical::ProjectileExpiryReason::ground_contact);
+    expect(live::terminal_particle(expired) == live::TerminalParticle::ground, "ground contact takes the ground particle");
+    expired.kind = tactical::CombatEventKind::projectile_hit;
+    expect(live::terminal_particle(expired) == live::TerminalParticle::lifetime, "only expiry events take the ground route");
+}
 
 void test_facing() {
     tactical::Projectile straight;
@@ -312,6 +330,74 @@ void test_slot_growth_owner_allocation_failure() {
            "a staging allocation exception has a typed failure and bounded retry state");
 }
 
+void test_slot_growth_step_cap() {
+    using Slots = live::ProjectileModelSlots;
+    // Below the cap threshold growth still doubles; from 512 slots up a growth adds at most 128 beyond the demand.
+    Slots small(256);
+    std::vector<std::uint64_t> ids;
+    for (std::uint64_t id = 1; id <= 257; ++id) ids.push_back(id);
+    static_cast<void>(small.bind(ids, [](const Slots::GrowthRequest request) {
+        expect(request.minimum == 257 && request.preferred == 512, "a 256-slot pool still doubles");
+        return Slots::GrowthResult{Slots::GrowthStatus::admitted, request.preferred, 1024};
+    }));
+    expect(small.size() == 512, "the small pool doubled");
+    Slots big(512);
+    ids.clear();
+    for (std::uint64_t id = 1; id <= 513; ++id) ids.push_back(id);
+    std::size_t calls = 0;
+    auto bound = big.bind(ids, [&](const Slots::GrowthRequest request) {
+        ++calls;
+        expect(request.minimum == 513 && request.preferred == 640, "a 512-slot pool grows by at most 128 slots");
+        return Slots::GrowthResult{Slots::GrowthStatus::admitted, request.preferred, 4096};
+    });
+    expect(calls == 1 && big.size() == 640 && big.refused() == 0 && bound.back() == 512, "the capped step still seats every flight");
+    ids.clear();
+    for (std::uint64_t id = 1; id <= 800; ++id) ids.push_back(id);
+    static_cast<void>(big.bind(ids, [&](const Slots::GrowthRequest request) {
+        ++calls;
+        expect(request.minimum == 800 && request.preferred == 800, "a burst past the cap is always met in the same frame");
+        return Slots::GrowthResult{Slots::GrowthStatus::admitted, request.preferred, 4096};
+    }));
+    expect(calls == 2 && big.size() == 800 && big.refused() == 0, "demand is never refused or delayed by the cap");
+}
+
+void test_slot_growth_schedule_matches_doubling_below_cap() {
+    using Slots = live::ProjectileModelSlots;
+    // Main's schedule: every growth admits max(demand, double the pool). Below growth_step_cap_from the capped policy
+    // must produce exactly that schedule (this is what keeps scenes with small pools, e.g. RaW60, identical to main).
+    Slots slots(1);
+    std::size_t reference = 1;
+    std::vector<std::size_t> grown, expected;
+    const Slots::Reserve admit = [&](const Slots::GrowthRequest request) {
+        grown.push_back(request.preferred);
+        return Slots::GrowthResult{Slots::GrowthStatus::admitted, request.preferred, 64};
+    };
+    std::vector<std::uint64_t> ids;
+    for (std::uint64_t id = 1; id <= 511; ++id) {
+        ids.push_back(id);
+        const auto demand = ids.size();
+        if (demand > reference) {
+            reference = std::max(demand, reference * 2);
+            expected.push_back(reference);
+        }
+        static_cast<void>(slots.bind(ids, admit));
+        expect(slots.size() == reference, "below the cap threshold the pool size follows main's doubling");
+    }
+    expect(grown == expected, "the whole growth schedule below 512 slots equals main's doubling");
+    // From 512 slots up a growth never adds more than demand + 128, and never less than the demand.
+    for (std::uint64_t id = 512; id <= 3000; ++id) {
+        ids.push_back(id);
+        const auto before = slots.size();
+        static_cast<void>(slots.bind(ids, [&](const Slots::GrowthRequest request) {
+            expect(request.minimum == ids.size() && request.preferred >= request.minimum, "growth never asks for less than the demand");
+            expect(before < 512 || request.preferred <= std::max(request.minimum, before + Slots::growth_step_cap),
+                   "a pool of 512+ slots grows by at most 128 slots");
+            return Slots::GrowthResult{Slots::GrowthStatus::admitted, request.preferred, 64};
+        }));
+        expect(slots.size() >= ids.size() && slots.refused() == 0, "every flight keeps a slot");
+    }
+}
+
 void test_slot_growth_failures() {
     using Slots = live::ProjectileModelSlots;
     for (const auto status : {Slots::GrowthStatus::refused_budget, Slots::GrowthStatus::allocation_failed,
@@ -349,6 +435,7 @@ void test_slot_growth_failures() {
 } // namespace
 
 int main() {
+    test_terminal_particle();
     test_facing();
     test_perspective_axis();
     test_interpolation();
@@ -358,6 +445,8 @@ int main() {
     test_slots_catch_up_history();
     test_slot_growth();
     test_slot_growth_failures();
+    test_slot_growth_step_cap();
+    test_slot_growth_schedule_matches_doubling_below_cap();
     test_slot_growth_owner_allocation_failure();
     if (failures != 0) {
         std::cerr << failures << " failure(s)\n";

@@ -31,7 +31,9 @@ def test_nested_viewer_lists_keep_order_and_scope(tmp_path, monkeypatch):
 
 
 def test_viewer_members_are_unique_and_exist():
-    text = sources.viewer_build_source()
+    # A separate helper executable may compile a file the viewer library also lists; only the viewer's own
+    # members must be unique.
+    text = re.sub(r"add_executable\(\s*\w+[^)]*\)", "", sources.viewer_build_source())
     paths = re.findall(r"(?:apps/viewer/src|src/presentation/godot)/[\w/]+\.cpp", text)
     assert len(paths) == len(set(paths))
     assert paths

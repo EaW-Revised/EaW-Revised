@@ -2,11 +2,15 @@
 
 #include "methods.hpp"
 #include "loadcheck.hpp"
+#include "records.hpp"
 #include "eawr/mods/steam/text_formats.hpp"
 
 #include "eawr/core/json_text.hpp"
 
+#include <algorithm>
+#include <array>
 #include <cmath>
+#include <string_view>
 #include <cstdint>
 #include <optional>
 #include <utility>
@@ -124,9 +128,10 @@ Reply Reply::fail(std::string_view code, std::string message, std::string data) 
     return reply;
 }
 
-Service::Service(ServiceInfo info, Log log) : info_(std::move(info)), log_(std::move(log)), loadcheck_(std::make_unique<LoadCheck>(*this)) {}
+Service::Service(ServiceInfo info, Log log) : info_(std::move(info)), log_(std::move(log)), loadcheck_(std::make_unique<LoadCheck>(*this)), records_(std::make_unique<Records>(*this)) {}
 Service::~Service() = default;
 LoadCheck& Service::loadcheck() { return *loadcheck_; }
+Records& Service::records() { return *records_; }
 
 void Service::log(std::string_view text) const {
     if (log_) log_(text);
@@ -180,8 +185,15 @@ void Service::handle_line(std::string_view line, std::vector<std::string>& out) 
                 const auto immediate = loadcheck_->start(*id, *params);
                 if (!immediate) return;
                 reply = *immediate;
+            } else if (*method == "records.index" || *method == "records.get") {
+                const auto immediate = records_->start(*id, *method, *params);
+                if (!immediate) return;
+                reply = *immediate;
             } else {
-                if (*method == "shutdown") loadcheck_->stop();
+                // Read-only methods keep the records fingerprint reuse window; every other one ends it.
+                static constexpr std::array<std::string_view, 8> kKeepsReuse{"hello", "profile.list", "profile.locks", "profile.load", "loadnotes.read", "files.page", "loadcheck.result", "loadcheck.cancel"};
+                if (std::find(kKeepsReuse.begin(), kKeepsReuse.end(), *method) == kKeepsReuse.end()) records_->invalidate_reuse();
+                if (*method == "shutdown") { loadcheck_->stop(); records_->stop(); }
                 reply = entry->handler(*this, *params);
             }
         } catch (const std::exception& error) {

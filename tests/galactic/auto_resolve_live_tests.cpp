@@ -10,6 +10,7 @@
 #include <string>
 #include <optional>
 #include "../support/env.hpp"
+#include "eawr/vfs/vfs.hpp"
 #include "../support/result.hpp"
 #include "galactic_support.hpp"
 #include "eawr/assets/map.hpp"
@@ -406,6 +407,21 @@ void installed() {
             auto admitted = take(adapters.admission(*snapshot, request, 900));
             expect(admitted.has_value(), "stock orbital and surface presence admit each requested layer");
             if (!admitted) continue;
+            // WAR-75: authored exclusions do not affect admission on either layer.
+            auto restricted_data = data;
+            auto campaign = std::find_if(restricted_data.campaigns.begin(), restricted_data.campaigns.end(),
+                [&](const auto& row) { return row.name == plan.campaign_name(); });
+            if (campaign == restricted_data.campaigns.end()) throw std::runtime_error("missing admission campaign");
+            const auto location = std::find_if(plan.locations().begin(), plan.locations().end(),
+                [&](const auto& row) { return row.planet && row.planet->id == fixture.conflict.planet; });
+            if (location == plan.locations().end()) throw std::runtime_error("missing admission location");
+            campaign->is_story_campaign = true;
+            campaign->is_autoresolve_allowed = true;
+            campaign->autoresolve_exclusion_locations = {location->original_type, "space", location->original_type, "land"};
+            auto restricted = take(cp::make_stock_auto_resolver(filesystem, catalog.catalog, restricted_data, types, plan, fixture.originals));
+            auto still_admitted = take(restricted.admission(*snapshot, request, 900));
+            expect(still_admitted && !still_admitted->arbitration.forced_tactical,
+                "WAR-75: story location exclusions do not force tactical conflict arbitration");
             const bool land = kind == gc::GalacticEventKind::land_conflict_requested;
             const auto& record = admitted->conflict;
             expect(std::any_of(record.forces.begin(), record.forces.end(), [](const auto& row) { return row.id == 300; }) == land,

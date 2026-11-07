@@ -65,7 +65,7 @@ struct LoadingPlanet::State {
     SubViewport* viewport{};
     TextureRect* picture{};
     std::unique_ptr<GodotRenderer> renderer;
-    struct Surface { sim::AssetId asset{}; std::optional<animation::Player> player; bool planet{}; };
+    struct Surface { sim::AssetId asset{}; std::optional<animation::Player> player; bool planet{}; animation::Pose pose; };
     std::vector<Surface> surfaces;
     std::string model, failure;
     float scale{1}, framing{};
@@ -239,7 +239,7 @@ void fragment() {
     }
     std::vector<sim::RenderInstance> instances;
     const scene::AssetAccess effect_access{.exists = [&fs](const std::string_view path) {
-        return static_cast<bool>(fs.stat(path)); }};
+        return static_cast<bool>(fs.stat(path)); }, .model = {}, .sha256 = {}, .particle_system = {}};
     for (const auto& surface : space::scene_surfaces(model, [&](const std::string_view program) {
              return scene::missing_material_effect(effect_access, program); })) {
         if (std::none_of(selected.begin(), selected.end(), [&](const auto& choice) { return choice.mesh == surface.mesh_index && choice.submesh == surface.submesh_index; })) continue;
@@ -275,8 +275,8 @@ void fragment() {
         const auto asset = static_cast<sim::AssetId>(state.surfaces.size()+1);
         auto upload = state.renderer->upload(asset,geometry,*primary,material,extra);
         if (!upload) return fail(core::format_diagnostic(upload.error()));
-        State::Surface item{asset,{},planet};
-        if (clip) { auto player = animation::Player::create(geometry,&*clip); if (!player) return fail(core::format_diagnostic(player.error())); item.player = std::move(player.value()); }
+        State::Surface item{asset,{},planet,{}};
+        if (clip) { auto player = animation::Player::create(geometry,&*clip); if (!player) return fail(core::format_diagnostic(player.error())); item.player = std::move(player.value()); item.pose.bones.resize(item.player->bone_count()); }
         state.surfaces.push_back(std::move(item)); instances.push_back({asset,asset,matrix});
     }
     if (instances.empty()) return fail("loading model has no alternate-1 surfaces");
@@ -287,8 +287,18 @@ void fragment() {
     state.picture->set_position(picture_rect.position);
     state.picture->set_size(picture_rect.size);
     parent.add_child(state.picture);
-    advance(0);
-    if (!state.failure.empty()) return fail(state.failure);
+    // Set the initial pose during construction; it is not an animation update.
+    for (auto& surface : state.surfaces) {
+        if (surface.planet) {
+            auto clock = state.renderer->set_material_scalar(surface.asset, "eawr_effect_time", 0.0F);
+            if (!clock) return fail(core::format_diagnostic(clock.error()));
+        }
+        if (!surface.player) continue;
+        auto initial = surface.player->sample_position(0, 65536, surface.pose);
+        if (!initial) return fail(core::format_diagnostic(initial.error()));
+        auto applied = state.renderer->set_skin_pose(surface.asset, surface.asset, surface.pose.bones);
+        if (!applied) return fail(core::format_diagnostic(applied.error()));
+    }
     return true;
 }
 void LoadingPlanet::advance(double seconds) {
@@ -297,9 +307,13 @@ void LoadingPlanet::advance(double seconds) {
     for (auto& surface : state.surfaces) {
         if (surface.planet) { auto result = state.renderer->set_material_scalar(surface.asset,"eawr_effect_time",static_cast<float>(seconds)); if (!result) state.failure = core::format_diagnostic(result.error()); }
         if (!surface.player) continue;
-        auto pose = surface.player->sample({static_cast<float>(seconds),animation::PlaybackMode::loop,0});
+        constexpr std::uint32_t subdivisions = 65536;
+        const auto frames = surface.player->playable_frames();
+        const double position = frames == 0 ? 0.0 : std::fmod(seconds * surface.player->frames_per_second(), static_cast<double>(frames));
+        const auto fixed = static_cast<std::uint64_t>(position * subdivisions);
+        auto pose = surface.player->sample_position(fixed, subdivisions, surface.pose);
         if (!pose) { state.failure = core::format_diagnostic(pose.error()); continue; }
-        auto result = state.renderer->set_skin_pose(surface.asset,surface.asset,pose.value().bones);
+        auto result = state.renderer->set_skin_pose(surface.asset,surface.asset,surface.pose.bones);
         if (!result) state.failure = core::format_diagnostic(result.error());
     }
     ++state.updates;

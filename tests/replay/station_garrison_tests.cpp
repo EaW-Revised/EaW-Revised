@@ -1,4 +1,5 @@
 #include "station_upgrade_fixtures.hpp"
+#include "eawr/sim/tactical/fighters.hpp"
 #include "eawr/sim/tactical/session.hpp"
 #include <optional>
 #include <vector>
@@ -242,6 +243,78 @@ void test_hangar_replacement() {
         expect(carrier.squadrons().size() == (reserve == 0 ? 0U : 1U), "WPR-56: retained death releases correct entry without replenishing spent reserve");
       }
     }
+}
+// #5527 / WSL-16, WSL-16a: two non-Squadron craft (own CraftProfile) leave one bay as arriving single ships. Each
+// takes its own free spot beside the bay's spawn vector and holds it: the idle anchor is that spot, not the arrival
+// lane start (arrival_tail behind the exit), so the craft does not fly back to where the lane began.
+void test_solo_craft_free_spot_launch() {
+    auto launch_setup = setup();
+    std::erase_if(launch_setup.units, [](const auto& unit) { return unit.entity_id == 2; });
+    auto health = durability(); auto craft_health = health.profiles.front(); craft_health.type_id = 20;
+    health.profiles.insert(health.profiles.begin() + 1, craft_health);
+    t::MotionTable motion;
+    t::CraftProfile craft;
+    craft.type_id = 20; craft.max_speed = whole(5); craft.min_speed = whole(1);
+    craft.rate_of_turn = whole(6); craft.lift = whole(6); craft.thrust = decimal("0.2");
+    craft.roll_rate = whole(6); craft.bank_angle = whole(70); craft.strafe_distance = whole(200);
+    motion.squadrons.craft = {craft};
+    motion.squadrons.squadrons = {{20, {20}, {m::Vec3{}}, whole(1000), whole(200), whole(300), whole(20)}};
+    t::SpawnerProfile hangar; hangar.type_id = 40; hangar.delay_frames = 1;
+    t::SpawnEntryProfile raider; raider.squadron = 20; raider.starting = 2; raider.reserve = 0; raider.ship = true;
+    raider.arrival = true;
+    hangar.entries = {raider};
+    hangar.bays = {{0, {}, {whole(1), {}, {}}}};
+    motion.squadrons.spawners.push_back(hangar);
+    auto rules = economy();
+    rules.footprints.push_back({20, t::PlacementBox{whole(-50), whole(-50), whole(50), whole(50)}, {}});
+    expect(t::arrival_tail(0).raw() > whole(800).raw(), "the arrival lane start lies farther back than the free-spot ring search reaches");
+    auto made = t::TacticalSession::create(launch_setup, {}, health, motion, std::nullopt, {}, {}, {}, rules);
+    expect(static_cast<bool>(made), "solo craft launch fixture creates"); if (!made) return;
+    auto world = std::move(made).value();
+    eawr::platform::ThreadWorkerAdapter executor(1);
+    for (int i = 0; i < 120; ++i) expect(static_cast<bool>(world.step(executor)), "solo craft launch steps");
+    std::vector<eawr::sim::EntityId> launched;
+    for (const auto& unit : world.units()) if (unit.type_id == 20 && unit.entity_id > 1) launched.push_back(unit.entity_id);
+    expect(launched.size() == 2, "#5527: both starting craft launch as single ships");
+    if (launched.size() != 2) return;
+    std::vector<m::Vec3> anchors;
+    for (const auto id : launched) {
+        const auto order = world.squadron_state(id);
+        expect(order.has_value(), "#5527: a launched solo craft has order state");
+        if (!order) return;
+        anchors.push_back(order->anchor);
+        const auto dx = static_cast<double>((order->anchor.x.raw() - whole(1).raw())) / m::Fixed::scale;
+        const auto dy = static_cast<double>(order->anchor.y.raw()) / m::Fixed::scale;
+        expect(dx * dx + dy * dy <= 800.0 * 800.0 + 1.0, "#5527: the idle anchor is the free spot beside the bay, not the lane start");
+    }
+    expect(anchors[0] != anchors[1], "#5527: two craft hold distinct free spots, not one stacked point");
+}
+// #5683: a vanilla (non-craft) ship also enters the arrival lane. A pending lane arrival blocks the free-spot search
+// only when it is a craft, so a second vanilla single-ship launch takes the same spot as before #5527.
+void test_vanilla_ship_launch_ignores_lane_blocker() {
+    auto launch_setup = setup();
+    std::erase_if(launch_setup.units, [](const auto& unit) { return unit.entity_id == 2; });
+    auto health = durability(); auto ship_health = health.profiles.front(); ship_health.type_id = 20;
+    health.profiles.insert(health.profiles.begin() + 1, ship_health);
+    t::MotionTable motion;
+    t::SpawnerProfile hangar; hangar.type_id = 40; hangar.delay_frames = 1;
+    t::SpawnEntryProfile frigate; frigate.squadron = 20; frigate.starting = 2; frigate.reserve = 0; frigate.ship = true;
+    frigate.arrival = true;
+    hangar.entries = {frigate};
+    hangar.bays = {{0, {}, {whole(1), {}, {}}}};
+    motion.squadrons.spawners.push_back(hangar);
+    auto rules = economy();
+    rules.footprints.push_back({20, t::PlacementBox{whole(-50), whole(-50), whole(50), whole(50)}, {}});
+    auto made = t::TacticalSession::create(launch_setup, {}, health, motion, std::nullopt, {}, {}, {}, rules);
+    expect(static_cast<bool>(made), "vanilla ship launch fixture creates"); if (!made) return;
+    auto world = std::move(made).value();
+    eawr::platform::ThreadWorkerAdapter executor(1);
+    for (int i = 0; i < 400; ++i) expect(static_cast<bool>(world.step(executor)), "vanilla ship launch steps");
+    std::vector<m::Vec3> spots;
+    for (const auto& unit : world.units()) if (unit.type_id == 20 && unit.entity_id > 1) spots.push_back(unit.position);
+    expect(spots.size() == 2, "#5683: both starting vanilla ships launch");
+    if (spots.size() != 2) return;
+    expect(spots[0] == spots[1], "#5683: a pending vanilla arrival does not move the next vanilla launch's free spot");
 }
 t::MotionTable free_garrison_motion() {
     t::MotionTable motion;

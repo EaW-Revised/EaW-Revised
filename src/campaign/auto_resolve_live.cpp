@@ -1,4 +1,5 @@
 #include "eawr/campaign/auto_resolve_live.hpp"
+#include "eawr/vfs/vfs.hpp"
 #include "eawr/campaign/setup.hpp"
 #include "eawr/campaign/space_entry.hpp"
 #include "eawr/assets/map.hpp"
@@ -18,6 +19,7 @@
 #include <limits>
 #include <map>
 #include <set>
+#include <unordered_map>
 
 namespace eawr::campaign {
 namespace {
@@ -44,9 +46,10 @@ const units::GalacticType* bound(const CampaignSetupPlan& plan, const units::Gal
 }
 const gc::MovementContents* contents(const gc::GalacticSnapshot& snapshot, sim::EntityId id) {
     if (!snapshot.movement()) return nullptr;
+    // The movement tables are validated strictly ordered by container, so the first match is the lower bound.
     const auto& rows = snapshot.movement()->contents;
-    const auto at = std::find_if(rows.begin(), rows.end(), [&](const auto& row) { return row.container == id; });
-    return at == rows.end() ? nullptr : &*at;
+    const auto at = std::lower_bound(rows.begin(), rows.end(), id, [](const auto& row, sim::EntityId value) { return row.container < value; });
+    return at == rows.end() || at->container != id ? nullptr : &*at;
 }
 const gc::ControlPlanet* control_planet(const gc::GalacticSnapshot& snapshot, gc::PlanetId id) {
     if (!snapshot.control()) return nullptr;
@@ -61,6 +64,12 @@ struct ResolveState {
     AutoResolveRoster roster;
     std::optional<script::authoritative::RandomStream> random;
     std::optional<AutoResolveProgress> progress;
+};
+// Everything facts() reads from a bound type, derived once: the type data never changes while a campaign runs.
+struct TypeFact {
+    bool bound{}, combatant{}, stays_in_transport{};
+    Fixed ai_power{};
+    CombatantKind kind{CombatantKind::ordinary};
 };
 struct Prepared {
     CampaignSetupPlan plan;
@@ -78,23 +87,36 @@ struct Prepared {
     std::set<std::string> immune, unqualified;
     std::map<std::string, Fixed> bounty; // WAR-U05: bounty value per bound type, keyed like `key`
     std::vector<StartingForceRelation> relations;
+    std::unordered_map<gc::TypeId, TypeFact> type_facts; // first binding row per id, like bound()
     Prepared(const CampaignSetupPlan& p) : plan(p) {}
 };
+void derive_type_facts(Prepared& p) {
+    for (const auto& binding : p.plan.type_bindings()) {
+        if (p.type_facts.contains(binding.id)) continue; // bound() takes the first row with the id, even when it is unbound
+        TypeFact fact;
+        if (const auto* type = p.types.find(binding.original_type)) {
+            fact.bound = true; fact.combatant = !behaves(*type, "FLEET"); fact.ai_power = type->ai_combat_power.value_or(Fixed{});
+            fact.stays_in_transport = type->stays_in_transport.value_or(false);
+            fact.kind = behaves(*type, "TRANSPORT") ? CombatantKind::transport : behaves(*type, "DUMMY_GROUND_COMPANY") ? CombatantKind::company
+                : behaves(*type, "DUMMY_SPACE_FIGHTER_SQUADRON") || behaves(*type, "SQUADRON") ? CombatantKind::squadron
+                : behaves(*type, "DUMMY_STAR_BASE") ? CombatantKind::space_base : behaves(*type, "DUMMY_GROUND_BASE") ? CombatantKind::ground_base
+                : behaves(*type, "FLEET") ? CombatantKind::fleet : CombatantKind::ordinary;
+        }
+        p.type_facts.emplace(binding.id, fact);
+    }
+}
 core::Result<CombatantFacts> facts(const Prepared& p, const gc::GalacticSnapshot& snapshot,
     gc::FleetMember member, unsigned depth = 0) {
     if (depth > 32) return fail<CombatantFacts>("cyclic combatant contents");
-    const auto* type = bound(p.plan, p.types, member.type);
-    if (!type) return fail<CombatantFacts>("unbound combatant type");
-    CombatantFacts out; out.combatant = !behaves(*type, "FLEET"); out.ai_power = type->ai_combat_power.value_or(Fixed{});
-    out.stays_in_transport = type->stays_in_transport.value_or(false);
-    out.kind = behaves(*type, "TRANSPORT") ? CombatantKind::transport : behaves(*type, "DUMMY_GROUND_COMPANY") ? CombatantKind::company
-        : behaves(*type, "DUMMY_SPACE_FIGHTER_SQUADRON") || behaves(*type, "SQUADRON") ? CombatantKind::squadron
-        : behaves(*type, "DUMMY_STAR_BASE") ? CombatantKind::space_base : behaves(*type, "DUMMY_GROUND_BASE") ? CombatantKind::ground_base
-        : behaves(*type, "FLEET") ? CombatantKind::fleet : CombatantKind::ordinary;
+    const auto fact = p.type_facts.find(member.type);
+    if (fact == p.type_facts.end() || !fact->second.bound) return fail<CombatantFacts>("unbound combatant type");
+    CombatantFacts out; out.combatant = fact->second.combatant; out.ai_power = fact->second.ai_power;
+    out.stays_in_transport = fact->second.stays_in_transport; out.kind = fact->second.kind;
     if (snapshot.movement()) {
+        // Strictly ordered by type (validated with the movement setup): the first match is the lower bound.
         const auto& rows = snapshot.movement()->types;
-        const auto at = std::find_if(rows.begin(), rows.end(), [&](const auto& row) { return row.type == member.type; });
-        if (at != rows.end()) out.stealth = at->skips_combat;
+        const auto at = std::lower_bound(rows.begin(), rows.end(), member.type, [](const auto& row, gc::TypeId value) { return row.type < value; });
+        if (at != rows.end() && at->type == member.type) out.stealth = at->skips_combat;
     }
     if (const auto* children = contents(snapshot, member.id)) for (const auto& child : children->children) {
         auto value = facts(p, snapshot, child, depth + 1); if (!value) return value; out.contents.push_back(std::move(value).value());
@@ -369,22 +391,27 @@ core::Result<void> load_inputs(Prepared& p, const vfs::Vfs& filesystem) {
             auto& slot = bounty_defaults[key(child.raw_text.substr(0, comma))]; slot = value->value;
         }
     }
+    StockNameSkips skips;
     for (const auto& type : p.types.types) {
+        auto resolved = resolve_stock_name(p.catalog, type.name, data::Category::game_object, "auto-resolve type", skips);
+        if (!resolved) return core::Result<void>::failure(resolved.error());
+        if (!resolved.value()) continue;
+        const auto& effective = *resolved.value();
         script::foc::AiType ai; ai.name = key(type.name); ai.type_id = assets::object_type_crc(type.name);
         const auto* tactical_type = tables.value().find(type.name);
         if (!tactical_type) return fail<void>("auto-resolve type lacks tactical behavior flags");
         ai.targeting = tactical_type->targeting; ai.unit_ai = tactical_type->unit_ai;
+        ai.selectable = tactical_type->selectable; // WSU-21: Is_Selectable answers the type's SELECTABLE behaviour here too
         p.host.setup.content.types.push_back(ai);
-        auto effective = p.catalog.resolve(type.name, data::Category::game_object); if (!effective) return core::Result<void>::failure(effective.error());
         const auto text = [&](std::string_view tag) {
-            const auto* value = effective.value().value(tag); if (!value) return std::string{}; data::tag_trace::used(value->value); return key(value->value.raw_text);
+            const auto* value = effective.value(tag); if (!value) return std::string{}; data::tag_trace::used(value->value); return key(value->value.raw_text);
         };
         p.movement_class[key(type.name)] = text("MovementClass");
         {
             // WAR-U05: the authored override wins when it is not negative; otherwise the largest
             // default among the type's categories, never below zero.
             Fixed value = Fixed::from_integer(-1).value(); bool overridden = false;
-            if (const auto* node = effective.value().value("Override_Bounty_SP")) {
+            if (const auto* node = effective.value("Override_Bounty_SP")) {
                 data::tag_trace::used(node->value);
                 if (const auto number = data::retail::leading_number(node->value.raw_text)) { value = number->value; overridden = value.raw() >= 0; }
             }
@@ -398,7 +425,7 @@ core::Result<void> load_inputs(Prepared& p, const vfs::Vfs& filesystem) {
             p.bounty[key(type.name)] = value;
         }
         const auto immune = text("Immune_To_Damage"); if (data::retail::boolean(immune).value_or(false)) p.immune.insert(key(type.name));
-        if (const auto* abilities = effective.value().value("Abilities")) {
+        if (const auto* abilities = effective.value("Abilities")) {
             // WAR-86/WAR-U04: a damage-triggered handler is an explicit diagnostic unless its kind is
             // sourced as inert for an auto-resolve request (WAR-126).
             if (has_unqualified_damage_handler(abilities->value)) p.unqualified.insert(key(type.name));
@@ -424,7 +451,10 @@ core::Result<void> load_inputs(Prepared& p, const vfs::Vfs& filesystem) {
     }
     for (const auto& location : p.plan.locations()) if (location.planet) {
         p.planet_types.emplace(location.planet->id, location.original_type);
-        auto effective = p.catalog.resolve(location.original_type, data::Category::game_object); if (!effective) return core::Result<void>::failure(effective.error());
+        auto effective = p.catalog.resolve(location.original_type, data::Category::game_object);
+        // CGS-22: a planet type with no loadable base was skipped (and noted once) by space-entry preparation.
+        if (!effective && stock_name_skippable(effective.error())) continue;
+        if (!effective) return core::Result<void>::failure(effective.error());
         if (const auto* value = effective.value().value("Terrain")) { data::tag_trace::used(value->value); p.planet_terrain.emplace(location.planet->id, key(value->value.raw_text)); }
     }
     return core::Result<void>::success();
@@ -443,6 +473,7 @@ core::Result<LiveConflictAdapters> make_stock_auto_resolver(const vfs::Vfs& file
     if (!relations) return core::Result<LiveConflictAdapters>::failure(relations.error());
     p->relations = std::move(relations).value().placement;
     if (auto loaded = load_inputs(*p, filesystem); !loaded) return core::Result<LiveConflictAdapters>::failure(loaded.error());
+    derive_type_facts(*p);
     if (!time) time = [](const gc::GalacticSnapshot& snapshot) {
         return Fixed::from_ratio(static_cast<std::int64_t>(snapshot.completed_tick()), gc::galactic_frames_per_second);
     };
@@ -630,6 +661,8 @@ core::Result<LiveConflictAdapters> make_stock_auto_resolver(const vfs::Vfs& file
         if (!snapshot.movement() || !snapshot.control()) return fail<std::vector<gc::MovementAccess>>("runtime access requires current presence");
         std::vector<gc::MovementAccess> rows = snapshot.movement()->access;
         std::vector<std::optional<core::Diagnostic>> errors(rows.size());
+        std::unordered_map<gc::PlanetId, const gc::ControlPlanet*> control_index; // first row per planet, like control_planet()
+        for (const auto& planet : snapshot.control()->planets) control_index.emplace(planet.planet, &planet);
         const auto enemy = [&](gc::PlayerId a, gc::PlayerId b) {
             return std::any_of(p->relations.begin(), p->relations.end(), [&](const auto& relation) { return relation.player == a && relation.other == b && relation.enemy; });
         };
@@ -662,7 +695,9 @@ core::Result<LiveConflictAdapters> make_stock_auto_resolver(const vfs::Vfs& file
         phase = executor.execute_phase("galactic-movement-access", sim::tick_partition_count, [&](std::size_t partition) {
             const auto range = sim::partition_range(partition, rows.size());
             for (auto i = range.begin; i < range.end; ++i) {
-                auto& row = rows[i]; const auto* planet = control_planet(snapshot, row.planet);
+                auto& row = rows[i];
+                const auto indexed = control_index.find(row.planet);
+                const auto* planet = indexed == control_index.end() ? nullptr : indexed->second;
                 if (!planet) { errors[i] = fail<void>("missing runtime control planet").error(); continue; }
                 row.potential_conflict = planet->starbase.level != 0 && enemy(row.player, planet->starbase.owner);
                 const auto orbit = presence.find(row.planet);
@@ -722,12 +757,15 @@ core::Result<LiveConflictAdapters> make_stock_auto_resolver(const vfs::Vfs& file
         ArbitrationInputs inputs; inputs.layer = record.layer;
         const auto human = [&](gc::PlayerId owner) { return std::any_of(snapshot.seats().begin(), snapshot.seats().end(), [&](const auto& seat) { return seat.active && seat.player == owner && seat.kind == gc::SeatKind::human; }); };
         if (const auto* queue = p->data.constant("Strategic_Queue_Tactical_Battles")) inputs.queue_tactical = data::retail::boolean(queue->text).value_or(false);
-        inputs.multiplayer = p->plan.mode() == CampaignSetupMode::multiplayer;
+        inputs.multiplayer = p->plan.rules_flavour() == CampaignRulesFlavour::multiplayer;
         inputs.invader_human = human(record.invader); inputs.defender_human = human(record.defender);
-        inputs.local_involved = p->plan.solo_reference_human() && (*p->plan.solo_reference_human() == record.invader || *p->plan.solo_reference_human() == record.defender);
+        if (p->plan.mode() == CampaignSetupMode::single_player) {
+            const auto local = p->plan.solo_reference_human();
+            inputs.local_involved = local && (*local == record.invader || *local == record.defender);
+        }
         const auto* campaign = p->data.campaign(p->plan.campaign_name()); if (!campaign) return fail<std::optional<RecordedAdmission>>("missing campaign admission rules");
         inputs.tutorial_disables_auto = campaign->tutorial.value_or(false);
-        inputs.story_restricts_auto = campaign->is_autoresolve_allowed == false || std::any_of(campaign->autoresolve_exclusion_locations.begin(), campaign->autoresolve_exclusion_locations.end(), [&](const auto& name) { return key(name) == key(location->second); });
+        inputs.story_restricts_auto = campaign->is_autoresolve_allowed == false; // WAR-03/75: the location list only gates UI.
         auto arbitration = arbitrate_conflict(inputs); if (!arbitration) return core::Result<std::optional<RecordedAdmission>>::failure(arbitration.error());
         return core::Result<std::optional<RecordedAdmission>>::success(RecordedAdmission{event.tick, std::move(record), arbitration.value()});
     };
@@ -761,7 +799,7 @@ core::Result<void> install_live_conflict_adapters(GameSession& game, const vfs::
     // restore fills the saved plot state afterwards). Missing files only log (the loader's notes).
     auto plots = load_story_plots(filesystem, data, plan);
     if (!plots) return core::Result<void>::failure(plots.error());
-    if (auto installed = game.install_story({plan.mode() != CampaignSetupMode::multiplayer}, std::move(plots.value().plots),
+    if (auto installed = game.install_story({plan.rules_flavour() == CampaignRulesFlavour::single_player}, std::move(plots.value().plots),
         std::move(plots.value().subplots), std::move(plots.value().notes)); !installed) return installed;
     // #683 part 2: the galaxy-changing rewards of those plots (WST-40/41/64) and their journal replayer.
     if (auto bound = bind_story_rewards(game, plan, data); !bound) return bound;

@@ -2,6 +2,7 @@
 #include "galactic_ai_world.hpp"
 #include "galactic_ai_actions.hpp"
 #include "tactical_ai_internal.hpp"
+#include "ai_mode.hpp"
 #include "eawr/core/sha256.hpp"
 #include "eawr/core/gc_profile.hpp"
 
@@ -16,7 +17,11 @@ namespace eawr::script::foc::ai {
 namespace {
 using Bytes = std::vector<std::uint8_t>;
 constexpr std::string_view domain = "eawr-galactic-goals-v4";
-constexpr std::uint64_t max_rows = 262144;
+constexpr std::uint64_t max_rows = galactic_ai::native_state_max_rows;
+template<class T> inline constexpr bool node_leaf = std::is_arithmetic_v<T> || std::is_enum_v<T>
+    || std::is_same_v<T, Real> || std::is_same_v<T, math::Fixed> || std::is_same_v<T, std::string>;
+template<class T> inline constexpr bool node_leaf<galactic_ai::Setting<T>> = node_leaf<T>;
+template<class A, class B> inline constexpr bool node_leaf<std::pair<A, B>> = node_leaf<A> && node_leaf<B>;
 template<class T> core::Result<T> fail(std::string message) {
     return core::Result<T>::failure(detail::make_error(authoritative::codes::load_rejected, std::move(message)));
 }
@@ -25,6 +30,7 @@ template<class T> core::Result<T> fail(std::string message) {
 struct Archive {
     bool reading{};
     bool galactic_tasks{}; // WGA-485: keep the tactical field inventory unchanged.
+    bool nodes_only{}; // Admission reuses this inventory without encoding payloads.
     Bytes bytes;
     std::span<const std::uint8_t> input;
     std::size_t depth{};
@@ -65,6 +71,7 @@ struct Archive {
             + std::to_string(location.line()));
     }
     void word(std::uint64_t& value, std::size_t width) {
+        if (nodes_only) return;
         if (reading) {
             check(width <= input.size()); value = 0;
             for (std::size_t i = 0; i < width; ++i) value |= std::uint64_t{input[i]} << (i * 8U);
@@ -89,19 +96,40 @@ struct Archive {
     }
     void item(bool& value) { std::uint8_t bits = value ? 1 : 0; item(bits); check(bits <= 1); if (reading) value = bits != 0; }
     void item(Real& value) { item(value.repr); }
+    // Native records are individually framed. Keep numeric records byte-identical;
+    // longer scalar records carry a type tag and a bounded payload. This codec
+    // serves live hashing/transaction rollback, independently of save policy.
+    void item(Engine::GlobalScalar& value) {
+        if (nodes_only) return;
+        if (reading && input.size() == 8) { Real number{}; item(number); value = number; return; }
+        if (!reading) if (auto* number = std::get_if<Real>(&value)) { item(*number); return; }
+        std::uint8_t kind = std::holds_alternative<std::string>(value) ? 1 : 2;
+        item(kind); check(kind == 1 || kind == 2);
+        if (kind == 1) {
+            std::string text = reading ? std::string{} : std::get<std::string>(value);
+            item(text); if (reading) value = std::move(text);
+        } else {
+            std::uint64_t marker{}; item(marker); check(marker == 0);
+            bool flag = reading ? false : std::get<bool>(value);
+            item(flag); if (reading) value = flag;
+        }
+    }
     void item(math::Fixed& value) { auto raw = value.raw(); item(raw); if (reading) value = math::Fixed::from_raw(raw); }
     void item(std::string& value) {
-        std::uint64_t length = value.size(); item(length); check(length <= 1048576);
+        if (nodes_only) return;
+        std::uint64_t length = value.size(); item(length); check(length <= galactic_ai::native_state_max_text_bytes);
         if (reading) { check(length <= input.size()); value.assign(input.begin(), input.begin() + static_cast<std::ptrdiff_t>(length)); input = input.subspan(static_cast<std::size_t>(length)); }
         else { check(length <= galactic_ai::native_state_max_bytes - encoded_size); encoded_size += static_cast<std::size_t>(length); bytes.insert(bytes.end(), value.begin(), value.end()); }
     }
     std::uint64_t count(std::uint64_t value) {
-        item(value); check(value <= max_rows && nodes + value <= 1048576); nodes += value;
-        if (reading) check(value <= input.size());
+        if (nodes_only) { nodes += value; return value; }
+        item(value); check(value <= max_rows && nodes + value <= galactic_ai::native_state_max_nodes); nodes += value;
+        if (reading && !record_headers_only) check(value <= input.size());
         return value;
     }
     template<class T> void item(std::vector<T>& value) {
         const auto size = count(value.size()); if (reading) value.resize(static_cast<std::size_t>(size));
+        if constexpr (node_leaf<T>) if (nodes_only) return;
         for (auto& row : value) item(row);
     }
     template<class T> void item(std::optional<T>& value) {
@@ -111,6 +139,7 @@ struct Archive {
     }
     template<class T, class C> void item(std::set<T, C>& value) {
         const auto size = count(value.size());
+        if constexpr (node_leaf<T>) if (nodes_only) return;
         if (!reading) { for (const auto& row : value) { auto copied = row; item(copied); } return; }
         value.clear(); std::optional<T> previous;
         for (std::uint64_t i = 0; i < size; ++i) { T row{}; item(row); check(!previous || C{}(*previous, row)); previous = row; value.insert(std::move(row)); }
@@ -118,6 +147,7 @@ struct Archive {
     template<class A, class B> void item(std::pair<A, B>& value) { fields(value.first, value.second); }
     template<class K, class V, class C> void item(std::map<K, V, C>& value) {
         const auto size = count(value.size());
+        if constexpr (node_leaf<K> && node_leaf<V>) if (nodes_only) return;
         if (!reading) { for (auto& [key, row] : value) { auto copied = key; fields(copied, row); } return; }
         value.clear(); std::optional<K> previous;
         for (std::uint64_t i = 0; i < size; ++i) {
@@ -238,10 +268,20 @@ struct GoalStateCodec {
         ar.fields(v.player, type); ar.check(!type.empty() && data.players.contains(type));
         if (ar.reading) v.type = &data.players.at(type);
         std::string selected;
-        if (!ar.reading) for (const auto& [name, row] : data.templates) if (&row == v.space_template) selected = name;
+        if (!ar.reading) for (const auto& [name, row] : data.templates) if (&row == v.mode_template) selected = name;
         ar.item(selected); ar.check(selected.empty() || data.templates.contains(selected));
-        if (ar.reading) v.space_template = selected.empty() ? nullptr : &data.templates.at(selected);
+        if (ar.reading) v.mode_template = selected.empty() ? nullptr : &data.templates.at(selected);
         ar.fields(v.difficulty, v.galactic);
+        if (ar.reading && setup.domain == sim::tactical::BattleDomain::land) {
+            // The land adjustments are derived from the mounted data, not serialized (no format change): re-resolve them.
+            for (const auto& slot : setup.players) if (slot.player == v.player) {
+                const Difficulty land = resolve_difficulty(data, v.type, sim::tactical::to_string(slot.difficulty));
+                v.difficulty.land_contrast_multiplier = land.land_contrast_multiplier;
+                v.difficulty.land_goal_cycle_sleep = land.land_goal_cycle_sleep;
+                v.difficulty.land_build_time_multiplier = land.land_build_time_multiplier;
+                break;
+            }
+        }
         ar.record(v.player, 33, std::uint64_t{}, [&] { ar.item(v.galactic_policy); });
         ar.fields(v.proposal_counts, v.exclusion_counts);
         const auto functions = ar.count(v.functions.size()); if (ar.reading) v.functions.resize(static_cast<std::size_t>(functions));
@@ -277,6 +317,16 @@ struct GoalStateCodec {
     template<class T> static void rows(Archive& ar, Engine& e, std::map<std::uint64_t, T> PlayerAi::* member,
         const std::function<PlayerAi*(std::uint64_t, const T&)>& owner, std::uint32_t kind = 0,
         const std::function<std::uint32_t(const T&)>& record_owner = {}) {
+        if (ar.nodes_only) {
+            // Node sums need neither global ordering nor a copied runtime index.
+            for (auto& player : e.players_) {
+                ar.count((player.*member).size());
+                if constexpr (!node_leaf<T>) for (auto& [id, row] : player.*member) {
+                    static_cast<void>(id); ar.item(row);
+                }
+            }
+            return;
+        }
         if (!ar.reading) {
             const auto ordered = e.ordered_runtime(member);
             (void)ar.count(ordered.size());
@@ -333,7 +383,21 @@ struct GoalStateCodec {
         rows<std::uint64_t>(ar, v, &PlayerAi::plan_of_instance, [&](auto instance, auto) { return owner_of_instance(instance); },
             24, [&](const auto& id) { return plan_owner(id); });
         if (ar.reading) v.rebuild_runtime_index();
-        ar.map_records(v.threats_, 25, shared); ar.map_records(v.last_hits_, 26, shared); ar.map_records(v.globals_, 27, shared);
+        ar.map_records(v.threats_, 25, shared); ar.map_records(v.last_hits_, 26, shared);
+        if (ar.nodes_only) ar.count(v.globals_.size());
+        else if (ar.record_output) ar.map_records(v.globals_, 27, shared);
+        else {
+            // L-55: preserve the numeric field; expanded scalar kinds use the
+            // optional tail, leaving a numeric-only checkpoint byte-identical.
+            std::map<std::string, Real, std::less<>> numbers;
+            if (!ar.reading) for (const auto& [key, scalar] : v.globals_)
+                if (const auto* number = std::get_if<Real>(&scalar)) numbers.emplace(key, *number);
+            ar.item(numbers);
+            if (ar.reading) {
+                v.globals_.clear();
+                for (const auto& [key, number] : numbers) v.globals_.emplace(key, number);
+            }
+        }
         ar.record(0, 28, std::uint64_t{}, [&] { ar.item(v.pending_attach_); });
         ar.record(0, 29, std::uint64_t{}, [&] { ar.item(v.events_); });
         ar.record(0, 30, std::uint64_t{}, [&] { ar.item(v.orders_); });
@@ -352,12 +416,13 @@ struct GoalStateCodec {
             }
         }
     }
-    static Engine::NativeRecordRows records(Engine& engine, bool cold = false) {
+    static Engine::NativeRecordRows records(Engine& engine, bool cold = false,
+        const std::map<tactical::PlayerId, math::Fixed>* credit_override = nullptr) {
         Engine::NativeRecordRows rows;
         if (cold) {
             // Independent oracle: the full canonical field walk, without dirty selections.
             Archive ar; ar.galactic_tasks = true; ar.record_output = &rows;
-            auto credits = engine.host_->credit_changes;
+            auto credits = credit_override ? *credit_override : engine.host_->credit_changes;
             ar.record(0, 0, std::uint64_t{}, [&] { runtime(ar, engine, credits); });
             return rows;
         }
@@ -475,7 +540,111 @@ struct GoalStateCodec {
             emit(row.player, 32, key, [&](Archive& ar) { auto copied = key; ar.fields(copied, row.player, row.goal, row.type, row.consumed, row.issued); });
         return rows;
     }
-    static void publish(Engine& destination, Engine& staged, bool positioning_restored = false) {
+    // Fault path only. Decode the same typed field inventory from retained
+    // canonical records, then independently re-encode before publication.
+    // Player headers omit their separate policy/goals/map/task records.
+    static void restore_records(const Engine::NativeRecordRows& rows, Engine& engine,
+        std::map<tactical::PlayerId, math::Fixed>& credits) {
+        const auto reader = [](const auto& entry) {
+            const auto& key = std::get<2>(entry.first);
+            const auto& bytes = entry.second;
+            if (bytes.size() < key.size() || !std::equal(key.begin(), key.end(), bytes.begin()))
+                throw std::runtime_error("invalid retained goal record identity");
+            Archive ar(std::span<const std::uint8_t>(bytes).subspan(key.size()));
+            ar.galactic_tasks = true;
+            return ar;
+        };
+        const auto header = rows.find({0, 0, Bytes(8)});
+        if (header == rows.end()) throw std::runtime_error("retained goal header missing");
+        auto ar = reader(*header);
+        runtime_header(ar, engine);
+        for (std::size_t i = 0; i < 11; ++i) {
+            std::uint64_t count{}; ar.item(count); ar.check(count <= max_rows);
+        }
+        ar.check(ar.input.empty());
+        for (const auto& entry : rows) if (std::get<1>(entry.first) == 1) {
+            PlayerAi p;
+            auto player_ar = reader(entry);
+            Engine::NativeRecordRows ignored;
+            player_ar.record_output = &ignored; player_ar.record_headers_only = true;
+            player(player_ar, p, engine.data_, engine.host_->setup);
+            player_ar.check(player_ar.input.empty() && p.player == std::get<0>(entry.first));
+            engine.players_.push_back(std::move(p));
+        }
+        const auto map_row = [](Archive& input, auto& values) {
+            using Map = std::remove_reference_t<decltype(values)>;
+            typename Map::key_type key{};
+            typename Map::mapped_type value{};
+            input.fields(key, value);
+            input.check(values.emplace(std::move(key), std::move(value)).second);
+        };
+        using GoalChain = std::map<std::uint64_t, Goal>;
+        std::map<std::pair<std::uint32_t, std::uint32_t>, GoalChain> goals;
+        for (const auto& entry : rows) {
+            const auto owner = std::get<0>(entry.first), kind = std::get<1>(entry.first);
+            if (kind <= 1) continue;
+            auto input = reader(entry);
+            auto* p = engine.player_ai(owner);
+            if ((kind >= 2 && kind <= 17) || (kind >= 21 && kind <= 24) || kind == 33)
+                input.check(p != nullptr);
+            switch (kind) {
+            case 2: case 3: {
+                std::uint64_t previous{}; Goal row; input.fields(previous, row);
+                input.check(goals[{owner, kind}].emplace(previous, std::move(row)).second); break;
+            }
+            case 4: input.item(p->tasks); break;
+            case 5: map_row(input, p->activations); break;
+            case 6: map_row(input, p->goal_outcomes); break;
+            case 7: map_row(input, p->plan_outcomes); break;
+            case 8: map_row(input, p->plan_success); break;
+            case 9: map_row(input, p->goal_success); break;
+            case 10: map_row(input, p->target_goal_success); break;
+            case 11: map_row(input, p->target_plan_success); break;
+            case 12: map_row(input, p->unit_survival); break;
+            case 13: map_row(input, p->reserved); break;
+            case 14: map_row(input, p->assigned); break;
+            case 15: map_row(input, p->reserved_pool); break;
+            case 16: map_row(input, p->reserved_pool_tokens); break;
+            case 17: map_row(input, p->reserved_credits); break;
+            case 20: map_row(input, engine.targets_); break;
+            case 21: map_row(input, p->taskforces); break;
+            case 22: map_row(input, p->running); break;
+            case 23: map_row(input, p->blocks); break;
+            case 24: map_row(input, p->plan_of_instance); break;
+            case 25: map_row(input, engine.threats_); break;
+            case 26: map_row(input, engine.last_hits_); break;
+            case 27: map_row(input, engine.globals_); break;
+            case 28: input.item(engine.pending_attach_); break;
+            case 29: input.item(engine.events_); break;
+            case 30: input.item(engine.orders_); break;
+            case 31: map_row(input, credits); break;
+            case 32: {
+                sim::EntityId id{}; Engine::PadReservation row;
+                input.fields(id, row.player, row.goal, row.type, row.consumed, row.issued);
+                input.check(row.player == owner && engine.pad_reservations_.emplace(id, row).second); break;
+            }
+            case 33: input.item(p->galactic_policy); break;
+            default: throw std::runtime_error("unknown retained goal record kind");
+            }
+            input.check(input.input.empty());
+        }
+        for (auto& [identity, chain] : goals) {
+            auto* p = engine.player_ai(identity.first);
+            if (!p) throw std::runtime_error("retained goal owner missing");
+            auto& target = identity.second == 2 ? p->proposed : p->active;
+            std::uint64_t previous{};
+            while (!chain.empty()) {
+                auto at = chain.find(previous);
+                if (at == chain.end()) throw std::runtime_error("invalid retained goal predecessor chain");
+                previous = at->second.id;
+                target.push_back(std::move(at->second)); chain.erase(at);
+            }
+        }
+        engine.rebuild_runtime_index();
+        if (records(engine, true, &credits) != rows)
+            throw std::runtime_error("retained goal records do not reconstruct canonically");
+    }
+    static void publish(Engine& destination, Engine& staged, bool positioning_restored = false, bool preserve_reports = false) {
         if (!positioning_restored) {
             // Galactic bytes omit tactical positioning, so restore must retain those
             // rows just as the former engine-wide container did.
@@ -492,7 +661,7 @@ struct GoalStateCodec {
         // live immutable closure before the single ordered owner publication.
         for (auto& p : staged.players_) {
             for (const auto& [name, row] : staged.data_.players) if (&row == p.type) { p.type = &destination.data_.players.at(name); break; }
-            for (const auto& [name, row] : staged.data_.templates) if (&row == p.space_template) { p.space_template = &destination.data_.templates.at(name); break; }
+            for (const auto& [name, row] : staged.data_.templates) if (&row == p.mode_template) { p.mode_template = &destination.data_.templates.at(name); break; }
             for (auto& f : p.functions) { f.goal = &destination.data_.goals.at(f.goal_name); f.equation = destination.data_.equations.find(f.equation_name); }
             if (auto* old = destination.player_ai(p.player)) p.galactic_funding = old->galactic_funding;
         }
@@ -511,7 +680,7 @@ struct GoalStateCodec {
         destination.initialized_ = staged.initialized_; destination.work_ = {};
         destination.staggered_clock_ = staged.staggered_clock_;
         destination.staggered_seeded_ = staged.staggered_seeded_;
-        destination.records_.clear(); destination.costs_.clear();
+        if (!preserve_reports) { destination.records_.clear(); destination.costs_.clear(); }
         destination.producers_.clear(); destination.producers_prepared_ = false; destination.producer_work_ = {};
         destination.mark_galactic_tasks_changed();
         destination.perception_executor_ = nullptr; destination.scripts_ = nullptr;
@@ -571,6 +740,17 @@ struct GoalStateCodec {
     }
 };
 
+std::uint64_t Engine::native_collection_nodes() noexcept {
+    try {
+        Archive ar; ar.nodes_only = true; ar.galactic_tasks = true;
+        GoalStateCodec::runtime(ar, *this, host_->credit_changes);
+        return ar.nodes;
+    } catch (const std::exception&) {
+        // An already invalid owner cannot admit another scalar write. Deletion
+        // remains available, and the ordinary state validator owns diagnostics.
+        return std::numeric_limits<std::uint64_t>::max();
+    }
+}
 void Engine::enable_native_records() {
     if (native_records_enabled_) return;
     native_records_enabled_ = true; native_records_all_dirty_ = true; refresh_native_records();
@@ -628,11 +808,18 @@ void Engine::refresh_native_records() noexcept {
     gc_profile::Scope profile_scope(gc_profile::Phase::goal_record_maintenance);
     try {
         auto next = GoalStateCodec::records(*this);
+        const auto retain = [&](NativeRecordRows::iterator at) {
+            if (!native_phase_ || native_phase_->records.contains(at->first)) return;
+            auto [saved, inserted] = native_phase_->records.try_emplace(at->first);
+            static_cast<void>(inserted);
+            saved->second.emplace(std::move(at->second));
+        };
         const auto reconcile = [&](NativeRecordRows::iterator at) {
             ++native_record_inspections_;
             if (!next.contains(at->first)) {
                 const auto& [owner, kind, key] = at->first;
                 native_records_.erase(owner, kind, std::span<const std::uint8_t>(key));
+                retain(at);
                 native_record_rows_.erase(at);
             }
         };
@@ -670,14 +857,109 @@ void Engine::refresh_native_records() noexcept {
         for (auto& [key, bytes] : next) {
             const auto old = native_record_rows_.find(key); if (old != native_record_rows_.end() && old->second == bytes) continue;
             native_records_.set(std::get<0>(key), std::get<1>(key), std::span<const std::uint8_t>(std::get<2>(key)), bytes);
+            if (native_phase_) {
+                if (old == native_record_rows_.end()) native_phase_->records.try_emplace(key);
+                else retain(old);
+            }
             native_record_rows_.insert_or_assign(key, std::move(bytes));
         }
         native_record_dirty_groups_.clear(); native_record_dirty_keys_.clear();
         native_records_all_dirty_ = false; native_record_header_dirty_ = false; native_record_failure_.reset();
     } catch (const std::exception& error) { native_record_failure_ = detail::make_error(authoritative::codes::invalid_request, error.what()); }
 }
+struct GoalStateContributor::PhaseSavepoint::Saved {
+    GoalStateContributor* owner{};
+    std::shared_ptr<Engine> engine;
+    Engine::NativePhaseUndo undo;
+    TickCost work;
+    StaggeredServiceClock clock;
+    bool seeded{};
+    bool settled{};
+};
+GoalStateContributor::PhaseSavepoint::PhaseSavepoint(std::unique_ptr<Saved> saved) : saved_(std::move(saved)) {}
+GoalStateContributor::PhaseSavepoint::~PhaseSavepoint() {
+    if (!saved_ || saved_->settled) return;
+    saved_->engine->native_phase_ = nullptr;
+    saved_->engine->native_phase_abandoned_ = true;
+    saved_->engine->mark_native_state_changed();
+}
+GoalStateContributor::PhaseSavepoint::Work GoalStateContributor::PhaseSavepoint::work() const noexcept {
+    Work result;
+    if (!saved_) return result;
+    result.retained_records = saved_->undo.records.size();
+    for (const auto& [key, bytes] : saved_->undo.records) {
+        static_cast<void>(key); if (bytes) result.retained_bytes += bytes->size();
+    }
+    return result;
+}
+core::Result<void> GoalStateContributor::PhaseSavepoint::commit() {
+    if (!saved_ || saved_->settled) return fail<void>("native goal phase already settled");
+    auto& engine = *saved_->engine;
+    engine.refresh_native_records();
+    if (engine.native_record_failure_) return core::Result<void>::failure(*engine.native_record_failure_);
+    // No deterministic callback may run after observer publication starts.
+    engine.native_phase_ = nullptr;
+    saved_->settled = true;
+    for (auto& row : saved_->undo.plan_reports) append_ai_diagnostic(engine.records_, engine.records_dropped_, std::move(row));
+    for (auto& row : saved_->undo.cost_reports) append_ai_diagnostic(engine.costs_, engine.costs_dropped_, std::move(row));
+    saved_->undo = {};
+    return core::Result<void>::success();
+}
+core::Result<void> GoalStateContributor::PhaseSavepoint::rollback() {
+    if (!saved_ || saved_->settled) return fail<void>("native goal phase already settled");
+    auto& engine = *saved_->engine;
+    try {
+        // Do not encode the speculative fields here: a deterministic callback
+        // can leave them temporarily invalid. The published record inventory
+        // plus first-write undo still describes the exact phase-start state.
+        // Whole inventory copy/decode is exclusively the deterministic-fault path.
+        auto records = engine.native_record_rows_;
+        for (const auto& [key, old] : saved_->undo.records) {
+            if (old) records.insert_or_assign(key, *old);
+            else records.erase(key);
+        }
+        Engine staged(engine.host_, engine.data_, engine.plans_);
+        std::map<tactical::PlayerId, math::Fixed> credits;
+        GoalStateCodec::restore_records(records, staged, credits);
+        if (auto valid = saved_->owner->validate(staged); !valid) return valid;
+        core::RecordDigest digest;
+        for (const auto& [key, bytes] : records)
+            digest.set(std::get<0>(key), std::get<1>(key), std::span<const std::uint8_t>(std::get<2>(key)), bytes);
+        GoalStateCodec::publish(engine, staged, false, true);
+        engine.host_->credit_changes = std::move(credits);
+        engine.work_ = saved_->work;
+        engine.staggered_clock_ = saved_->clock; engine.staggered_seeded_ = saved_->seeded;
+        engine.decision_players_.clear(); engine.decision_reads_frozen_ = false;
+        engine.player_inputs_active_ = false; engine.galactic_deferred_ = false;
+        engine.station_levels_.reset(); engine.pad_inputs_.reset();
+        engine.native_record_rows_ = std::move(records); engine.native_records_ = std::move(digest);
+        engine.native_record_dirty_groups_.clear(); engine.native_record_dirty_keys_.clear();
+        engine.native_records_all_dirty_ = false; engine.native_record_header_dirty_ = false;
+        engine.native_record_failure_.reset();
+        engine.native_phase_ = nullptr; engine.mark_native_state_changed();
+        saved_->settled = true; saved_->undo = {};
+        return core::Result<void>::success();
+    } catch (const std::exception& error) { return fail<void>(error.what()); }
+}
+core::Result<std::unique_ptr<GoalStateContributor::PhaseSavepoint>> GoalStateContributor::begin_phase() {
+    using Return = core::Result<std::unique_ptr<PhaseSavepoint>>;
+    if (!engine_ || engine_->native_phase_ || engine_->native_phase_abandoned_
+        || engine_->native_record_depth_ != 0 || engine_->staged())
+        return fail<std::unique_ptr<PhaseSavepoint>>("native goal phase requires an idle serial owner");
+    if (!engine_->host_ || !engine_->host_->ai_world || engine_->host_->ai_world->goal_mode() != "GALACTIC")
+        return fail<std::unique_ptr<PhaseSavepoint>>("native goal phase requires its galactic owner");
+    engine_->refresh_native_records();
+    if (engine_->native_record_failure_) return Return::failure(*engine_->native_record_failure_);
+    auto saved = std::make_unique<PhaseSavepoint::Saved>();
+    saved->owner = this; saved->engine = engine_; saved->work = engine_->work_;
+    saved->clock = engine_->staggered_clock_; saved->seeded = engine_->staggered_seeded_;
+    auto phase = std::unique_ptr<PhaseSavepoint>(new PhaseSavepoint(std::move(saved)));
+    engine_->native_phase_ = &phase->saved_->undo;
+    return Return::success(std::move(phase));
+}
 core::Result<std::string> GoalStateContributor::record_sync_hash(bool cold) const {
     if (!engine_) return fail<std::string>("goal contributor has no engine");
+    if (engine_->native_phase_abandoned_) return fail<std::string>("unsettled native goal phase");
     if (engine_->native_record_failure_) return core::Result<std::string>::failure(*engine_->native_record_failure_);
     core::RecordDigest rebuilt;
     if (cold) for (const auto& [key, bytes] : GoalStateCodec::records(*engine_, true))
@@ -711,7 +993,7 @@ core::Result<void> GoalStateContributor::validate(const Engine& e, const detail:
             && positioning_count == e.ordered_runtime(&PlayerAi::positioning).size());
         check(e.host_ && e.host_->ai_world && digest(content_identity_));
         const bool galactic = e.host_->ai_world->goal_mode() == "GALACTIC";
-        check(galactic || e.host_->ai_world->goal_mode() == "SPACE");
+        check(galactic || e.host_->ai_world->goal_mode() == ai_mode(e.host_->setup.domain).goal_mode);
         const auto* native_actions = galactic ? dynamic_cast<const galactic_ai::NativeActions*>(e.host_->galactic_execution.get()) : nullptr;
         // WGA-484/227: launch can retain a newly allocated fleet, even after a later
         // member refuses. Its identity belongs to the live owner, not perception.
@@ -728,7 +1010,7 @@ core::Result<void> GoalStateContributor::validate(const Engine& e, const detail:
         for (const auto& p : e.players_) {
             const auto admission = e.host_->setup.player_ai_start_ticks.find(p.player);
             check(!p.admission_pending || (admission != e.host_->setup.player_ai_start_ticks.end() && admission->second != 0));
-            check(p.player > previous && p.galactic == galactic && (!galactic || !p.space_template) && p.type && p.next_goal_id && p.per_frame >= 1
+            check(p.player > previous && p.galactic == galactic && (!galactic || !p.mode_template) && p.type && p.next_goal_id && p.per_frame >= 1
                 && p.sleep_frames >= 0 && p.nontrivial >= 0 && p.next_function <= p.functions.size() && p.next_target <= p.targets.size());
             previous = p.player;
             std::uint64_t proposal_holders{};
@@ -748,9 +1030,9 @@ core::Result<void> GoalStateContributor::validate(const Engine& e, const detail:
             const auto setup = e.host_->players.find(p.player); check(setup != e.host_->players.end());
             check(upper_case(setup->second->player_type) == upper_case(p.type->name));
             if (!galactic) {
-                const auto selected = p.type->space_templates.empty() ? e.data_.templates.end()
-                    : e.data_.templates.find(p.type->space_templates.front());
-                check(p.space_template == (selected == e.data_.templates.end() ? nullptr : &selected->second));
+                const auto& templates = mode_templates(*p.type, e.host_->setup.domain);
+                const auto selected = templates.empty() ? e.data_.templates.end() : e.data_.templates.find(templates.front());
+                check(p.mode_template == (selected == e.data_.templates.end() ? nullptr : &selected->second));
             }
             std::vector<std::pair<std::string, std::string>> functions;
             for (const auto& name : p.type->function_sets) if (const auto rows = e.data_.function_sets.find(name); rows != e.data_.function_sets.end())
@@ -895,6 +1177,26 @@ core::Result<void> GoalStateContributor::validate(const Engine& e, const detail:
     return core::Result<void>::success();
 }
 
+namespace {
+void global_scalar_tail(Archive& ar, std::map<std::string, Engine::GlobalScalar, std::less<>>& globals) {
+    std::map<std::string, std::string> strings;
+    std::map<std::string, bool> booleans;
+    if (!ar.reading) for (const auto& [key, scalar] : globals) {
+        if (const auto* text = std::get_if<std::string>(&scalar)) strings.emplace(key, *text);
+        else if (const auto* flag = std::get_if<bool>(&scalar)) booleans.emplace(key, *flag);
+    }
+    if (ar.reading ? ar.input.empty() : strings.empty() && booleans.empty()) return;
+    std::string tag = "global-scalars-v1";
+    ar.item(tag); ar.check(tag == "global-scalars-v1");
+    ar.fields(strings, booleans);
+    ar.check(!strings.empty() || !booleans.empty());
+    if (ar.reading) {
+        for (const auto& [key, text] : strings) ar.check(globals.emplace(key, text).second);
+        for (const auto& [key, flag] : booleans) ar.check(globals.emplace(key, flag).second);
+    }
+}
+} // namespace
+
 core::Result<Bytes> GoalStateContributor::encode(Engine& engine) const {
     try {
         Archive ar; ar.galactic_tasks = true;
@@ -902,6 +1204,7 @@ core::Result<Bytes> GoalStateContributor::encode(Engine& engine) const {
         ar.fields(tag, version, identity, configuration);
         auto credits = engine.host_->credit_changes;
         GoalStateCodec::runtime(ar, engine, credits);
+        global_scalar_tail(ar, engine.globals_);
         return core::Result<Bytes>::success(std::move(ar.bytes));
     } catch (const std::exception& error) { return fail<Bytes>(error.what()); }
 }
@@ -916,6 +1219,7 @@ core::Result<galactic_ai::NativeState> GoalStateContributor::capture() const {
     return core::Result<galactic_ai::NativeState>::success(std::move(state));
 }
 core::Result<void> GoalStateContributor::restore(const galactic_ai::NativeState& state) {
+    if (engine_ && engine_->native_phase_) return fail<void>("cannot restore during a native goal phase");
     if (!engine_ || state.version != galactic_ai::native_state_version || !state.components.contains(std::string(component))) return fail<void>("goal contributor component/version missing");
     const auto& bytes = state.components.at(std::string(component));
     if (bytes.size() > galactic_ai::native_state_max_bytes) return fail<void>("goal component exceeds byte bound");
@@ -930,7 +1234,7 @@ core::Result<void> GoalStateContributor::restore(const galactic_ai::NativeState&
         ar.fields(tag, version, identity, configuration);
         ar.check(tag == domain && version == 17 && identity == content_identity_ && configuration == GoalStateCodec::configuration(staged));
         std::map<tactical::PlayerId, math::Fixed> credits;
-        GoalStateCodec::runtime(ar, staged, credits); ar.check(ar.input.empty());
+        GoalStateCodec::runtime(ar, staged, credits); global_scalar_tail(ar, staged.globals_); ar.check(ar.input.empty());
         for (const auto& [player, value] : credits) { static_cast<void>(value); ar.check(staged.host_->players.contains(player)); }
         if (auto valid = validate(staged, view.get()); !valid) return valid;
         // Canonical decoding is enforced field-by-field (especially map order).
@@ -953,7 +1257,7 @@ core::Result<std::string> GoalStateContributor::state_hash() const {
 core::Result<Bytes> Engine::save_tactical_native(std::string_view identity,
     authoritative::ScriptScheduler& scripts) const {
     try {
-        if (!host_ || !host_->ai_world || host_->ai_world->goal_mode() != "SPACE") return fail<Bytes>("native child requires the tactical provider");
+        if (!host_ || !host_->ai_world || host_->ai_world->goal_mode() == "GALACTIC") return fail<Bytes>("native child requires the tactical provider");
         GoalStateContributor validation({}, std::string(identity));
         if (auto valid = validation.validate(*this); !valid) return core::Result<Bytes>::failure(valid.error());
         Archive ar; std::string tag = "eawr-tactical-ai-v10", content(identity);
@@ -965,6 +1269,7 @@ core::Result<Bytes> Engine::save_tactical_native(std::string_view identity,
         GoalStateCodec::runtime(ar, source, credits);
         GoalStateCodec::grid(ar, source.grid_);
         GoalStateCodec::positioning(ar, source);
+        global_scalar_tail(ar, source.globals_);
         return core::Result<Bytes>::success(std::move(ar.bytes));
     } catch (const std::exception& error) { return fail<Bytes>(error.what()); }
 }
@@ -972,7 +1277,7 @@ core::Result<void> Engine::restore_tactical_native(std::span<const std::uint8_t>
     std::string_view identity, authoritative::ScriptScheduler& scripts) {
     try {
         if (bytes.size() > galactic_ai::native_state_max_bytes || !host_ || !host_->ai_world
-            || host_->ai_world->goal_mode() != "SPACE" || !host_->view) return fail<void>("native child needs a rebuilt tactical provider");
+            || host_->ai_world->goal_mode() == "GALACTIC" || !host_->view) return fail<void>("native child needs a rebuilt tactical provider");
         Engine staged(host_, data_, plans_); Archive ar(bytes);
         std::string tag, content, configuration; std::uint64_t barrier{};
         ar.fields(tag, content, configuration, barrier);
@@ -987,6 +1292,7 @@ core::Result<void> Engine::restore_tactical_native(std::span<const std::uint8_t>
         std::map<tactical::PlayerId, math::Fixed> credits;
         GoalStateCodec::runtime(ar, staged, credits); GoalStateCodec::grid(ar, staged.grid_);
         GoalStateCodec::positioning(ar, staged);
+        global_scalar_tail(ar, staged.globals_);
         ar.check(ar.input.empty() && (!staged.initialized_ || staged.frame_ == static_cast<std::int64_t>(barrier)));
         // PE-25: the stamps are per session player; a world with another player count cannot own them.
         ar.check(!host_->world || staged.grid_.watched_players() == 0 || staged.grid_.watched_players() == host_->world->players().size());

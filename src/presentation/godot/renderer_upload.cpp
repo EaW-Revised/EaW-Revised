@@ -3,6 +3,10 @@
 #include "renderer_upload_internal.hpp"
 #include "vram_probe.hpp"
 
+#include <map>
+#include <optional>
+#include <sstream>
+
 namespace eawr::presentation::godot_backend {
 namespace detail {
 struct RecipeMemoryProbe final {
@@ -12,6 +16,86 @@ struct RecipeMemoryProbe final {
             static_cast<void>(asset);
             if (resource.recipe) output.model(resource.recipe->model.retained(), diagnostics::OwnerCensus::renderer);
         }
+    }
+    // One-shot texture owner census (--eawr-texture-census), main thread only. Owners are found here, at
+    // snapshot time, from the resources' recipes, so uploading keeps no extra record.
+    static void texture_census(const GodotRenderer::Impl& impl, TextureCensus& census) {
+        struct Holder final {
+            std::uint64_t first_asset{}, last_asset{}, shared_by{};
+            std::string owner, role;
+            const TextureRecipe* recipe{};
+        };
+        std::map<std::pair<std::uint64_t, std::uint64_t>, Holder> holders;
+        for (const auto& [asset, resource] : impl.resources_) {
+            if (!resource.recipe) continue;
+            const std::string& model_path = resource.recipe->model.source().logical_path;
+            const auto note = [&](const TextureRecipe* recipe, const std::string& role) {
+                if (!recipe) return;
+                const auto [at, inserted] = holders.try_emplace({recipe->item().key, recipe->item().check});
+                Holder& holder = at->second;
+                if (inserted) {
+                    holder.first_asset = asset;
+                    holder.owner = model_path;
+                    holder.role = role;
+                    holder.recipe = recipe;
+                }
+                if (inserted || holder.last_asset != asset) ++holder.shared_by;
+                holder.last_asset = asset;
+            };
+            note(resource.recipe->texture.get(), "base");
+            for (const auto& binding : resource.recipe->bindings) note(binding.second.get(), binding.first);
+        }
+        const auto describe = [](TextureCensusRow& row, const Holder& holder) {
+            row.owner = holder.owner;
+            row.role = holder.role;
+            row.shared_by = holder.shared_by;
+            const assets::Source& source = holder.recipe->source();
+            row.path = source.logical_path;
+            row.source_id = source.source_id;
+            row.layer_id = source.layer_id;
+            if (const assets::Texture* retained = holder.recipe->retained()) {
+                row.cpu_snapshot_held = true;
+                row.cpu_bytes = assets::payload_capacity(*retained).texture_payload_bytes;
+            }
+        };
+        for (const auto& [key, pooled] : impl.texture_pool_) {
+            TextureCensusRow row;
+            row.key = key.first;
+            row.check = key.second;
+            row.format = pooled.item.format;
+            row.width = pooled.item.width;
+            row.height = pooled.item.height;
+            row.mips = pooled.item.mips;
+            row.device_bytes = pooled.item.bytes;
+            row.compressed = pooled.item.compressed;
+            const auto holder = holders.find(key);
+            if (holder == holders.end()) {
+                row.owner_kind = TextureOwnerKind::unowned;
+                row.owner = "no model resource";
+            } else {
+                row.owner_kind = TextureOwnerKind::model;
+                describe(row, holder->second);
+            }
+            census.add(std::move(row));
+        }
+        // Demand-only (dormant) resources hold a CPU snapshot but no GPU texture.
+        for (const auto& [key, holder] : holders) {
+            if (impl.texture_pool_.contains(key) || !holder.recipe->retained()) continue;
+            TextureCensusRow row;
+            row.key = key.first;
+            row.check = key.second;
+            const GpuItem& item = holder.recipe->item();
+            row.format = item.format;
+            row.width = item.width;
+            row.height = item.height;
+            row.mips = item.mips;
+            row.compressed = item.compressed;
+            row.owner_kind = TextureOwnerKind::model;
+            row.resident = false;
+            describe(row, holder);
+            census.add(std::move(row));
+        }
+        TextureCensusRegistry::instance().append(census, &impl);
     }
     static assets::RetainedPayload read(const GodotRenderer::Impl& impl) {
         assets::PayloadProbe probe;
@@ -60,6 +144,42 @@ assets::RetainedPayload GodotRenderer::recipe_memory() const {
 void GodotRenderer::owner_census(diagnostics::OwnerCensus& output) const {
     // Same main-thread ownership boundary as recipe_memory and upload/release.
     if (impl_) detail::RecipeMemoryProbe::census(*impl_, output);
+}
+
+void GodotRenderer::set_texture_census(const bool enabled) noexcept {
+    detail::TextureCensusRegistry::enabled().store(enabled, std::memory_order_relaxed);
+}
+
+bool GodotRenderer::texture_census_enabled() noexcept {
+    return detail::TextureCensusRegistry::enabled().load(std::memory_order_relaxed);
+}
+
+std::function<std::string(std::string_view)> GodotRenderer::texture_census_probe() const {
+    // Same main-thread, lifetime-token contract as recipe_memory_probe. Returns "" with the switch off.
+    return [lifetime = std::weak_ptr<const bool>(memory_probe_lifetime_), impl = impl_.get()](const std::string_view phase) {
+        if (!texture_census_enabled() || lifetime.expired() || !impl) return std::string{};
+        detail::TextureCensus census;
+        detail::RecipeMemoryProbe::texture_census(*impl, census);
+        const auto totals = detail::gpu_memory_ledger().totals();
+        std::ostringstream output;
+        census.write(output, phase, &totals[static_cast<std::size_t>(detail::GpuCategory::texture)]);
+        return output.str();
+    };
+}
+
+std::vector<std::string> GodotRenderer::texture_census_snapshots(const std::string_view label) {
+    std::vector<std::string> result;
+    if (!texture_census_enabled()) return result;
+    const auto totals = detail::gpu_memory_ledger().totals();
+    for (const void* live : detail::TextureCensusRenderers::instance().live()) {
+        detail::TextureCensus census;
+        detail::RecipeMemoryProbe::texture_census(*static_cast<const GodotRenderer::Impl*>(live), census);
+        if (census.rows().empty()) continue;
+        std::ostringstream output;
+        census.write(output, label, &totals[static_cast<std::size_t>(detail::GpuCategory::texture)]);
+        result.push_back(output.str());
+    }
+    return result;
 }
 
 std::function<assets::RetainedPayload()> GodotRenderer::recipe_memory_probe() const {
@@ -144,8 +264,20 @@ std::function<assets::RetainedPayload()> GodotRenderer::recipe_memory_probe() co
     const bool authoritative = retained_model.model != nullptr; // loader/cache model, not a derived copy
     recipe->model = detail::ModelRecipe(authoritative ? std::move(retained_model)
         : ModelUpload{std::make_shared<const assets::Model>(model.original), {}}, model_loader_, authoritative);
-    recipe->texture = keep_texture(texture);
-    for (const auto& item : binding_textures) recipe->bindings.emplace_back(item.binding, keep_texture(item.texture));
+    // The texture bytes are hashed once per upload, inside upload_keep_texture: the recipes and the budget count below both
+    // use the item (#5197).
+    std::optional<detail::GpuItem> texture_gpu_item;
+    std::vector<detail::GpuItem> binding_items;
+    binding_items.reserve(binding_textures.size());
+    {
+        core::load_profile::DetailScope keep(core::load_profile::Phase::upload_keep_texture);
+        texture_gpu_item = detail::texture_item(texture);
+        recipe->texture = keep_texture(texture, *texture_gpu_item);
+        for (const auto& item : binding_textures) {
+            binding_items.push_back(detail::texture_item(item.texture));
+            recipe->bindings.emplace_back(item.binding, keep_texture(item.texture, binding_items.back()));
+        }
+    }
     resource.recipe = std::move(recipe);
     auto& budget = detail::texture_budget();
     if (!budget.probed()) {
@@ -155,8 +287,7 @@ std::function<assets::RetainedPayload()> GodotRenderer::recipe_memory_probe() co
     }
     std::uint64_t incoming{};
     std::set<std::pair<std::uint64_t, std::uint64_t>> counted;
-    const auto count_texture = [&](const assets::Texture& value) {
-        const auto item = detail::texture_item(value);
+    const auto count_texture = [&](const assets::Texture& value, const detail::GpuItem& item) {
         const auto key = std::pair{item.key, item.check};
         if (detail::texture_sharing() && (!counted.insert(key).second || texture_pool_.contains(key))) return;
         const auto drop = detail::TextureBudget::usable_drop(detail::TextureBudget::mip_edges(value), budget.drop());
@@ -165,8 +296,13 @@ std::function<assets::RetainedPayload()> GodotRenderer::recipe_memory_probe() co
             incoming += value.format == assets::PixelFormat::bgr8 ? bytes / 3U * 4U : bytes;
         }
     };
-    count_texture(texture);
-    for (const auto& item : binding_textures) count_texture(item.texture);
+    {
+        core::load_profile::DetailScope counting(core::load_profile::Phase::upload_count_texture);
+        count_texture(texture, *texture_gpu_item);
+        for (std::size_t index = 0; index < binding_textures.size(); ++index) {
+            count_texture(binding_textures[index].texture, binding_items[index]);
+        }
+    }
     for (const auto& mesh : model.meshes) {
         if (!mesh.visible) continue;
         for (const auto& surface : mesh.submeshes) incoming += detail::surface_gpu_bytes(
@@ -183,8 +319,16 @@ std::function<assets::RetainedPayload()> GodotRenderer::recipe_memory_probe() co
         * detail::TextureBudget::usable_numerator;
     const bool resident = residency_.eager(held, incoming, usable);
     if (!upload_identity_pool_) upload_identity_pool_ = std::make_unique<detail::UploadIdentityPool>();
-    resource.identity = upload_identity_pool_->submit(
-        detail::upload_identity_bytes(model, texture, description, named));
+    std::vector<std::uint8_t> identity_bytes;
+    {
+        core::load_profile::DetailScope copy(core::load_profile::Phase::upload_identity_copy);
+        identity_bytes = detail::upload_identity_bytes(model, texture, description, named);
+    }
+    {
+        core::load_profile::DetailScope submit(core::load_profile::Phase::upload_identity_submit);
+        resource.identity = upload_identity_pool_->submit(std::move(identity_bytes));
+    }
+    core::load_profile::DetailScope gpu_create(core::load_profile::Phase::upload_gpu_create);
     MaterialRefusal refusal;
     bool texture_uploaded = !resident || acquire_texture(*rendering, texture, resource.texture, resource.gpu_items);
     for (const GodotRenderer::BindingTexture& item : binding_textures) {
@@ -220,7 +364,7 @@ std::function<assets::RetainedPayload()> GodotRenderer::recipe_memory_probe() co
     if (resident) {
         resource.recipe->texture->uploaded();
         for (const auto& binding : resource.recipe->bindings) binding.second->uploaded();
-        resource.recipe->model.uploaded(model_stats_);
+        resource.recipe->model.uploaded(model_stats_, [this](const auto& model) { return model_digest(model); });
     }
     resources_.emplace(asset_id, std::move(resource));
     residency_.add(asset_id, resident);
@@ -280,8 +424,12 @@ std::function<assets::RetainedPayload()> GodotRenderer::recipe_memory_probe() co
     return core::Result<void>::success();
 }
 
-std::shared_ptr<detail::TextureRecipe> GodotRenderer::Impl::keep_texture(const assets::Texture& texture) {
-    const auto item = detail::texture_item(texture);
+detail::UploadIdentity GodotRenderer::Impl::model_digest(const std::shared_ptr<const assets::Model>& model) {
+    return model_digests_.identity(model);
+}
+
+std::shared_ptr<detail::TextureRecipe> GodotRenderer::Impl::keep_texture(
+    const assets::Texture& texture, const detail::GpuItem& item) {
     auto& entry = texture_recipes_[{item.key, item.check}];
     if (auto existing = entry.lock()) return existing;
     auto kept = std::make_shared<detail::TextureRecipe>(texture, texture_loader_, item);
@@ -340,7 +488,7 @@ bool GodotRenderer::Impl::admit_resource(RenderingServer& rendering, const sim::
     }
     recipe.texture->uploaded();
     for (const auto& binding : recipe.bindings) binding.second->uploaded();
-    recipe.model.uploaded(model_stats_);
+    recipe.model.uploaded(model_stats_, [this](const auto& model) { return model_digest(model); });
     residency_.resident(asset, true);
     ++upload_generation_;
     return true;

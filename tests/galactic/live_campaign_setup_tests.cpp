@@ -1,6 +1,7 @@
 #include <exception>
 #include <initializer_list>
 #include "../support/env.hpp"
+#include "eawr/vfs/vfs.hpp"
 #include "galactic_support.hpp"
 #include "eawr/campaign/live_setup.hpp"
 #include "eawr/campaign/starting_forces.hpp"
@@ -9,6 +10,9 @@
 #include "eawr/campaign/galactic_ai_services.hpp"
 #include "../../src/platform/galactic/save_repository.hpp"
 #include "eawr/platform/live_game_session.hpp"
+#include "eawr/platform/campaign_service_configuration.hpp"
+#include "eawr/platform/agreed_campaign.hpp"
+#include "eawr/platform/live_game_lockstep.hpp"
 #include "eawr/platform/sim_workers.hpp"
 #include "eawr/sim/galactic/fleet_intelligence.hpp"
 #include "eawr/sim/galactic/control.hpp"
@@ -31,6 +35,7 @@
 #include <regex>
 #include "../support/temp_dir.hpp"
 #include "eawr/sim/galactic/production.hpp"
+#include "eawr/sim/galactic/ability_host.hpp"
 #include "eawr/campaign/planet_economy.hpp"
 #include <limits>
 #include <map>
@@ -257,6 +262,9 @@ void installed(bool domains_only = false, bool slots_only = false, std::string_v
                 if (!services) throw std::runtime_error(name + ": " + eawr::core::format_diagnostic(services.error()));
                 auto created = cp::CampaignRoot::create(plan.value(), services.value());
                 if (!created) throw std::runtime_error(name + ": " + eawr::core::format_diagnostic(created.error()));
+                const auto stock_notes = created.value().load_notes();
+                expect(std::none_of(stock_notes.begin(), stock_notes.end(), [](const auto& n) { return n.code == "EAWR-LOAD-1238"; }),
+                    "stock curves do not emit duplicate-point notes");
                 const auto& setup = created.value().game()->galaxy().setup();
                 expect(control_sources_match(*created.value().game()->galaxy().snapshot()),
                     "all stock MP automatic control sources match their live actor identities");
@@ -1111,6 +1119,32 @@ void installed(bool domains_only = false, bool slots_only = false, std::string_v
         if (!live) throw std::runtime_error(eawr::core::format_diagnostic(live.error()));
         expect(live.value()->frame().latest != nullptr, "retained root publishes live snapshot"); live.value()->stop();
         if (source->name == "Sandbox_Equal_Footing_Underworld") {
+            // Exercise the same plan-backed provider after exact checkpoint restoration.
+            auto coop_options = options;
+            coop_options.mode = cp::CampaignSetupMode::multiplayer;
+            coop_options.rules_flavour = cp::CampaignRulesFlavour::single_player;
+            auto teammate = *std::find_if(coop_options.seats.begin(), coop_options.seats.end(),
+                [](const auto& seat) { return seat.kind == gc::SeatKind::human; });
+            teammate.seat_id = {999}; teammate.lobby_slot = static_cast<std::uint32_t>(coop_options.seats.size());
+            coop_options.seats.push_back(teammate);
+            auto coop_plan = cp::plan_live_campaign_setup(filesystem, data, types, name, coop_options, "Normal_Default").value();
+            auto fresh_coop = eawr::platform::PreparedLiveCampaign::from_plan(filesystem_owner, catalog.catalog,
+                data, types, coop_plan, "Normal_Default", false).value();
+            cp::ConflictRecord policy_conflict; policy_conflict.id = 777;
+            const auto location = std::find_if(coop_plan.locations().begin(), coop_plan.locations().end(),
+                [](const auto& row) { return row.planet.has_value(); });
+            if (location == coop_plan.locations().end()) throw std::runtime_error("co-op fixture needs a planet");
+            policy_conflict.planet = location->planet->id;
+            const auto fresh_policy = fresh_coop->services()->retreat_policy(policy_conflict);
+            auto& coop_game = eawr::platform::AgreedCampaignAccess::session(*fresh_coop);
+            const auto coop_ids = eawr::checkpoint::game_identities(coop_game.galaxy().setup());
+            const auto coop_bytes = eawr::checkpoint::save_game_checkpoint(coop_game, coop_ids).value();
+            auto restored_coop = eawr::platform::PreparedLiveCampaign::from_plan(filesystem_owner, catalog.catalog,
+                data, types, coop_plan, "Normal_Default", false, {}, false, coop_bytes).value();
+            const auto restored_policy = restored_coop->services()->retreat_policy(policy_conflict);
+            expect(fresh_coop->layout().networked_transport == true && restored_coop->layout().networked_transport == true
+                && fresh_policy && restored_policy && !fresh_policy->multiplayer && *fresh_policy == *restored_policy,
+                "networked SP-rules co-op retains its retreat policy across exact checkpoint restore");
             auto prepared = eawr::platform::PreparedLiveCampaign::create(filesystem_owner, catalog.catalog, data,
                 types, name, options, "Normal_Default");
             if (!prepared) throw std::runtime_error(eawr::core::format_diagnostic(prepared.error()));
@@ -1743,6 +1777,19 @@ void installed_guard_load_notes(bool production_guard = false) {
     struct Cleanup { std::filesystem::path path; ~Cleanup() { eawr::testing::remove_temp_directory(path); } } cleanup{directory};
     const auto original = base.open("data/xml/namedherounits.xml").value();
     std::string text(reinterpret_cast<const char*>(original.data()), original.size());
+    const std::regex neutral_cost("<Neutralization_Cost>[^<]*</Neutralization_Cost>", std::regex::icase);
+    std::vector<std::pair<std::size_t, std::size_t>> costs;
+    for (auto it = std::sregex_iterator(text.begin(), text.end(), neutral_cost); it != std::sregex_iterator(); ++it)
+        costs.emplace_back(static_cast<std::size_t>(it->position()), static_cast<std::size_t>(it->length()));
+    if (costs.size() < 2) throw std::runtime_error("neutralization fixture needs two authored costs");
+    text.replace(costs[1].first, costs[1].second, "<Neutralization_Cost>broken</Neutralization_Cost>");
+    text.replace(costs[0].first, costs[0].second, "<Neutralization_Cost>-1.0</Neutralization_Cost>");
+    const std::regex neutral_curve("<Cost_Mod_By_Base_Level>[^<]*</Cost_Mod_By_Base_Level>", std::regex::icase);
+    const std::regex history_curve("<Cost_Mod_By_Previous_Neutralizations>[^<]*</Cost_Mod_By_Previous_Neutralizations>", std::regex::icase);
+    if (!std::regex_search(text, neutral_curve) || !std::regex_search(text, history_curve))
+        throw std::runtime_error("neutralization fixture needs base and history curves");
+    text = std::regex_replace(text, neutral_curve, "<Cost_Mod_By_Base_Level>1.0,1.0, 1.0, 1.0</Cost_Mod_By_Base_Level>");
+    text = std::regex_replace(text, history_curve, "<Cost_Mod_By_Previous_Neutralizations>0,0, 1,2, 1,3</Cost_Mod_By_Previous_Neutralizations>");
     text = std::regex_replace(text, std::regex("<Min_Respawn_Time_Per_Tech_Level>[^<]*</Min_Respawn_Time_Per_Tech_Level>", std::regex::icase),
         "<Min_Respawn_Time_Per_Tech_Level>broken</Min_Respawn_Time_Per_Tech_Level>");
     text = std::regex_replace(text, std::regex("</HeroUnit>", std::regex::icase),
@@ -1847,6 +1894,19 @@ void installed_guard_load_notes(bool production_guard = false) {
     if (!created) throw std::runtime_error(eawr::core::format_diagnostic(created.error()));
     auto campaign = std::move(created).value();
     const auto notes = campaign.load_notes();
+    for (const auto& [authored, classification] : {
+            std::pair{"1.0,1.0, 1.0, 1.0", eawr::core::LoadCategory::retail_accepts},
+            std::pair{"0,0, 1,2, 1,3", eawr::core::LoadCategory::unknown_degrade}}) {
+        const auto note = std::find_if(notes.begin(), notes.end(), [&](const auto& n) {
+            return n.code == "EAWR-LOAD-1238" && n.authored_value == authored;
+        });
+        expect(note != notes.end(), "duplicate neutralization curve reports its authored value");
+        if (note != notes.end()) expect(note->classification == classification && !note->object.empty()
+            && note->file == "data/xml/namedherounits.xml" && note->line.has_value()
+            && note->layer.mod_id == "hero-guard-fixture"
+            && (classification != eawr::core::LoadCategory::unknown_degrade || note->retail == "tie order unverified, capture needed"),
+            "curve note records its source and evidence level");
+    }
     if (production_guard) {
         for (const auto tag : {"Tech_Level", "Required_Star_Base_Level", "Base_Level"})
             expect(std::any_of(notes.begin(), notes.end(), [&](const auto& note) {
@@ -1885,6 +1945,32 @@ void installed_guard_load_notes(bool production_guard = false) {
             return note.code == code && note.classification == eawr::core::LoadCategory::unknown_degrade;
         }), "GC root snapshot includes every hero guard family");
     const auto& abilities = *campaign.game()->galaxy().setup().ability_host;
+    for (const auto authored : {"-1.0", "broken"}) {
+        const auto note = std::find_if(notes.begin(), notes.end(), [&](const auto& n) {
+            return n.code == "EAWR-LOAD-1233" && n.authored_value == authored;
+        });
+        expect(note != notes.end(), std::string("unusual neutralization cost produces a note: ") + authored);
+        if (note == notes.end()) continue;
+        expect(!note->object.empty() && note->file == "data/xml/namedherounits.xml" && note->line.has_value()
+            && note->layer.mod_id == "hero-guard-fixture", "neutralization note identifies the binding and winning source");
+        const auto binding = std::find_if(plan.type_bindings().begin(), plan.type_bindings().end(),
+            [&](const auto& b) { return b.original_type == note->object; });
+        expect(binding != plan.type_bindings().end(), "neutralization note names a bound type");
+        if (binding == plan.type_bindings().end()) continue;
+        const auto target = std::find_if(abilities.neutralization_targets.begin(), abilities.neutralization_targets.end(),
+            [&](const auto& t) { return t.type == binding->id; });
+        if (std::string_view(authored) == "-1.0") {
+            expect(note->classification == eawr::core::LoadCategory::retail_accepts
+                && note->action == eawr::core::LoadAction::accepted && note->effective_value == "-1.0"
+                && target != abilities.neutralization_targets.end() && target->cost == Fixed::from_integer(-1).value(),
+                "negative cost is retained through startup");
+        } else {
+            expect(note->classification == eawr::core::LoadCategory::retail_accepts
+                && note->action == eawr::core::LoadAction::accepted
+                && note->effective_value == "0/" + std::to_string(Fixed::scale)
+                && target == abilities.neutralization_targets.end(), "nonnumeric cost is reported as retail zero and has no target");
+        }
+    }
     expect(abilities.ruined_income.empty(), "invalid ruined income retains ordinary income");
     bool theft_seen{};
     for (const auto& profile : abilities.profiles) {
@@ -1892,6 +1978,24 @@ void installed_guard_load_notes(bool production_guard = false) {
         if (profile.theft) { theft_seen = true; expect(profile.theft->absence_min.empty() && profile.theft->absence_max.empty(), "malformed theft arrays clear both"); }
     }
     expect(theft_seen, "installed hero fixture exercised theft parsing");
+    const auto identities = eawr::checkpoint::game_identities(campaign.game()->galaxy().setup());
+    const auto saved_result = eawr::checkpoint::save_game_checkpoint(*campaign.game(), identities);
+    if (!saved_result) throw std::runtime_error(eawr::core::format_diagnostic(saved_result.error()));
+    const auto& saved = saved_result.value();
+    const eawr::platform::ThreadWorkerAdapter checkpoint_executor(1);
+    auto loaded = eawr::checkpoint::load_game_checkpoint(saved, identities, {}, checkpoint_executor);
+    if (!loaded) throw std::runtime_error(eawr::core::format_diagnostic(loaded.error()));
+    const auto restored = std::move(loaded).value();
+    expect(restored.session.galaxy().setup().ability_host == campaign.game()->galaxy().setup().ability_host,
+        "negative neutralization cost survives checkpoint round trip");
+    const auto& original_control = *campaign.game()->galaxy().setup().control;
+    const auto& restored_control = *restored.session.galaxy().setup().control;
+    expect(!original_control.planets.empty() && restored_control.planets.size() == original_control.planets.size(),
+        "stock checkpoint retains the planet control table");
+    for (std::size_t i = 0; i < original_control.planets.size() && i < restored_control.planets.size(); ++i)
+        expect(restored_control.planets[i].planet == original_control.planets[i].planet
+            && restored_control.planets[i].ground_layout == original_control.planets[i].ground_layout,
+            "stock checkpoint retains each planet ground layout");
     const auto snapshot_again = services.load_notes();
     const auto expected_snapshot = eawr::core::load_notes_json(notes);
     const auto expected_provider = production_guard ? eawr::core::load_notes_json(services.load_notes()) : expected_snapshot;
@@ -1904,12 +2008,53 @@ void installed_guard_load_notes(bool production_guard = false) {
         for (unsigned tick = 0; tick < 3; ++tick) hashes.push_back(session.step(executor).value().state_hash.get());
         if (workers == 1) baseline = hashes; else expect(hashes == baseline, "degraded hero campaign continues deterministically");
     }
+    class HeldDriver final : public eawr::platform::LiveGameStepDriver {
+        eawr::core::Result<std::optional<cp::GameTick>> step(eawr::platform::LiveGameStepContext&,
+            std::span<const eawr::platform::LiveGameOrder>, std::uint64_t) override {
+            return eawr::core::Result<std::optional<cp::GameTick>>::success(std::nullopt);
+        }
+    };
+    std::vector<eawr::core::LoadNote> local_notes(notes.begin(), notes.end());
+    auto owner = std::make_shared<cp::CampaignRoot>(std::move(campaign));
+    auto agreement = std::make_shared<eawr::platform::PreparedLiveAgreement>();
+    agreement->session = std::shared_ptr<cp::GameSession>(owner, owner->game());
+    agreement->load_notes = std::move(local_notes);
     std::vector<eawr::core::LoadNote> published;
     eawr::platform::LiveGameSession::Options live;
+    live.step_driver = std::make_shared<HeldDriver>();
     live.load_note_sink = [&](std::span<const eawr::core::LoadNote> rows) { published.assign(rows.begin(), rows.end()); };
-    const auto started = eawr::platform::LiveGameSession::start(std::move(campaign), std::move(live));
+    const auto started = eawr::platform::LiveGameSession::start(std::move(agreement), std::move(live));
     expect(static_cast<bool>(started) && eawr::core::load_notes_json(published) == expected_snapshot,
-        "session start hands GC snapshot to the shared load-note sink");
+        "MP agreement start hands GC snapshot to the shared load-note sink");
+    auto solo = cp::CampaignRoot::create(plan, services);
+    expect(static_cast<bool>(solo), "second campaign root starts");
+    published.clear();
+    eawr::platform::LiveGameSession::Options solo_live;
+    solo_live.load_note_sink = [&](std::span<const eawr::core::LoadNote> rows) { published.assign(rows.begin(), rows.end()); };
+    const auto solo_started = eawr::platform::LiveGameSession::start(std::move(solo).value(), std::move(solo_live));
+    expect(static_cast<bool>(solo_started) && eawr::core::load_notes_json(published) == expected_snapshot,
+        "root start hands GC snapshot to the shared load-note sink");
+    if (!production_guard) {
+        const auto malformed = std::regex_replace(text, neutral_curve,
+            "<Cost_Mod_By_Base_Level>broken</Cost_Mod_By_Base_Level>");
+        { std::ofstream out(directory / "xml/namedherounits.xml"); out << malformed; }
+        const auto bad_files = eawr::vfs::Vfs::mount(mounts).value();
+        const auto bad_catalog = eawr::data::load_catalog(bad_files, eawr::data::Profile::foc).value();
+        const auto bad_data = eawr::data::galactic::load_galactic_data(bad_files, bad_catalog.catalog).value();
+        const auto bad_types = eawr::units::galactic_type_table(bad_catalog.catalog);
+        const auto bad_plan = cp::plan_live_campaign_setup(bad_files, bad_data, bad_types,
+            "Sandbox_Equal_Footing_Rebel", options, "Normal_Default").value();
+        const auto bad_services = cp::prepare_live_campaign_services(bad_files, bad_catalog.catalog, bad_data,
+            bad_types, bad_plan, "Normal_Default").value();
+        const auto bad_root = cp::CampaignRoot::create(bad_plan, bad_services);
+        expect(!bad_root, "malformed curve remains an error");
+        if (!bad_root) {
+            const auto& error = bad_root.error();
+            expect(error.code == "EAWR-SIM-0501" && error.logical_path == "data/xml/namedherounits.xml"
+                && error.line.has_value() && error.message.find("Cost_Mod_By_Base_Level for ") != std::string::npos,
+                "malformed neutralization diagnostic identifies type and source");
+        }
+    }
 }
 // LSA-17/18: temporary XML overlays exercise the live readers and full campaign root.
 void installed_retail_production_numbers() {
@@ -2194,6 +2339,135 @@ void omitted_route_control() {
             return item.route == plan.galaxy().routes[static_cast<std::size_t>(index)].id && item.political_gain == eawr::sim::math::Fixed{};
         }), "omitted route gain loads as zero");
 }
+// WGCH-187: any other authored slicer style is forced back, so the live setup lists theft whatever the XML says.
+void installed_slicer_style_is_forced(const std::vector<eawr::vfs::MountSpec>& mounts) {
+    const auto base = eawr::vfs::Vfs::mount(mounts).value();
+    const auto bytes = base.open("data/xml/namedherounits.xml").value();
+    auto xml = std::string(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+    const std::string opening = "<Slicer_Ability Name=\"R2D2_Slicer\">";
+    const auto at = xml.find(opening);
+    if (at == std::string::npos) throw std::runtime_error("the stock slicer is absent from the named hero file");
+    xml.insert(at + opening.size(), "<Activation_Style>User_Input</Activation_Style>");
+    // CTest's working directory is the build tree; retail and mod folders are read-only inputs.
+    const auto directory = std::filesystem::current_path() / ("slicer-style-"
+        + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    struct Cleanup { std::filesystem::path path; ~Cleanup() { eawr::testing::remove_temp_directory(path); } } cleanup{directory};
+    std::filesystem::create_directories(directory / "xml");
+    {
+        std::ofstream out(directory / "xml" / "namedherounits.xml", std::ios::binary); out << xml;
+        if (!out) throw std::runtime_error("slicer style overlay write failed");
+    }
+    auto layered = mounts;
+    layered.insert(layered.begin(), {"slicer-style", directory, "data", {}});
+    const auto fs = eawr::vfs::Vfs::mount(layered).value();
+    const auto loaded = eawr::data::load_catalog(fs, eawr::data::Profile::foc).value();
+    const auto data = eawr::data::galactic::load_galactic_data(fs, loaded.catalog).value();
+    const auto types = eawr::units::galactic_type_table(loaded.catalog);
+    cp::CampaignSetupOptions options; options.seed = 42;
+    for (const auto& faction : data.factions) {
+        const auto id = static_cast<gc::PlayerId>(options.players.size() + 1);
+        options.players.push_back({{id, id, 0}, faction.name, true});
+        const bool human = faction.name == "Rebel";
+        if (human) options.solo_reference_human = id;
+        if (!faction.is_neutral.value_or(false)) options.seats.push_back({gc::SeatId{id}, id,
+            human ? gc::SeatKind::human : gc::SeatKind::ai, id, true, human ? id : 0});
+    }
+    std::vector<std::string> names;
+    for (const auto& type : types.types) names.push_back(type.name);
+    std::sort(names.begin(), names.end());
+    for (const auto& name : names) options.types.push_back({options.types.size() + 1, name});
+    const auto plan = cp::plan_live_campaign_setup(fs, data, types, "Sandbox_Equal_Footing_Rebel", options, "Normal_Default").value();
+    auto services = cp::prepare_live_campaign_services(fs, loaded.catalog, data, types, plan, "Normal_Default").value();
+    auto campaign = cp::CampaignRoot::create(plan, services).value();
+    const auto& host = campaign.game()->galaxy().setup().ability_host;
+    bool checked{};
+    if (host) for (const auto& profile : host->profiles) if (profile.theft) {
+        checked = true;
+        expect(std::find(profile.ground_activated.begin(), profile.ground_activated.end(), gc::AbilityKind::technology_theft)
+            != profile.ground_activated.end(), "WGCH-187: a slicer authored to another style stays ground-activated");
+    }
+    expect(checked, "the overlaid slicer reached the ability host");
+}
+// Owner 11-05 (#5507): the offer list a Rebel slicer gets on an Underworld planet at tech 2 and 3, from the
+// installed data through the host's own candidate function (the one prepare_theft iterates). The count is what
+// the viewer's twelve buttons must hold (WGCH-188).
+void installed_steal_offers() {
+    const auto root = game_root();
+    if (!root) { eawr::testing::skip_installed("SKIPPED: steal offers require EAWR_EAW_GAME_ROOT\n", 0, std::cout); return; }
+    std::vector<eawr::vfs::MountSpec> mounts;
+    for (const auto& [id, folder] : {std::pair{"expansion", "corruption"}, std::pair{"base", "GameData"}})
+        mounts.push_back(eawr::vfs::resolve_manifest_mount(id, std::filesystem::path(*root) / folder / "Data").value().mount);
+    const auto fs = std::make_shared<const eawr::vfs::Vfs>(eawr::vfs::Vfs::mount(mounts).value());
+    const auto catalog = eawr::data::load_catalog(*fs, eawr::data::Profile::foc).value();
+    const auto data = eawr::data::galactic::load_galactic_data(*fs, catalog.catalog).value();
+    const auto types = eawr::units::galactic_type_table(catalog.catalog);
+    std::vector<std::string> names;
+    for (const auto& type : types.types) names.push_back(type.name);
+    std::sort(names.begin(), names.end());
+    bool rebel_seen{};
+    for (const auto& source : data.campaigns) {
+        if (source.name != "Sandbox_Equal_Footing_Rebel") continue;
+        cp::CampaignSetupOptions options; options.seed = 42;
+        std::map<std::string, gc::PlayerId> ids;
+        for (const auto& faction : data.factions) {
+            const auto id = static_cast<gc::PlayerId>(options.players.size() + 1);
+            ids[faction.name] = id;
+            options.players.push_back({{id, id, 0}, faction.name, true});
+            const bool human = faction.name == source.starting_active_player;
+            if (human) options.solo_reference_human = id;
+            if (!faction.is_neutral.value_or(false)) options.seats.push_back({gc::SeatId{id}, id,
+                human ? gc::SeatKind::human : gc::SeatKind::ai, id, true, human ? id : 0});
+        }
+        for (const auto& name : names) options.types.push_back({options.types.size() + 1, name});
+        const auto credits = std::find_if(source.starting_credits.begin(), source.starting_credits.end(),
+            [&](const auto& row) { return row.faction == source.starting_active_player; });
+        if (credits == source.starting_credits.end()) throw std::runtime_error("missing authored test credits");
+        for (const std::int64_t level : {2, 3}) {
+            options.custom = cp::CampaignCustomOptions{credits->value, level, 5, true};
+            auto planned = cp::plan_live_campaign_setup(*fs, data, types, source.name, options, "Normal_Default").value();
+            auto services = cp::prepare_live_campaign_services(*fs, catalog.catalog, data, types, planned, "Normal_Default").value();
+            auto campaign = cp::CampaignRoot::create(planned, services).value();
+            const auto& setup = campaign.game()->galaxy().setup();
+            expect(setup.ability_host && setup.production && setup.player_economy, "stock setup carries theft host, production and economy");
+            if (!setup.ability_host || !setup.production || !setup.player_economy) continue;
+            const auto rebel = ids.at("Rebel");
+            const auto player = std::find_if(setup.production->players.begin(), setup.production->players.end(),
+                [&](const auto& row) { return row.player == rebel; });
+            const auto account = std::find_if(setup.player_economy->players.begin(), setup.player_economy->players.end(),
+                [&](const auto& row) { return row.player == rebel; });
+            expect(player != setup.production->players.end() && account != setup.player_economy->players.end(), "Rebel player exists");
+            if (player == setup.production->players.end() || account == setup.player_economy->players.end()) continue;
+            const auto offered = gc::theft_offer_candidates(*setup.ability_host, *setup.production, *player, rebel, account->current_tech);
+            std::cout << "steal-offers " << source.name << " level=" << level << " current_tech=" << account->current_tech
+                << " registered=" << setup.ability_host->technologies.size() << " offered=" << offered.size() << '\n';
+            expect(!offered.empty(), "a Rebel slicer is offered technologies at tech 2 and 3");
+            // Stops B and C of the drop path (#5507), from the same stock setup: which hero types carry an enabled
+            // theft service, and whether an Underworld-owned planet is a legal target for a Rebel actor.
+            for (const auto& profile : setup.ability_host->profiles)
+                if (profile.theft) std::cout << "steal-profile type=" << (profile.type >= 1 && profile.type <= names.size() ? names[profile.type - 1] : std::string("?"))
+                    << " initially_enabled=" << profile.theft->initially_enabled << " level=" << level << '\n';
+            for (const auto& profile : setup.ability_host->profiles) if (profile.theft)
+                expect(std::find(profile.ground_activated.begin(), profile.ground_activated.end(), gc::AbilityKind::technology_theft)
+                    != profile.ground_activated.end(), "WGCH-187: the stock slicer authors no style and is ground-activated");
+            const auto underworld = ids.at("Underworld");
+            bool allied = false;
+            if (setup.control) for (const auto& relation : setup.control->relations)
+                if ((relation.player == rebel && relation.other == underworld) || (relation.player == underworld && relation.other == rebel))
+                    allied |= relation.allied;
+            bool underworld_playable = false;
+            if (setup.economy_corruption) for (const auto& row : setup.economy_corruption->players)
+                if (row.player == underworld) underworld_playable = row.playable;
+            std::size_t underworld_planets = 0;
+            if (setup.control) for (std::size_t i = 0; i < setup.control->state.size(); ++i)
+                if (setup.control->state[i].current_player == underworld) ++underworld_planets;
+            std::cout << "steal-target level=" << level << " underworld_planets=" << underworld_planets
+                << " underworld_playable=" << underworld_playable << " rebel_underworld_allied=" << allied << '\n';
+            rebel_seen = true;
+        }
+    }
+    expect(rebel_seen, "stock Rebel steal offers were counted");
+    installed_slicer_style_is_forced(mounts);
+}
 } // namespace
 int main(int argc, const char* const argv[]) {
 #if defined(_MSC_VER)
@@ -2215,6 +2489,7 @@ int main(int argc, const char* const argv[]) {
         else if (argc == 2 && std::string_view(argv[1]) == "--starting-tech") installed_starting_levels();
         else if (argc == 2 && std::string_view(argv[1]) == "--accepted-starting-tech") installed_starting_levels(true);
         else if (argc == 2 && std::string_view(argv[1]) == "--unscouted-intel") installed_unscouted_intel();
+        else if (argc == 2 && std::string_view(argv[1]) == "--steal-offers") installed_steal_offers();
         else installed(argc == 2 && std::string_view(argv[1]) == "--production-domains",
             argc == 2 && std::string_view(argv[1]) == "--structure-slots");
     } catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }

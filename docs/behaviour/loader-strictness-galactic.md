@@ -42,7 +42,8 @@ Status column: `a` matches retail, `b` the remake rejects a value retail accepts
 | LSA-22 | Stacking_Category (Political_Transition_Bonus) | fractional (bad_value) or outside int32 -> fail | signed integer | b | pending |
 | LSA-23 | Time_Reduction_Percentage (Political_Transition_Bonus) | none: outside [0,1) becomes zero (WGM-197) | float | a | pending |
 | LSA-24 | Stacking_Category (reduce price/time abilities) | negative, > uint32 or fractional -> fail | signed integer | b | pending |
-| LSA-25 | Sabotage_Cost_Credits, Neutralization_Cost, Hack_Super_Weapon_Cost, Sabotage_Cost_Increase_Factor | negative -> refuse | signed integer / float | b | pending |
+| LSA-25 | Sabotage_Cost_Credits, Hack_Super_Weapon_Cost, Sabotage_Cost_Increase_Factor | negative -> refuse | signed integer / float | b | pending |
+| LSA-25a | Neutralization_Cost | negative is retained with EAWR-LOAD-1233; ordinary target enumeration requires a positive cost (debug-build read). Unparseable values use zero with a note; retail malformed-input handling is unverified. | float | a | galactic_guard_load_notes_stock |
 | LSA-26 | Planet_Destroyed_Credit_Value | negative -> refuse | signed integer | b | pending |
 | LSA-27 | Duration_Of_Credit_Halt | negative -> fail; zero or missing registers a zero-length halt (retail parses any float; with Can_Halt_Credit_Production on, a duration of 0 or less is an error message and becomes 10 seconds) | float | b | pending |
 | LSA-28 | Min/Max_Respawn_Time_Per_Tech_Level | not 0 or 5 entries, min>max, negative min -> refuse (retail parses a whitespace/comma list of floats with no check; ability validation then reports a count other than 5, a negative entry, a zero mixed with non-zero entries or min > max and clears both lists, so the respawn time is 0; never a load failure) | float sequence | b | pending |

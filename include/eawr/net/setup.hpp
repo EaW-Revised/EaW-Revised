@@ -104,6 +104,10 @@ struct SetupOptions {
     std::uint64_t timeout_ms{30'000};
     bool auto_accept{true}; // UI callers disable this to show the offer before accepting.
     bool auto_start{true}; // UI hosts disable this until the user presses Start.
+    // Galactic rooms: a guest derives its whole campaign session before it can send its preview, and that takes
+    // minutes on a large mod chain. The host then waits for the preview without a deadline; the transport still
+    // detects a dead guest. Offer delivery to a guest and the tick-zero barrier keep their deadlines.
+    bool untimed_preview_wait{};
 };
 enum class SetupPhase { awaiting_offer, reviewing_offer, awaiting_accept, barrier, ready, refused };
 struct SetupRuntime;

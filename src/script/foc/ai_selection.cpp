@@ -229,7 +229,7 @@ bool Engine::select_units(PlayerAi& player, const Goal& goal, PotentialPlan& pot
     const bool contrast = target != nullptr && !plan.ignore_target;
     potential.threshold = contrast && Real{} < max_scale ? to_single(real(1) - min_scale / max_scale) : Real{};
     potential.target_contrast = contrast
-        ? contrast_list(player, goal, plan, to_single(max_scale * player.difficulty.space_contrast_multiplier))
+        ? contrast_list(player, goal, plan, to_single(max_scale * mode_contrast_multiplier(player.difficulty, host_->setup.domain)))
         : std::vector<Contrast>{};
     potential.current_contrast = potential.target_contrast;
     const auto still_needs = [&] {
@@ -528,7 +528,7 @@ bool Engine::test_target_contrast(PlayerAi& player, Goal& goal) {
         const Real minimum = to_single(definition.min_contrast + adjustment);
         potential.threshold = Real{} < maximum ? to_single(real(1) - minimum / maximum) : Real{};
         potential.target_contrast = contrast_list(player, goal, definition,
-            to_single(maximum * player.difficulty.space_contrast_multiplier));
+            to_single(maximum * mode_contrast_multiplier(player.difficulty, host_->setup.domain)));
         potential.current_contrast = potential.target_contrast;
         if (potential.current_contrast.empty()) return true;
         // PL-32/GS-22: apply the retained categories, using the live object's type

@@ -11,13 +11,35 @@ namespace eawr::script::foc::ai {
 // worker handles and diagnostic timelines are never archived.
 class GoalStateContributor final : public galactic_ai::StateContributor {
 public:
+    // Serial phase owner; retains only first displaced dirty-record bytes and
+    // new observer rows. No archive capture or retained-record scan on begin.
+    // Owner/engine must outlive the token. Unsettled destruction refuses future
+    // native hashes rather than silently publish speculative fields.
+    class PhaseSavepoint {
+    public:
+        struct Work { std::size_t retained_records{}, retained_bytes{}; };
+        ~PhaseSavepoint();
+        PhaseSavepoint(const PhaseSavepoint&) = delete;
+        PhaseSavepoint& operator=(const PhaseSavepoint&) = delete;
+        [[nodiscard]] core::Result<void> commit();
+        // Restore world/action/funding participants first: reference checks
+        // validate the rebuilt native fields against those phase-start owners.
+        [[nodiscard]] core::Result<void> rollback();
+        [[nodiscard]] Work work() const noexcept;
+    private:
+        struct Saved;
+        std::unique_ptr<Saved> saved_;
+        explicit PhaseSavepoint(std::unique_ptr<Saved>);
+        friend class GoalStateContributor;
+    };
+    [[nodiscard]] core::Result<std::unique_ptr<PhaseSavepoint>> begin_phase();
     GoalStateContributor(std::shared_ptr<Engine> engine, std::string content_identity)
         : engine_(std::move(engine)), content_identity_(std::move(content_identity)) { if (engine_) engine_->enable_native_records(); }
     [[nodiscard]] core::Result<galactic_ai::NativeState> capture() const override;
     [[nodiscard]] core::Result<void> restore(const galactic_ai::NativeState&) override;
     [[nodiscard]] core::Result<std::string> state_hash() const override;
     [[nodiscard]] core::Result<std::string> record_sync_hash(bool cold = false) const override;
-    [[nodiscard]] std::size_t record_byte_upper_bound() const noexcept override { return engine_ ? engine_->native_records_.byte_size() + 1024 : 0; }
+    [[nodiscard]] std::size_t record_byte_upper_bound() const noexcept override { return engine_ ? engine_->native_records_.byte_size() + galactic_ai::native_record_archive_reserve : 0; }
     [[nodiscard]] std::optional<std::uint64_t> state_revision() const noexcept override {
         return engine_ ? std::optional{engine_->native_state_revision()} : std::nullopt;
     }

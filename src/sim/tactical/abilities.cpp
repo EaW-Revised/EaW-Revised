@@ -24,7 +24,7 @@ struct KindName {
     std::string_view name;
 };
 
-constexpr std::array<KindName, 29> kind_names{{
+constexpr std::array<KindName, 30> kind_names{{
     {AbilityKind::defend, "DEFEND"},
     {AbilityKind::turbo, "TURBO"},
     {AbilityKind::power_to_weapons, "POWER_TO_WEAPONS"},
@@ -54,6 +54,7 @@ constexpr std::array<KindName, 29> kind_names{{
     {AbilityKind::fow_reveal_ping, "FOW_REVEAL_PING"},
     {AbilityKind::blast, "BLAST"},
     {AbilityKind::rocket_attack, "ROCKET_ATTACK"},
+    {AbilityKind::super_laser, "SUPER_LASER"},
 }};
 
 [[nodiscard]] bool iequals(const std::string_view left, const std::string_view right) noexcept {
@@ -128,7 +129,7 @@ AbilityKind ability_kind(const std::string_view name) noexcept {
 }
 
 SpecialAbilityKind special_ability_kind(const std::string_view name) noexcept {
-    constexpr std::array<std::pair<std::string_view, SpecialAbilityKind>, 16> names{{
+    constexpr std::array<std::pair<std::string_view, SpecialAbilityKind>, 17> names{{
         {"Combat_Bonus_Ability", SpecialAbilityKind::combat_bonus},
         {"Reduce_Production_Price_Ability", SpecialAbilityKind::production_price},
         {"Concentrate_Fire_Attack_Ability", SpecialAbilityKind::concentrate_fire},
@@ -145,6 +146,7 @@ SpecialAbilityKind special_ability_kind(const std::string_view name) noexcept {
         {"Redirect_Blaster_Ability", SpecialAbilityKind::redirect_blaster},
         {"Force_Healing_Ability", SpecialAbilityKind::force_healing},
         {"Enable_Radar_Ability", SpecialAbilityKind::enable_radar},
+        {"Super_Laser_Ability", SpecialAbilityKind::super_laser},
     }};
     for (const auto& [spelling, kind] : names) if (iequals(name, spelling)) return kind;
     return SpecialAbilityKind::none;
@@ -168,7 +170,7 @@ std::uint32_t special_service_interval(const SpecialAbilityKind kind) noexcept {
         || kind == SpecialAbilityKind::tractor_beam || kind == SpecialAbilityKind::sensor_jamming
         || kind == SpecialAbilityKind::blast || kind == SpecialAbilityKind::stealth
         || kind == SpecialAbilityKind::laser_defense || kind == SpecialAbilityKind::leech_shields
-        || kind == SpecialAbilityKind::force_healing ? 1U : 0U; // WST-04, WLS-02, WSH-06
+        || kind == SpecialAbilityKind::force_healing || kind == SpecialAbilityKind::super_laser ? 1U : 0U; // WST-04, WLS-02, WSH-06
 }
 bool special_type_matches(const SpecialAbilityFilter& filter, const TypeId type, const std::uint64_t categories) noexcept {
     // WHE-14: explicit inclusion precedes both category admission and exclusions.
@@ -328,7 +330,7 @@ core::Result<void> validate_ability_profile(const UnitAbilityProfile& profile) {
                 && (ids.empty() || ids.front() != 0);
         };
         if (special.name.empty() || special.kind == SpecialAbilityKind::none
-            || static_cast<unsigned>(special.kind) > static_cast<unsigned>(SpecialAbilityKind::enable_radar)
+            || static_cast<unsigned>(special.kind) > static_cast<unsigned>(SpecialAbilityKind::super_laser)
             || static_cast<unsigned>(special.style) > static_cast<unsigned>(SpecialActivationStyle::skirmish_automatic)
             || special.service_interval > max_ability_frames
             || !sorted_unique(special.filter.applicable_types) || !sorted_unique(special.filter.excluded_types))
@@ -344,8 +346,6 @@ core::Result<void> validate_ability_profile(const UnitAbilityProfile& profile) {
                 || special.heal_percent.raw() < 0 || special.heal_percent.raw() > 64 * one_raw
                 // WSH-09: a negative amount is passive damage (debug build); only its size is bounded.
                 || special.heal_amount.raw() < -max_hit_damage * one_raw || special.heal_amount.raw() > max_durability_health * one_raw
-                // WSH-09: damage (a negative amount) together with a percent heal has no defined meaning.
-                || (special.heal_amount.raw() < 0 && special.heal_percent.raw() > 0)
                 || special.heal_interval_frames > max_ability_frames))
             return invalid("invalid automatic healing data" + type);
     }
@@ -434,7 +434,7 @@ core::Result<void> validate_ability_profile(const UnitAbilityProfile& profile) {
             const auto& spawn = *ability.spawned;
             const auto distance = [](const Fixed value) { return value.raw() >= 0 && value.raw() <= 65536 * one_raw; };
             if (!distance(spawn.speed) || !distance(spawn.max_travel)
-                || (spawn.lifetime && (!distance(*spawn.lifetime) || spawn.lifetime->raw() > 3600 * one_raw))
+                || (spawn.lifetime && (spawn.lifetime->raw() < 0 || spawn.lifetime->raw() > (std::int64_t{1} << 18) * one_raw))
                 || (spawn.reveal_range && !distance(*spawn.reveal_range))
                 || spawn.dense_reveal_multiplier.raw() < 0 || spawn.dense_reveal_multiplier.raw() > one_raw)
                 return invalid("invalid spawned projectile flight or reveal range" + type);
@@ -459,10 +459,11 @@ core::Result<void> validate_ability_profile(const UnitAbilityProfile& profile) {
                     || ability.spawned->weaken.on_detonation || ability.spawned->z_offset.raw() != 0))))
             return invalid("self destruct requires an expiration and a blast object" + type);
         if (ability.kind == AbilityKind::energy_weapon || ability.kind == AbilityKind::tractor_beam
-            || ability.kind == AbilityKind::leech_shields) {
+            || ability.kind == AbilityKind::leech_shields || ability.kind == AbilityKind::super_laser) {
             const auto expected = ability.kind == AbilityKind::energy_weapon
                 ? SpecialAbilityKind::energy_weapon : ability.kind == AbilityKind::leech_shields
-                    ? SpecialAbilityKind::leech_shields : SpecialAbilityKind::tractor_beam;
+                    ? SpecialAbilityKind::leech_shields : ability.kind == AbilityKind::super_laser
+                        ? SpecialAbilityKind::super_laser : SpecialAbilityKind::tractor_beam;
             const auto handler = std::find_if(profile.special.begin(), profile.special.end(), [&](const auto& special) {
                 return special.name == ability.gui_activated_ability_name && special.kind == expected;
             });
@@ -483,7 +484,7 @@ core::Result<void> validate_ability_profile(const UnitAbilityProfile& profile) {
                     && special.kind == SpecialAbilityKind::concentrate_fire;
             });
             if (ability.effective_radius.raw() < 0 || handler == profile.special.end()
-                || handler->target_damage_increase.raw() < 0 || handler->target_damage_increase.raw() > 4 * one_raw
+                || handler->target_damage_increase.raw() < 0 || handler->target_damage_increase.raw() > max_ability_multiplier * one_raw
                 || handler->target_speed_decrease.raw() < 0 || handler->target_speed_decrease.raw() > one_raw) {
                 return invalid("invalid concentrate-fire radius, handler or target modifiers" + type);
             }
@@ -524,7 +525,7 @@ core::Result<void> validate_ability_profile(const UnitAbilityProfile& profile) {
         // AB-22/AB-23: an interval multiplier of 0 is accepted (the interval then floors at one frame); negative is not.
         if (!bounded(m.weapon_delay, true) || !bounded(m.shield_regen, false) || !bounded(m.shield_regen_interval, false)
             || m.shield_regen_interval.raw() < 0 || !bounded(m.energy_regen, false) || !bounded(m.energy_regen_interval, false)
-            || m.energy_regen_interval.raw() < 0 || !bounded(m.speed, true)
+            || m.energy_regen_interval.raw() < 0 || !bounded(m.speed, false) || m.speed.raw() < 0
             || !bounded(m.scatter_radius, true) || !bounded(m.cause_damage, false) || !bounded(m.take_damage, false)
             || !bounded(m.fire_rate, false) || m.cause_damage.raw() < 0 || m.take_damage.raw() < 0) {
             return invalid("a multiplier is out of bounds" + type);

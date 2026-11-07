@@ -97,10 +97,18 @@ GalacticSnapshot::GalacticSnapshot(const std::uint64_t completed_tick, const Gal
           : std::make_shared<const std::optional<IncomeState>>(std::move(income))),
       victory_(shared_sections.victory ? std::move(shared_sections.victory)
           : std::make_shared<const std::optional<VictoryState>>(std::move(victory))) {
+    networked_transport_ = shared_sections.networked_transport.value_or(
+        *victory_ ? (*victory_)->context.multiplayer : false);
     history_ = std::move(shared_sections.history);
     view_player_ = view_player ? view_player : *observer_ ? (*observer_)->solo_reference_human : 0;
-    if (*observer_) observations_ = observations ? std::move(observations)
-        : std::make_shared<const std::vector<ObservedPlanet>>(observed_planets(**observer_, *fleets_, {view_player}, movement_.get(), this->actor_records()));
+    if (*observer_) {
+        if (observations) observations_ = std::move(observations);
+        else {
+            auto observed = observed_planets(**observer_, *fleets_, {view_player}, movement_.get(), this->actor_records());
+            project_ground_layout(observed, *control_ ? &**control_ : nullptr);
+            observations_ = std::make_shared<const std::vector<ObservedPlanet>>(std::move(observed));
+        }
+    }
     production_ = shared_production ? std::move(shared_production)
         : std::make_shared<const std::optional<ProductionSetup>>(std::move(production));
     production_offers_ = shared_production_offers ? std::move(shared_production_offers)
@@ -186,7 +194,8 @@ std::span<const GalacticEvent> GalacticSnapshot::events() const noexcept {
 
 std::vector<std::uint8_t> GalacticSnapshot::canonical_bytes() const {
     std::vector<std::uint8_t> bytes(detail::snapshot_magic.begin(), detail::snapshot_magic.end());
-    detail::put_u32(bytes, 8); // GGS-06: retained arrival landing request
+    detail::put_u32(bytes, 9); // Transport is independent of campaign balance.
+    detail::put_u8(bytes, multiplayer() ? 1U : 0U);
     detail::put_u64(bytes, completed_tick());
     detail::put_u64(bytes, clock().session_tick);
     detail::put_u64(bytes, clock().galactic_frame);

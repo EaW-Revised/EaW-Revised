@@ -1,10 +1,15 @@
 #include "unit_tables_decode.hpp"
+#include "eawr/vfs/vfs.hpp"
+#include "eawr/core/load_profile.hpp"
 
 #include "eawr/data/retail_values.hpp"
+
+#include <algorithm>
 
 namespace eawr::units::unit_tables_detail {
 
 void Loader::load_hardpoint(const std::string& id, UnitType& unit, const Frames* owner) {
+    core::load_profile::Scope unit_hardpoint_scope(core::load_profile::Phase::unit_hardpoint);
         auto object = resolve(*input_.catalog, id, data::Category::hardpoint, unit.id, "hardpoint", report_);
         Hardpoint hardpoint;
         hardpoint.id = id;
@@ -28,9 +33,35 @@ void Loader::load_hardpoint(const std::string& id, UnitType& unit, const Frames*
         }
         hardpoint.targetable = flag(*object, "Is_Targetable", true).value_or(false);
         hardpoint.destroyable = flag(*object, "Is_Destroyable", true).value_or(false);
-        hardpoint.health = object->fixed("Health", report_, hardpoint.targetable && !hardpoint.destroyable);
-        // HD-06: omission keeps the retail zero default; invalid authored values stay unresolved.
-        if (hardpoint.destroyable && object->single("Health") == nullptr) hardpoint.health = Fixed{};
+        if (hardpoint.destroyable) {
+            const auto* health = object->single("Health");
+            hardpoint.health = health ? number(health->raw_text) : std::optional<Fixed>{Fixed{}};
+            if (!hardpoint.health) {
+                // HD-06 / AU-82: retail reads the leading number and ignores trailing text, so a stray
+                // character inside the text keeps the number before it. With no leading number (or one outside
+                // the fixed range) the slot takes zero and starts destroyed.
+                const auto leading = data::retail::leading_number(health->raw_text);
+                std::string effective = "0";
+                bool keeps_number = false;
+                if (leading && leading->trailing_text && leading->value.raw() >= 0) {
+                    hardpoint.health = leading->value;
+                    effective = fixed_decimal(leading->value);
+                    keeps_number = true;
+                } else {
+                    hardpoint.health = Fixed{};
+                }
+                HardpointHealthDefault recovered{unit.id, hardpoint.id, trim(health->raw_text),
+                    health->source.logical_path, health->source.layer_id, health->source.line, effective, keeps_number};
+                if (std::find(tables_.hardpoint_health_defaults.begin(), tables_.hardpoint_health_defaults.end(), recovered)
+                    == tables_.hardpoint_health_defaults.end())
+                    tables_.hardpoint_health_defaults.push_back(std::move(recovered));
+                report_.note(owner_id, "Health", trim(health->raw_text),
+                    !keeps_number ? "HD-06: malformed hardpoint Health uses zero; the slot starts destroyed and cannot fire"
+                        : "HD-06 / AU-82: trailing text after the hardpoint Health number is ignored; the leading number is used");
+            }
+        } else {
+            hardpoint.health = object->fixed("Health", report_, hardpoint.targetable);
+        }
         hardpoint.repair_amount_per_frame = object->fixed("Repair_Amount_Per_Frame", report_, false);
         hardpoint.repair_cost_per_frame = object->fixed("Repair_Cost_Per_Frame", report_, false);
         hardpoint.model_to_attach = object->text("Model_To_Attach");
@@ -198,6 +229,7 @@ void Loader::load_spawner(Object& object, UnitType& unit) {
     }
 
 void Loader::load_abilities(Object& object, UnitType& unit) {
+    core::load_profile::Scope unit_abilities_scope(core::load_profile::Phase::unit_abilities);
         load_unit_abilities(object, unit);
         load_nested_abilities(object, unit);
     }
@@ -205,6 +237,7 @@ void Loader::load_abilities(Object& object, UnitType& unit) {
     // #530 (docs/behaviour/space-purchasing.md PU-10 to PU-21, PU-31): what a station builds for
     // each faction, and what a type costs, takes and counts in a skirmish.
 void Loader::load_production(Object& object, UnitType& unit) {
+    core::load_profile::Scope unit_production_scope(core::load_profile::Phase::unit_production);
         if (input_.campaign_scene) {
             unit.bounty_sp = object.fixed("Override_Bounty_SP", report_, false);
             unit.bounty_mp = object.fixed("Override_Bounty_MP", report_, false);
@@ -335,6 +368,7 @@ void Loader::read_object_weapon(Object& object, UnitType& unit, const Frames* mo
 }
 
 void Loader::load_body(Object& object, UnitType& unit) {
+    core::load_profile::Scope unit_body_scope(core::load_profile::Phase::unit_body);
         unit.creates_team = flag(object, "Create_Team", false).value_or(false);
         const bool station = unit.kind == UnitKind::station;
         // WBP-01/13/18: live space obstacles have durability and sensors, but no locomotor.
@@ -516,6 +550,7 @@ void Loader::load_body(Object& object, UnitType& unit) {
     }
 
 void Loader::load_squadron(Object& object, UnitType& unit) {
+    core::load_profile::Scope unit_body_scope(core::load_profile::Phase::unit_body);
         // FL-06: nonpositive maxima do not make progress in debug-build creation.
         // Refuse them at validation rather than inventing a fallback or hanging.
         if (const auto* node = object.single("Max_Squad_Size")) {

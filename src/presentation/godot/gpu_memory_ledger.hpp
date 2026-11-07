@@ -1,6 +1,7 @@
 #pragma once
 
 #include "eawr/assets/assets.hpp"
+#include "eawr/core/load_profile.hpp"
 #include "texture_mip_tail.hpp"
 
 #include <array>
@@ -30,6 +31,9 @@ struct GpuItem final {
     // Estimated device bytes (see texture_gpu_bytes / mesh_gpu_bytes).
     std::uint64_t bytes{};
     bool compressed{};
+    // Texture shape for the opt-in texture census only (scalars, no allocation).
+    assets::PixelFormat format{};
+    std::uint32_t width{}, height{}, mips{};
 };
 
 struct GpuCategoryTotals final {
@@ -171,6 +175,7 @@ private:
 // The bytes uploaded for a texture: its stored mip chain. Three-channel
 // sources are padded to four channels on the GPU.
 [[nodiscard]] inline GpuItem texture_item(const assets::Texture& texture) {
+    core::load_profile::Scope hash_scope(core::load_profile::Phase::texture_hash);
     ContentDigest digest;
     ContentDigest check(1);
     std::uint64_t bytes{};
@@ -187,7 +192,8 @@ private:
     }
     bytes += texture_mip_tail_bytes(texture);
     if (texture.format == assets::PixelFormat::bgr8) bytes = bytes / 3U * 4U;
-    return {GpuCategory::texture, digest.value(), check.value(), bytes, block_compressed(texture.format)};
+    return {GpuCategory::texture, digest.value(), check.value(), bytes, block_compressed(texture.format),
+            texture.format, texture.width, texture.height, static_cast<std::uint32_t>(texture.mips.size())};
 }
 
 // A layered texture of RGBA8 layers at `edge` with a full mip chain.
@@ -196,7 +202,8 @@ private:
     digest.scalar(edge);
     for (const assets::Texture& layer : layers) digest.scalar(texture_item(layer).key);
     const std::uint64_t top = static_cast<std::uint64_t>(edge) * edge * 4U;
-    return {GpuCategory::texture_array, digest.value(), 0, top * 4U / 3U * layers.size(), false};
+    return {GpuCategory::texture_array, digest.value(), 0, top * 4U / 3U * layers.size(), false,
+            assets::PixelFormat::rgba8, edge, edge, 0};
 }
 
 // Estimated device bytes of one uploaded surface: position (12), packed

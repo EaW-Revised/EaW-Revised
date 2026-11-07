@@ -51,6 +51,7 @@ public:
     [[nodiscard]] godot::String line_text(const std::string& control) const;
     [[nodiscard]] godot::Control* modal() const noexcept { return modal_; }
     [[nodiscard]] godot::Control* frame() const noexcept { return built_.frame; }
+    void set_scrollable_text(const std::string& text);
 
     // Chooses a result as a click on its button does: emits `result_chosen`, then frees the box.
     void choose(int64_t result);

@@ -74,6 +74,8 @@ control service subsequently applies eligible trade influence through its existi
 | CGS-19 | `Planet_Credit_Value` is signed. Preserve negative values through actual planet income and the player's fiscal sum without flooring the income. A negative fiscal total debits the account without the positive-credit difficulty multiplier; the resulting account balance is floored at zero. Checked arithmetic still rejects overflow. | debug build; signed planet income and fiscal payment; WGEP-03..06/16 |
 | CGS-20 | Direct special-structure creation appends and retains every authored record, including duplicates beyond the planet's ground or space capacity and at zero capacity. The capacity comparison follows insertion; its debug-only assert does not undo the object, skip later records or refuse campaign setup. Both domains use the same insertion helper with no owner capacity filter. WGS-70 sets the target faction before each starting record, so structures keep that record's supplied faction even when earlier records have another owner. Ground accessibility and ordinary purchase admission remain separate gates; direct and additional-result creation do not raise the authored capacities. This rule is derived from the debug build. | debug build; starting pass, delegated creation and both structure-list insertion paths; WGS-70/80; WGEP-84 |
 | CGS-21 | Production reduction target selection reads original types independently of creation reachability or purchase eligibility. Known types without an authored build cost remain time-reduction targets; price reduction still requires positive base cost. An explicit `Applicable_Unit_Types` reference that resolves to no type asserts in the retail debug build; we skip it with a warning, and remaining explicit and category targets still apply. An empty selection supplies no effect and does not refuse campaign setup. Omitted scalar parameters retain the constructor defaults in WGEP-93; malformed consumed parameters still refuse in the remake. | debug build; shared target selection, price/time application and reduction constructors; WGEP-73/93 |
+| CGS-22 | An object type that stock content names and that cannot be loaded because its variant base resolves to nothing (CGS-13) is a null reference, whichever table asks for it: a galactic type, a planet type, a galaxy-wide space upgrade, a map placement, or a name handed to the unit-table loader (escort, unique unit, marker type). Space-entry preparation resolves every such name through one shared path and skips only this case (error code EAWR-XML-0008): the type is left out of the space-entry type table and of the unit-table name set, a planet type gets no map and no upgrades, a galaxy-wide upgrade is not registered, and a map placement is left out of the obstacle set (the placement stays in the decoded map placements used for reachability). Each name is skipped once and writes one load note (action skipped_object, with the defining layer, file and line), however many tables name it; later consumers (auto-resolve terrain, the galactic AI selection content and perception rows, the galactic AI route adjustment) skip the same planet type silently and keep their defaults. Names taken from the galactic type table (tactical return, auto-resolve rows, AI selection content) cannot reach this case, because that table already leaves such a type out (CGS-13). Any other resolve failure, such as a malformed object, still refuses the campaign start. The debug build reports the unresolved name through a log line, an error popup and a debug assert (CGS-05); the remake writes the load note instead of a popup, and has no assert. Whether the placement-time null is also silent in the debug build is unverified; this is the least visible behaviour that follows CGS-13. | debug build for CGS-13; placement-time handling unverified; space entry preparation |
+| CGS-23 | A galactic planet model that fails to load (any `load_model` error, not only a missing file) is a logged load error, not a start failure. Campaign placement keeps the planet (it is not skipped) with a zero collision radius and writes a load note (the model-load diagnostic code, action default_used, with the planet file). An empty `Galactic_Model_Name` still hard-refuses the placement (no model to look up). EAWR recovery policy: the debug build's handling of a missing planet model is unverified. | unverified; campaign placement context |
 | WGS-180 | Starting starbase records are applied in authored order. Each admitted record replaces the planet's starbase type, level and supplied faction owner, even at an equal or lower level. There is no first/highest-level selection or planet-controller faction filter. The debug build diagnoses a non-increasing level, then continues to the unconditional base update. | debug build; starting placement and base initialization; WGS-70/80 |
 | WGS-181 | Authored starting companies may leave transports of different owners in the same ordered surface list. Surface linking appends the transport without filtering against a prior transport owner or changing its owner. The trailing debug owner-consistency check is bypassed during startup; its later mismatch diagnostics do not rewrite the list. Identity validity and the shared authored ground-force capacity still apply. Downstream mixed-list readers are qualified by WGS-186..188. | debug build; company placement and final surface linking; WGS-80/93 |
 | WGS-186 | A nonzero ground base supplies political controller and ground occupation. Without it, political control selects the first non-delete-pending linked transport, while ground occupation selects the first linked transport. The troop military contribution is zero until a non-delete-pending entry supplies one; an all-deleting list supplies neither troop controller nor military presence. Mixed-owner diagnostics do not replace either result with a consensus or last owner. Default invasion defense instead uses the ground base, then target political allegiance; only the invalid-player sentinel or neutral target falls back to the first linked transport. Our zero target represents that sentinel; unknown nonzero player identities refuse world admission before these readers. Explicit invasion defenders remain authoritative. | debug build; political presence reduction, ground occupation and invasion admission; WGM-66, WGM-C01 |
@@ -180,11 +182,12 @@ WGS-U08 retains the retail placement/save qualification beyond these debug branc
 WGS-U01 is already settled by WGS-69; WGS-U02 custom/menu
 admission remains open and no custom option is admitted by this PR.
 
-The coordinator-reserved identity domain `eawr-campaign-setup-v1` combines
-validated content identity, selected definition, player/faction/activity bindings
-and explicit original-type bindings. Seed and seats use the existing galactic
-setup encoding. Created roster/control/identity state uses existing replay and
-checkpoint sections, with no new wire numbers or changes to existing corpus pins.
+The coordinator-reserved identity domain `eawr-campaign-setup-v2` combines
+validated content identity, selected definition, player/faction/activity bindings,
+explicit original-type bindings, transport and resolved campaign-rules flavour.
+Seed and seats use the galactic setup encoding. Roster/control/identity state uses
+the replay and checkpoint sections; the transport split upgrades their versions
+and regenerates the galactic corpus pins.
 Home/cap receipts belong to the startup context; this PR does not claim to persist
 new dynamic home, economy, control or scene state through a checkpoint.
 
@@ -277,3 +280,41 @@ Per-seat difficulty would require a separate agreed-input extension.
   composition remains qualified by WGM-PC-U01; this does not close that capture.
 - Level-0 starbase placement remains **unverified** and stays refused at this
   boundary; WGS-180 covers admitted positive-level stations.
+
+## Campaign rules and session transport
+
+`CampaignSetupOptions::mode` chooses local or networked transport. The optional
+`rules_flavour` chooses `single_player` or `multiplayer` campaign balance; omission
+follows transport. The immutable plan resolves both values before startup. The
+campaign setup v2 identity seals both, and the multiplayer agreement seals the
+flavour in its rules v5 digest. Changing either refuses a checkpoint from the
+other setup.
+
+Single-player rules select authored `AI_Player_Control`, story events without
+`Multiplayer`, the human and AI victory lists (WGS-15..20), black-market income,
+and tactical unit balance. Multiplayer rules select the faction's `Basic_AI`
+and its extra `Multiplayer_Campaign_Heroes` pass. Transport controls votes,
+interactive observer policy, synchronized script RNG, pause policy, autosave and
+quick-save admission (WGS-33), and the multiplayer campaign ending route.
+`solo_reference_human` remains absent in networked plans.
+
+The resolved transport is persisted separately in `GalacticSetup`; standalone
+setup producers may omit the override to follow their existing victory/economy
+mode default. This is a source API default, not an older-format reader.
+Arbitration inputs use campaign rules. Networked arbitration under single-player
+rules still needs the shared human-side policy before SP lobby admission opens.
+Lobby catalog, SP map admission, local-player script lookup, story presentation
+and multiplayer resume are separate follow-ups.
+
+## Co-op on single-player campaign entries
+
+The multiplayer agreement admits a listed, non-tutorial, non-story entry that is
+not `Is_Multiplayer` when its flavour is `single_player` (project rule, owner
+decisions D1-D3 of the co-op design). With no explicit flavour in the session
+terms, every peer derives it from the agreed entry: multiplayer entries use
+multiplayer rules, single-player entries use authored single-player rules.
+Human seats may hold only the entry's `Starting_Active_Player`; the lobby plans
+exactly one human side for such an entry. The lobby catalog lists these entries
+in a second list (`list_coop_sp_lobby_campaigns`) for the lobby's separate co-op
+tab, so the multiplayer list is unchanged. Resume of such a game from the lobby stays with the save
+resume work.

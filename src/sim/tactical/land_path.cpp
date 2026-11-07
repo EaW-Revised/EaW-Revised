@@ -1,6 +1,7 @@
 #include "land_path_internal.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdlib>
 #include <limits>
 #include <utility>

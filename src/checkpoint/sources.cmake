@@ -5,5 +5,6 @@ set(EAWR_CHECKPOINT_SOURCES
     "${CMAKE_CURRENT_LIST_DIR}/checkpoint.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/restore_continue.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/tactical.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/skirmish.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/game.cpp"
 )

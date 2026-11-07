@@ -104,6 +104,7 @@ struct NativeSnapshotChanges {
 // Sections the session shares between consecutive publications while their inputs are unchanged. A set pointer
 // replaces the matching by-value constructor argument; contents are what that argument would have been.
 struct SharedSnapshotSections {
+    std::optional<bool> networked_transport{};
     std::shared_ptr<const HistorySnapshot> history{};
     // Observer-local display facts only; excluded from canonical/checkpoint encoding.
     std::shared_ptr<const std::vector<AbilityActorState>> ability_services{};
@@ -162,6 +163,7 @@ public:
         // Sections shared with the previous publication; each replaces its by-value argument above.
         SharedSnapshotSections shared_sections = {}, PlayerId view_player = 0);
 
+    [[nodiscard]] bool multiplayer() const noexcept { return native_base_ ? native_base_->multiplayer() : networked_transport_; }
     [[nodiscard]] PlayerId view_player() const noexcept { return native_base_ ? native_base_->view_player() : view_player_; }
     [[nodiscard]] const HistorySnapshot* history() const noexcept {
         return native_base_ ? native_base_->history() : history_.get();
@@ -370,6 +372,7 @@ public:
 private:
     std::shared_ptr<const HistorySnapshot> history_; // per-viewer publication, excluded from canonical bytes
     GalacticSnapshot() = default;
+    bool networked_transport_{};
     PlayerId view_player_{}; // publication context, excluded from canonical bytes
     std::shared_ptr<const std::vector<AbilityResult>> ability_results_;
     std::shared_ptr<const std::vector<AbilityActorState>> ability_services_;

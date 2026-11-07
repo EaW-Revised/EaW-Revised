@@ -279,7 +279,17 @@ void refusals() {
     expect(parse_fails(patched(8, galactic::galactic_replay_format_version + 1), codes::replay_version),
         "unknown format version: EAWR-SIM-0511");
     expect(parse_fails(patched(12, 9), codes::replay_version), "another rules version: EAWR-SIM-0511");
-    expect(parse_fails(patched(10, 4), codes::replay_malformed), "unknown header flags: EAWR-SIM-0510");
+    expect(parse_fails(patched(10, 16), codes::replay_malformed), "unknown header flags: EAWR-SIM-0510");
+    expect(parse_fails(patched(10, 8), codes::replay_malformed), "networked bit without explicit transport is refused");
+    for (const bool networked : {false, true}) {
+        auto choice = replay; choice.setup.networked_transport = networked;
+        const auto bytes = galactic::write_replay(choice).value();
+        const auto parsed = galactic::parse_replay(bytes).value();
+        expect(parsed.setup.networked_transport == networked
+            && parsed.setup.uses_network_transport() == networked,
+            "both explicit local and networked transports survive the replay codec");
+        expect(galactic::write_replay(parsed).value() == bytes, "transport replay is byte canonical");
+    }
     // Header: magic 8, version 2, flags 2, rules 4, identities 64, seed 8, final tick 8 = 96.
     expect(parse_fails(patched(96, 0xff), codes::replay_malformed), "a hostile player count: EAWR-SIM-0510");
     expect(parse_fails(Bytes(galactic::galactic_replay_max_bytes + 1, 0), codes::replay_resource_limit),

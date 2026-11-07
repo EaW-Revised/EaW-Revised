@@ -163,4 +163,4 @@ try {
     }
     $env:EAWR_OFFLOAD_ONLY = $savedOffloadOnly
 }
-exit $(if ($verdict.result -eq 'PASS 9/9') { 0 } else { 1 })
+exit $(if ($verdict.result -eq "PASS $expected/$expected") { 0 } else { 1 })

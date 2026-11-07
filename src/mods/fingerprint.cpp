@@ -29,13 +29,12 @@ std::string loadcheck_chain_fingerprint(const Profile& profile, const fs::path& 
     return core::sha256_hex(std::span(reinterpret_cast<const std::uint8_t*>(material.data()), material.size()));
 }
 
-TreeFingerprint tree_fingerprint(const fs::path& root, std::uint64_t entry_cap) {
-    TreeFingerprint result;
+TreeListing list_tree(const fs::path& root, std::uint64_t entry_cap) {
+    TreeListing result;
     std::error_code error;
     if (!fs::is_directory(root, error)) return result;
+    result.root_exists = true;
 
-    // (relative path, "\t<size>\t<mtime>\n"), sorted by path before hashing.
-    std::vector<std::pair<std::string, std::string>> files;
     std::vector<std::pair<fs::path, std::string>> pending{{root, std::string()}};
     std::uint64_t visited = 0;
     while (!pending.empty() && !result.capped) {
@@ -68,19 +67,27 @@ TreeFingerprint tree_fingerprint(const fs::path& root, std::uint64_t entry_cap) 
                     result.incomplete = true;
                     continue;
                 }
-                files.emplace_back(relative, "\t" + std::to_string(size) + "\t" + std::to_string(time.time_since_epoch().count()) + "\n");
+                result.files.push_back({relative, size, static_cast<std::int64_t>(time.time_since_epoch().count())});
             }
         }
         if (list_error) result.incomplete = true;
     }
+    std::sort(result.files.begin(), result.files.end(), [](const TreeFile& left, const TreeFile& right) { return left.relative < right.relative; });
+    return result;
+}
 
-    std::sort(files.begin(), files.end(), [](const auto& left, const auto& right) { return left.first < right.first; });
+TreeFingerprint tree_fingerprint(const fs::path& root, std::uint64_t entry_cap) {
+    TreeFingerprint result;
+    const TreeListing listing = list_tree(root, entry_cap);
+    if (!listing.root_exists) return result;
+    result.capped = listing.capped;
+    result.incomplete = listing.incomplete;
     std::string text;
-    for (const auto& [path, tail] : files) {
-        text += path;
-        text += tail;
+    for (const TreeFile& file : listing.files) {
+        text += file.relative;
+        text += "\t" + std::to_string(file.size) + "\t" + std::to_string(file.mtime) + "\n";
     }
-    result.files = files.size();
+    result.files = listing.files.size();
     result.tree = core::sha256_hex(std::span<const std::uint8_t>(reinterpret_cast<const std::uint8_t*>(text.data()), text.size()));
     return result;
 }

@@ -12,6 +12,7 @@
 #include <fstream>
 #include <span>
 #include <algorithm>
+#include <exception>
 #include <map>
 #include <tuple>
 #include <utility>
@@ -96,8 +97,7 @@ GameSession::Impl::Impl(galactic::GalacticSession session) : galaxy(std::move(se
     };
     galaxy.defer_victory_tail(galaxy.setup().victory.has_value());
     // A multiplayer observer is local presentation, never synchronized policy.
-    const auto& victory = galaxy.victory();
-    interactive_seat = victory && victory->context.multiplayer ? galactic::SeatId{} : galaxy.setup().interactive_seat;
+    interactive_seat = galaxy.multiplayer() ? galactic::SeatId{} : galaxy.setup().interactive_seat;
 }
 
 core::Result<void> GameSession::Impl::update_galaxy_timeline(const std::optional<galactic::PlayerEconomySetup>& inputs) {
@@ -166,6 +166,7 @@ std::string GameSession::Impl::with_timeline(const std::string& base, const Time
 }
 
 core::Result<void> GameSession::Impl::story_notice(GameStoryNotice notice) {
+    world().note_native_output_published(); // notice history and plot notification are already published output
     story_notices.push_back(std::move(notice));
     // The plot engine rebuilds its state from the same notices when a session is reconstructed, so it
     // sees them even while the UI handler is held back.
@@ -174,7 +175,11 @@ core::Result<void> GameSession::Impl::story_notice(GameStoryNotice notice) {
         if (auto told = story_engine->notify(stored.player, stored.payload); !told) return told;
         if (reconstructing_native_notices) static_cast<void>(story_engine->take_script_calls()); // the scripts are restored, not called again
     }
-    return story_handler && !reconstructing_native_notices ? story_handler(story_notices.back()) : core::Result<void>::success();
+    if (story_handler && !reconstructing_native_notices) {
+        world().note_native_output_published();
+        return story_handler(story_notices.back());
+    }
+    return core::Result<void>::success();
 }
 
 // The engine's queue is applied only here, at the end of the galaxy step's story service, never from inside a notice
@@ -193,8 +198,10 @@ core::Result<void> GameSession::Impl::apply_story_rewards() {
             else if (!record.refusal.empty()) record.outcome = "refused: " + record.refusal; // already diagnosed by the engine
             else if (record.reward_type.empty()) record.outcome = "no reward";
             else if (replaying) record.outcome = "replayed from the native journal";
+            else if (record.reward_type == "FORCE_CLICK_GUI") declined = !force_click_request(record); // WST-75: the HUD owns the click
             else if (!story_rewards || !executor) { record.outcome = "refused: no reward provider is bound"; declined = true; }
             else {
+                world().note_native_output_published();
                 auto applied = story_rewards(world(), record, *executor);
                 if (!applied) return core::Result<void>::failure(applied.error());
                 record.outcome = applied.value().applied ? "applied" : "refused: " + applied.value().note;
@@ -204,6 +211,7 @@ core::Result<void> GameSession::Impl::apply_story_rewards() {
                 auto text = record.reward_type + " not applied: " + record.outcome.substr(std::string_view("refused: ").size());
                 if (story_reported.insert(text).second) story_notes.push_back(std::move(text));
             }
+            world().note_native_output_published(); // dialog/triggered reports leave this story phase
             if (!record.dialog.empty()) apply_story_dialog(record); // WST-20 (6): the dialog follows the reward
             story_triggers.push_back(std::move(record));
         }
@@ -234,6 +242,25 @@ void GameSession::Impl::apply_story_dialog(const galactic::story::Triggered& rec
         record.remove_after_viewed}, local, queue));
 }
 
+// WST-49/75: FORCE_CLICK_GUI names one HUD component (parameter 1). The click itself belongs to the local HUD, which
+// presses its own authored control and so sends the click on the seat's command stream like a human press; here the
+// request becomes a presentation event for the plot owner's seat. Local rendering input only: never saved, hashed or
+// replayed (a replayed step carries the clicks in its command stream already). A request without a component is refused.
+bool GameSession::Impl::force_click_request(galactic::story::Triggered& record) {
+    namespace st = galactic::story;
+    std::string component;
+    if (!record.reward_params[0].empty()) component = record.reward_params[0].front();
+    while (!component.empty() && std::isspace(static_cast<unsigned char>(component.front()))) component.erase(component.begin());
+    while (!component.empty() && std::isspace(static_cast<unsigned char>(component.back()))) component.pop_back();
+    if (component.empty() || component.size() > galactic::max_gui_component_name) {
+        record.outcome = "refused: FORCE_CLICK_GUI needs one component name as parameter 1";
+        return false;
+    }
+    story_presentation.push_back({record.owner, st::ConsumerRequest{st::Consumer::gui, "FORCE_CLICK_GUI", {std::move(component)}}});
+    record.outcome = "applied";
+    return true;
+}
+
 core::Result<void> GameSession::Impl::forward_story_calls() {
     auto calls = story_engine->take_script_calls();
     if (calls.empty() || reconstructing_native_notices || !story_scripts || !scripts) return core::Result<void>::success();
@@ -253,17 +280,30 @@ core::Result<void> GameSession::Impl::tech_assigned(galactic::PlayerId player, s
 // the plots first (WGS-140: plots load before the authored forces, credits and tech).
 core::Result<void> GameSession::Impl::service_story() {
     if (!story_engine) return core::Result<void>::success();
-    if (!story_engine->started()) {
-        if (const auto& economy = world().snapshot()->player_economy())
-            for (const auto& row : economy->players)
-                if (auto told = tech_assigned(row.player, row.current_tech); !told) return told;
-        story_engine->mark_started();
-    }
-    const auto& clock = world().clock();
-    auto time = sim::math::Fixed::from_ratio(static_cast<std::int64_t>(clock.galactic_frame), galactic::galactic_frames_per_second);
-    if (!time) return core::Result<void>::failure(time.error());
-    if (auto served = story_engine->service(time.value(), clock.pause_depth != 0); !served) return served;
-    return apply_story_rewards();
+    auto begun = world().begin_native_output_phase();
+    if (!begun) return core::Result<void>::failure(begun.error());
+    auto output = std::move(begun).value();
+    struct PublishedException {
+        galactic::GalacticSession::NativeOutputPhase& output;
+        int exceptions{std::uncaught_exceptions()};
+        ~PublishedException() { if (std::uncaught_exceptions() > exceptions) output.record_fault(); }
+    } exceptional{*output};
+    const auto run = [&]() -> core::Result<void> {
+        if (!story_engine->started()) {
+            if (const auto& economy = world().snapshot()->player_economy())
+                for (const auto& row : economy->players)
+                    if (auto told = tech_assigned(row.player, row.current_tech); !told) return told;
+            story_engine->mark_started();
+        }
+        const auto& clock = world().clock();
+        auto time = sim::math::Fixed::from_ratio(static_cast<std::int64_t>(clock.galactic_frame), galactic::galactic_frames_per_second);
+        if (!time) return core::Result<void>::failure(time.error());
+        if (auto served = story_engine->service(time.value(), clock.pause_depth != 0); !served) return served;
+        return apply_story_rewards();
+    };
+    auto result = run();
+    if (!result) output->record_fault();
+    return result;
 }
 
 std::string GameSession::Impl::with_story(const std::string& base, const std::string& story) {
@@ -284,7 +324,11 @@ core::Result<void> GameSession::Impl::control_notices(std::span<const galactic::
         if (auto delivered = story_notice({{}, galactic::story::ConquestCountNotice{
             name, effect.planet}, effect.old_owner, effect.new_owner}); !delivered) return delivered;
     }
-    return control_observer ? control_observer(effects, planets) : core::Result<void>::success();
+    if (control_observer) {
+        world().note_native_output_published();
+        return control_observer(effects, planets);
+    }
+    return core::Result<void>::success();
 }
 
 core::Result<void> GameSession::Impl::battle_story(galactic::PlanetId planet, BattleLayer layer,
@@ -306,6 +350,7 @@ core::Result<void> GameSession::Impl::battle_notice(GalacticAiBattleKind kind, c
         const BattleResult* result, bool automatic) {
     if (!native_ai.battle) return core::Result<void>::success();
     const auto snapshot = world().snapshot();
+    world().note_native_output_published();
     return native_ai.battle({kind, tick, conflict, *snapshot, result, automatic});
 }
 
@@ -444,7 +489,7 @@ core::Result<void> GameSession::Impl::hold_summary(sim::EntityId conflict, galac
     const auto* observer = seat(interactive_seat);
     if (!observer || !observer->active || observer->kind != galactic::SeatKind::human
         || (observer->player != invader && observer->player != defender)
-        || (world().victory() && world().victory()->context.multiplayer)
+        || world().multiplayer()
         || admission || staged || child || !waiting_admissions.empty()) return core::Result<void>::success();
     if (summary_conflict == conflict) return core::Result<void>::success();
     if (auto released = release_summary(); !released) return released;
@@ -473,6 +518,11 @@ bool GameSession::Impl::human_side(const galactic::PlayerId owner) const {
     return std::any_of(seats.begin(), seats.end(), [&](const auto& seat) {
         return seat.active && seat.kind == galactic::SeatKind::human && seat.player == owner;
     });
+}
+
+bool GameSession::Impl::untimed_votes() const {
+    const auto& state = world().seat_control();
+    return multiplayer_vote_timeout && state && state->control.teams.size() <= 1;
 }
 
 tactical::PlayerId GameSession::Impl::player(const galactic::SeatId id) const {
@@ -770,7 +820,11 @@ GameSession::GameSession(galactic::GalacticSession galaxy) : impl_(std::make_uni
     impl_->world().set_technology_notice_handler([owner = impl_.get()](const auto& notice) -> core::Result<void> {
         if (notice.kind == galactic::GalacticSession::TechnologyNotice::Kind::assigned)
             if (auto told = owner->tech_assigned(notice.player, notice.tech); !told) return told;
-        return owner->technology_handler ? owner->technology_handler(notice) : core::Result<void>::success();
+        if (owner->technology_handler) {
+            owner->world().note_native_output_published();
+            return owner->technology_handler(notice);
+        }
+        return core::Result<void>::success();
     });
     // The Impl address survives moves and script ownership transfers.
     impl_->world().set_control_effects_handler([owner = impl_.get()](const auto effects, const auto planets) {
@@ -787,7 +841,7 @@ core::Result<GameSession> GameSession::create(const galactic::GalacticSetup& set
             return fail<GameSession>("unknown or malformed campaign outcome input");
     }
     auto galaxy = [&] {
-        if (setup.interactive_seat.value && setup.victory && setup.victory->context.multiplayer) {
+        if (setup.interactive_seat.value && setup.uses_network_transport()) {
             auto canonical = setup; canonical.interactive_seat = {};
             return galactic::GalacticSession::create(canonical);
         }
@@ -965,8 +1019,7 @@ core::Result<void> GameSession::set_interactive_seat(galactic::SeatId observer) 
     const auto* seat = impl_->seat(observer);
     if (!seat || !seat->active || seat->kind != galactic::SeatKind::human)
         return fail<void>("interactive observer requires a fresh active human seat");
-    const auto& victory = impl_->world().victory();
-    const auto policy = victory && victory->context.multiplayer ? galactic::SeatId{} : observer;
+    const auto policy = impl_->world().multiplayer() ? galactic::SeatId{} : observer;
     if (policy == impl_->interactive_seat) return core::Result<void>::success();
     if (impl_->tick || impl_->summary_conflict)
         return fail<void>("interactive observer requires a fresh active human seat");
@@ -1126,6 +1179,7 @@ std::optional<PendingConflictView> GameSession::pending_conflict_view(galactic::
             PendingBattleAlertInputs inputs;
             inputs.local = seat->player; inputs.active_mode = inputs.queue_tactical = inputs.multiplayer = inputs.authorized_issuer = true;
             inputs.always_bypass = view.arbitration.forced_tactical;
+            inputs.untimed = impl_->untimed_votes();
             inputs.timeout_ms = *impl_->multiplayer_vote_timeout * 1000 / galactic::galactic_frames_per_second;
             inputs.elapsed_wall_ms = impl_->vote_started ? (impl_->tick - *impl_->vote_started) * 1000 / galactic::galactic_frames_per_second : 0;
             const auto vote = impl_->votes.find(seat->player);
@@ -1276,6 +1330,28 @@ const galactic::story::GoalsState* GameSession::story_goals(const galactic::stor
 }
 const galactic::story::Engine* GameSession::story_engine() const noexcept {
     return impl_->story_engine ? &*impl_->story_engine : nullptr;
+}
+core::Result<void> GameSession::apply_story_plot(const galactic::story::PlotCommand& command) {
+    return story_plot_applier()(command);
+}
+std::function<core::Result<void>(const galactic::story::PlotCommand&)> GameSession::story_plot_applier() {
+    // Threading precondition: the weak_ptr only detects a session that is already gone; it does not keep Impl alive (~Impl frees
+    // regardless of token holders), so expired()-then-deref is safe only because this applier never runs concurrently with
+    // session teardown. It is invoked solely from the ordered command commit of the AI service report
+    // (foc::detail::commit_story_plot from ai_service.cpp, in command order on the session's own step thread), never from a
+    // Lua worker or producer thread; teardown happens on that same owner thread.
+    return [impl = impl_.get(), alive = std::weak_ptr<const bool>(impl_->story_plot_alive)](const galactic::story::PlotCommand& command) -> core::Result<void> {
+        if (alive.expired()) {
+            core::Diagnostic gone; gone.code = "EAWR-SCRIPT-0215"; gone.message = "the game session that owned this plot applier no longer exists";
+            return core::Result<void>::failure(std::move(gone));
+        }
+        if (!impl->story_engine) {
+            core::Diagnostic missing; missing.code = "EAWR-SCRIPT-0215"; missing.message = "no plot engine is installed for Get_Story_Plot";
+            return core::Result<void>::failure(std::move(missing));
+        }
+        impl->world().note_native_output_published();
+        return impl->story_engine->apply(command);
+    };
 }
 void GameSession::set_feedback_notice_handler(sim::galactic::GalacticSession::FeedbackNoticeHandler handler) {
     impl_->world().set_feedback_notice_handler(std::move(handler));

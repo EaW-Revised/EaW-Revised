@@ -6,6 +6,7 @@
 #include "setup_map_reference.hpp"
 #include "eawr/core/sha256.hpp"
 #include <fstream>
+#include <filesystem>
 #include <bit>
 #include <type_traits>
 
@@ -94,7 +95,7 @@ inline std::map<std::string,Row> read(const std::filesystem::path& path) {
 
 // Authored two-team corpus with duplicate station priority, spawn counts, owner
 // facts and faction/rule values. It contains no installed-game bytes.
-inline void write_team_corpus(const std::filesystem::path& directory, const std::uint32_t capacity = 4) {
+inline void write_team_corpus(const std::filesystem::path& directory, const std::uint32_t capacity = 4, const float bad_position = 0.0F, const float bad_orientation = 0.0F, const bool collision = false, const bool collision_unit = false) {
     using Bytes = std::vector<std::byte>;
     std::filesystem::create_directories(directory / "art/maps");
     std::filesystem::create_directories(directory / "xml");
@@ -112,9 +113,9 @@ inline void write_team_corpus(const std::filesystem::path& directory, const std:
     for (const auto& [name,x] : std::vector<std::pair<std::string,float>>{
             {"Team_00_Space_Station",-50.0F},{"Team_00_Spawn_Point_Marker",-45.0F},
             {"Team_01_Space_Station",50.0F},{"Team_01_Spawn_Point_Marker",45.0F},
-            {"Team_00_Space_Station",-55.0F}}) {
+            {collision ? "SYNTH_OIVRHNPFF4K4" : "Team_00_Space_Station",-55.0F}}) {
         Bytes fields;mini(fields,0,integer(ordinal++));mini(fields,1,integer(assets::object_type_crc(name)));
-        mini(fields,2,integer(x<0?0U:1U));mini(fields,4,point(x,3,0));mini(fields,5,point(0,0,x<0?90.0F:270.0F));
+        mini(fields,2,integer(x<0?0U:1U));mini(fields,4,point(bad_position != 0.0F && ordinal == 5 ? bad_position : x,3,0));mini(fields,5,point(0,0,bad_orientation != 0.0F && ordinal == 5 ? bad_orientation : (x<0?90.0F:270.0F)));
         add(placements,chunk(1100,chunk(1113,chunk(1200,fields),true),true));
     }
     Bytes starts=integer(2);for(float x:{-50.0F,50.0F}) {add(starts,real(x));add(starts,real(0));}
@@ -129,6 +130,11 @@ inline void write_team_corpus(const std::filesystem::path& directory, const std:
     { std::ofstream out(directory/"xml/markers.xml");out<<"<Objects>";
       for(const auto name:{"Team_00_Space_Station","Team_01_Space_Station","Team_00_Spawn_Point_Marker","Team_01_Spawn_Point_Marker"})
         out<<"<Marker Name=\""<<name<<"\"><Is_Marker>yes</Is_Marker><Marker_For_Specific_Object_Type>Fixture_Rebel,Fixture_Empire</Marker_For_Specific_Object_Type></Marker>";
+      if (collision) {
+          out << "<SpaceProp Name=\"SYNTH_QLU1MOI5PTT3\"><Space_Layer>Capital</Space_Layer></SpaceProp>";
+          if (collision_unit) out << "<SpaceUnit Name=\"SYNTH_OIVRHNPFF4K4\"><Space_Layer>Corvette</Space_Layer></SpaceUnit>";
+          else out << "<SpaceProp Name=\"SYNTH_OIVRHNPFF4K4\"><Space_Layer>Corvette</Space_Layer></SpaceProp>";
+      }
       out<<"<StarBase Name=\"Fixture_Rebel\"><Affiliation>Rebel</Affiliation></StarBase><StarBase Name=\"Fixture_Empire\"><Affiliation>Empire</Affiliation></StarBase></Objects>"; }
     std::ofstream out(directory/"xml/gameconstants.xml");
     out<<"<GameConstants>"

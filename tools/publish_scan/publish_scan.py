@@ -181,12 +181,25 @@ def asset_scan(root: Path, config: dict[str, Any], files: Iterable[Path],
     banned = {suffix.lower() for suffix in scan["retail_suffixes"]}
     images = {suffix.lower() for suffix in scan["image_suffixes"]}
     hits = []
+    # The reviewed release layer has an exact path, size and hash for every file;
+    # all other layer content remains forbidden, including different case or bytes.
+    manifest_path = root / "tools/release/revised-layer-manifest.json"
+    approved = {}
+    if manifest_path.is_file():
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if manifest.get("schema") != 1 or not isinstance(manifest.get("files"), dict):
+            raise ScanError("invalid reviewed release layer manifest")
+        approved = {"Revised/" + name: entry for name, entry in manifest["files"].items()}
     for path in files:
         relpath = rel(path, root)
         suffix = path.suffix.lower()
+        entry = approved.get(relpath)
+        reviewed = bool(entry and entry.get("size") == path.stat().st_size and entry.get("sha256") == sha256_file(path))
+        if relpath.casefold().startswith(("layers/", "revised/")) and not reviewed:
+            hits.append(f"{relpath}: private layer must not be published")
         if generated_file(relpath, config):
             hits.append(f"{relpath}: generated file must not be published")
-        if suffix in banned and not any(matches(relpath, p) for p in scan["retail_suffix_allow"]):
+        if suffix in banned and not reviewed and not any(matches(relpath, p) for p in scan["retail_suffix_allow"]):
             hits.append(f"{relpath}: game asset type {suffix}")
             continue
         digest = sha256_file(path)
@@ -195,7 +208,7 @@ def asset_scan(root: Path, config: dict[str, Any], files: Iterable[Path],
         if suffix in images:
             if scan["image_allowlist"].get(relpath) != digest:
                 hits.append(f"{relpath}: image not on the reviewed allowlist (sha256 {digest})")
-        elif read_text(path) is None and scan["binary_allowlist"].get(relpath) != pinned_digest(path, relpath,
+        elif not reviewed and read_text(path) is None and scan["binary_allowlist"].get(relpath) != pinned_digest(path, relpath,
                                                                                                digest, scan):
             hits.append(f"{relpath}: binary file not on the allowlist")
     return hits

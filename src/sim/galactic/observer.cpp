@@ -3,6 +3,7 @@
 #include "encoding.hpp"
 #include "observer_internal.hpp"
 
+#include <algorithm>
 #include <limits>
 #include <set>
 #include <tuple>
@@ -214,6 +215,16 @@ core::Result<void> validate_observer(const GalacticSetup& setup) {
             return invalid("invalid intelligence source");
     }
     return core::Result<void>::success();
+}
+
+void project_ground_layout(std::vector<ObservedPlanet>& observed, const PoliticalControlSetup* control) {
+    if (!control) return;
+    for (auto& row : observed) {
+        if (!row.knowledge.ground_contents) continue;
+        const auto planet = std::find_if(control->planets.begin(), control->planets.end(),
+            [&](const auto& value) { return value.planet == row.planet; });
+        if (planet != control->planets.end()) row.ground_layout = planet->ground_layout;
+    }
 }
 
 std::vector<ObservedPlanet> observed_planets(const ObserverSetup& inputs, const std::span<const Fleet> fleets,

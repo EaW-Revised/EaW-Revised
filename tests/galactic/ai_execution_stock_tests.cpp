@@ -1,6 +1,7 @@
 // Insert before the anonymous namespace; this is fixture setup only.
 
 #include "../support/env.hpp"
+#include "eawr/vfs/vfs.hpp"
 #include "../support/result.hpp"
 #include "galactic_support.hpp"
 #include "galactic_ai_execution.hpp"
@@ -386,6 +387,49 @@ void paid_contracts() {
         actions.bind_handlers();
         expect(!actions.admit(request), "plan identity cannot silently stand in for goal identity");
         const auto first = take(actions.admit_paid(request, 7));
+        if (mode == 0) for (const bool throws : {false, true}) for (const bool after_mutation : {false, true}) {
+            // Native-owner unit: the separate fixture world is deliberately
+            // discarded afterward. Whole-phase world rollback belongs to the
+            // composed controller contract, not this adapter participant.
+            auto fixture_world = take(gc::GalacticSession::create(setup));
+            auto fixture_funding = std::make_shared<ai::GalacticFunding>();
+            static_cast<void>(take(fixture_funding->initialize(1, std::span(&policy, 1), whole(250))));
+            static_cast<void>(take(fixture_funding->reserve(1, {7, 1, whole(200), {}, {}, {}})));
+            ga::NativeActions fixture(fixture_world, fixture_funding, {}, {{1, whole(1)}}, {}, &executor,
+                [](auto) { return eawr::core::Result<Fixed>::success(whole(100)); });
+            fixture.bind_handlers();
+            const auto purchase = take(fixture.admit_paid(request, 7));
+            const auto before = take(fixture.capture()); const auto before_hash = take(fixture.state_hash());
+            const auto ledger = fixture_funding->state();
+            auto fiscal = take(fixture_funding->begin_phase());
+            auto phase = take(fixture.begin_phase());
+            expect(phase->work().purchases == 0 && phase->work().movements == 0 && phase->work().created_players == 0,
+                "native action begin retains no row scans, copies or archive");
+            expect(!fixture.begin_phase(), "native action phase rejects nesting");
+            bool caught{};
+            try {
+                const auto result = [&]() -> eawr::core::Result<void> {
+                    if (after_mutation) {
+                        for (unsigned frame = 0; frame < 3; ++frame) static_cast<void>(take(fixture_world.step(executor)));
+                        expect(fixture.purchases().at(purchase.request).billed > Fixed{}, "actual producer callbacks bill retained purchase");
+                        expect(phase->work().purchases == 1, "repeated native bills retain the first purchase once");
+                        expect(take(fixture.admit_paid(request, 7)).admitted, "native phase creates a second retained purchase");
+                        expect(phase->work().purchases == 2 && fixture.purchases().size() == 2,
+                            "native phase retains absence for a newly created purchase");
+                    }
+                    if (throws) throw std::runtime_error("native action phase fixture");
+                    eawr::core::Diagnostic diagnostic; diagnostic.code = "native-action-phase-fixture";
+                    return eawr::core::Result<void>::failure(std::move(diagnostic));
+                }();
+                expect(!result && result.error().code == "native-action-phase-fixture", "native action Result diagnostic preserved");
+            } catch (const std::runtime_error& exception) { caught = std::string_view(exception.what()) == "native action phase fixture"; }
+            expect(caught == throws, "native action exception identity preserved");
+            static_cast<void>(take(fiscal->rollback())); static_cast<void>(take(phase->rollback()));
+            expect(fixture_funding->state() == ledger && take(fixture.capture()).components == before.components
+                && take(fixture.state_hash()) == before_hash, "native action rollback restores old purchases and removes new mappings on 1/2/4/8");
+            auto retry = take(fixture.begin_phase()); static_cast<void>(take(retry->commit()));
+            expect(!retry->commit() && take(fixture.state_hash()) == before_hash, "native action phase settles exactly once");
+        }
         expect(first.admitted && take(actions.build_status(1, first.request)).state == ai::GalacticBuildStatus::State::waiting,
             "accepted build identity waits for the authoritative producer outcome");
         expect(!actions.build_status(2, first.request) && !actions.build_status(1, first.request + 10000),
@@ -555,6 +599,57 @@ void live_execution_restore() {
         expect(!live.restore(take(codec.capture())) && pool->pool == old_pool && routes.at(2).paths == old_paths && take(live.state_hash()) == before,
             "failed derived route rebuild publishes no partial reservation/config state");
         if (baseline.empty()) baseline = before; else expect(before == baseline, "live execution native restore equality on 1/2/4/8");
+        live.enable_revision_tracking();
+        const auto original = retained; const auto original_rows = routes.at(2).rows;
+        const auto mutate = [&] {
+            auto changed = retained; ++changed.at(2).next_refresh;
+            static_cast<void>(take(live.replace_retained(std::move(changed))));
+            auto next = routes.at(2); ++next.next_refresh; ++next.revision;
+            next.rows.clear(); next.paths.reset(); next.memo.reset();
+            live.replace_route(2, std::move(next));
+            live.replace_route(3, {});
+            auto copied = std::make_shared<ga::FreestorePool>(*pool->pool);
+            copied->reservations.clear(); pool->pool = std::move(copied);
+        };
+        for (const bool throws : {false, true}) for (const bool after_mutation : {false, true}) {
+            auto phase = take(live.begin_phase());
+            expect(phase->work().retained_publications == 0 && phase->work().routes == 0,
+                "execution begin moves no retained publications and copies no route/archive data");
+            expect(!live.begin_phase() && !live.restore(take(codec.capture())), "execution phase refuses nesting and external restore");
+            bool caught{};
+            try {
+                const auto result = [&]() -> eawr::core::Result<void> {
+                    if (after_mutation) {
+                        mutate(); mutate();
+                        expect(phase->work().retained_publications == 1 && phase->work().routes == 2,
+                            "execution retains the first moved publication/route once across repeated replacements");
+                        expect(retained != original && !routes.at(2).paths && routes.contains(3) && pool->pool != old_pool,
+                            "execution fault fixture mutates actual retained and derived publications");
+                    }
+                    if (throws) throw std::runtime_error("execution phase fixture");
+                    eawr::core::Diagnostic diagnostic; diagnostic.code = "execution-phase-fixture";
+                    return eawr::core::Result<void>::failure(std::move(diagnostic));
+                }();
+                expect(!result, "execution phase Result failure preserved");
+            } catch (const std::runtime_error& exception) { caught = std::string_view(exception.what()) == "execution phase fixture"; }
+            expect(caught == throws, "execution phase deterministic exception identity preserved");
+            static_cast<void>(take(phase->rollback()));
+            expect(retained == original && routes.size() == 1 && routes.at(2).paths == old_paths
+                && routes.at(2).rows.size() == original_rows.size()
+                && std::equal(routes.at(2).rows.begin(), routes.at(2).rows.end(), original_rows.begin(), [](const auto& a, const auto& b) {
+                    return a.player == b.player && a.source == b.source && a.candidate == b.candidate && a.empty == b.empty
+                        && a.distance.repr == b.distance.repr && a.threat.repr == b.threat.repr && a.prefix_threat.repr == b.prefix_threat.repr;
+                }) && routes.at(2).next_refresh == original.at(2).next_refresh
+                && pool->pool == old_pool && take(live.state_hash()) == before,
+                "execution rollback restores native bytes, route rows/matrix pointers, deadlines and immutable pool publication");
+        }
+        auto retry = take(live.begin_phase()); mutate();
+        const auto committed = take(live.state_hash()); static_cast<void>(take(retry->commit()));
+        expect(take(live.state_hash()) == committed && !retry->commit(), "execution retry publishes exactly once");
+        ga::ExecutionStateContributor oracle;
+        static_cast<void>(take(oracle.replace(retained)));
+        expect(take(oracle.capture()).components == take(live.capture()).components,
+            "committed execution retry uses the unchanged checkpoint format on 1/2/4/8");
     }
 }
 
@@ -899,10 +994,16 @@ end
         return take(scripts.service(executor));
     };
     const auto original = world.state_sha256(); const auto ledgers = funding->state(); const auto frontier = world.next_entity_id();
+    const auto healthy = take(scripts.save(executor));
     auto rejected = deliver("Failed");
+    expect(scripts.retired_instances() == std::vector<std::uint64_t>{instance}, "installed failed handler retires its GC identity");
     expect(rejected.diagnostics.size() == 1 && rejected.commands.empty() && world.state_sha256() == original
         && funding->state() == ledgers && world.next_entity_id() == frontier && engine.taskforce(1)->types == std::vector<gc::TypeId>{type},
         "installed failed handler discards real cash, windfall, placement, taskforce bookkeeping and frontier");
+    // Success is an independent timeline from the healthy checkpoint; the
+    // retired provider above cannot be called again in its failed timeline.
+    expect(static_cast<bool>(scripts.load(healthy)), "installed healthy observer checkpoint restores");
+    (void)take(scripts.service(executor));
     auto accepted = deliver("Success");
     expect(accepted.diagnostics.empty(), "installed immediate success has no unsupported/missing diagnostics");
     const auto lua = [&](std::string_view name) { return *take(scripts.read_global(instance, name)); };

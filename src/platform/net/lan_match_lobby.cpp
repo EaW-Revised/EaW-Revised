@@ -4,6 +4,7 @@
 #include "eawr/core/build_identity.hpp"
 #include "eawr/core/gc_load_trace.hpp"
 #include "eawr/core/text.hpp"
+#include <array>
 #include <cctype>
 
 namespace eawr::presentation::godot_backend::lan_detail {
@@ -114,8 +115,12 @@ void TcpLanMatch::configure_galactic(std::shared_ptr<GalacticLobbyBackend> backe
         galactic_->set_adapter_factory([executor](const net::SetupOffer&, const campaign::MpAgreement& agreement)
             -> core::Result<std::unique_ptr<net::SessionAdapter>> {
             net::GalacticAdapterOptions options; options.clock_policy = net::GalacticClockPolicy::limited;
-            return core::Result<std::unique_ptr<net::SessionAdapter>>::success(
-                std::make_unique<net::GalacticSessionAdapter>(*agreement.session, *executor, options));
+            auto adapter = std::make_unique<net::GalacticSessionAdapter>(*agreement.session, *executor, options);
+            if (agreement.resume && !agreement.resume->network_state.empty()) {
+                auto restored = adapter->restore_network_state(agreement.resume->network_state);
+                if (!restored) return core::Result<std::unique_ptr<net::SessionAdapter>>::failure(restored.error());
+            }
+            return core::Result<std::unique_ptr<net::SessionAdapter>>::success(std::move(adapter));
         });
     }
 }
@@ -134,7 +139,14 @@ bool TcpLanMatch::lobby_galactic_game(const net::GalacticLobbyOptions& options) 
         auto encoded = net::encode_galactic_lobby_game(options);
         if (!encoded) return lobby_feedback(core::Result<void>::failure(encoded.error()));
         auto assignments = lobby_->snapshot().seats;
+        const auto previous = net::decode_galactic_lobby_game(lobby_->snapshot().game);
+        const bool changing_campaign = previous && previous.value().campaign != options.campaign;
+        const auto first_human = std::find_if(options.rows.begin(), options.rows.end(), [](const auto& row) { return row.human; });
         for (auto& seat : assignments) {
+            // A newly chosen campaign can have different playable factions. Move seats whose
+            // previous row is unavailable to its first human row in the same room revision.
+            if (changing_campaign && !net::galactic_lobby_side(options, seat.selection.slot) && first_human != options.rows.end())
+                seat.selection.slot = first_human->player;
             const auto side = net::galactic_lobby_side(options, seat.selection.slot);
             const auto row = std::find_if(options.rows.begin(), options.rows.end(), [&](const auto& value) { return value.player == seat.selection.slot; });
             // A row holding a human keeps its control; the host removes a guest with the kick action.
@@ -142,8 +154,39 @@ bool TcpLanMatch::lobby_galactic_game(const net::GalacticLobbyOptions& options) 
                 return lobby_feedback(lobby_fail<void>(net::LobbyReason::invalid_choice, "A faction held by a player cannot be switched to AI; kick the player first."));
             seat.selection.faction = row->faction; seat.selection.team = *side; seat.selection.colour = 0; seat.player = row->player;
         }
+        // Validate the whole proposed revision against the installed campaign catalog.
+        auto proposed = lobby_->snapshot();
+        proposed.game = encoded.value(); proposed.seats = assignments;
+        if (auto valid = net::validate_galactic_lobby(proposed, false, galactic_->campaigns()); !valid)
+            return lobby_feedback(std::move(valid));
         return lobby_feedback(lobby_->configure_game(std::move(encoded).value(), std::move(assignments), lobby_->snapshot().revision));
     }
+
+bool TcpLanMatch::lobby_galactic_checkpoint(const net::GalacticLobbyOptions& options,
+    const std::vector<net::SetupSeat>& bindings) {
+    if (!lobby_mutable() || !view().host || !galactic_room() || !galactic_) return false;
+    for (const auto& seat : lobby_->snapshot().seats) {
+        if (seat.peer == lobby_->snapshot().host) continue;
+        const auto found = mod_review_edges_.find(seat.peer);
+        if (found == mod_review_edges_.end() || found->second != room_edge(seat.peer))
+            return lobby_feedback(lobby_fail<void>(net::LobbyReason::not_ready, "Waiting for players to review the host's mods."));
+    }
+    auto encoded = net::encode_galactic_lobby_game(options);
+    if (!encoded) return lobby_feedback(core::Result<void>::failure(encoded.error()));
+    auto assignments = lobby_->snapshot().seats;
+    if (bindings.size() != assignments.size()) return false;
+    for (std::size_t i = 0; i < assignments.size(); ++i) {
+        const auto& binding = bindings[i];
+        const auto side = net::galactic_lobby_side(options, binding.player);
+        const auto row = std::find_if(options.rows.begin(), options.rows.end(),
+            [&](const auto& value) { return value.player == binding.player; });
+        if (binding.peer != i || !side || row == options.rows.end()) return false;
+        auto& seat = assignments[i];
+        seat.player = binding.player; seat.selection.slot = binding.player;
+        seat.selection.faction = row->faction; seat.selection.team = *side;
+    }
+    return lobby_feedback(lobby_->configure_game(std::move(encoded).value(), std::move(assignments), lobby_->snapshot().revision));
+}
 
 bool TcpLanMatch::galactic_room() const {
         if (lobby_) return net::lobby_game_mode(lobby_->snapshot().game) == net::LobbyGameMode::galactic;
@@ -161,7 +204,7 @@ void TcpLanMatch::lobby_leave()  {
 
 std::optional<LanLobbyState> TcpLanMatch::lobby_state() const  {
         if (handed_over_) return last_lobby_state_;
-        if (!lobby_) return {};
+        if (!lobby_ || view().mod_review_pending) return {};
         LanLobbyState state; state.snapshot = lobby_->snapshot(); state.chat = lobby_->chat_history(); state.notice = lobby_->notice() ? lobby_->notice() : lobby_notice_;
         state.preparing = preparing_.valid();
         const auto local = std::find_if(state.snapshot.seats.begin(), state.snapshot.seats.end(), [&](const auto& seat) { return seat.peer == lobby_self_; });
@@ -190,6 +233,18 @@ std::optional<LanLobbyState> TcpLanMatch::lobby_state() const  {
             && mesh_complete && all_ready;
         return state;
     }
+
+void TcpLanMatch::accept_mod_review() {
+    if (!view().mod_review_pending || !io_->transport.tcp) return;
+    const std::array<std::uint8_t, 1> frame{net::lobby_mod_review_ack_kind};
+    if (auto sent = io_->transport.send(0, frame); !sent) {
+        { const std::lock_guard lock(mutex_); view_.mod_review_pending = false; view_.host_mod_description.clear(); }
+        set_failure(sent.error()); return;
+    }
+    const std::lock_guard lock(mutex_);
+    view_.mod_review_pending = false;
+    view_.host_mod_description.clear();
+}
 
 bool TcpLanMatch::lobby_mutable() const { return !handed_over_ && view().phase != LanPhase::ended && lobby_ && io_->transport.tcp; }
 
@@ -303,9 +358,13 @@ bool TcpLanMatch::current_mesh_credentials(const net::Received& frame) {
     }
 
 core::Result<void> TcpLanMatch::provision_mesh_repair(const net::SetupOffer& offer, std::uint64_t revision) {
-        if (!online_options_ || offer.seats.size() < 3) return core::Result<void>::success();
+        const bool galactic = offer.domain == net::galactic_setup_domain;
+        if (!galactic && (!online_options_ || offer.seats.size() < 3)) return core::Result<void>::success();
         if (mesh_material_revision_ && *mesh_material_revision_ != revision) clear_mesh_repair_material();
-        auto keys = credential_state_->provide_mesh_repair(offer, io_->transport);
+        std::vector<net::PeerIndex> native_peers;
+        if (galactic && lobby_) for (const auto& seat : lobby_->snapshot().seats) native_peers.push_back(seat.peer);
+        auto keys = galactic ? credential_state_->provide_galactic_recovery(offer, io_->transport, native_peers)
+            : credential_state_->provide_mesh_repair(offer, io_->transport);
         if (!keys) return core::Result<void>::failure(keys.error());
         auto encoded = net::encode_setup_offer(offer);
         if (!encoded) return core::Result<void>::failure(encoded.error());
@@ -317,13 +376,49 @@ core::Result<void> TcpLanMatch::provision_mesh_repair(const net::SetupOffer& off
 
 net::LobbyHooks TcpLanMatch::lobby_hooks() {
         net::LobbyHooks hooks;
+        if (galactic_ && galactic_host_game_) hooks.mounted_mods = galactic_->mounted_mods();
+        hooks.bind_setup_seats = [this](const auto& snapshot, const auto& ordinary) {
+            return galactic_ && net::lobby_game_mode(snapshot.game) == net::LobbyGameMode::galactic
+                ? galactic_->bind_setup_seats(snapshot, ordinary)
+                : core::Result<std::vector<net::SetupSeat>>::success(ordinary);
+        };
+        hooks.application_frame = [this](auto& transport, const auto& snapshot, const auto& frame, auto now) {
+            if (frame.frame.size() == 1 && frame.frame.front() == net::lobby_mod_review_ack_kind) {
+                if (view().host && net::lobby_game_mode(snapshot.game) == net::LobbyGameMode::galactic
+                    && frame.from != snapshot.host && std::any_of(snapshot.seats.begin(), snapshot.seats.end(),
+                        [&](const auto& seat) { return seat.peer == frame.from; }))
+                    if (const auto edge = room_edge(frame.from); edge != 0) mod_review_edges_[frame.from] = edge;
+                return true;
+            }
+            if (!galactic_ || !net::GalacticCheckpointTransfer::handles(frame.frame)) return false;
+            if (net::lobby_game_mode(snapshot.game) == net::LobbyGameMode::galactic && snapshot.phase == net::LobbyPhase::staging)
+                galactic_->receive_transfer(transport, snapshot, frame, now);
+            return true;
+        };
+        hooks.application_pump = [this](auto& transport, const auto& snapshot, auto now) {
+            if (!galactic_ || net::lobby_game_mode(snapshot.game) != net::LobbyGameMode::galactic
+                || snapshot.phase != net::LobbyPhase::staging) return false;
+            if (view().host) for (const auto& seat : snapshot.seats) {
+                if (seat.peer == snapshot.host) continue;
+                const auto found = mod_review_edges_.find(seat.peer);
+                if (found == mod_review_edges_.end() || found->second != room_edge(seat.peer)) return false;
+            }
+            galactic_->pump_transfer(transport, snapshot, now);
+            const auto epoch = galactic_->selection_epoch();
+            const bool changed = epoch != galactic_selection_epoch_;
+            galactic_selection_epoch_ = epoch;
+            return changed;
+        };
         hooks.validate = [this](const net::LobbySnapshot& state, bool starting) { return validate_lobby(state, starting); };
         hooks.offer = [this](const net::LobbySnapshot& state, const std::vector<net::SetupSeat>& seats) -> core::Result<net::SetupOffer> {
             if (net::lobby_game_mode(state.game) == net::LobbyGameMode::galactic) {
                 // GC: seal the roster from the agreed choices and local content, and publish the galactic-campaign-v1 offer.
                 if (!galactic_) return lobby_fail<net::SetupOffer>(net::LobbyReason::setup_failed, "This build has no campaign content for this room.");
-                auto built = galactic_->offer(state, seats);
+                auto built = while_pumping<net::SetupOffer>(io_->transport, [&] { return galactic_->offer(state, seats); });
                 if (!built) return built;
+                // The host's offer, or the guest's own derivation of the same choices: equal digests mean the peers agree.
+                diagnostics_->emit("campaign-start", "offer", io_->transport.self(),
+                    galactic_->start_summary(built.value(), state.host == io_->transport.self()));
                 if (recovery_policy_.reconnect || recovery_policy_.resync) return lobby_fail<net::SetupOffer>(net::LobbyReason::recovery_unavailable, "Recovery provisioning for staging is unavailable.");
                 if (auto provisioned = provision_mesh_repair(built.value(), state.frozen_revision); !provisioned)
                     return core::Result<net::SetupOffer>::failure(provisioned.error());
@@ -348,7 +443,7 @@ net::LobbyHooks TcpLanMatch::lobby_hooks() {
                 core::gc_load::trace.begin("mp_guest", true);
             lobby_stream_ = &stream;
             net::LobbySetupContext context; context.options.auto_accept = false; context.options.auto_start = false;
-            context.options.timeout_ms = 180'000; context.options.session.keep_admission_tick_open = true;
+            context.options.timeout_ms = static_cast<std::uint64_t>(setup_timeout_.count()); context.options.session.keep_admission_tick_open = true;
             if (online_options_ && staged.seats.size() >= 3) {
                 // Three or more seats share one room mesh: a lost pair is decided by one seat, not by each end (N4). The setup
                 // stream is dense (host first, roster order); the pair diagnostics belong to the transport slots.
@@ -366,12 +461,20 @@ net::LobbyHooks TcpLanMatch::lobby_hooks() {
             }
             context.options.session.pending_input_epoch = [this] { return pending_input_epoch(); };
             if (net::lobby_game_mode(staged.game) == net::LobbyGameMode::galactic) {
+                context.options.untimed_preview_wait = true;
+                context.providers.configure_session = [this, revision = staged.frozen_revision](net::SessionOptions&, const net::SetupOffer& offer) {
+                    return provision_mesh_repair(offer, revision);
+                };
+                context.providers.credentials_delivered = [this] { return credential_state_->delivered(); };
                 if (galactic_) context.options.session.final_tick_count = galactic_->final_tick_count();
                 auto options = net::decode_galactic_lobby_game(staged.game);
                 if (!options) return core::Result<net::LobbySetupContext>::failure(options.error());
                 net::DesyncOptions monitor_options;
                 monitor_options.input_delay = options.value().input_delay;
                 monitor_options.exchange_every = 30;
+                monitor_options.initial_tick = galactic_ ? galactic_->initial_tick() : 0;
+                context.options.session.initial_tick = monitor_options.initial_tick;
+                if (galactic_) context.options.session.producer_sequences = galactic_->producer_sequences();
                 io_->monitor = std::make_unique<net::DesyncMonitor>(stream, monitor_options);
                 auto bound = gate_.bind(*io_->monitor);
                 if (!bound) return core::Result<net::LobbySetupContext>::failure(bound.error());
@@ -380,11 +483,14 @@ net::LobbyHooks TcpLanMatch::lobby_hooks() {
                 // GC: every peer derives the identities and the tick-zero session from its own content; the adapter is GCMP-03's.
                 context.providers.identify = [this](const net::SetupOffer& offer) -> core::Result<sim::MatchAgreement> {
                     if (!galactic_) return lobby_fail<sim::MatchAgreement>(net::LobbyReason::setup_failed, "Local campaign content is unavailable.");
-                    return galactic_->identify(offer);
+                    auto identified = while_pumping<sim::MatchAgreement>(io_->transport, [&] { return galactic_->identify(offer); });
+                    diagnostics_->emit("campaign-start", identified ? "identity-ok" : "identity-refused", io_->transport.self(),
+                        galactic_->start_summary(offer, io_->transport.self() == 0));
+                    return identified;
                 };
                 context.providers.build = [this](const net::SetupOffer& offer) -> core::Result<std::unique_ptr<net::SessionAdapter>> {
                     if (!galactic_) return lobby_fail<std::unique_ptr<net::SessionAdapter>>(net::LobbyReason::setup_failed, "Local campaign content is unavailable.");
-                    return galactic_->build(offer);
+                    return while_pumping<std::unique_ptr<net::SessionAdapter>>(io_->transport, [&] { return galactic_->build(offer); });
                 };
             } else {
             context.providers.identify = [this](const net::SetupOffer&) {
@@ -403,7 +509,7 @@ net::LobbyHooks TcpLanMatch::lobby_hooks() {
             context.providers.tick_zero_mismatch = [this]() -> std::optional<net::TickZeroMismatch> {
                 if (!io_->monitor || !io_->monitor->report()) return {};
                 const auto& report = *io_->monitor->report();
-                if (report.first_divergent_tick != 0) return {};
+                if (report.first_divergent_tick != (galactic_ ? galactic_->initial_tick() : 0)) return {};
                 return net::TickZeroMismatch{report.local_hash, report.remote_hash, report.channel};
             };
             return core::Result<net::LobbySetupContext>::success(std::move(context));
@@ -433,7 +539,7 @@ net::LobbyHooks TcpLanMatch::lobby_hooks() {
 void TcpLanMatch::reset_lobby() {
         gate_.reset();
         lobby_.reset(); lobby_result_.reset(); lobby_stream_ = nullptr; prepared_setup_.reset(); ready_pending_ = false; lobby_setup_accepted_ = false; lobby_room_committed_ = false;
-        removed_peers_.clear(); known_edges_.clear(); closing_peers_.clear(); lobby_notice_.reset(); last_lobby_state_.reset(); identity_retry_at_ms_ = 0;
+        removed_peers_.clear(); known_edges_.clear(); mod_review_edges_.clear(); closing_peers_.clear(); lobby_notice_.reset(); last_lobby_state_.reset(); identity_retry_at_ms_ = 0;
         galactic_host_game_.reset(); galactic_start_.reset(); galactic_flush_started_.reset();
     }
 
@@ -488,6 +594,31 @@ void TcpLanMatch::start_lobby() {
 
 void TcpLanMatch::pump_lobby(const skirmish::FixtureOptions& selected) {
         if (handed_over_ || !io_->transport.tcp || view().phase == LanPhase::ended) return;
+        if (view().mod_review_pending) {
+            if (auto raw = io_->transport.poll_socket()) {
+                constexpr std::size_t limit = 8U * 1024U * 1024U;
+                if (io_->transport.pending.size() >= 256 || io_->transport.pending_bytes > limit
+                    || raw->frame.size() > limit - io_->transport.pending_bytes) {
+                    { const std::lock_guard lock(mutex_); view_.mod_review_pending = false; view_.host_mod_description.clear(); }
+                    set_failure(net::lobby_diagnostic(net::LobbyReason::resource_limit, "Too much room traffic while reviewing mods."));
+                    return;
+                }
+                io_->transport.pending_bytes += raw->frame.size(); io_->transport.pending.push_back(std::move(*raw));
+            }
+            // The raw socket state: frames parked for the review keep the buffered link() open until they are consumed,
+            // and nothing consumes them while the prompt is up.
+            if (io_->transport.tcp->link(0) == net::LinkState::closed) {
+                { const std::lock_guard lock(mutex_); view_.mod_review_pending = false; view_.host_mod_description.clear(); }
+                set_failure(net::lobby_diagnostic(net::LobbyReason::host_closed, "The host left while mods were being reviewed."));
+            }
+            return;
+        }
+        if (galactic_room()) {
+            // GC provisions pair credentials on ordinary LAN and two-seat
+            // online rooms too. Receive them before pumping the frozen setup.
+            io_->transport.credentials = credential_state_;
+            io_->transport.credential_filter = [this](const net::Received& frame) { return current_mesh_credentials(frame); };
+        }
         lobby_clock_ = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
         if (online_options_ && !drain_mesh_events()) return;
         sample_online_route();
@@ -582,12 +713,22 @@ void TcpLanMatch::pump_lobby(const skirmish::FixtureOptions& selected) {
                 if (raw->from == 0 && decoded) if (const auto* refused = std::get_if<net::LobbyRejected>(&decoded.value())) {
                     set_failure(net::lobby_diagnostic(refused->reason, refused->message)); return;
                 }
+                // A host that already left its lobby sends match traffic only (the rejoin proof, lockstep frames): say so in words.
+                if (raw->from == 0 && lan_host_match_running(raw->frame)) {
+                    set_failure(net::lobby_diagnostic(net::LobbyReason::frozen, lan_match_running_refusal)); return;
+                }
                 if (!snapshot || raw->from != 0) { set_failure(net::lobby_diagnostic(net::LobbyReason::malformed, "Missing authoritative admission snapshot.")); return; }
                 auto created = net::LobbySession::join(io_->transport, snapshot->room, 0, lobby_hooks());
                 if (!created) { set_failure(created.error()); return; }
                 lobby_ = std::make_shared<net::LobbySession>(std::move(created).value()); io_->room_lifetime = lobby_; lobby_self_ = io_->transport.self();
                 online_snapshot_deadline_.reset();
                 io_->transport.pending_bytes += raw->frame.size(); io_->transport.pending.push_back(std::move(*raw));
+                if (net::lobby_game_mode(snapshot->game) == net::LobbyGameMode::galactic) {
+                    const std::lock_guard lock(mutex_);
+                    view_.host_mod_description = snapshot->mounted_mods;
+                    view_.mod_review_pending = true;
+                    return;
+                }
             }
         }
         // Closing is deferred until the core has queued its typed notice.
@@ -615,7 +756,7 @@ void TcpLanMatch::pump_lobby(const skirmish::FixtureOptions& selected) {
                     // A room slot keeps its roster identity when its occupant returns, so a removal cannot outlive the closed pair
                     // (a leave, a refusal or a retry would otherwise be answered "removed from the room"). The service's own
                     // denylist covers a kicked player.
-                    if (io_->transport.tcp->mesh()) { removed_peers_.erase(peer); known_edges_.erase(peer); }
+                    if (io_->transport.tcp->mesh()) { removed_peers_.erase(peer); known_edges_.erase(peer); mod_review_edges_.erase(peer); }
                     continue;
                 }
                 if (std::any_of(lobby_->snapshot().seats.begin(), lobby_->snapshot().seats.end(), [&](const auto& seat) { return seat.peer == peer; })) continue;
@@ -755,7 +896,18 @@ void TcpLanMatch::pump_lobby(const skirmish::FixtureOptions& selected) {
             auto agreed = net::decode_galactic_lobby_game(state->snapshot.game);
             if (agreed) galactic_start_ = GalacticLobbyStart{std::move(agreed).value(), lobby_, galactic_};
         }
-        if (io_->transport.tcp->diagnostic() && !view().connected) set_failure(*io_->transport.tcp->diagnostic());
+        if (const auto& error = io_->transport.tcp->diagnostic(); error && !view().connected) {
+            // A two-seat LAN guest can leave before accepting the mod review.
+            // The room has already removed its seat; reopen the listener before
+            // treating the ordinary disconnected edge as a terminal failure.
+            if (view().host && state->snapshot.phase == net::LobbyPhase::staging
+                && state->snapshot.seats.size() == 1 && io_->transport.peer_count() == 2
+                && !io_->transport.tcp->staging_capacity() && error->code == "EAWR-NET-0206") {
+                if (auto reopened = io_->transport.tcp->reopen_staging_listener(); !reopened) set_failure(reopened.error());
+                return;
+            }
+            set_failure(*error);
+        }
     }
 
 } // namespace eawr::presentation::godot_backend::lan_detail

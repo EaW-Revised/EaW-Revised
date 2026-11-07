@@ -100,11 +100,12 @@ def select_toolchain() -> Toolchain | None:
     return Toolchain(str(compiler), environment, True, version)
 
 
-def compile_fixture(toolchain: Toolchain, source: Path, executable: Path) -> None:
+def compile_fixture(toolchain: Toolchain, source: Path, executable: Path, include_dirs: tuple = ()) -> None:
     if toolchain.msvc:
-        arguments = ["/std:c++20", "/EHsc", str(source), f"/Fe:{executable}", f"/Fo:{source.with_suffix('.obj')}"]
+        arguments = ["/std:c++20", "/EHsc", *[f"/I{path}" for path in include_dirs], str(source),
+                     f"/Fe:{executable}", f"/Fo:{source.with_suffix('.obj')}"]
     else:
-        arguments = ["-std=c++20", str(source), "-o", str(executable)]
+        arguments = ["-std=c++20", *[f"-I{path}" for path in include_dirs], str(source), "-o", str(executable)]
     built = subprocess.run([toolchain.compiler, *arguments], env=toolchain.environment,
                            cwd=source.parent, capture_output=True, text=True,
                            timeout=COMPILE_TIMEOUT)

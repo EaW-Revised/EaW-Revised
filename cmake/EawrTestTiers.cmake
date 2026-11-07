@@ -7,9 +7,12 @@
 # too when the change touches the tooling; merge validation runs every test.
 #
 # Each directory that registers tests ends with eawr_label_tests(); eawr_check_test_tiers() at the
-# end of the root list file fails the configure when one does not.
+# end of the root list file fails the configure when one does not. It also adds the area labels of
+# tests/test_labels.txt (cmake/EawrTestLabels.cmake) to every test and fails for a test no row reaches.
 
 include("${CMAKE_CURRENT_LIST_DIR}/EawrGameDataTests.cmake")
+# Area labels (ai, save, checkpoint ...) from tests/test_labels.txt; applied by eawr_check_test_tiers() below.
+include("${CMAKE_CURRENT_LIST_DIR}/EawrTestLabels.cmake")
 
 set(EAWR_SLOW_TESTS
 
@@ -21,7 +24,9 @@ set(EAWR_SLOW_TESTS
     fidelity_trace_comparator_contracts
     foc_ai_turn_668
     foc_burn_battle
-    foc_ai_economy
+    foc_ai_economy_2
+    foc_ai_economy_4
+    foc_ai_economy_8
     foc_plan_battle
     foc_plan_long_tail
     foc_schedule_957
@@ -139,6 +144,9 @@ endfunction()
 # Root list file, after every add_subdirectory: every directory with tests labelled them.
 function(eawr_check_test_tiers)
     eawr_check_game_data_tests("${CMAKE_SOURCE_DIR}")
+    if(COMMAND eawr_apply_area_labels)
+        eawr_apply_area_labels()
+    endif()
     set(unlabelled "")
     set(all_tests "")
     _eawr_collect_test_directories("${CMAKE_SOURCE_DIR}" unlabelled all_tests)

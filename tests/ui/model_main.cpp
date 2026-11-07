@@ -8,6 +8,7 @@ void hud_contracts();
 void hud_shell_contracts();
 void theme_contracts();
 void story_summary_contracts();
+void project_hud_contracts();
 
 int main() {
     layout_contracts();
@@ -16,6 +17,7 @@ int main() {
     hud_shell_contracts();
     theme_contracts();
     story_summary_contracts();
+    project_hud_contracts();
     if (eawr::test::ui::failures() != 0) {
         std::cerr << eawr::test::ui::failures() << " UI model contract(s) failed\n";
         return 1;

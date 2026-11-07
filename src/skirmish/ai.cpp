@@ -1,4 +1,6 @@
 #include "eawr/skirmish/ai.hpp"
+#include "eawr/vfs/vfs.hpp"
+#include "eawr/skirmish/land_start.hpp"
 #include "eawr/skirmish/placement.hpp"
 #include "eawr/skirmish/roster_gate.hpp"
 
@@ -38,6 +40,7 @@ numeric_value lua_float(std::uint32_t bits) {
 
 script::foc::AiSetup ai_setup(const SkirmishStart& start, const StartInputs& inputs, const units::UnitTables& tables) {
     script::foc::AiSetup setup;
+    setup.domain = start.setup.domain; // #3207 G1-b: a land start mounts the land mode (space is the default)
     setup.seed = start.setup.seed;
     setup.content.catalog_types = inputs.catalog_types;
     setup.allow_special_weapons = start.match.allow_superweapons;
@@ -94,6 +97,7 @@ script::foc::AiSetup ai_setup(const SkirmishStart& start, const StartInputs& inp
         type.locomotor = (unit.kind == units::UnitKind::ship && unit.movement.max_speed.has_value() && unit.locomotion) ||
             unit.kind == units::UnitKind::squadron;
         type.star_base = unit.star_base;
+        type.selectable = unit.selectable;
         type.space_special_weapon = unit.planetary_weapon.has_value();
         type.targeting = unit.targeting;
         type.unit_ai = unit.unit_ai;
@@ -221,6 +225,18 @@ script::foc::AiSetup ai_setup(const SkirmishStart& start, const StartInputs& inp
     return setup;
 }
 
+script::foc::AiSetup land_ai_setup(const LandStart& land, const LandStartInputs& inputs, const units::UnitTables& tables) {
+    auto setup = ai_setup(land.start, inputs.common, tables);
+    setup.domain = sim::tactical::BattleDomain::land;
+    // The perception grid covers the playable land rectangle (left, top, right, bottom as in the space bounds).
+    if (land.content.land_terrain) {
+        if (const auto bounds = land.content.land_terrain->playable_bounds()) {
+            setup.bounds = script::foc::AiBounds{lua(bounds->min_x), lua(bounds->max_y), lua(bounds->max_x), lua(bounds->min_y)};
+        }
+    }
+    return setup;
+}
+
 std::string ai_player_type(const StartInputs& inputs, const StartPlayer& player) {
     const bool named = !player.ai_player_type.empty();
     if (!((player.lobby && !player.human) || named)) return {};
@@ -264,21 +280,30 @@ script::foc::AiDifficultyAdjustment player_difficulty(const StartInputs& inputs,
     return inputs.difficulty->resolve(type, player.difficulty);
 }
 
+core::Result<std::optional<sim::tactical::DifficultyScale>> player_difficulty_scale(
+    const StartInputs& inputs, const StartPlayer& player) {
+    using Result = core::Result<std::optional<sim::tactical::DifficultyScale>>;
+    if (!player.lobby || player.human || player.difficulty == sim::tactical::AiLevel::normal) return Result::success(std::nullopt);
+    const script::foc::AiDifficultyAdjustment adjustment = player_difficulty(inputs, player);
+    auto health = script::numeric::to_fixed(adjustment.health);
+    auto shield = script::numeric::to_fixed(adjustment.shield);
+    auto damage = script::numeric::to_fixed(adjustment.damage);
+    if (!health) return Result::failure(health.error());
+    if (!shield) return Result::failure(shield.error());
+    if (!damage) return Result::failure(damage.error());
+    const sim::tactical::DifficultyScale neutral{};
+    sim::tactical::DifficultyScale scale{player.player.player_id, health.value(), shield.value(), damage.value()};
+    if (scale.health == neutral.health && scale.shield == neutral.shield && scale.damage == neutral.damage)
+        return Result::success(std::nullopt);
+    return Result::success(scale);
+}
+
 core::Result<void> bind_difficulty(SessionContent& content, const SkirmishStart& start, const StartInputs& inputs) {
     std::vector<sim::tactical::DifficultyScale> scales;
     for (const StartPlayer& player : start.players) {
-        if (!player.lobby || player.human || player.difficulty == sim::tactical::AiLevel::normal) continue;
-        const script::foc::AiDifficultyAdjustment adjustment = player_difficulty(inputs, player);
-        auto health = script::numeric::to_fixed(adjustment.health);
-        auto shield = script::numeric::to_fixed(adjustment.shield);
-        auto damage = script::numeric::to_fixed(adjustment.damage);
-        if (!health) return core::Result<void>::failure(health.error());
-        if (!shield) return core::Result<void>::failure(shield.error());
-        if (!damage) return core::Result<void>::failure(damage.error());
-        const sim::tactical::DifficultyScale neutral{};
-        sim::tactical::DifficultyScale scale{player.player.player_id, health.value(), shield.value(), damage.value()};
-        if (scale.health == neutral.health && scale.shield == neutral.shield && scale.damage == neutral.damage) continue;
-        scales.push_back(scale);
+        auto scale = player_difficulty_scale(inputs, player);
+        if (!scale) return core::Result<void>::failure(scale.error());
+        if (scale.value()) scales.push_back(*scale.value());
     }
     std::sort(scales.begin(), scales.end(),
         [](const auto& left, const auto& right) { return left.player < right.player; });
@@ -297,7 +322,7 @@ core::Result<void> enable_goal_system(const vfs::Vfs& files, script::foc::AiSetu
             if (entry.canonical_path.find('/', prefix.size()) == std::string::npos) paths.push_back(entry.canonical_path);
         }
     }
-    for (const auto& path : script::foc::required_xml())
+    for (const auto& path : script::foc::required_xml(setup.domain))
         if (!path.starts_with("data/xml/ai/")) paths.push_back(path);
     std::map<std::string, std::string, std::less<>> xml;
     for (const std::string& path : paths) {

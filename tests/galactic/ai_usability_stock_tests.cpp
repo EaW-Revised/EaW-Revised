@@ -6,6 +6,7 @@
 #include <string>
 #include <vector>
 #include "../support/env.hpp"
+#include "eawr/vfs/vfs.hpp"
 #include "../support/result.hpp"
 #include "galactic_support.hpp"
 #include "galactic_ai_usability.hpp"
@@ -128,8 +129,8 @@ void installed() {
             const auto& row = continued.goal_reach[i]; const auto& original = connectivity.goal_reach[i];
             expect(row.player == original.player && row.source == original.source && row.policy == original.policy,
                 "stock restored policy identity/order is exact");
-            expect(row.policy == "Single_Hop_Disconnected" ? row.production_sites.empty() : row.production_sites == original.production_sites,
-                "B-U07 unsaved policy 4 is empty before TTL; archived stock policy output is exact");
+            expect(row.production_sites == original.production_sites,
+                "all six archived stock policy outputs, including policy 4, are exact");
         }
         trace << take(world.state_hash()) << ':' << session.state_sha256();
         if (reference.empty()) reference = trace.str(); else expect(reference == trace.str(), "installed stock output and owner hashes equal on 1/2/4/8");

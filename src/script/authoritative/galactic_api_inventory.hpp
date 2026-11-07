@@ -5,7 +5,7 @@
 #include <string_view>
 
 namespace eawr::script::authoritative::detail {
-inline constexpr std::array<std::string_view, 114> missing_galactic_globals{{
+inline constexpr std::array<std::string_view, 107> missing_galactic_globals{{
     "Add_Objective",
     "Add_Planet_Highlight",
     "Add_Radar_Blip",
@@ -29,18 +29,15 @@ inline constexpr std::array<std::string_view, 114> missing_galactic_globals{{
     "Fade_Screen_In",
     "Fade_Screen_Out",
     "FindDeadlyEnemy",
-    "FindPlanet",
     "FindPlanet.Get_All_Planets",
     "FindTarget",
     "FindTarget.Reachable_Target",
     "Find_All_Objects_Of_Type",
     "Find_All_Objects_With_Hint",
     "Find_Best_Local_Threat_Center",
-    "Find_First_Object",
     "Find_Hint",
     "Find_Nearest",
     "Find_Nearest_Space_Field",
-    "Find_Object_Type",
     "Find_Path",
     "Find_Player",
     "FogOfWar.Reveal",
@@ -58,8 +55,6 @@ inline constexpr std::array<std::string_view, 114> missing_galactic_globals{{
     "Get_Most_Defended_Position",
     "Get_Story_Plot",
     "GiveDesireBonus",
-    "GlobalValue.Get",
-    "GlobalValue.Set",
     "Hide_Object",
     "Hide_Sub_Object",
     "Letter_Box_In",
@@ -70,7 +65,6 @@ inline constexpr std::array<std::string_view, 114> missing_galactic_globals{{
     "Play_Bink_Movie",
     "Play_Lightning_Effect",
     "Play_Music",
-    "PlayerObject.Get_Difficulty",
     "PlayerObject.Get_Faction_Name",
     "PlayerObject.Get_Tech_Level",
     "PlayerObject.Give_Money",
@@ -93,7 +87,6 @@ inline constexpr std::array<std::string_view, 114> missing_galactic_globals{{
     "Set_Cinematic_Target_Key",
     "Spawn_From_Reinforcement_Pool",
     "Spawn_Special_Weapon",
-    "Spawn_Unit",
     "Start_Cinematic_Camera",
     "Start_Cinematic_Space_Retreat",
     "Stop_All_Music",

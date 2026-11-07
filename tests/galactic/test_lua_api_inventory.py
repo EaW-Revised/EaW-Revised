@@ -41,6 +41,36 @@ class GalacticInventoryTests(unittest.TestCase):
         self.assertNotIn(str(root), json.dumps(result))
         self.assertEqual(result, generate(root, manifest, registrations))
 
+    def test_findplanet_is_partial_in_story_host(self):
+        root, manifest = self.fixture({"data/scripts/story/a.lua": 'FindPlanet("x")'})
+        registrations = {"entries": [{"exposed_name": "FindPlanet", "call_kind": "global"}]}
+        row = generate(root, manifest, registrations)["rows"][0]
+        self.assertEqual((row["status"], row["target"]), ("partial", "src/campaign/galactic_story_scripts.cpp"))
+
+    def test_difficulty_is_partial_only_for_the_player_receiver(self):
+        root, manifest = self.fixture({"data/scripts/story/a.lua":
+            'PlayerObject.Get_Difficulty()\nObject.Get_Difficulty()\nowner.Get_Difficulty()'})
+        registrations = {"entries": [{"exposed_name": "Get_Difficulty", "call_kind": "member"}]}
+        rows = generate(root, manifest, registrations)["rows"]
+        partial = [row for row in rows if row["status"] == "partial"]
+        missing = [row for row in rows if row["status"] == "missing"]
+        self.assertEqual(len(partial), 1)
+        self.assertEqual(partial[0]["receiver_expressions"], ["PlayerObject.Get_Difficulty"])
+        self.assertEqual(len(missing), 1)
+        self.assertEqual(missing[0]["receiver_expressions"], ["Object.Get_Difficulty", "owner.Get_Difficulty"])
+
+    def test_shared_global_values_are_partial_only_for_the_global_receiver(self):
+        root, manifest = self.fixture({"data/scripts/story/a.lua":
+            'GlobalValue.Set("key", "value")\nGlobalValue.Get("key")\nThreadValue.Get("key")'})
+        registrations = {"entries": [{"exposed_name": "Get", "call_kind": "member"},
+                                     {"exposed_name": "Set", "call_kind": "member"}]}
+        rows = generate(root, manifest, registrations)["rows"]
+        partial = [row for row in rows if row["status"] == "partial"]
+        self.assertEqual(len(partial), 2)
+        self.assertEqual({row["target"] for row in partial}, {"src/script/authoritative/bindings.cpp"})
+        self.assertEqual([row["receiver_expressions"] for row in rows if row["status"] == "missing"],
+                         [["ThreadValue.Get"]])
+
     def test_pinned_winning_bytes_are_required(self):
         root, manifest = self.fixture({"data/scripts/story/a.lua": 'Find_Player("x")'})
         (root / "data/scripts/story/a.lua").write_text("changed")

@@ -24,6 +24,40 @@ namespace math = eawr::sim::math;
 using eawr::testing::result_code_colon::take;
 void check(eawr::core::Result<void> result) { eawr::testing::must(std::move(result)); }
 
+void seeded_controller_ties() {
+    tactical::TacticalSetup original;
+    original.seed = 12345;
+    original.players = {{1, 1, 1, 1}};
+    original.campaign.emplace();
+    original.controllers.emplace();
+    original.controllers->factions = {{1, tactical::FactionController::humans}};
+    for (std::uint32_t seat = 1; seat <= 4; ++seat)
+        original.controllers->seats.push_back({{seat}, 1, galactic::SeatKind::human, true});
+    for (std::uint64_t id = 1; id <= 32; ++id) {
+        tactical::UnitState unit; unit.entity_id = id; unit.owner = 1; unit.type_id = 1;
+        original.units.push_back(unit);
+    }
+    tactical::EconomyRules economy;
+    auto first = original;
+    check(tactical::split_initial_controllers(first, economy));
+    for (std::uint32_t seat = 1; seat <= 4; ++seat)
+        expect(std::count_if(first.units.begin(), first.units.end(), [seat](const auto& unit) {
+            return unit.controller_seat.value == seat;
+        }) == 8, "equal roots are dealt evenly");
+    auto reversed = original;
+    std::reverse(reversed.units.begin(), reversed.units.end());
+    check(tactical::split_initial_controllers(reversed, economy));
+    expect(first == reversed, "seeded split is independent of input order");
+    auto changed = original; ++changed.seed;
+    check(tactical::split_initial_controllers(changed, economy));
+    expect(std::any_of(first.units.begin(), first.units.end(), [&](const auto& unit) {
+        return unit.controller_seat != changed.units[static_cast<std::size_t>(unit.entity_id - 1)].controller_seat;
+    }), "different seeds change equal-root assignments");
+    expect(std::any_of(first.units.begin(), first.units.end(), [](const auto& unit) {
+        return unit.controller_seat.value != (unit.entity_id - 1) % 4 + 1;
+    }), "equal-root assignments do not follow entity-ID order");
+}
+
 galactic::GalacticSetup setup(bool coop = false) {
     galactic::SyntheticGalaxyOptions options; options.planets = 8; options.players = 4;
     options.fleets_per_player = 1; options.members_per_fleet = 1; options.debug_commands = true;
@@ -157,21 +191,12 @@ void roster_and_dropout() {
             && !passive.galaxy().seats()[8].active, "explicit passive dropout policy does not activate AI");
     }
 }
-void opt_in_controllers(campaign::ConflictRecord& record, const galactic::GalacticSetup& config) {
+void campaign_accounts(campaign::ConflictRecord& record) {
     record.tactical.campaign.emplace();
-    record.tactical.controllers.emplace();
     for (const auto player : {record.invader, record.defender}) {
-        tactical::EconomyPlayer account; account.player = player; account.credit_cap = math::Fixed{}; record.tactical.campaign->players.push_back(account);
-        const bool human = std::any_of(config.seats.begin(), config.seats.end(), [&](const auto& row) {
-            return row.player == player && row.active && row.kind == galactic::SeatKind::human;
-        });
-        record.tactical.controllers->factions.push_back({player,
-            human ? tactical::FactionController::humans : tactical::FactionController::ai});
+        tactical::EconomyPlayer account; account.player = player; account.credit_cap = math::Fixed{};
+        record.tactical.campaign->players.push_back(account);
     }
-    for (const auto& seat : config.seats) if (seat.active && (seat.player == record.invader || seat.player == record.defender))
-        record.tactical.controllers->seats.push_back({seat.seat_id, seat.player, seat.kind, true});
-    auto rules = content(record);
-    check(tactical::split_initial_controllers(record.tactical, rules.economy));
 }
 
 void roles_and_checkpoint() {
@@ -180,7 +205,7 @@ void roles_and_checkpoint() {
         const eawr::platform::ThreadWorkerAdapter executor(workers);
         for (const auto role : {galactic::BattleTeamRole::ai_side, galactic::BattleTeamRole::spectate, galactic::BattleTeamRole::ally}) for (const bool controllers : {false, true}) {
             const auto config = setup(); auto record = conflict(config);
-            if (controllers) opt_in_controllers(record, config);
+            if (controllers) campaign_accounts(record);
             const auto tables = content(record);
             auto game = take(campaign::GameSession::create(config)); check(game.stage_battle(record, tables, eawr::campaign::ScriptRequirement::none));
             (void)take(game.step(executor));
@@ -469,7 +494,7 @@ Create_Thread("main")
         auto reserve = config.fleets.front().members.front();
         reserve.id = take(galactic::GalacticSession::create(config)).next_entity_id();
         config.fleets.front().members.push_back(reserve);
-        auto record = conflict(config); opt_in_controllers(record, config);
+        auto record = conflict(config); campaign_accounts(record);
         record.forces.push_back({reserve.id, reserve.type, 1, config.fleets.front().id, campaign::ForceRole::reinforcement});
         std::sort(record.forces.begin(), record.forces.end(), [](const auto& a, const auto& b) { return a.id < b.id; });
         record.tactical.campaign->reserves.push_back({reserve.id, reserve.type, 1, false, 0, {}});
@@ -545,7 +570,7 @@ Create_Thread("main")
     for (const bool no_ai_seat : {false, true}) {
         auto config = setup(true);
         if (no_ai_seat) std::erase_if(config.seats, [](const auto& seat) { return seat.seat_id.value == 9; });
-        auto record = conflict(config); opt_in_controllers(record, config); const auto tables = content(record);
+        auto record = conflict(config); campaign_accounts(record); const auto tables = content(record);
         auto unsupported = take(campaign::GameSession::create(config));
         if (no_ai_seat) unsupported.set_child_configurator([](auth::ScriptedTacticalSession& host) {
             return host.set_engine(std::make_shared<DepartureProvider>());
@@ -575,7 +600,7 @@ void cooperative_departure_lockstep() {
     using Adapter = lockstep::GameSessionAdapter; using Peer = lockstep::Peer<Adapter>;
     for (const auto peer_count : {2U, 4U, 8U}) for (const auto workers : {1U, 2U, 4U, 8U}) {
         const eawr::platform::ThreadWorkerAdapter executor(workers); const auto config = setup(true);
-        auto record = conflict(config); opt_in_controllers(record, config); const auto tables = content(record);
+        auto record = conflict(config); campaign_accounts(record); const auto tables = content(record);
         std::vector<galactic::GameCommand> commands{{{3, {1}, 1}, galactic::SeatLeave{}}};
         auto split = lockstep::split_by_issuer<Adapter>(commands, peer_count); std::vector<Peer> peers;
         for (std::uint32_t index = 0; index < peer_count; ++index) {
@@ -586,6 +611,220 @@ void cooperative_departure_lockstep() {
         std::vector<Peer*> pointers; for (auto& peer : peers) pointers.push_back(&peer);
         lockstep::Options options; options.final_tick = 8; options.compare_every = 1; options.input_delay = 1;
         const auto report = lockstep::run<Adapter>(pointers, options); expect(report.agreed(), report.describe());
+    }
+}
+
+// ADR-020: one synthetic corpus crosses the parent, child, restore and peer paths.
+void cooperative_cross_path_corpus() {
+    for (const bool versus : {false, true}) {
+        std::vector<std::string> reference;
+        for (const auto workers : {1U, 2U, 4U, 8U}) {
+            const eawr::platform::ThreadWorkerAdapter executor(workers), other(workers == 1 ? 8 : 1);
+            auto config = setup(!versus);
+            std::erase_if(config.seats, [versus](const auto& seat) {
+                return seat.kind == galactic::SeatKind::human && seat.seat_id.value != 1 && seat.seat_id.value != 2
+                    && (!versus || (seat.seat_id.value != 5 && seat.seat_id.value != 6));
+            });
+            const auto defender = versus ? 2U : 3U;
+            const auto fixed = [](std::int64_t value) { return math::Fixed::from_integer(value).value(); };
+            config.rules.maximum_fleet_movement_distance = fixed(5000);
+            config.fleet_control.emplace();
+            config.fleet_control->types = {{1000, false, true, false}};
+            config.movement.emplace();
+            config.movement->mode_modifier = fixed(1);
+            config.movement->types = {{1000, fixed(2), fixed(100), 0, true, false, false, false}};
+            for (const auto& player : config.players) {
+                config.movement->players.push_back({player.player_id, fixed(1), fixed(3), false});
+                for (const auto& planet : config.planets)
+                    config.movement->access.push_back({player.player_id, planet.id, true, false});
+            }
+            for (const auto& planet : config.planets) config.movement->planets.push_back({planet.id, fixed(1), false});
+            for (auto& fleet : config.fleets) if (fleet.owner == 1 || fleet.owner == defender)
+                fleet.orbit = config.planets.front().id;
+            config.player_economy.emplace();
+            for (const auto& player : config.players)
+                config.player_economy->players.push_back({player.player_id, {}, {}, 0, 0});
+            auto next = take(galactic::GalacticSession::create(config)).next_entity_id();
+            for (auto& fleet : config.fleets) if (fleet.owner == 1 || fleet.owner == defender) {
+                const auto member = fleet.members.front();
+                for (int i = 0; i < 3; ++i) { auto extra = member; extra.id = next++; fleet.members.push_back(extra); }
+            }
+            auto record = conflict(config, defender);
+            for (const auto& fleet : config.fleets) if (fleet.owner == 1 || fleet.owner == defender) {
+                const auto& root = fleet.members[1];
+                record.forces.push_back({root.id, root.type, fleet.owner, fleet.id});
+                record.tactical.units.push_back({root.id, root.type, fleet.owner});
+            }
+            const auto by_id = [](const auto& a, const auto& b) { return a.id < b.id; };
+            std::sort(record.forces.begin(), record.forces.end(), by_id);
+            std::sort(record.tactical.units.begin(), record.tactical.units.end(), [](const auto& a, const auto& b) { return a.entity_id < b.entity_id; });
+            campaign_accounts(record);
+            expect(!record.tactical.controllers, "P7 fixture supplies no opt-in controller policy");
+            for (auto& account : record.tactical.campaign->players) account.population_cap = 20;
+            for (const auto& fleet : config.fleets) if (fleet.owner == 1 || (versus && fleet.owner == defender))
+                for (std::size_t i = 2; i < 4; ++i) {
+                    const auto& reserve = fleet.members[i];
+                    record.forces.push_back({reserve.id, reserve.type, fleet.owner, fleet.id, campaign::ForceRole::reinforcement});
+                    record.tactical.campaign->reserves.push_back({reserve.id, reserve.type, fleet.owner, false, 0, {}});
+                }
+            std::sort(record.forces.begin(), record.forces.end(), by_id);
+            auto tables = content(record);
+            tables.victory.condition = tactical::VictoryCondition::all_enemy_units_destroyed;
+            tables.victory.contenders = {1, defender}; tables.victory.controlled_players = {1, defender};
+            tables.victory.humans = {1}; if (versus) tables.victory.humans.push_back(defender);
+            tables.victory.countdown_frames = 2;
+            for (const auto& profile : tables.durability.profiles) tables.victory.relevant_types.push_back(profile.type_id);
+            tables.motion.rules.arc_degrees = fixed(30); tables.motion.rules.expansion_distance = fixed(10);
+            for (const auto& profile : tables.durability.profiles)
+                tables.motion.profiles.push_back({profile.type_id, fixed(1), fixed(1), fixed(1), fixed(1), fixed(1)});
+            tables.retreat.emplace(); tables.retreat->rules.campaign = true;
+            tables.retreat->rules.players = {{1, 2, true}, {defender, 2, true}};
+            for (const auto& force : record.forces) {
+                tactical::RetreatActor actor{force.id, force.owner, true, true, true, true}; actor.persistent = true;
+                tables.retreat->actors.push_back(actor);
+            }
+            auto load = load_options();
+            load.content = [tables](const auto&) { return eawr::core::Result<tactical::TacticalContent>::success(tables); };
+            auto game = take(campaign::GameSession::create(config));
+            check(game.stage_battle(record, tables, campaign::ScriptRequirement::none));
+            std::vector<std::string> hashes;
+            const auto step = [&] { auto tick = take(game.step(executor)); hashes.push_back(tick.state_hash.get()); return tick; };
+            (void)step();
+            expect(game.battle()->controller_policy().has_value(), "P7 two humans on a side enable splitting without an option");
+            const auto issue = [&](std::uint32_t seat, tactical::PlayerId player, std::uint64_t sequence,
+                                   std::vector<eawr::sim::EntityId> units, tactical::CommandPayload payload) {
+                tactical::PlayerCommand command{{0, player, sequence}, std::move(units), std::move(payload), {seat}, tactical::CommandOrigin::seat};
+                auto body = take(tactical::encode_command_body(command, game.battle()->initial_setup()));
+                check(game.submit({{game.completed_tick(), {seat}, sequence}, galactic::TacticalLayerCommand{
+                    record.id, tactical::command_body_opcode(command), std::move(body)}}));
+            };
+            for (const auto& fleet : config.fleets) if (fleet.owner == 1 || (versus && fleet.owner == defender)) {
+                const auto seat = fleet.owner == 1 ? 1U : 5U;
+                const auto units = game.battle()->units();
+                for (const auto caller : {seat, seat + 1}) expect(std::count_if(units.begin(), units.end(), [&](const auto& unit) {
+                    return unit.owner == fleet.owner && unit.controller_seat.value == caller;
+                }) == 1, "P7 deployed roots split between both callers on each human side");
+                for (std::size_t i = 2; i < 4; ++i) issue(seat + static_cast<std::uint32_t>(i - 2), fleet.owner, 1, {},
+                    tactical::ReinforcePayload{fleet.members[i].type, {}, fleet.members[i].id});
+            }
+            (void)step();
+            for (const auto& fleet : config.fleets) if (fleet.owner == 1 || (versus && fleet.owner == defender)) {
+                const auto seat = fleet.owner == 1 ? 1U : 5U;
+                const auto units = game.battle()->units();
+                for (std::size_t i = 2; i < 4; ++i) {
+                    const auto born = std::find_if(units.begin(), units.end(), [&](const auto& unit) { return unit.entity_id == fleet.members[i].id; });
+                    expect(born != units.end() && born->owner == fleet.owner && born->controller_seat.value == seat + i - 2,
+                        "P7 both persistent reserve arrivals retain their distinct callers");
+                }
+                issue(seat, fleet.owner, 2, {fleet.members[2].id}, tactical::GiftPayload{{seat + 1}});
+            }
+            (void)step();
+            for (const auto& fleet : config.fleets) if (fleet.owner == 1 || (versus && fleet.owner == defender)) {
+                const auto units = game.battle()->units();
+                const auto gifted = std::find_if(units.begin(), units.end(), [&](const auto& unit) { return unit.entity_id == fleet.members[2].id; });
+                expect(gifted != units.end() && gifted->controller_seat.value == (fleet.owner == 1 ? 2U : 6U),
+                    "P7 gift transfers the called-in root before departure redistribution");
+            }
+            for (const auto seat : {1U, 5U}) if (seat == 1 || versus)
+                check(game.submit({{game.completed_tick(), {seat}, 3}, galactic::SeatLeave{}}));
+            (void)step();
+            for (const auto& unit : game.battle()->units()) if (unit.owner == 1 || versus)
+                expect(unit.controller_seat.value == (unit.owner == 1 ? 2U : 6U), "P7 gifts and departure consolidate mobile control within each faction");
+            const auto identities = cp::game_identities(config);
+            const auto saved = take(cp::save_game_checkpoint(game, identities));
+            auto restored = take(cp::load_game_checkpoint(saved, identities, load, other));
+            expect(take(cp::save_game_checkpoint(restored.session, identities)) == saved, "P7 restore never re-splits consolidated roots");
+            const auto child_bytes = take(tactical::write_replay(*game.battle_record()));
+            auto child = take(tactical::TacticalSession::from_replay(take(tactical::parse_replay(child_bytes)), tables));
+            while (child.completed_tick() < game.battle()->completed_tick()) (void)take(child.step(other));
+            expect(child.state_sha256() == game.battle()->state_sha256(), "P7 standalone child reproduces calls, gifts and departures");
+            tactical::PlayerCommand retreat{{0, 1, 4}, {}, tactical::RetreatPayload{tactical::RetreatAction::start},
+                {2}, tactical::CommandOrigin::seat};
+            const galactic::TacticalLayerCommand retreat_input{record.id, tactical::command_body_opcode(retreat),
+                take(tactical::encode_command_body(retreat, game.battle()->initial_setup()))};
+            for (auto* owner : {&game, &restored.session}) check(owner->submit({{owner->completed_tick(), {2}, 4}, retreat_input}));
+            std::optional<campaign::BattleResult> result;
+            for (int i = 0; i < 600 && game.battle(); ++i) {
+                const auto tick = step(), resumed = take(restored.session.step(other));
+                expect(tick.state_hash.get() == resumed.state_hash.get() && tick.result == resumed.result,
+                    "P7 restored continuation matches every live digest and faction result");
+                if (tick.result) result = tick.result;
+            }
+            expect(result && result->winner == defender && !game.battle(), "P7 integrated corpus reaches ordinary faction retreat return");
+            const auto returned_child = take(tactical::parse_replay(take(tactical::write_replay(*game.battle_record()))));
+            auto full_child = take(tactical::TacticalSession::from_replay(returned_child, tables));
+            while (full_child.completed_tick() < returned_child.final_tick_count) (void)take(full_child.step(other));
+            const auto surviving_units = full_child.units();
+            expect(std::count_if(surviving_units.begin(), surviving_units.end(), [](const auto& unit) {
+                return unit.owner == 1;
+            }) == 4, "P7 full standalone child retains both deployed and both called-in faction survivors at return");
+            expect(game.galaxy().canonical_state_bytes() == restored.session.galaxy().canonical_state_bytes(),
+                "P7 restored fleets, accounts and population return identically");
+            for (const auto& fleet : game.galaxy().snapshot()->fleets()) for (const auto& member : fleet.members)
+                if (std::any_of(record.forces.begin(), record.forces.end(), [&](const auto& force) { return force.id == member.id && force.owner == 1; }))
+                    expect(fleet.owner == 1, "P7 gifted and called-in survivors retain original faction ownership");
+            auto replayed = take(campaign::GameSession::from_recording(game.recording(), load.content, {}, campaign::ScriptRequirement::none));
+            for (const auto& hash : hashes) expect(take(replayed.step(other)).state_hash.get() == hash, "P7 GC replay matches every live lifecycle digest");
+            if (workers == 1) reference = hashes;
+            else expect(hashes == reference, "P7 cross-path corpus agrees on 1/2/4/8 entity workers");
+            using Adapter = lockstep::GameSessionAdapter; using Peer = lockstep::Peer<Adapter>;
+            auto split = lockstep::split_by_issuer<Adapter>(game.record().commands, 2);
+            std::vector<Peer> peers;
+            for (std::size_t index = 0; index < 2; ++index) {
+                auto peer = take(campaign::GameSession::create(config)); check(peer.stage_battle(record, tables, campaign::ScriptRequirement::none));
+                peers.push_back({std::move(peer), index == 0 ? &executor : &other, std::move(split[index]), {}, {}});
+                if (index) peers.back().before_step = [](auto& session, std::uint64_t) { session.scramble_storage_for_testing(); };
+            }
+            std::vector<Peer*> pointers{&peers[0], &peers[1]};
+            lockstep::Options options; options.final_tick = game.completed_tick(); options.compare_every = 1; options.input_delay = 1;
+            const auto report = lockstep::run<Adapter>(pointers, options); expect(report.agreed(), report.describe());
+            expect(peers[0].session.state_sha256() == game.state_sha256(), "P7 two-peer corpus reaches live faction-return digest");
+        }
+    }
+}
+
+void cooperative_no_human_and_solo() {
+    const eawr::sim::InlineExecutor executor;
+    for (const auto mode : {0, 1, 2}) {
+        const bool no_human = mode == 2, versus = mode == 1;
+        auto config = setup(!versus);
+        std::erase_if(config.seats, [no_human](const auto& seat) { return no_human && seat.kind == galactic::SeatKind::human; });
+        for (auto& seat : config.seats) if (seat.kind == galactic::SeatKind::human)
+            seat.active = seat.seat_id.value == 1 || (versus && seat.seat_id.value == 5);
+        if (no_human) {
+            config.seat_control->teams.clear();
+            for (auto& controller : config.seat_control->controllers) controller.kind = galactic::FactionControl::ai;
+            for (auto& seat : config.seats) seat.active = true;
+        }
+        auto record = conflict(config, versus ? 2U : 3U);
+        campaign_accounts(record);
+        const auto tables = content(record);
+        auto game = take(campaign::GameSession::create(config));
+        check(game.stage_battle(record, tables, campaign::ScriptRequirement::none)); (void)take(game.step(executor));
+        for (const auto& unit : game.battle()->units())
+            expect(unit.controller_seat.value == 0 && unit.control == tactical::UnitControl::none,
+                "P7 no-human and solo sides preserve the policy-off faction command model");
+        expect(!game.battle()->controller_policy(), "P7 no-human, human-AI and one-human-per-side battles do not enable cooperative splitting");
+        auto expected = record.tactical; expected.seed = campaign::child_seed(config.seed, record.id);
+        expect(game.battle()->initial_setup() == expected,
+            "policy-off GC entry preserves every setup field apart from its existing child seed");
+        auto supplied = record;
+        supplied.tactical.controllers.emplace();
+        for (auto& unit : supplied.tactical.units) { unit.controller_seat = {77}; unit.control = tactical::UnitControl::mobile; }
+        auto ignored = take(campaign::GameSession::create(config));
+        check(ignored.stage_battle(supplied, tables, campaign::ScriptRequirement::none)); (void)take(ignored.step(executor));
+        expect(ignored.state_sha256() == game.state_sha256(), "old opt-in flags and assignments cannot enable a solo policy");
+        roundtrip(game, executor);
+        auto skirmish = record.tactical; skirmish.controllers.reset(); skirmish.campaign.reset();
+        for (auto& unit : skirmish.units) { unit.controller_seat = {}; unit.control = tactical::UnitControl::none; }
+        auto ordinary = take(tactical::TacticalSession::create(skirmish));
+        expect(!ordinary.controller_policy(), "P7 standalone skirmish never enables cooperative splitting");
+        (void)take(ordinary.step(executor));
+        const auto bytes = take(tactical::write_replay(ordinary.record()));
+        auto replayed = take(tactical::TacticalSession::from_replay(take(tactical::parse_replay(bytes))));
+        (void)take(replayed.step(executor));
+        expect(ordinary.state_sha256() == replayed.state_sha256()
+            && take(tactical::write_replay(replayed.record())) == bytes, "P7 policy-off skirmish retains canonical replay bytes and digest");
     }
 }
 
@@ -658,7 +897,7 @@ void rejoin_ends_fast_forward() {
 }
 } // namespace
 int case_galactic_seat_roles_tests() {
-    try { cooperative_departure_continuation(); cooperative_departure_lockstep(); controller_provenance(); roster_and_dropout(); roles_and_checkpoint(); battle_start_events(); unrelated_ai_activity(); readiness_departure_and_return(); all_peers_lockstep(); generated_controller_orders(); rejoin_ends_fast_forward(); }
+    try { seeded_controller_ties(); cooperative_no_human_and_solo(); cooperative_cross_path_corpus(); cooperative_departure_continuation(); cooperative_departure_lockstep(); controller_provenance(); roster_and_dropout(); roles_and_checkpoint(); battle_start_events(); unrelated_ai_activity(); readiness_departure_and_return(); all_peers_lockstep(); generated_controller_orders(); rejoin_ends_fast_forward(); }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
     return failures == 0 ? 0 : 1;
 }

@@ -49,6 +49,7 @@ sys.path.insert(0, str(ROOT / "tools"))
 import symbol_store  # noqa: E402
 sys.path.insert(0, str(ROOT / "tools" / "release"))
 import launcher_artifact  # noqa: E402
+import update_manifest  # noqa: E402
 from shader_runtime_package import package as shader_runtime_package  # noqa: E402
 
 TOOLS = ("sim_headless", "sim_bench", "path_bench", "asset_scan", "asset_validate", "xml_scan", "scene_scan",
@@ -66,7 +67,9 @@ PLATFORMS = {
 PLAYER_LAUNCHER = "EAWR.exe"
 PLAYER_GODOT = "godot/Godot_v4.7.2-stable_win64.exe"
 PLAYER_SUMS = "SHA256SUMS"
-PLAYER_SAFE_START = "EAWR (Safe render thread).cmd"
+REVISED_LAYER_RELPATH = Path("Revised")
+REVISED_LAYER_MANIFEST = ROOT / "tools/release/revised-layer-manifest.json"
+REVISED_LAYER_README = "The Revised voice and hotkey layer is included and enabled by default."
 # The bundled runtime must be byte-identical to the pinned patched build (EAWR fork fad06b579, MSVC lto=full;
 # third_party/godot/README.md), not only report its version. The maintainer-only remote-run tooling keeps pinning the
 # stock official exe for its probes, so the two pins differ on purpose.
@@ -109,6 +112,44 @@ def verify_identity(expected: Optional[str], binaries: list[tuple[Path, bool]]) 
             if commit != expected or dirty:
                 raise ValueError(f"{binary.name} embeds build identity {commit}{'+dirty' if dirty else ''}, "
                                  f"not the packaged commit {expected}: rebuild it (a warm tree keeps a stale identity)")
+
+
+KIT_LABEL_FILE = ROOT / "tools" / "release" / "kit-label.txt"
+KIT_LABEL_RULE = "the kit label must be 1-32 characters from A-Z a-z 0-9 . _ - (no spaces, paths or quotes)"
+
+
+def read_kit_label(path: Path = KIT_LABEL_FILE) -> str:
+    """The kit a release is cut as: the first line of tools/release/kit-label.txt, '' when the cut has no file.
+
+    The offload build scripts pass the same line to CMake as EAWR_KIT_LABEL; this packager builds nothing and only
+    checks the binaries against it.
+    """
+    if not path.is_file():
+        return ""
+    # utf-8-sig: a file saved by PowerShell may start with a byte order mark, which the offload scripts' reader drops.
+    lines = path.read_text(encoding="utf-8-sig").splitlines()
+    label = lines[0].strip() if lines else ""
+    if label and not re.fullmatch(r"[A-Za-z0-9._-]{1,32}", label):
+        raise ValueError(f"kit label {label!r} in {path.name} is invalid: {KIT_LABEL_RULE}")
+    return label
+
+
+def verify_kit_label(label: str, binaries: list[tuple[Path, bool]]) -> None:
+    """A cut that carries a kit label must ship binaries whose identity starts with it (a warm tree keeps an old one)."""
+    if not label:
+        return
+    # The identity string is not NUL-delimited: in the real binaries it follows the hex digit table ("...6789abcdef")
+    # directly. So the label starts either after a character outside the label alphabet or right after that table;
+    # any other label character before it means a longer, different label (10.3.2g is not 0.3.2g).
+    # Residual: a label that begins with the table's last character 'f' cannot be told from the table glued to a
+    # shorter label. Accepted: the label is the committed kit-label.txt and the identity always starts with it.
+    prefix = re.compile(rb"(?:(?<![A-Za-z0-9_.-])|(?<=0123456789abcdef))" + re.escape(label.encode())
+                        + rb"\+[0-9a-f]{40}")
+    for binary, required in binaries:
+        with binary.open("rb") as stream, mmap.mmap(stream.fileno(), 0, access=mmap.ACCESS_READ) as data:
+            if BUILD_IDENTITY_PATTERN.search(data) and not prefix.search(data):
+                raise ValueError(f"{binary.name} embeds a build identity without the kit label {label}: rebuild it "
+                                 f"from the cut commit (a warm tree keeps a stale one)")
 
 
 def identity_binaries(spec: dict, build_dir: Path, configuration: str, launcher: Optional[Path],
@@ -172,18 +213,51 @@ def preimport_project(godot: Path, project: Path, importer: Callable[[Path, Path
         raise RuntimeError(f"the pre-import did not produce {', '.join(missing)}" + (f" ({output})" if output else ""))
 
 
+def stage_revised_layer(folder: Path, source: Optional[Path], allow_missing: bool, public: bool) -> bool:
+    """Stage the layer; public packages require the exact reviewed files and bytes."""
+    if source is None or not source.is_dir():
+        message = "Revised layer source is missing; set --revised-layer or EAWR_REVISED_LAYER_DIR"
+        if public or not allow_missing:
+            raise FileNotFoundError(message)
+        print(f"package_release: warning: {message}", file=sys.stderr)
+        return False
+    if not all((source / "Data" / name).is_dir() for name in ("Audio", "XML")):
+        raise ValueError("Revised layer source must contain Data/Audio and Data/XML")
+    if any(path.is_symlink() for path in source.rglob("*")):
+        raise ValueError("Revised layer source must not contain symlinks")
+    target = folder / REVISED_LAYER_RELPATH
+    before = {p.relative_to(source): (p.stat().st_size, sha256_file(p)) for p in source.rglob("*") if p.is_file()}
+    if not before:
+        raise ValueError("Revised layer source contains no files")
+    if public:
+        manifest = json.loads(REVISED_LAYER_MANIFEST.read_text(encoding="utf-8"))
+        expected = {Path(name): (entry["size"], entry["sha256"])
+                    for name, entry in manifest["files"].items()}
+        if manifest.get("schema") != 1 or before != expected:
+            raise ValueError("public Revised layer differs from the reviewed file manifest")
+    shutil.copytree(source, target)
+    after = {p.relative_to(target): (p.stat().st_size, sha256_file(p)) for p in target.rglob("*") if p.is_file()}
+    if before != after:
+        raise ValueError("Revised layer copy verification failed (file count, sizes or hashes differ)")
+    return True
+
+
 def build_player(stem: str, spec: dict, out: Path, godot: Path, launcher: Optional[Path],
                  importer: Callable[[Path, Path], Optional[str]] = godot_import,
                  debug_build_dir: Optional[Path] = None, mods_service: Optional[Path] = None,
                  manager_artifact: Optional[Path] = None,
                  launcher_pin: Path = launcher_artifact.DEFAULT_PIN, with_mods_manager: bool = False,
-                 shader_runtime: Optional[Path] = None) -> Path:
+                 shader_runtime: Optional[Path] = None, revised_layer: Optional[Path] = None,
+                 allow_missing_revised_layer: bool = False, public: bool = False,
+                 readme_note: str = "") -> Path:
     """The portable Windows player folder as a zip: launcher slot, pinned Godot GUI runtime, pre-imported project.
 
     With debug_build_dir (the Debug configuration of the root build) the same folder is written as the debug
     variant: the viewer project's current extension must be the Debug one and carry its PDB, and the headless tools
     of that build ride along in tools/ with their PDBs (docs/debug-build.md ships as DEBUG-BUILD.md).
     """
+    if (VIEWER_PROJECT / "cross-build-rig-only.json").exists():
+        raise ValueError("cross-built viewer artifacts are for rig runs only")
     debug = debug_build_dir is not None
     if godot.name.casefold() != Path(PLAYER_GODOT).name.casefold():
         raise ValueError(f"--godot must be the standard GUI executable {Path(PLAYER_GODOT).name} (no console companion)")
@@ -231,9 +305,13 @@ def build_player(stem: str, spec: dict, out: Path, godot: Path, launcher: Option
         for name in ("LICENSE", "THIRD_PARTY_NOTICES.md"):
             shutil.copyfile(ROOT / name, folder / name)
         shutil.copyfile(PLAYER_GUIDE, folder / "README.md")
-        # Opt-out from the default Separate render thread: the same launcher with the Safe engine mode.
-        (folder / PLAYER_SAFE_START).write_text(
-            f'@echo off\r\nstart "" "%~dp0{PLAYER_LAUNCHER}" --safe-render-thread %*\r\n', encoding="utf-8", newline="")
+        if readme_note:
+            with (folder / "README.md").open("a", encoding="utf-8", newline="\n") as readme:
+                readme.write(f"\n{readme_note}\n")
+        included_layer = stage_revised_layer(folder, revised_layer, allow_missing_revised_layer, public)
+        if included_layer:
+            with (folder / "README.md").open("a", encoding="utf-8", newline="\n") as readme:
+                readme.write(f"\n{REVISED_LAYER_README}\n")
         tool_sha256: dict[str, str] = {}
         if debug:
             shutil.copyfile(DEBUG_GUIDE, folder / "DEBUG-BUILD.md")
@@ -289,7 +367,11 @@ def package(build_dir: Path, platform: str, version: str, out: Path, godot: Opti
             importer: Callable[[Path, Path], Optional[str]] = godot_import,
             mods_service: Optional[Path] = None, manager_artifact: Optional[Path] = None,
             launcher_pin: Path = launcher_artifact.DEFAULT_PIN, with_mods_manager: bool = False,
-            expect_identity: Optional[str] = None, shader_runtime: Optional[Path] = None) -> list[Path]:
+            expect_identity: Optional[str] = None, shader_runtime: Optional[Path] = None,
+            revised_layer: Optional[Path] = None, allow_missing_revised_layer: bool = False,
+            public: bool = False, readme_note: str = "") -> list[Path]:
+    if (VIEWER_PROJECT / "cross-build-rig-only.json").exists():
+        raise ValueError("cross-built viewer artifacts are for rig runs only")
     spec = PLATFORMS[platform]
     if shader_runtime is not None:
         if platform != "windows-x64":
@@ -300,6 +382,7 @@ def package(build_dir: Path, platform: str, version: str, out: Path, godot: Opti
     if godot is not None and platform != "windows-x64":
         raise ValueError("the player folder is Windows x64 only for now")
     verify_identity(expect_identity, identity_binaries(spec, build_dir, "Release", launcher, mods_service))
+    verify_kit_label(read_kit_label(), identity_binaries(spec, build_dir, "Release", launcher, mods_service))
     out.mkdir(parents=True, exist_ok=True)
     stem = f"eaw-revised-{version}-{platform}"
 
@@ -347,7 +430,9 @@ def package(build_dir: Path, platform: str, version: str, out: Path, godot: Opti
     if godot is not None:
         files.append(build_player(stem, spec, out, godot, launcher, importer, mods_service=mods_service,
                                   manager_artifact=manager_artifact, launcher_pin=launcher_pin,
-                                  with_mods_manager=with_mods_manager, shader_runtime=shader_runtime))
+                                  with_mods_manager=with_mods_manager, shader_runtime=shader_runtime, revised_layer=revised_layer,
+                                  allow_missing_revised_layer=allow_missing_revised_layer, public=public,
+                                  readme_note=readme_note))
     return files
 
 
@@ -355,7 +440,9 @@ def package_debug(build_dir: Path, version: str, out: Path, godot: Path, launche
                   importer: Callable[[Path, Path], Optional[str]] = godot_import,
                   mods_service: Optional[Path] = None, manager_artifact: Optional[Path] = None,
                   launcher_pin: Path = launcher_artifact.DEFAULT_PIN, with_mods_manager: bool = False,
-                  expect_identity: Optional[str] = None, shader_runtime: Optional[Path] = None) -> Path:
+                  expect_identity: Optional[str] = None, shader_runtime: Optional[Path] = None,
+                  revised_layer: Optional[Path] = None, allow_missing_revised_layer: bool = False,
+                  public: bool = False, readme_note: str = "") -> Path:
     """The Windows x64 debug variant (eaw-revised-<version>-windows-x64-debug.zip).
 
     build_dir is the root build's Debug configuration; the viewer project's bin/ must hold the Debug extension
@@ -363,8 +450,9 @@ def package_debug(build_dir: Path, version: str, out: Path, godot: Path, launche
     """
     spec = PLATFORMS["windows-x64"]
     verify_identity(expect_identity, identity_binaries(spec, build_dir, "Debug", launcher, mods_service))
+    verify_kit_label(read_kit_label(), identity_binaries(spec, build_dir, "Debug", launcher, mods_service))
     out.mkdir(parents=True, exist_ok=True)
-    return build_player(f"eaw-revised-{version}-windows-x64", spec, out, godot, launcher, importer, build_dir, mods_service, manager_artifact, launcher_pin, with_mods_manager, shader_runtime)
+    return build_player(f"eaw-revised-{version}-windows-x64", spec, out, godot, launcher, importer, build_dir, mods_service, manager_artifact, launcher_pin, with_mods_manager, shader_runtime, revised_layer, allow_missing_revised_layer, public, readme_note)
 
 
 def write_sums(files: list[Path], out: Path) -> Path:
@@ -377,10 +465,50 @@ def write_sums(files: list[Path], out: Path) -> Path:
 def retain_release_symbols(build_dir, version, store, debug=False):
     """Private archive is deliberately outside the public assets and sums list."""
     identity = symbol_store.build_identity(Path(build_dir) / "src/core/generated/build_identity.cpp")
-    binaries = [VIEWER_PROJECT / "bin" / PLATFORMS["windows-x64"]["extension"]]
-    binaries += [find_tool(build_dir, name, ".exe", "Debug" if debug else "Release") for name in TOOLS]
+    binaries = retained_binaries(build_dir, debug)
     return symbol_store.archive(store, identity, binaries,
                                 "release-" + version + ("-Debug" if debug else "-Release"), release=True)
+
+
+NO_SYMBOLS_NOTE = "symbols: none (test kit)"
+
+
+def retained_binaries(build_dir, debug=False) -> list[Path]:
+    """The PE images whose private symbols a release retains (the viewer extension and the headless tools)."""
+    binaries = [VIEWER_PROJECT / "bin" / PLATFORMS["windows-x64"]["extension"]]
+    binaries += [find_tool(build_dir, name, ".exe", "Debug" if debug else "Release") for name in TOOLS]
+    return binaries
+
+
+def check_symbol_identities(build_dir, debug=False) -> None:
+    """Fail at the start, naming every retained PE without a PDB identity, a matching PDB beside it, or missing, not only the first."""
+    problems = []
+    names = [VIEWER_PROJECT / "bin" / PLATFORMS["windows-x64"]["extension"]]
+    for name in TOOLS:
+        try:
+            names.append(find_tool(build_dir, name, ".exe", "Debug" if debug else "Release"))
+        except FileNotFoundError as error:
+            problems.append(f"{name}.exe: {error}")
+    for binary in names:
+        try:
+            pdb_name, key, _ = symbol_store.pe_identity(binary.read_bytes())
+        except FileNotFoundError:
+            problems.append(f"{binary}: missing")
+            continue
+        except ValueError as error:
+            problems.append(f"{binary}: {error}")
+            continue
+        symbols = binary.parent / pdb_name
+        try:
+            if symbol_store.inspect(symbols, symbol_store.pdb_identity) != key:
+                problems.append(f"{binary}: {pdb_name} does not match the image")
+        except FileNotFoundError:
+            problems.append(f"{binary}: {pdb_name} is missing beside it")
+        except (OSError, ValueError) as error:
+            problems.append(f"{binary}: {pdb_name}: {error}")
+    if problems:
+        raise ValueError("these binaries cannot be retained with private symbols:\n  " + "\n  ".join(problems)
+                         + "\nrebuild with --require-symbols (and --viewer), or pass --no-symbols for an owner test kit")
 
 
 def git_head() -> str:
@@ -416,8 +544,17 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--launcher-pin", type=Path, default=launcher_artifact.DEFAULT_PIN)
     parser.add_argument("--with-mods-manager", action="store_true", help="include the pinned manager and mods service")
     parser.add_argument("--shader-runtime", type=Path, help="offline verified optional shader DLL package; activation stays off")
+    parser.add_argument("--revised-layer", type=Path, default=Path(os.environ["EAWR_REVISED_LAYER_DIR"]) if os.environ.get("EAWR_REVISED_LAYER_DIR") else None)
+    parser.add_argument("--allow-missing-revised-layer", action="store_true", help="warn instead of failing for preview packages")
+    parser.add_argument("--public", action="store_true", help="require the reviewed Revised layer and release symbols")
+    parser.add_argument("--no-symbols", action="store_true",
+                        help="owner TEST kit only: skip private symbol retention and note 'symbols: none (test kit)' in "
+                             "the README and update manifest; refused with --public")
+    parser.add_argument("--channel", choices=update_manifest.CHANNELS,
+                        help="update channel written to update-manifest.json (default: preview for a -suffix version, else stable)")
     args = parser.parse_args(argv)
     sums = None
+    note = NO_SYMBOLS_NOTE if args.no_symbols else ""
     try:
         with contextlib.ExitStack() as resources:
             if args.sums_only:
@@ -427,6 +564,10 @@ def main(argv: list[str]) -> int:
             else:
                 if not (args.build_dir and args.platform and args.version):
                     parser.error("--build-dir, --platform and --version are required")
+                if args.no_symbols and args.public:
+                    parser.error("--no-symbols is for owner test kits and cannot be combined with --public")
+                if args.platform == "windows-x64" and not args.no_symbols:
+                    check_symbol_identities(args.build_dir, args.debug)
                 if args.expect_identity is None:
                     args.expect_identity = git_head()
                 if args.with_mods_manager:
@@ -440,26 +581,39 @@ def main(argv: list[str]) -> int:
                 elif args.godot and not args.launcher:
                     parser.error("--godot needs --launcher")
                 if args.platform == "windows-x64":
-                    if args.symbol_store is None:
+                    if args.no_symbols:
+                        print(f"package_release: {NO_SYMBOLS_NOTE}: private symbols are not retained", file=sys.stderr)
+                    elif args.symbol_store is None:
                         parser.error("windows-x64 needs --symbol-store or the EAWR_SYMBOL_STORE environment variable")
-                    if args.symbol_store.resolve().is_relative_to(args.out.resolve()):
-                        raise ValueError("private symbols must be outside the public release output")
-                    retained = retain_release_symbols(args.build_dir, args.version, args.symbol_store, args.debug)
-                    print(f"Private symbols retained: {retained}", file=sys.stderr)
+                    if not args.no_symbols:
+                        if args.symbol_store.resolve().is_relative_to(args.out.resolve()):
+                            raise ValueError("private symbols must be outside the public release output")
+                        retained = retain_release_symbols(args.build_dir, args.version, args.symbol_store, args.debug)
+                        print(f"Private symbols retained: {retained}", file=sys.stderr)
                 if args.debug:
                     if args.platform != "windows-x64" or not args.godot:
                         parser.error("--debug needs --platform windows-x64 and --godot")
                     files = [package_debug(args.build_dir, args.version, args.out, args.godot, args.launcher,
                                            mods_service=args.mods_service, manager_artifact=args.launcher_artifact,
                                            launcher_pin=args.launcher_pin, with_mods_manager=args.with_mods_manager,
-                                           expect_identity=args.expect_identity, shader_runtime=args.shader_runtime)]
+                                           expect_identity=args.expect_identity, shader_runtime=args.shader_runtime, revised_layer=args.revised_layer,
+                                           allow_missing_revised_layer=args.allow_missing_revised_layer, public=args.public,
+                                           readme_note=note)]
                 else:
                     files = package(args.build_dir, args.platform, args.version, args.out, args.godot, args.launcher,
                                     mods_service=args.mods_service, manager_artifact=args.launcher_artifact,
                                     launcher_pin=args.launcher_pin, with_mods_manager=args.with_mods_manager,
-                                    expect_identity=args.expect_identity, shader_runtime=args.shader_runtime)
+                                    expect_identity=args.expect_identity, shader_runtime=args.shader_runtime, revised_layer=args.revised_layer,
+                                    allow_missing_revised_layer=args.allow_missing_revised_layer, public=args.public,
+                                    readme_note=note)
             if not args.debug:
-                sums = write_sums(files, args.out)
+                if not args.sums_only:
+                    player = next((f for f in files if f.name.endswith("-windows-x64-player.zip")), None)
+                    if player is not None:
+                        # The updater's manifest (docs/releasing.md): per-file and archive hashes of the zip just written.
+                        print(update_manifest.write(player, args.out, args.version, args.expect_identity, args.channel, note))
+                manifest_file = args.out / update_manifest.MANIFEST_NAME
+                sums = write_sums(files + ([manifest_file] if manifest_file.is_file() else []), args.out)
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
         print(f"package_release: {error}", file=sys.stderr)
         return 2

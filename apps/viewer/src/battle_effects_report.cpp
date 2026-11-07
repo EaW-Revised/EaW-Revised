@@ -129,7 +129,10 @@ void BattleEffects::write_report(std::ostream& output) const {
             << ",\"bolts_created\":" << lightning.bolts_created << ",\"segments_drawn\":" << lightning.segments_drawn
             << ",\"active_sources\":" << (released_ ? lightning.active_at_release : lightning.sources.size())
             << ",\"last_start\":[" << lightning.last_start[0] << ',' << lightning.last_start[1] << ',' << lightning.last_start[2]
-            << "],\"last_end\":[" << lightning.last_end[0] << ',' << lightning.last_end[1] << ',' << lightning.last_end[2] << "]}";
+            << "],\"last_end\":[" << lightning.last_end[0] << ',' << lightning.last_end[1] << ',' << lightning.last_end[2]
+            << "],\"last_uv_ends\":[" << lightning.last_uv_ends[0] << ',' << lightning.last_uv_ends[1] << ','
+            << lightning.last_uv_ends[2] << ',' << lightning.last_uv_ends[3] << ',' << lightning.last_uv_ends[4] << ','
+            << lightning.last_uv_ends[5] << "]}";
     };
     output << ", \"hero_beam_looks\": [";
     for (std::size_t index = 0; index < hero_beams_.size(); ++index) {

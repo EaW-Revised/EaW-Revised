@@ -15,6 +15,24 @@ int main() {
     eawr::loadcheck::add(groups, "B", "later warning", Severity::warning);
     if (groups.at("B").severity != Severity::error || eawr::loadcheck::count(groups, Severity::error) != 7
         || eawr::loadcheck::count(groups, Severity::warning) != 0) return 8;
+    {
+        // A malformed XML diagnostic names its logical file, line and column in the report example.
+        eawr::loadcheck::Groups xml;
+        eawr::core::Diagnostic malformed;
+        malformed.code = "EAWR-XML-0001";
+        malformed.severity = Severity::error;
+        malformed.message = "malformed XML: Start-end tags mismatch";
+        malformed.logical_path = "data/xml/broken_unit.xml";
+        malformed.line = 12;
+        malformed.column = 5;
+        eawr::loadcheck::add(xml, malformed);
+        if (xml.at("EAWR-XML-0001").examples.at(0) !=
+            "malformed XML: Start-end tags mismatch (file data/xml/broken_unit.xml:12:5)") return 9;
+        malformed.logical_path.reset();
+        eawr::loadcheck::Groups bare;
+        eawr::loadcheck::add(bare, malformed);
+        if (bare.at("EAWR-XML-0001").examples.at(0) != "malformed XML: Start-end tags mismatch") return 10;
+    }
     eawr::sim::MatchIdentity a;
     a.domains = {eawr::sim::identity_domain("rules", "one"), eawr::sim::identity_domain("map-path", "map-a"),
         eawr::sim::identity_domain("map-digest", "aaa"), eawr::sim::identity_domain("units", "units")};

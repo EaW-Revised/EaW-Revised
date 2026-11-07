@@ -371,6 +371,10 @@ int run_installed_campaign(const InstalledCampaignRequest& request) {
         const auto before = prepared.value()->snapshot();
         const auto goal_reader = prepared.value()->native_ai_goal_reader();
         eawr::platform::LiveGameSession::Options live_options;
+        live_options.load_note_sink = [](std::span<const eawr::core::LoadNote> notes) {
+            for (const auto& note : notes)
+                std::cerr << eawr::core::format_diagnostic(eawr::core::load_note_diagnostic(note)) << '\n';
+        };
         live_options.workers = request.workers;
         live_options.pacing = eawr::platform::LiveGameSession::Pacing::driven;
         // WST-53: what the sub-plot scripts ran into, once per distinct fault (the tick is dropped from the text).

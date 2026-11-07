@@ -1,4 +1,7 @@
 #include "front_end_mode.hpp"
+#include "eawr/core/build_identity.hpp"
+#include "eawr/core/build_label.hpp"
+#include "eawr/core/gc_load_trace.hpp"
 #include "eawr/core/text.hpp"
 
 #include "attract_runner.hpp"
@@ -407,6 +410,7 @@ struct FrontEndMode::State final {
     std::unique_ptr<MenuAudio> audio;
     bool escape_was_down{true};
     std::uint32_t frames{};
+    std::uint32_t menu_test_frames{};
     std::uint64_t fade_started_ms{};
     bool fading{};
     std::vector<std::string> notes;
@@ -513,6 +517,7 @@ bool FrontEndMode::State::attract_wanted() const {
 }
 
 void FrontEndMode::State::stop_attract(const char* reason) {
+    const core::gc_load::Scope teardown("gc.attract_stop");
     if (attract && attract->running()) UtilityFunctions::print("EAWR front end attract stopped: ", reason);
     if (attract) attract->stop();
     attract_tried = false;
@@ -561,8 +566,9 @@ void FrontEndMode::State::sync_attract() {
         // MAT-14: the selector keeps the battle visible; the LAN and Internet lobby/chat
         // screens supply their own opaque backing. Every menu return clears the shell backing.
         const model::FrontEndScreen screen = nav.current();
-        backdrop->set_color(Color(0.0F, 0.0F, 0.0F, 0.0F));
-        setup->scene_behind(screen != model::FrontEndScreen::lan_setup && screen != model::FrontEndScreen::online_setup);
+        backdrop->set_color(Color(0.0F, 0.0F, 0.0F, 1.0F - attract->reveal_fraction()));
+        setup->scene_behind(attract->visible() && screen != model::FrontEndScreen::lan_setup
+            && screen != model::FrontEndScreen::online_setup);
     }
     if (!attract->failure().empty()) attract_failure = attract->failure();
 }
@@ -626,6 +632,14 @@ bool FrontEndMode::State::build() {
     // text is rasterised at the scale it is drawn at, not at the canvas size and stretched (#3176).
     root->set_oversampling_with_scale(CanvasItem::OVERSAMPLING_WITH_SCALE_ENABLED);
     backdrop->add_child(root);
+    // The build line: the kit label and short commit of this build, in the lower-left corner of every menu.
+    auto* build_line = memnew(EawrUiLabel);
+    build_line->set_role("L_Text");
+    build_line->set_text(text(core::build_label(core::build_identity())));
+    build_line->set_mouse_filter(Control::MOUSE_FILTER_IGNORE);
+    build_line->set_position(Vector2(12.0F, canvas_height - 28.0F));
+    build_line->set_size(Vector2(400.0F, 20.0F));
+    root->add_child(build_line);
     fade = memnew(ColorRect);
     fade->set_color(Color(0.0F, 0.0F, 0.0F, 0.0F));
     fade->set_mouse_filter(Control::MOUSE_FILTER_IGNORE);
@@ -891,6 +905,7 @@ std::string FrontEndMode::State::restore_saved(const model::SavedGameRequest& re
 
 // MNU-34, WGP-29: the demo battle stops, then the host starts the chosen campaign.
 void FrontEndMode::State::start_campaign(const model::CampaignStartRequest& request) {
+    core::gc_load::trace.begin("sp_start", true);
     stop_attract("campaign start");
     campaign_launching = true;
     const std::string refusal = options.campaign_launcher
@@ -903,6 +918,7 @@ void FrontEndMode::State::start_campaign(const model::CampaignStartRequest& requ
         return;
     }
     UtilityFunctions::print("EAWR front end campaign refused: ", text(refusal));
+    core::gc_load::trace.cancel();
     show_notice("TEXT_BUTTON_CUSTOM_CAMPAIGN", refusal);
 }
 
@@ -1075,6 +1091,11 @@ void FrontEndMode::State::capture(const char* label) const {
 std::optional<int> FrontEndMode::State::run_test() {
     if (options.battle_round_trip) return run_battle_test();
     if (!options.campaign_test.empty()) return run_campaign_test();
+    // This walk proves the live art behind the menus. Its scripted gestures
+    // begin after reveal; the campaign/battle routes above can leave mid-load.
+    if (attract && attract->running() && (!attract->visible() || attract->reveal_fraction() < 1.0F))
+        return std::nullopt;
+    ++menu_test_frames;
     const auto press_gadget = [&](model::FrontEndScreen screen, const char* id) {
         Menu& menu = menus[menu_index(screen)];
         if (Entry* entry = find_entry(menu, id); entry != nullptr && entry->button != nullptr)
@@ -1083,7 +1104,7 @@ std::optional<int> FrontEndMode::State::run_test() {
     };
     using S = model::FrontEndScreen;
     if (options.online_routes_test) {
-        switch (frames) {
+        switch (menu_test_frames) {
         case 8: press_gadget(S::main_menu, "IDC_MAIN_MENU_MULTIPLAYER"); break;
         case 16: log_menu("multiplayer", menus[2]); press_gadget(S::multiplayer, "IDC_MULTIPLAYER_INTERNET_BUTTON"); break;
         case 24:
@@ -1122,7 +1143,7 @@ std::optional<int> FrontEndMode::State::run_test() {
         }
         return std::nullopt;
     }
-    switch (frames) {
+    switch (menu_test_frames) {
     case 8:
         log_menu("main_menu", menus[0]);
         for (const Entry& entry : menus[0].entries) {
@@ -1271,9 +1292,11 @@ std::optional<int> FrontEndMode::State::run_campaign_test() {
     };
     const bool tech_five_test = options.campaign_test.starts_with("tech5:");
     const bool tech_test = tech_five_test || options.campaign_test.starts_with("tech:");
+    const bool campaign_test = options.campaign_test.starts_with("campaign:");
+    const bool named_campaign_test = tech_test || campaign_test;
     const model::CampaignFacts* target{};
-    if (tech_test && campaign_screen && campaign_screen->model()) {
-        const auto wanted = std::string_view(options.campaign_test).substr(tech_five_test ? 6 : 5);
+    if (named_campaign_test && campaign_screen && campaign_screen->model()) {
+        const auto wanted = std::string_view(options.campaign_test).substr(campaign_test ? 9 : (tech_five_test ? 6 : 5));
         for (const auto& entry : campaign_screen->model()->campaigns()) if (entry.name == wanted) target = &entry;
         if (!target) return 2;
     }
@@ -1316,7 +1339,7 @@ std::optional<int> FrontEndMode::State::run_campaign_test() {
         break;
     }
     case 28:
-        if (tech_test) {
+        if (named_campaign_test) {
             if (auto* combo = Object::cast_to<OptionButton>(campaign_screen->gadget("IDC_FACTION_COMBO"))) {
                 const auto& choices = campaign_screen->model()->factions();
                 bool found{};
@@ -1354,7 +1377,7 @@ std::optional<int> FrontEndMode::State::run_campaign_test() {
         // The campaign did not start (a refusal opened a notice, or Start stayed off).
         if (!campaign_started) {
             UtilityFunctions::print("EAWR front end campaign not started");
-            return 0;
+            return campaign_test ? 2 : 0;
         }
         break;
     case 44:
@@ -1377,7 +1400,7 @@ std::optional<int> FrontEndMode::State::run_campaign_test() {
         if (tech_test) press_control("IDC_PLAY_BUTTON");
         break;
     case 64:
-        if (tech_test && !campaign_started) return 2;
+        if (named_campaign_test && !campaign_started) return 2;
         break;
     default: break;
     }
@@ -1578,7 +1601,7 @@ bool FrontEndMode::owns_frame() const {
 
 std::optional<int> FrontEndMode::process() {
     State& state = *state_;
-    MenuTimeline::frame(state.attract != nullptr && state.attract->running());
+    MenuTimeline::frame(state.attract != nullptr && state.attract->visible());
     state.layout();
     if (state.fading) {
         const double elapsed = (Time::get_singleton()->get_ticks_msec() - state.fade_started_ms) / 1000.0;
@@ -1616,7 +1639,9 @@ std::optional<int> FrontEndMode::process() {
     }
     state.show_screen();
     state.sync_attract();
-    if (state.frames == 600) MenuTimeline::end("frame_600");
+    if (MenuTimeline::active() && state.frames >= 600
+        && (!state.attract || !state.attract->running() || state.attract->visible()))
+        MenuTimeline::end("menu_and_attract_ready");
     if (state.options.test && state.options.start_battle && state.setup->start_pending()) {
         UtilityFunctions::print("EAWR front end start pressed: attract running ",
                                 state.attract != nullptr && state.attract->running());

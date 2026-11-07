@@ -82,6 +82,14 @@ std::optional<DriverResult> TcpLanMatch::drive_prepare(const tactical::TacticalS
             };
             diagnostic_sink_ = options.diagnostic_sink;
             options.input_delay = offer.input_delay;
+            // An incident leaves every peer a complete bundle: the other peers' differing input batches and the
+            // replayable session journal come with it (the journal is read on the pump thread that owns the adapter).
+            options.share_evidence = true;
+            options.replay_journal = [this]() -> std::vector<std::uint8_t> {
+                if (!adapter_) return {};
+                auto journal = adapter_->record_controls();
+                return journal ? std::move(journal).value() : std::vector<std::uint8_t>{};
+            };
             options.build_identity = offer.identity.build;
             options.match_setup = offer.setup;
             options.match_identity = core::sha256_hex(sim::canonical_match_identity(offer.identity.content));

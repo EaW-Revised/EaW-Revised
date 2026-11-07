@@ -97,6 +97,8 @@ core::Result<void> GalacticSession::Impl::force_planet_owner(const PlanetId plan
     effect.refresh_visibility = true;
     auto& planet = registry.get<session_detail::PlanetData>(planets.at(planet_id));
     if (effect.owner_changed) {
+        control->planets[index].ground_layout.clear();
+        invalidate_observer_projection();
         --owned_planet_counts[planet.owner];
         ++owned_planet_counts[new_owner];
         planet.owner = new_owner; dirty[static_cast<std::size_t>(StateSection::planets)] = true;

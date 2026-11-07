@@ -1,3 +1,5 @@
+#include "revised_layer.hpp"
+#include "eawr/vfs/vfs.hpp"
 #include "viewer_host_internal.hpp"
 
 namespace eawr::presentation::godot_backend {
@@ -47,6 +49,7 @@ namespace viewer_host_detail {
         return std::nullopt;
     }
     std::vector<vfs::MountSpec> specs;
+    mount_revised_layer(roots);
     auto chain = vfs::resolve_manifest_chain(roots);
     if (!chain) {
         failure = core::format_diagnostic(chain.error());

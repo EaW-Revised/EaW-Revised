@@ -84,6 +84,9 @@ void listing() {
 void factions_and_start() {
     ui::CampaignSetupModel model(stock_like(), factions());
     expect(model.factions().size() == 3, "WGP-40: only playable factions are offered");
+    expect(std::none_of(model.factions().begin(), model.factions().end(), [](const auto& faction) {
+        return faction.name == "Hostile";
+    }), "an authored non-playable faction is not a selectable side");
     expect(model.factions()[0].title == "raider fleet" && model.factions()[2].title == "Warden League",
            "WGP-40: the drop-down is sorted by display name");
     expect(model.selected_faction() == std::size_t{2} && model.factions()[*model.selected_faction()].name == "Wardens",
@@ -92,6 +95,17 @@ void factions_and_start() {
            "WGP-40/66: opening selects no campaign and Start is off");
     expect(!model.start_request() && !model.start_disabled_reason().empty(), "Start without a campaign says why");
     expect(model.difficulty() == ui::CampaignDifficulty::normal, "WGP-40: difficulty is normal on open");
+
+    auto nonplayable_variant = stock_like();
+    nonplayable_variant.push_back(entry("Set_Beta_Hostile", "Set_Beta", "Hostile", "Beta Origin", 2));
+    ui::CampaignSetupModel with_owner(nonplayable_variant, factions());
+    expect(with_owner.campaigns().size() == nonplayable_variant.size()
+        && std::none_of(with_owner.factions().begin(), with_owner.factions().end(), [](const auto& faction) {
+            return faction.name == "Hostile";
+        }), "a campaign variant naming a non-playable owner does not make that owner selectable");
+    ui::CampaignSetupModel no_playable(stock_like(), {{"Hostile", "Hostile", false}});
+    expect(no_playable.factions().empty() && !no_playable.selected_faction() && !no_playable.start_request(),
+        "no playable faction leaves the selector empty and cannot start");
 
     model.select_row(1);
     expect(model.selected() != nullptr && model.selected()->title == "Beta Origin", "a row selects");

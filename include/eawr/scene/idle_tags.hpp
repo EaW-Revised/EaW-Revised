@@ -1,7 +1,7 @@
 #pragma once
 
 #include "eawr/assets/map.hpp"
-#include "eawr/data/xml.hpp"
+#include "eawr/data/xml_fwd.hpp"
 
 #include <string>
 

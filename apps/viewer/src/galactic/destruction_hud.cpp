@@ -2,6 +2,9 @@
 #include "raid_input.hpp"
 #include "ui/tactical_hud_internal.hpp"
 #include "eawr/presentation/ui/layout.hpp"
+#include <godot_cpp/classes/canvas_layer.hpp>
+#include <godot_cpp/classes/label.hpp>
+#include <godot_cpp/classes/time.hpp>
 #include <ostream>
 using namespace godot;
 namespace eawr::presentation::godot_backend {
@@ -154,7 +157,10 @@ void GalacticMode::State::position_destruction_hud(galactic_view::ObjectId plane
             };
             slot.button->set_texture_normal(texture(data::ui::Field::blank_texture_name));
             slot.button->set_texture_hover(texture(data::ui::Field::mouse_over_texture_name));
-            slot.button->set_order_icon(texture(data::ui::Field::icon_alternate_texture_name, 3), false);
+            // #5506: retail draws the raid slot as the bare dark frame (owner capture 2026-10-21, held-011021:
+            // an empty ellipse beside RAID, only the dragged unit's icon over it). The ALT list's raid entry
+            // (rebel emblem with its own R box) is not drawn here, so no icon is set.
+            slot.button->set_order_icon({}, false);
             slot.button->set_action([this] { static_cast<void>(map_input.hud_event()); });
             slot.text = memnew(Label); slot.button->add_child(slot.text);
             slot.text->set_mouse_filter(Control::MOUSE_FILTER_IGNORE);
@@ -290,11 +296,63 @@ bool GalacticMode::State::drop_raid(galactic_view::ObjectId source, galactic_vie
     }
     return true;
 }
+void GalacticMode::State::refuse_hero_ability(std::string text) {
+    ability_notice_text = std::move(text);
+    ability_notice_until_msec = Time::get_singleton()->get_ticks_msec() + 4000;
+    if (audio) audio->negative_feedback();
+}
+void GalacticMode::State::service_ability_notice() {
+    if (!game || !galaxy || !host) return;
+    // Host-side refusals: the order was queued, and the host answered for the supplied object or the bearer it carries.
+    const auto dropped = [&](std::uint64_t subject) {
+        const auto source = destruction_hud.accepted_source;
+        const auto actors = displayed_snapshot ? displayed_snapshot->actor_records() : std::span<const sim::galactic::CensusObject>{};
+        for (std::size_t remaining = actors.size() + 1; source && subject && remaining; --remaining) {
+            if (subject == source) return true;
+            const auto actor = std::lower_bound(actors.begin(), actors.end(), subject,
+                [](const auto& row, auto id) { return row.id < id; });
+            if (actor == actors.end() || actor->id != subject) return false;
+            subject = actor->container;
+        }
+        return false;
+    };
+    const auto feed = game->galactic_events_after(ability_event_cursor, sim::SeatId{galaxy->local.seat});
+    ability_event_cursor = feed.through;
+    for (const auto& row : feed.events) {
+        const auto& event = row.event;
+        if (event.kind != sim::galactic::GalacticEventKind::command_rejected
+            || event.producer != sim::SeatId{galaxy->local.seat} || !dropped(event.subject)) continue;
+        refuse_hero_ability(event.reason == sim::galactic::GalacticRejectReason::incompatible_location
+            ? "This hero must be in orbit of that planet to use its ability."
+            : "This ability cannot be used on that planet (allied or unavailable target, or nothing left to offer).");
+    }
+    if (!ability_notice_text.empty() && Time::get_singleton()->get_ticks_msec() >= ability_notice_until_msec) ability_notice_text.clear();
+    if (ability_notice_text == ability_notice_shown) return; // No native call on an idle frame.
+    ability_notice_shown = ability_notice_text;
+    const bool shown = !ability_notice_text.empty();
+    if (!ability_notice_label) {
+        auto* layer = memnew(CanvasLayer);
+        layer->set_layer(90); layer->set_name("GalacticAbilityNoticeLayer");
+        ability_notice_label = memnew(Label);
+        ability_notice_label->set_name("GalacticAbilityNotice");
+        ability_notice_label->set_position({20, 110});
+        ability_notice_label->add_theme_color_override("font_shadow_color", Color(0, 0, 0, 1));
+        ability_notice_label->add_theme_constant_override("shadow_offset_x", 1);
+        ability_notice_label->add_theme_constant_override("shadow_offset_y", 1);
+        ability_notice_label->set_mouse_filter(Control::MOUSE_FILTER_IGNORE);
+        layer->add_child(ability_notice_label);
+        host->add_child(layer);
+    }
+    ability_notice_label->set_text(String::utf8(ability_notice_text.c_str()));
+    ability_notice_label->set_visible(shown);
+}
 bool GalacticMode::State::drop_hero_ability(galactic_view::ObjectId source, bool submit, galactic_view::ObjectId target) {
     auto& state = destruction_hud;
     if (!state.enabled || source != dragged_fleet || !game || state.fixture || !galaxy_setup.ability_host) return false;
+    // Every refusal on a real release says why; a preview (submit=false) stays silent.
+    const auto refuse = [&](const char* text) { if (submit) refuse_hero_ability(text); return false; };
     const auto drop = hero_ability_drop(source, target ? target : state.drop ? state.drop->planet : fleet_drag_planet);
-    if (!drop) return false;
+    if (!drop) return refuse("This hero has no ability it can use on that planet.");
     galactic_view::DropIntent intent;
     intent.kind = galactic_view::DropKind::ability;
     intent.source = drop->supplied; intent.planet = drop->planet;
@@ -303,25 +361,25 @@ bool GalacticMode::State::drop_hero_ability(galactic_view::ObjectId source, bool
         [&](const auto& row) { return row.id == source; });
     const bool surface = fleet == displayed_snapshot->fleets().end();
     const auto from = surface ? galactic_view::actor_containing_planet(*displayed_snapshot, drop->supplied) : fleet->orbit;
-    if (!from) return false;
+    if (!from) return refuse("The hero is not at a planet.");
     if (from != drop->planet) {
         if (!submit) return displayed_snapshot->movement() != nullptr;
         if (surface) {
             const auto path = galactic_view::destination_path(*displayed_snapshot, galaxy->local.player,
                 from, drop->planet, input_planets());
-            if (!path) return false;
+            if (!path) return refuse("There is no route for the hero to that planet.");
             intent = {}; intent.kind = galactic_view::DropKind::launch;
             intent.source = drop->supplied; intent.planet = from; intent.path = *path;
         } else {
             const auto movement = galactic_view::fleet_destination_intent(*displayed_snapshot,
                 galaxy->local.player, source, drop->planet, input_planets(), {});
-            if (!movement) return false;
+            if (!movement) return refuse("The hero cannot travel to that planet.");
             intent = *movement;
         }
         intent.destination_actor = drop->supplied;
     }
     const auto command = map_input.command(intent, input_planets());
-    if (!command) return false;
+    if (!command) return refuse("That order is not available right now.");
     if (submit) {
         // WGCH-154: no confirmation. The prepared publication opens the hero action menu (hero_action_modal);
         // a destruction release queues its execution and the host reports the result.
@@ -356,6 +414,8 @@ void GalacticMode::State::write_destruction_report(std::ostream& output) const {
         << ", \"outcome\": " << (result == results.end() ? 0 : static_cast<int>(result->outcome))
         << ", \"raid_accepts\": " << state.raid_accepts
         << ", \"raid_slots\": " << state.raids.size()
+        << ", \"raid_slot_icons_shown\": " << std::count_if(state.raid_slots.begin(), state.raid_slots.end(),
+            [](const auto& row) { return row.second.button && row.second.button->icon_shown(); })
         << ", \"rebuilds\": " << state.rebuilds << ", \"accepts\": " << state.accepts << ", \"hero_drops\": " << state.prepares << ", \"enabled\": " << (state.enabled ? "true" : "false")
         << ", \"projected\": " << (state.projected ? "true" : "false") << ", \"drop_actor\": " << (state.drop ? state.drop->actor : 0)
         << ", \"drop_kind\": " << (state.drop ? static_cast<int>(state.drop->kind) : 0) << ", \"drop_fleet\": " << state.drop_fleet

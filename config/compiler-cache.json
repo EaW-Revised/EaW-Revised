@@ -7,7 +7,18 @@
     "url": "https://github.com/mozilla/sccache/releases/download/v0.18.0/sccache-v0.18.0-x86_64-pc-windows-msvc.zip",
     "sha256": "8965c74d5e8a225244f741e18ad2f3f504f48228dc1bac948fc22761a348363d",
     "member": "sccache-v0.18.0-x86_64-pc-windows-msvc/sccache.exe",
-    "maxSize": "10G"
+    "maxSize": "10G",
+    "_hostMaxSize": "Per-host override of the cache size PER SLOT (hosts not listed keep maxSize split into five equal shares). The key is the host's COMPUTERNAME. tools/offload/windows_cache_environment.ps1 trims a slot back to the share while the cache drive is low on disk (100 GB free for overrides of 40G or more, 45 GB below that, 60 GB for a relocated cache).",
+    "hostMaxSize": {
+      "example-host-1": "12G",
+      "example-host-2": "12G",
+      "example-host-3": "6G",
+      "example-host-4": "6G"
+    },
+    "_hostCacheDir": "Per-host absolute cache directory (slot dirs slot-N below it); if the drive is missing the host falls back to its default base directory and the old 2G share and logs it.",
+    "hostCacheDir": {
+      "example-host-2": "<cache-directory>"
+    }
   },
   "linux": {
     "tool": "ccache",

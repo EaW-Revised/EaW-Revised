@@ -7,8 +7,11 @@
 #include <utility>
 #include <vector>
 #include "../support/temp_dir.hpp"
+#include "eawr/vfs/vfs.hpp"
 #include "../support/check.hpp"
 #include "galactic/reference_catalog.hpp"
+#include "galactic/planet_label_scale.hpp"
+#include "galactic/hud_retained.hpp"
 #include <algorithm>
 #include <chrono>
 #include <filesystem>
@@ -140,6 +143,66 @@ void colliding_catalog_names() {
         require(slots[0].control == "IDC_TECHTREE_MOD_DUP" && slots[0].type.icon == "dup-a.tga"
             && slots[0].type.type == 81, "exact id wins over hyphen-normalized alias regardless of load order");
     }
+}
+void mod_label_scale() {
+    CatalogFixture fixture;
+    const auto base = fixture.root / "base", mod = fixture.root / "mod";
+    std::filesystem::create_directories(base / "XML");
+    std::filesystem::create_directories(mod / "XML");
+    std::ofstream(base / "XML/CommandBarComponentFiles.xml")
+        << "<CommandBar_Component_Files><File>Components.xml</File></CommandBar_Component_Files>";
+    std::ofstream(base / "XML/Components.xml")
+        << "<CommandBarComponents><CommandBarComponent Name='g_planet_name'><Type>TextButton</Type><Scale>1</Scale><Text_Offset>0 0</Text_Offset></CommandBarComponent></CommandBarComponents>";
+    std::ofstream(mod / "XML/Components.xml")
+        << "<CommandBarComponents><CommandBarComponent Name='g_planet_name'><Type>TextButton</Type><Scale>0.8</Scale><Text_Offset>0 -15</Text_Offset></CommandBarComponent></CommandBarComponents>";
+    auto mounted = eawr::vfs::Vfs::mount(std::array{eawr::vfs::MountSpec{"mod", mod, "data", {}},
+        eawr::vfs::MountSpec{"base", base, "data", {}}});
+    require(static_cast<bool>(mounted), "mod and base command-bar layers mount");
+    auto loaded = eawr::data::ui::load_command_bar(mounted.value());
+    require(static_cast<bool>(loaded), "effective command bar loads");
+    const auto* style = loaded.value().catalog.find("g_planet_name");
+    require(style != nullptr, "effective planet name component exists");
+    require(style->vec2(eawr::data::ui::Field::text_offset) == eawr::data::ui::Vec2{0, -15},
+        "effective mod layer supplies its name text offset");
+    const auto near = [](float a, float b) { return std::abs(a - b) < .0001F; };
+    const auto place = [](const auto& component) {
+        return page::planet_label_placement(component, 200, 100, 2, 100, 20, 100, 20);
+    };
+    const auto scaled = place(*style);
+    require(near(scaled.scale, .8F) && near(scaled.x, 160) && near(scaled.y, 122)
+        && near(scaled.bounds.x, 160) && near(scaled.bounds.y, 122)
+        && near(scaled.bounds.width, 80) && near(scaled.bounds.height, 16),
+        "mod scale and text offset determine placement and culling bounds");
+    auto variant = *style;
+    const auto set_scale = [&](float value) {
+        for (auto& entry : variant.fields) if (entry.field == eawr::data::ui::Field::scale) entry.value = value;
+    };
+    set_scale(0);
+    const auto zero = place(variant);
+    require(near(zero.x, 200) && near(zero.y, 130) && near(zero.bounds.x, 200)
+        && near(zero.bounds.y, 130) && near(zero.bounds.width, 0) && near(zero.bounds.height, 0),
+        "zero scale collapses the quad at the offset anchor");
+    set_scale(-.8F);
+    const auto negative = place(variant);
+    require(near(negative.x, 240) && near(negative.y, 138) && near(negative.bounds.x, 160)
+        && near(negative.bounds.y, 122) && near(negative.bounds.width, 80) && near(negative.bounds.height, 16),
+        "negative scale normalizes the culling bounds around the flipped quad");
+    set_scale(1);
+    for (auto& entry : variant.fields) if (entry.field == eawr::data::ui::Field::text_offset)
+        entry.value = eawr::data::ui::Vec2{};
+    const auto stock = place(variant);
+    require(near(stock.x, 150) && near(stock.y, 90) && near(stock.bounds.x, 150)
+        && near(stock.bounds.y, 90) && near(stock.bounds.width, 100) && near(stock.bounds.height, 20),
+        "stock scale preserves the original centered geometry");
+    variant.fields.push_back({eawr::data::ui::Field::offset, eawr::data::ui::Vec2{10, 99}, 0});
+    const auto offset = place(variant);
+    require(near(offset.x, 170) && near(offset.y, 90) && near(offset.bounds.x, 170),
+        "template X offset applies at HUD scale while template Y remains unused");
+    variant.fields.pop_back();
+    set_scale(2);
+    const auto edge = page::planet_label_placement(variant, -50, 0, 1, 100, 20, 100, 20);
+    page::HudBounds reach; reach.include(edge.bounds.x, edge.bounds.y, edge.bounds.width, edge.bounds.height, -50, 0);
+    require(!reach.outside({1280, 720}, -50, 0, 0), "enlarged label remains visible at the screen edge");
 }
 void history() {
     page::HistoryFacts facts;
@@ -293,9 +356,18 @@ void publication() {
         {}, {}, {}, observer, {}, {}, {}, observations, forecast);
     require(!filtered.economy_forecast()->planets[0].trade && !filtered.economy_forecast()->planets[0].modifiers, "income breakdown masks new component publication");
 }
+void legend() {
+    const auto lookup = [](std::string_view key) { return "L:" + std::string(key); };
+    auto entries = page::legend_entries({"a.tga", "b.tga", "c.tga"}, {"T_A", "T_B"}, {0, 255, 100, 255, 0, 51, 9, 9, 9}, lookup);
+    require(entries.size() == 2, "GREF-19 shorter authored list wins");
+    require(entries[0].icon.icon == "a.tga" && entries[0].text == "L:T_A" && entries[1].icon.icon == "b.tga", "GREF-19 authored order is kept");
+    require(entries[0].colour.g == 1.F && entries[1].colour.r == 1.F && entries[1].colour.b == 51.F / 255.F, "GREF-19 authored RGB per entry");
+    require(page::legend_entries({"a.tga"}, {"T_A"}, {1, 2}, lookup).empty(), "GREF-19 incomplete RGB triplet drops the entry");
+    require(page::legend_entries({}, {}, {}, lookup).empty(), "GREF-19 empty lists give an empty legend");
+}
 }
 int main() {
-    try { populated_catalog(); colliding_catalog_names(); history(); tree(); summary(); publication(); }
+    try { legend(); populated_catalog(); colliding_catalog_names(); mod_label_scale(); history(); tree(); summary(); publication(); }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
     std::cout << "GREF reference page contracts passed\n";
 }

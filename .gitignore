@@ -42,3 +42,10 @@ tools/preview/preview.local.json
 pool-overlay*.json
 pool-overlay*.bak
 pool-overlay.log.jsonl
+
+# Private player layer content must never enter the repository.
+/layers/
+/Revised/
+
+# Quality-sweep host pools (tools/gc_quality/README.md)
+config/gc-quality-hosts.local.json

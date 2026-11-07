@@ -1,13 +1,19 @@
 #pragma once
+#include "eawr/core/flat_id_map.hpp"
 #include "eawr/core/text.hpp"
 
 #include "eawr/diagnostics/memory_capacity.hpp"
 
 #include "battle_input.hpp"
 #include "battle_audio_load_queue.hpp"
+#include "battle_audio_trace.hpp"
+#include "frame_timer.hpp"
 #include "live_session_view.hpp"
+#include "load_job.hpp"
 
-#include "eawr/data/xml.hpp"
+#include "eawr/data/xml_fwd.hpp"
+#include "eawr/platform/sim_workers.hpp"
+#include "eawr/presentation/audio/ability_history.hpp"
 #include "eawr/presentation/audio/sfx.hpp"
 #include "eawr/presentation/audio/announcements.hpp"
 #include "eawr/presentation/audio/health_warning.hpp"
@@ -22,6 +28,7 @@
 #include <godot_cpp/classes/audio_listener3d.hpp>
 #include <godot_cpp/classes/audio_stream.hpp>
 #include <godot_cpp/classes/audio_stream_player.hpp>
+#include <godot_cpp/classes/audio_stream_wav.hpp>
 #include <godot_cpp/classes/audio_stream_player3d.hpp>
 #include <godot_cpp/classes/camera3d.hpp>
 #include <godot_cpp/classes/node3d.hpp>
@@ -72,14 +79,25 @@ public:
 
     // Reads the SFXEvents, audio.xml, the command rankings, the music events and each unit type's
     // sound events. Never fails the view: what does not resolve is reported.
+    // With `queue` the sample loading becomes load steps (one batch of files each, then the closing step), run in
+    // order between menu frames; the registry reads still run here. Without it everything runs here at once.
     void prepare(const units::UnitTables& tables, const sim::tactical::CombatTable& combat, std::string_view local_faction,
-                 std::set<sim::tactical::TypeId> first_types);
+                 std::set<sim::tactical::TypeId> first_types, const EnqueueLoadStep* queue = nullptr);
     // One presentation frame: the events of the ticks the frame reached, the gestures the player
     // made, the camera it renders and the frame's duration in seconds.
     void frame(const LiveSessionView& live, std::vector<BattleInput::Acknowledgement> acknowledgements,
                std::vector<LiveSessionView::AbilityClick> ability_clicks, const FixedCamera& camera, double delta,
                std::vector<LiveSessionView::ReinforcementFeedback> reinforcement_feedback = {},
                std::vector<BattleEffects::TerminalSound> terminal_sounds = {});
+    // N1: frame() in two halves, so the caller can overlap other work with the effects' frame that makes the terminal
+    // sounds. frame_before_combat runs everything up to present_reached_audio and returns whether frame_combat is
+    // owed (false: the frame ended there: released, recovery silence or no battle frame yet); frame_combat runs the
+    // rest with the terminal sounds. The play() order and every counter equal frame()'s. Call the second half of
+    // a frame before the next frame's first half, with the same `live`.
+    [[nodiscard]] bool frame_before_combat(const LiveSessionView& live, std::vector<BattleInput::Acknowledgement> acknowledgements,
+               std::vector<LiveSessionView::AbilityClick> ability_clicks, const FixedCamera& camera, double delta,
+               std::vector<LiveSessionView::ReinforcementFeedback> reinforcement_feedback = {});
+    void frame_combat(const LiveSessionView& live, std::vector<BattleEffects::TerminalSound> terminal_sounds = {});
     void release();
     // RP-05: the local player pressed the retreat button and the request was refused.
     void retreat_refused(sim::tactical::RetreatRefusal refusal);
@@ -90,6 +108,15 @@ public:
     }
     [[nodiscard]] bool campaign_briefing(std::string_view event_name);
     void set_mix_levels(const audio::MixLevels& levels);
+    // --eawr-perf-trace (battle_audio_trace.hpp): clears the frame's laps and counters; with `on` false
+    // no clock is read and nothing is written. Call once per frame before frame().
+    void trace_frames(bool on);
+    [[nodiscard]] const std::array<double, audio_trace::lap_count>& trace_laps() const noexcept { return trace_laps_; }
+    [[nodiscard]] const std::array<std::uint64_t, audio_trace::count_count>& trace_counts() const noexcept { return trace_counts_; }
+    [[nodiscard]] double trace_play_ms() const noexcept { return trace_play_ms_; }
+    [[nodiscard]] std::array<std::uint64_t, audio_trace::digest_count> trace_digests() const noexcept {
+        return {digests_[0].value(), digests_[1].value(), digests_[2].value()};
+    }
     void set_admission(const audio::Admission& admission) { options_.admission = admission; }
     void set_attached_silent(sim::EntityId source, bool silent) {
         if (silent) silent_sources_.insert(source);
@@ -247,14 +274,23 @@ private:
     };
     [[nodiscard]] static PreparedAudio prepare_audio(const std::shared_ptr<const vfs::Vfs>& filesystem,
                                                     const LoadKey& key);
+    static void order_by_disk_position(const vfs::Vfs& filesystem, std::vector<LoadKey>& keys);
     void prepare_audio_batch(const std::set<LoadKey>& keys);
+    void prepare_audio_chunk(platform::ThreadWorkerAdapter& pool, const std::vector<LoadKey>& ordered, std::size_t at,
+                             std::size_t batch_size);
+    void enqueue_audio_batches(const std::set<LoadKey>& keys, const EnqueueLoadStep& queue);
+    void finish_prepare();
     void commit_audio(const LoadKey& key, PreparedAudio prepared, bool runtime);
     [[nodiscard]] bool audio_ready(const LoadKey& key);
     void commit_ready_audio();
     struct Sample final {
         godot::Ref<godot::AudioStream> stream;
         std::string cause;  // why it did not load
+        // Looping copy of `stream` for continuous cues, built on the first continuous start and shared by later ones
+        // (the data is read-only once built; every player keeps its own playback position).
+        mutable godot::Ref<godot::AudioStreamWAV> loop;
     };
+    [[nodiscard]] static godot::Ref<godot::AudioStreamWAV> loop_stream(const Sample& sample);
     struct Seen final {
         std::array<double, 3> position{};
         double yaw_degrees{};
@@ -362,10 +398,10 @@ private:
         bool moving{};
         bool hidden{};
     };
-    std::map<sim::EntityId, AmbientTimer> ambient_timers_;
+    core::FlatIdMap<AmbientTimer> ambient_timers_;
     bool ambient_begun_{};
     std::vector<sim::tactical::Squadron> ambient_roster_;
-    std::map<sim::EntityId, AmbientMember> ambient_members_;
+    core::FlatIdMap<AmbientMember> ambient_members_;
     audio::Random ambient_random_{0x1501}; // presentation-only delays, independent of voice admission
     std::vector<AmbientRow> ambient_rows_;
     std::uint64_t ambient_visits_{};
@@ -387,6 +423,8 @@ private:
         return event.localized || event.hud_vo || event.unit_response_vo || event.ambient_vo || event.gui;
     }
     std::map<std::string, SpeechEvent> speech_events_;
+    // SH-03: regular SFX events, resolved from layer XML and preloaded normally.
+    std::array<const audio::SfxEvent*, 2> selection_events_{};
     audio::SpeechQueue<SpeechEvent> speech_queue_;
     audio::SpeechStream speech_stream_;
     godot::AudioStreamPlayer* speech_player_{};
@@ -433,6 +471,19 @@ private:
     audio::Random random_{0x84};
     std::vector<std::string> rankings_;
     std::map<sim::tactical::TypeId, TypeSounds> types_;
+    // The per-instance passes (ambient, engine, sighting) look a type up for every unit every reached tick:
+    // a flat cache of types_ (node addresses are stable), refilled whenever types_ gains rows.
+    struct TypeSlot final { TypeSounds* sounds{}; };
+    core::FlatIdMap<TypeSlot> type_cache_;
+    std::size_t type_cache_rows_{};
+    [[nodiscard]] TypeSounds* type_of(const sim::tactical::TypeId type) {
+        if (type_cache_rows_ != types_.size()) { type_cache_.clear(); type_cache_rows_ = types_.size(); }
+        if (const auto* cached = type_cache_.find(type)) return cached->second.sounds;
+        const auto found = types_.find(type);
+        TypeSounds* sounds = found == types_.end() ? nullptr : &found->second;
+        type_cache_[type].sounds = sounds;
+        return sounds;
+    }
     // WSW-33/34: own-ready, own-fire, enemy-ready, enemy-fire; blanks retain their indices.
     std::array<std::vector<const audio::SfxEvent*>, 4> special_speech_;
     std::map<std::string, Sample> samples_;
@@ -522,29 +573,25 @@ private:
     // Where each unit stood the last frame the local player saw it (explosions of units that left).
     // A dead unit's entry stays here until its destruction event reaches the report (BA-16 needs its
     // last position), so `respond()` checks `live_entities_`, not this map, for liveness.
-    std::map<sim::EntityId, Seen> last_seen_;
+    core::FlatIdMap<Seen> last_seen_;
     // WSD-11: the tick each unit the local player saw die was destroyed (its blast sounds when it was seen).
     std::map<sim::EntityId, std::uint64_t> seen_deaths_;
     // Every entity this tick's snapshot still carries (BA-24): a squadron's dead craft leave this
     // set the tick they leave the instances, ahead of last_seen_'s own, event-driven pruning.
-    std::set<sim::EntityId> live_entities_;
+    std::vector<sim::EntityId> live_entities_; // ascending, like the snapshot's instances
+    [[nodiscard]] bool live_entity(const sim::EntityId entity) const {
+        return std::binary_search(live_entities_.begin(), live_entities_.end(), entity);
+    }
     std::shared_ptr<const sim::tactical::TacticalSnapshot> metadata_snapshot_;
-    std::map<sim::EntityId, sim::tactical::PlayerId> owners_;
+    core::FlatIdMap<sim::tactical::PlayerId> owners_;
     // The type of every unit the session has held (a hit's shooter may have died).
-    std::map<sim::EntityId, sim::tactical::TypeId> entity_types_;
+    core::FlatIdMap<sim::tactical::TypeId> entity_types_;
     audio::Vec3 listener_position_{};
     std::set<std::uint64_t> projectiles_seen_;
     // The abilities each unit showed active in the last snapshot read. A timed one is remembered as such
     // once it has read frames left, with its latest count: the snapshot of its last active tick reads
     // zero, like an untimed ability, so BA-51 tells a natural end from a switch-off by this history.
-    struct AbilityMemory final {
-        bool active{};
-        bool timed{};
-        std::uint32_t remaining{};
-        std::uint64_t started{};
-        bool positioned{};
-    };
-    std::map<std::pair<sim::EntityId, sim::tactical::AbilityKind>, AbilityMemory> ability_memory_;
+    audio::AbilityHistory ability_history_;
     // WAB-75: a buzz-droid object type's own arming cue (Activate_SFX) and arming delay in frames,
     // and each live droid's first presented tick, so the cue starts once at its arming frame.
     struct DroidArming final {
@@ -629,6 +676,24 @@ private:
     std::array<BusLevel, 4> buses_{};  // sfx (3D), voice (2D), music, and their mix
     void end_voice(std::size_t voice);
     void meter_buses();
+    // --eawr-perf-trace state: laps partition frame() in call order (SumLapTimer, null slots when off).
+    bool trace_{};
+    std::array<double, audio_trace::lap_count> trace_laps_{};
+    std::array<std::uint64_t, audio_trace::count_count> trace_counts_{};
+    double trace_play_ms_{};
+    std::array<audio_trace::Digest, audio_trace::digest_count> digests_{};
+    SumLapTimer lap_{nullptr};
+    // The first half's hand-over to frame_combat (N1).
+    std::vector<BattleInput::Acknowledgement> split_acknowledgements_;
+    std::vector<LiveSessionView::AbilityClick> split_ability_clicks_;
+    std::uint64_t split_trace_starts_{};
+    const sim::tactical::TacticalSnapshot* split_trace_latest_{};
+    [[nodiscard]] audio_trace::Digest& digest(const audio_trace::Stream which) { return digests_[static_cast<std::size_t>(which)]; }
+    void lap(const audio_trace::Lap which) { lap_.mark(static_cast<std::size_t>(which)); }
+    void tally(const audio_trace::Count which, const std::uint64_t amount = 1U) {
+        if (trace_) trace_counts_[static_cast<std::size_t>(which)] += amount;
+    }
+    void trace_tail(std::uint64_t starts_before, const sim::tactical::TacticalSnapshot* latest);
 };
 
 } // namespace eawr::presentation::godot_backend

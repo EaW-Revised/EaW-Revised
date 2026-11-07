@@ -245,8 +245,10 @@ void build_stream_impl(const EmitterRenderPlan& plan, const std::size_t particle
                         {{{-size, size}, {-size, -size}, {size, size}, {size, -size}}}, particle.rotation);
                     continue;
                 }
+                // MD-09: an emitter that inherits motion measures its tail against a fixed
+                // reference speed (the debug build never updates it), not the sampled emitter speed.
                 const float reference = plan.inherit_emitter_motion
-                    ? particle.inherited_speed_limit : plan.kite_speed_limit;
+                    ? kInheritedKiteReferenceSpeed : plan.kite_speed_limit;
                 if (!std::isfinite(reference) || reference < 0.0F) continue;
                 const float limit = std::max(reference, speed);
                 const float stretch = limit == 0.0F ? 1.0F : 1.0F + plan.tail_size * speed / limit;

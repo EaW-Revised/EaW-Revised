@@ -452,6 +452,21 @@ std::filesystem::path mod_data_root(const std::filesystem::path& root) {
     return !root.empty() && std::filesystem::is_directory(root / "Data") ? root / "Data" : root;
 }
 
+bool insert_revised_layer(std::vector<LayerRoot>& roots, const bool enabled,
+    const std::filesystem::path& player_folder, const std::filesystem::path& override_root) {
+    if (!enabled) return true;
+    const auto root = override_root.empty() || !override_root.is_absolute()
+        ? player_folder / revised_layer_folder : override_root;
+    const auto data = root / "Data";
+    std::error_code error;
+    if (!std::filesystem::is_directory(data, error)) return false;
+    const auto position = std::find_if(roots.begin(), roots.end(), [](const auto& layer) {
+        return layer.first == "expansion" || layer.first == "base";
+    });
+    roots.insert(position, LayerRoot{std::string(revised_layer_id), data});
+    return true;
+}
+
 std::vector<LayerRoot> mod_chain_roots(const std::filesystem::path& chain) {
     std::vector<LayerRoot> roots;
     // A directory whose own name contains ';' (legal on Windows) is one root, not a chain.
@@ -530,6 +545,7 @@ struct Vfs::Impl {
         std::uint64_t offset{0};
     };
     std::vector<StoredAsset> assets;
+    std::vector<std::string> layer_ids;
     std::unordered_map<std::string, std::vector<std::size_t>> by_path;
     mutable std::mutex attachments_mutex;
     mutable std::map<std::type_index, std::shared_ptr<void>> attachments;
@@ -551,6 +567,10 @@ std::shared_ptr<void> Vfs::attachment(const std::type_index type,
     auto& slot = impl_->attachments[type];
     if (!slot) slot = create();
     return slot;
+}
+
+std::span<const std::string> Vfs::layer_ids() const noexcept {
+    return impl_ ? std::span<const std::string>(impl_->layer_ids) : std::span<const std::string>{};
 }
 
 core::Result<Vfs> Vfs::mount(const std::span<const MountSpec> ordered_layers) {
@@ -575,6 +595,7 @@ core::Result<Vfs> Vfs::mount(const std::span<const MountSpec> ordered_layers) {
             ));
         }
 
+        impl->layer_ids.push_back(layer.layer_id);
         std::unordered_map<std::string, std::string> loose_seen;
         std::error_code walk_error;
         std::optional<core::load_profile::Scope> walk_scope;
@@ -700,6 +721,17 @@ core::Result<std::vector<AssetRecord>> Vfs::candidates(const std::string_view lo
     return core::Result<std::vector<AssetRecord>>::success(std::move(result));
 }
 
+std::optional<ReadLocation> Vfs::read_location(const AssetRecord& candidate) const {
+    if (!impl_) return std::nullopt;
+    const auto found = impl_->by_path.find(candidate.canonical_path);
+    if (found == impl_->by_path.end()) return std::nullopt;
+    for (const auto index : found->second) {
+        const auto& asset = impl_->assets[index];
+        if (asset.record == candidate) return ReadLocation{asset.native_path.generic_string(), asset.offset};
+    }
+    return std::nullopt;
+}
+
 core::Result<AssetRecord> Vfs::stat(const std::string_view logical_path) const {
     auto found = candidates(logical_path);
     if (!found) return core::Result<AssetRecord>::failure(found.error());
@@ -813,6 +845,39 @@ core::Result<std::vector<std::byte>> Vfs::open(const AssetRecord& candidate, con
         return core::Result<std::vector<std::byte>>::success(std::move(bytes));
     }
     return core::Result<std::vector<std::byte>>::failure(error(
+        diagnostic_codes::not_found, "candidate is not present in the mounted view", candidate.canonical_path));
+}
+
+core::Result<void> Vfs::read_chunks(const AssetRecord& candidate, const std::span<std::byte> buffer,
+    const std::function<void(std::span<const std::byte>)>& consume) const {
+    if (!impl_ || buffer.empty() || !consume) return core::Result<void>::failure(error(
+        diagnostic_codes::mount_invalid, "chunked read requires a mounted VFS, buffer and consumer", candidate.canonical_path));
+    const auto found = impl_->by_path.find(candidate.canonical_path);
+    if (found != impl_->by_path.end()) {
+        for (const auto index : found->second) {
+            const auto& asset = impl_->assets[index];
+            if (asset.record != candidate) continue;
+            if (candidate.size > max_asset_bytes) return core::Result<void>::failure(error(
+                diagnostic_codes::archive_limit, "asset exceeds the bounded read limit", candidate.canonical_path, candidate.source_id));
+            std::ifstream input(asset.native_path, std::ios::binary);
+            if (!input) return core::Result<void>::failure(native_io_error(
+                asset.native_path, "cannot read asset source", candidate.canonical_path, candidate.source_id));
+            input.seekg(static_cast<std::streamoff>(asset.offset), std::ios::beg);
+            if (!input) return core::Result<void>::failure(error(
+                diagnostic_codes::native_io, "cannot seek asset source", candidate.canonical_path, candidate.source_id));
+            auto remaining = candidate.size;
+            while (remaining != 0) {
+                const auto count = static_cast<std::size_t>(std::min<std::uint64_t>(remaining,
+                    std::min<std::uint64_t>(buffer.size(), static_cast<std::uint64_t>(std::numeric_limits<std::streamsize>::max()))));
+                if (!read_exact(input, buffer.data(), count)) return core::Result<void>::failure(error(
+                    diagnostic_codes::native_io, "short read from asset source", candidate.canonical_path, candidate.source_id));
+                consume(buffer.first(count));
+                remaining -= count;
+            }
+            return core::Result<void>::success();
+        }
+    }
+    return core::Result<void>::failure(error(
         diagnostic_codes::not_found, "candidate is not present in the mounted view", candidate.canonical_path));
 }
 

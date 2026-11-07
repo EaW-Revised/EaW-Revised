@@ -95,6 +95,64 @@ int main() {
             self.assertEqual(enabled["attribution"], {"stub": True})
 
 
+class HeapSizeBucketContracts(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        source = (ROOT / "apps/viewer/src/memory_attribution.hpp").read_text(encoding="utf-8")
+        budget = source[source.index("static constexpr std::size_t kSizeBuckets"):]
+        budget = budget[:budget.index("\n", budget.index("kSizeBuckets")) + 1]
+        helper = source[source.index("static constexpr std::size_t size_class_bin("):]
+        helper = helper[:helper.index("\n    }\n") + len("\n    }\n")]
+        fixture = r'''
+#include <cstddef>
+#include <cstdint>
+#include <iostream>
+struct Fixture {
+    ''' + budget + helper + r'''
+};
+int main() {
+    const std::uint64_t samples[] = {0, 1, 2, 3, 4, 7, 8, 4095, 4096, 1048575, 1048576, 3000000000ull, ~0ull};
+    std::cout << '[';
+    for (std::size_t i = 0; i < sizeof(samples) / sizeof(samples[0]); ++i)
+        std::cout << (i ? "," : "") << Fixture::size_class_bin(samples[i]);
+    std::cout << ']';
+}
+'''
+        toolchain = select_toolchain()
+        if toolchain is None:
+            raise unittest.SkipTest("requires a C++ compiler on the validation host")
+        with tempfile.TemporaryDirectory(prefix="eawr-size-class-") as temporary:
+            path = Path(temporary)
+            cpp, executable = path / "bins.cpp", path / "bins.exe"
+            cpp.write_text(fixture, encoding="utf-8")
+            compile_fixture(toolchain, cpp, executable)
+            completed = subprocess.run([str(executable)], check=True, capture_output=True,
+                                       text=True, timeout=10)
+            cls.bins = json.loads(completed.stdout)
+
+    def test_bins_are_floor_log2_and_the_last_bin_catches_the_rest(self):
+        self.assertEqual(self.bins, [0, 0, 1, 1, 2, 2, 3, 11, 12, 19, 20, 31, 47])
+
+    def test_walk_is_opt_in_and_bounded_in_the_first_frame_snapshot_only(self):
+        header = (ROOT / "apps/viewer/src/memory_attribution.hpp").read_text(encoding="utf-8")
+        walk = header.split("void capture_size_classes() {", 1)[1].split("private:", 1)[0]
+        self.assertIn("if (!enabled() || !captured_ || size_classes_requested_) return;", walk)
+        self.assertIn("kSizeBucketBudget", walk)
+        trace = (ROOT / "apps/viewer/src/startup_trace.hpp").read_text(encoding="utf-8")
+        self.assertEqual(trace.count("capture_size_classes()"), 1)
+        self.assertIn("if (phase == 1) snapshot.attribution.capture_size_classes();", trace)
+
+    def test_load_marks_carry_live_model_bytes_and_the_scope_exit_mark(self):
+        header = (ROOT / "apps/viewer/src/memory_attribution.hpp").read_text(encoding="utf-8")
+        self.assertIn('" live_model_bytes=", static_cast<std::int64_t>(live_model_bytes)', header)
+        ready = (ROOT / "apps/viewer/src/map_mode_ready.cpp").read_text(encoding="utf-8")
+        self.assertEqual(ready.count('MemoryAttribution::load_mark("battle.scope_exit"'), 2)
+        for name in ("galactic/galactic_mode.cpp", "map_mode_hud.cpp", "map_mode_ready_population.cpp"):
+            text = (ROOT / "apps/viewer/src" / name).read_text(encoding="utf-8")
+            for call in text.split("MemoryAttribution::load_mark(")[1:]:
+                self.assertIn("capacity.total_bytes()", call.split(";", 1)[0], name)
+
+
 class ContainerCapacityContracts(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

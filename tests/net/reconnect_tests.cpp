@@ -97,9 +97,12 @@ struct Match {
         };
         // Adaptive timing has a core-owned binding; callers need no self-capturing callback.
         if (config.adaptive_timing) config.reconnect->replay_control = {};
+        // Stand in for the caller's exact private checkpoint restore. No network
+        // input is executed before the agreed nonzero boundary.
+        while (adapters[peer]->completed_tick() < config.initial_tick) require(adapters[peer]->step());
         if (joining) { config.reconnect->rejoin_source = peer == 0 ? 1U : 0U; config.reconnect->rejoin_epoch = epoch; }
         if (monitoring) {
-            net::DesyncOptions monitor_options; monitor_options.exchange_every = 5;
+            net::DesyncOptions monitor_options; monitor_options.initial_tick = config.initial_tick; monitor_options.exchange_every = 5;
             monitors[peer] = std::make_unique<net::DesyncMonitor>(*transports[peer], monitor_options);
         }
         sessions[peer] = std::make_unique<net::LockstepSession>(require(net::LockstepSession::create(
@@ -220,8 +223,9 @@ void connecting_rejoin(bool expire) {
     }
 }
 
-std::string reconnect(std::size_t workers, std::uint64_t drop_tick, std::uint32_t peers, bool monitor) {
-    Match control(workers, peers, monitor), match(workers, peers, monitor);
+std::string reconnect(std::size_t workers, std::uint64_t drop_tick, std::uint32_t peers, bool monitor, std::uint64_t initial_tick = 0) {
+    const auto configure = [initial_tick](auto& options) { options.initial_tick = initial_tick; };
+    Match control(workers, peers, monitor, 200, 50, configure), match(workers, peers, monitor, 200, 50, configure);
     for (net::PeerIndex peer = 0; peer < peers; ++peer) { control.submit(peer); match.submit(peer); }
     control.until(50);
     // A tick-zero drop still retains the batches sealed before the link broke.
@@ -1242,6 +1246,14 @@ int main() {
             if (baseline.empty()) baseline = hash;
             expect(hash == baseline, "reconnect is deterministic on 1/2/4/8 workers");
             std::cout << "reconnect workers=" << workers << " state=" << hash << '\n';
+        });
+    }
+    for (const auto peers : {2U, 3U}) {
+        std::string reference;
+        for (const auto workers : {1U, 2U, 4U, 8U}) run_case("checkpoint rooted reconnect", [&] {
+            const auto hash = reconnect(workers, 23, peers, true, 17);
+            if (reference.empty()) reference = hash;
+            expect(hash == reference, "checkpoint rooted reconnect agrees on 1/2/4/8 workers");
         });
     }
     run_case("history only recovery", recovery_without_rejoin);

@@ -4,6 +4,13 @@ namespace eawr::presentation::godot_backend {
 
 BattleSource::~BattleSource() = default;
 
+std::vector<BattleSource::Stage> BattleSource::prepare_stages(BattlePreparation& prepared, const vfs::Vfs& files,
+    const data::Catalog& catalog, const std::string_view map_path) const {
+    return {[this, &prepared, &files, &catalog, path = std::string(map_path)](std::string& failure) {
+        return prepare(prepared, files, catalog, path, failure);
+    }};
+}
+
 void BattleSourceState::select_arrivals() {
     arrivals_.reset();
     if (!start_ || !tables_) return;

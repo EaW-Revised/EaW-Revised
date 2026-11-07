@@ -1,7 +1,9 @@
 #include "unit_tables_decode.hpp"
+#include "eawr/core/load_profile.hpp"
 #include "eawr/data/retail_values.hpp"
 #include "eawr/sim/math/geometry.hpp"
 
+#include <algorithm>
 #include <array>
 
 namespace eawr::units::unit_tables_detail {
@@ -34,7 +36,30 @@ namespace eawr::units::unit_tables_detail {
 }
 
 void Loader::enqueue(const std::string& id, const UnitKind kind) {
-        if (queued_.insert(lower(id)).second) queue_.emplace_back(id, kind);
+        if (!queued_.insert(lower(id)).second) return;
+        queue_.emplace_back(id, kind);
+        if (!input_.model_hint || input_.catalog == nullptr) return;
+        // Tell the decode-ahead which model this type will ask for, by the same tag as planned_model_paths. The report is
+        // thrown away: the loader reports what is wrong when it loads the unit itself.
+        Report discard;
+        auto object = resolve(*input_.catalog, id, data::Category::game_object, id, "model", discard);
+        if (!object) return;
+        const auto path = model_path(object->text(domain_tag(input_.domain, DomainTag::model_name)));
+        if (path.empty()) return;
+        hinted_path_[lower(id)] = path;
+        ++hinted_pending_[path];
+        input_.model_hint(path);
+    }
+
+void Loader::release_hint(const std::string& id) {
+        if (!input_.model_skipped) return;
+        const auto hinted = hinted_path_.find(lower(id));
+        if (hinted == hinted_path_.end()) return;
+        const std::string path = std::move(hinted->second);
+        hinted_path_.erase(hinted);
+        const auto pending = hinted_pending_.find(path);
+        if (pending != hinted_pending_.end() && --pending->second != 0) return;
+        if (!models_.contains(path)) input_.model_skipped(path);
     }
 
 void Loader::want_projectile(const std::string& id) {
@@ -51,10 +76,12 @@ void Loader::record_layers(const Object& object) {
     }
 
 const Frames* Loader::frames(const std::string& path, const std::string& owner) {
+    core::load_profile::Scope unit_frames_scope(core::load_profile::Phase::unit_frames);
         const auto cached = models_.find(path);
         if (cached != models_.end()) return cached->second.model == nullptr ? nullptr : &cached->second;
         Frames entry;
         entry.model = input_.model ? input_.model(path) : nullptr;
+        if (input_.model_taken) input_.model_taken(path);
         if (entry.model == nullptr) {
             report_.missing(owner, "model", path, "model is not loadable");
         } else {
@@ -173,11 +200,13 @@ std::optional<bool> Loader::flag(Object& object, const std::string_view tag, con
     }
 
 void Loader::load_unit(const std::string& id, const UnitKind hint) {
+        core::load_profile::Scope type_scope(core::load_profile::Phase::unit_type_load);
+        const core::load_profile::IoScope type_io(core::load_profile::Phase::unit_type_load);
         UnitType unit;
         unit.id = id;
         unit.kind = hint;
-        // PL-20 covers unique names. Duplicate names retain the catalog winner's position;
-        // the separate retail duplicate-entry/name-lookup seam is tracked in legacy #3741.
+        // Duplicate names retain the first registered definition's position (PL-20); the
+        // other definitions stay in the catalog, and separate duplicate type-table entries remain legacy #3741.
         if (const auto* definition = input_.catalog->find(id, data::Category::game_object))
             unit.table_order = (static_cast<std::uint64_t>(definition->registry_order) << 32) | definition->definition_order;
         auto object = resolve(*input_.catalog, id, data::Category::game_object, id, "type", report_);
@@ -289,8 +318,13 @@ void Loader::load_unit(const std::string& id, const UnitKind hint) {
             unit.ownership_sticks = flag(*object, "Ownership_Sticks", false).value_or(false);
             unit.community_property = flag(*object, "Is_Community_Property", false).value_or(false);
         }
-        if (unit.kind == UnitKind::station) {
-            // WSU-16: skirmish stations share selection without being capture points.
+        // WSU-16 / #4985: skirmish structures share selection without being capture points. A structure is a
+        // StarBase or any other immobile space obstacle: a mod's shipyard is a SpaceBuildable, not a StarBase.
+        // Capture points keep their own community flag above.
+        const bool immobile_structure = unit.kind == UnitKind::station
+            || (unit.kind == UnitKind::ship && !unit.capture_point && has_behavior(*object, "SPACE_OBSTACLE")
+                && !has_behavior(*object, "SIMPLE_SPACE_LOCOMOTOR") && !has_behavior(*object, "TEAM_LOCOMOTOR"));
+        if (immobile_structure) {
             unit.station_community_property = flag(*object, "Is_Community_Property", false).value_or(false);
         }
         if (unit.under_construction) {
@@ -405,6 +439,10 @@ void Loader::load_obstacle(const std::string& id) {
         if (!object) return;
         record_layers(*object);
         ObstacleType obstacle;
+        // Map-only definitions without catalog ordinals follow global definitions; ties keep map order.
+        obstacle.table_order = std::numeric_limits<std::uint64_t>::max();
+        if (const auto* definition = input_.catalog->find(id, data::Category::game_object))
+            obstacle.table_order = (static_cast<std::uint64_t>(definition->registry_order) << 32) | definition->definition_order;
         obstacle.id = object->effective.object_id;
         obstacle.xml_type = object->effective.type_name;
         obstacle.space_layer = trim(object->text(domain_tag(input_.domain, DomainTag::layer)));

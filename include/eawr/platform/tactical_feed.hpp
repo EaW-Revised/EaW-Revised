@@ -39,6 +39,11 @@ public:
     [[nodiscard]] virtual bool wait_for(std::uint64_t tick, std::chrono::milliseconds timeout) const = 0;
     [[nodiscard]] virtual LiveFrame frame() const = 0;
     [[nodiscard]] virtual std::shared_ptr<const sim::tactical::TacticalSnapshot> snapshot_at(std::uint64_t tick) const = 0;
+    // L1.2: the kept snapshots at one instant (one lock; ticks are unique, the order is the feed's own);
+    // LiveSession::snapshot_in() answers over it like snapshot_at().
+    [[nodiscard]] virtual LiveSession::SnapshotHistory history_copy() const = 0;
+    // Debug overlay copy of the land movement state (null for feeds without a land world, or when the session is busy).
+    [[nodiscard]] virtual std::shared_ptr<const sim::tactical::LandOverlayData> land_overlay() const { return nullptr; }
     [[nodiscard]] virtual std::shared_ptr<const LiveFog> fog_at(std::uint64_t tick) const = 0;
     [[nodiscard]] virtual LiveEvents events_after(std::uint64_t after, std::uint64_t through) const = 0;
     [[nodiscard]] virtual std::vector<LiveTickCost> tick_costs_after(std::uint64_t after) const = 0;
@@ -65,6 +70,9 @@ public:
     virtual void command_source(std::function<std::vector<sim::tactical::PlayerCommand>(std::uint64_t)> source) = 0;
     // Authored base types opt into the same durable attack journal as M2.
     virtual void configure_notifications(std::vector<sim::tactical::TypeId>) {}
+    // #3989: a player's save of a standalone battle (LiveSession::request_save). False: this feed
+    // cannot save (a borrowed campaign child saves with its campaign), and `sink` is never called.
+    [[nodiscard]] virtual bool request_save(LiveSession::SaveSink) { return false; }
 };
 
 class StandaloneTacticalFeed final : public TacticalFeed {
@@ -82,6 +90,8 @@ public:
     bool wait_for(std::uint64_t tick, std::chrono::milliseconds timeout) const override { return session_->wait_for(tick, timeout); }
     LiveFrame frame() const override { return session_->frame(); }
     std::shared_ptr<const sim::tactical::TacticalSnapshot> snapshot_at(std::uint64_t tick) const override { return session_->snapshot_at(tick); }
+    LiveSession::SnapshotHistory history_copy() const override { return session_->history_copy(); }
+    std::shared_ptr<const sim::tactical::LandOverlayData> land_overlay() const override { return session_->land_overlay(); }
     std::shared_ptr<const LiveFog> fog_at(std::uint64_t tick) const override { return session_->fog_at(tick); }
     LiveEvents events_after(std::uint64_t after, std::uint64_t through) const override { return session_->events_after(after, through); }
     std::vector<LiveTickCost> tick_costs_after(std::uint64_t after) const override { return session_->tick_costs_after(after); }
@@ -92,6 +102,7 @@ public:
     diagnostics::MemoryCapacity memory_capacity() const override { return session_->memory_capacity(); }
     LiveScriptReport script_report() const override { return session_->script_report(); }
     void stop() override { session_->stop(); }
+    bool request_save(LiveSession::SaveSink sink) override { session_->request_save(std::move(sink)); return true; }
     std::vector<std::string> tick_hashes() const override { return session_->tick_hashes(); }
     sim::tactical::TacticalReplay record() const override { return session_->record(); }
     sim::tactical::TacticalReplay failure_record() const override { return session_->failure_record(); }

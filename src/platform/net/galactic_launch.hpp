@@ -17,12 +17,16 @@ struct GalacticLaunch {
     std::shared_ptr<GalacticLanMatch> match;
     std::shared_ptr<const campaign::CampaignSetupPlan> plan;
     std::shared_ptr<platform::PreparedLiveAgreement> owner;
+    // #6012: the campaign a save of this game records; a save made on this start path has no prepared campaign to read it from.
+    std::optional<platform::LiveSaveCampaignSource> saved_campaign;
     [[nodiscard]] const sim::galactic::GalacticSetup& layout() const;
     // Startup-owner reads before start(); active scenes consume LiveGameSession::frame(seat).
     [[nodiscard]] std::shared_ptr<const sim::galactic::GalacticSnapshot> snapshot() const;
     [[nodiscard]] std::shared_ptr<const sim::galactic::GalacticSnapshot> snapshot(sim::galactic::SeatId) const;
     [[nodiscard]] bool native_ai_installed() const;
     std::shared_ptr<const platform::CampaignServiceConfiguration> services;
+    std::function<net::GalacticRecoveryWorker::Restore(std::size_t)> recovery_factory;
+    std::function<core::Result<void>()> finish_load_transport;
     [[nodiscard]] core::Result<std::unique_ptr<platform::LiveGameSession>> start(platform::LiveGameSession::Options) const;
 };
 

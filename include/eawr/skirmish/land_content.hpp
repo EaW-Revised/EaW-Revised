@@ -218,8 +218,9 @@ inline constexpr sim::math::Fixed land_physical_limit = sim::math::Fixed::from_r
     result.land.occupations = inputs.occupations;
     result.bounds = inputs.bounds;
     result.last_known_capacity = inputs.last_known_capacity;
-    if (inputs.contacts.prediction_seconds < Fixed{} || inputs.contacts.minimum_prediction_distance < Fixed{})
-        return fail("land content", "contacts", "negative prediction settings");
+    if (inputs.contacts.prediction_seconds < Fixed{} || inputs.contacts.minimum_prediction_distance < Fixed{}
+        || inputs.contacts.stopped_overlap < Fixed{} || inputs.contacts.stopped_overlap > Fixed::from_raw(Fixed::scale))
+        return fail("land content", "contacts", "negative prediction settings or a stopped-pair overlap outside 0..1");
     std::uint32_t assigned_bits{};
     std::vector<std::string> bit_names;
     for (const auto& bit : inputs.unverified_passability_bits) {
@@ -423,7 +424,7 @@ inline constexpr sim::math::Fixed land_physical_limit = sim::math::Fixed::from_r
     const auto number = [&](std::uint64_t value) { for (unsigned shift = 0; shift < 64; shift += 8) bytes.push_back(static_cast<std::uint8_t>(value >> shift)); };
     const auto fixed = [&](Fixed value) { number(static_cast<std::uint64_t>(value.raw())); };
     const auto text = [&](const std::string& value) { number(value.size()); bytes.insert(bytes.end(), value.begin(), value.end()); };
-    text("land-content-adapter-v5");
+    text("land-content-adapter-v6");
     number(result.static_objects.size());
     for (const auto& row : result.static_objects) {
         number(row.type); fixed(row.width); fixed(row.height); fixed(row.x_offset); fixed(row.y_offset);
@@ -450,7 +451,7 @@ inline constexpr sim::math::Fixed land_physical_limit = sim::math::Fixed::from_r
         }
     }
     number(inputs.contacts.complexity_quota); number(inputs.contacts.reset_interval);
-    fixed(inputs.contacts.prediction_seconds); fixed(inputs.contacts.minimum_prediction_distance);
+    fixed(inputs.contacts.prediction_seconds); fixed(inputs.contacts.minimum_prediction_distance); fixed(inputs.contacts.stopped_overlap);
     number(inputs.occupations.size());
     for (const auto& row : inputs.occupations) {
         number(row.object); number(row.primary_passability); number(row.secondary_passability);

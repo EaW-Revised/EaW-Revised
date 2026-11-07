@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -17,6 +18,7 @@
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -302,6 +304,45 @@ int main(const int argc, char** argv) {
         auto empty_prefix = mounted.value().open_prefix("data/xml/order.xml", 0);
         expect(empty_prefix && empty_prefix.value().empty(), "a zero-byte prefix is empty");
         expect(!mounted.value().open_prefix("data/xml/missing.xml", 4), "a missing asset has no prefix");
+
+        // L1.2: the particle lane decodes assets lazily on a thread other than the one that mounted the VFS, through the
+        // same const API the load workers use, while the mounting thread keeps reading. Every answer must equal the
+        // mounting thread's, and no reader may fail.
+        const Vfs& shared_vfs = mounted.value();
+        const std::array<std::string_view, 4> lane_paths{"DATA/XML/shared.xml", "data/xml/LOOSE.xml", "data/xml/order.xml",
+            "data/xml/missing.xml"};
+        std::array<std::string, 4> expected_bytes;
+        std::array<bool, 4> expected_found{};
+        for (std::size_t index = 0; index < lane_paths.size(); ++index) {
+            auto bytes = shared_vfs.open(lane_paths[index]);
+            expected_found[index] = static_cast<bool>(bytes);
+            if (bytes) expected_bytes[index] = bytes_as_string(bytes.value());
+        }
+        std::atomic<unsigned> lane_mismatches{0};
+        const auto read_all = [&] {
+            for (unsigned round = 0; round < 200; ++round) {
+                for (std::size_t index = 0; index < lane_paths.size(); ++index) {
+                    auto bytes = shared_vfs.open(lane_paths[index]);
+                    auto located = shared_vfs.stat(lane_paths[index]);
+                    auto prefix = shared_vfs.open_prefix(lane_paths[index], 3);
+                    const bool found = static_cast<bool>(bytes);
+                    if (found != expected_found[index] || static_cast<bool>(located) != found
+                        || static_cast<bool>(prefix) != found
+                        || (found && (bytes_as_string(bytes.value()) != expected_bytes[index]
+                                       || bytes_as_string(prefix.value()) != expected_bytes[index].substr(0, 3)))) {
+                        lane_mismatches.fetch_add(1, std::memory_order_relaxed);
+                    }
+                }
+            }
+        };
+        {
+            std::thread lane_thread(read_all);
+            std::thread second_thread(read_all);
+            read_all();
+            lane_thread.join();
+            second_thread.join();
+        }
+        expect(lane_mismatches.load() == 0, "open/stat/open_prefix on worker threads equal the mounting thread's answers");
     }
 
     write_bytes(fixture.root / "truncated.meg", std::array<std::byte, 3>{});
@@ -435,6 +476,35 @@ int main(const int argc, char** argv) {
     const auto recovered = Vfs::mount(denied_mounts);
     expect(static_cast<bool>(recovered), "archive mounts after read access is restored");
 #endif
+
+    {
+        const auto player = fixture.root / "player";
+        const auto layer = player / "Revised" / "Data";
+        const auto revised_mod = fixture.root / "revised-mod";
+        const auto stock = fixture.root / "revised-stock";
+        write_text(layer / "XML" / "item.xml", "revised");
+        write_text(revised_mod / "XML" / "item.xml", "mod");
+        write_text(stock / "XML" / "item.xml", "stock");
+        std::vector<LayerRoot> roots{{"mod", revised_mod}, {"expansion", stock}};
+        expect(insert_revised_layer(roots, true, player), "packaged Revised layer exists");
+        expect(roots.size() == 3 && roots[1].first == revised_layer_id, "Revised sits below mod and above expansion");
+        std::vector<MountSpec> revised_mounts;
+        for (const auto& [id, path] : roots) revised_mounts.push_back({id, path, "data", {}});
+        auto files = Vfs::mount(revised_mounts);
+        expect(files && files.value().stat("data/xml/item.xml").value().layer_id == "mod", "mod overrides Revised");
+        roots.erase(roots.begin());
+        revised_mounts.clear();
+        for (const auto& [id, path] : roots) revised_mounts.push_back({id, path, "data", {}});
+        files = Vfs::mount(revised_mounts);
+        expect(files && files.value().stat("data/xml/item.xml").value().layer_id == revised_layer_id, "Revised overrides stock");
+        std::vector<LayerRoot> off{{"expansion", stock}};
+        expect(insert_revised_layer(off, false, player) && off.size() == 1, "disabled layer is absent");
+        expect(!insert_revised_layer(off, true, fixture.root / "missing") && off.size() == 1, "missing layer leaves chain unchanged");
+        expect(insert_revised_layer(off, true, {}, player / "Revised") && off.size() == 2, "development override mounts");
+        std::vector<LayerRoot> relative{{"expansion", stock}};
+        expect(insert_revised_layer(relative, true, player, "relative") && relative.size() == 2
+            && relative.front().second == layer, "relative override falls back to packaged Revised");
+    }
 
     vfs_loose_only_mod();
     vfs_mod_chain();

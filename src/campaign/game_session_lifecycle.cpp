@@ -1,4 +1,5 @@
 #include "game_session_impl.hpp"
+#include "eawr/vfs/vfs.hpp"
 #include "game_session_diagnostic.hpp"
 #include "checkpoint_owner_internal.hpp"
 #include "battle_return_internal.hpp"
@@ -45,7 +46,7 @@ template <class A, class T> void checkpoint_game_owner(A& a, T& v) {
         v.admissions, v.replay_admissions, v.votes, v.multiplayer_vote_timeout, v.vote_started, v.withdrawing_player, v.conflict_pause,
         v.conflicts, v.load_fixups, v.replay_fixups, v.replay_conflicts, v.replay_selected, v.history,
         v.timelines->galaxy, v.timelines->child, v.timelines->historical,
-        v.interactive_seat.value, v.summary_conflict, v.story_call_sequence);
+        v.interactive_seat.value, v.summary_conflict, v.story_call_sequence, v.network_producer_sequences, v.network_resume_state);
 }
 } // namespace
 
@@ -75,6 +76,41 @@ core::Result<void> GameSession::stage_battle(ConflictRecord record, const tactic
         || (!reserved_admission && record.id < impl_->world().next_entity_id()))
         return fail<void>("conflict setup must reserve its ID and the shared allocator boundary");
     record.tactical.seed = child_seed(impl_->world().setup().seed, record.id);
+    // ADR-020: final campaign entries derive control from the authoritative roster,
+    // never a lobby option or a provider's preselected policy. Ordinary tactical
+    // setups without campaign metadata keep their faction command model.
+    if (record.tactical.campaign) {
+        const auto& seats = impl_->world().seats();
+        const auto humans = [&](const auto player) {
+            return std::count_if(seats.begin(), seats.end(), [&](const auto& seat) {
+                return seat.player == player && seat.active && seat.kind == sim::SeatKind::human;
+            });
+        };
+        record.tactical.controllers.reset();
+        if (humans(record.invader) >= 2 || humans(record.defender) >= 2) {
+            tactical::BattleControllerPolicy policy;
+            for (const auto& player : record.tactical.players) {
+                if (player.player_id != record.invader && player.player_id != record.defender) continue;
+                policy.factions.push_back({player.player_id, humans(player.player_id)
+                    ? tactical::FactionController::humans : tactical::FactionController::ai});
+            }
+            for (const auto& seat : seats) {
+                if ((seat.player == record.invader || seat.player == record.defender)
+                    && (seat.kind == sim::SeatKind::human || seat.kind == sim::SeatKind::ai))
+                    policy.seats.push_back({seat.seat_id, seat.player, seat.kind, seat.active});
+            }
+            std::sort(policy.factions.begin(), policy.factions.end(), [](const auto& a, const auto& b) { return a.player < b.player; });
+            std::sort(policy.seats.begin(), policy.seats.end(), [](const auto& a, const auto& b) { return a.seat < b.seat; });
+            record.tactical.controllers = std::move(policy);
+        }
+        // Ignore supplied opt-in assignments as well as the flag itself. Retain
+        // explicit structure classification only when the derived policy is on.
+        for (auto& unit : record.tactical.units) {
+            unit.controller_seat = {};
+            if (!record.tactical.controllers || unit.control != tactical::UnitControl::shared_structure)
+                unit.control = tactical::UnitControl::none;
+        }
+    }
     if (auto split = prepare_battle_controllers(record.tactical, content); !split) return split;
     if (auto valid = tactical::validate_setup(record.tactical); !valid) return valid;
     if (content.retreat) tactical::resolve_cinematic_seats(record.tactical, content.economy.players);
@@ -167,6 +203,12 @@ core::Result<void> GameSession::Impl::queue_conflict(ConflictRecord record, Arbi
         || !record.invader || !record.defender
         || static_cast<std::uint8_t>(arbitration.route) > static_cast<std::uint8_t>(ConflictRoute::tactical))
         return fail<void>("conflict admission needs a fresh identity, pinned content and an idle service");
+    // #4546: a land request needs a registered land provider or an auto-resolver to settle it; otherwise it would stay
+    // pending for ever (headless or test sessions that never ran install_live). Refuse by name at admission.
+    if (record.layer == BattleLayer::land && !impl.layer(BattleLayer::land).installed
+        && !impl.services(record).content && !impl.auto_resolver)
+        return fail<void>("land tactical provider is unavailable: no land provider or auto-resolver is registered",
+            unavailable_conflict_tactical);
     // The host's live request is the only way a result can settle; a flagged conflict without one would fail at its result.
     if (record.corruption_mission != (record.corruption_request != 0))
         return fail<void>("corruption mission conflicts carry exactly their live host request");
@@ -489,6 +531,23 @@ core::Result<void> GameSession::process_session_commands(StepContext& tick_conte
             if (!accepted) out.diagnostics.push_back(accepted.error());
             out.invasion_accept_responses.push_back({accept->conflict, command.key.seat,
                 accepted ? std::string{} : accepted.error().message, summary_closed});
+        } else if (const auto* click = std::get_if<galactic::GuiClick>(&command.payload)) {
+            if (impl.gui_click_tick != impl.tick) { impl.gui_click_tick = impl.tick; impl.gui_clicks_this_tick.clear(); }
+            // WST-37: the click reaches the plots of the seat that issued it, at the agreed tick on every peer. It changes
+            // no world state itself; only the story's events and rewards do. A seat without a player is ignored.
+            // The seat's own galactic player. (impl.player() is the battle roster and is 0 on the galaxy map, which
+            // rejected every galactic click until #5857.)
+            const auto* issuer = impl.seat(command.key.seat);
+            const galactic::PlayerId player = issuer ? issuer->player : 0;
+            if (!issuer || !issuer->active || issuer->kind != galactic::SeatKind::human || player == 0)
+                out.diagnostics.push_back(fail<void>("GUI click from a seat that cannot raise story events").error());
+            else if (++impl.gui_clicks_this_tick[command.key.seat] > galactic::max_gui_clicks_per_tick)
+                out.diagnostics.push_back(fail<void>("GUI click dropped: more than " + std::to_string(galactic::max_gui_clicks_per_tick)
+                    + " clicks from one seat in one tick (a story click loop?)").error());
+            else if (impl.story_engine) {
+                auto told = impl.story_notice({player, galactic::story::TextNotice{galactic::story::Text::click_gui, click->component, std::nullopt}});
+                if (!told) { impl.failure = told.error(); return core::Result<void>::failure(*impl.failure); }
+            }
         } else if (const auto* withdraw = std::get_if<galactic::AutoResolveWithdraw>(&command.payload)) {
             const auto* issuer = impl.seat(command.key.seat);
             const auto progress = auto_resolve_progress();
@@ -893,7 +952,7 @@ core::Result<void> GameSession::step_galaxy(StepContext& tick_context, const sim
                 // GCMP D10 (owner update 10-21): every conflict with a human side votes
                 // Begin / Auto-Resolve; the AI side never votes. BF-5's layer capability owns D3's refusal.
                 const bool invader_human = human(conflict.invader), defender_human = human(conflict.defender);
-                auto tactical = impl.tactical_selection(conflict, true, impl.admission->arbitration.forced_tactical);
+                auto tactical = impl.tactical_selection(conflict, true, false);
                 if (!tactical) { impl.failure = tactical.error(); return core::Result<void>::failure(*impl.failure); }
                 impl.admission->arbitration.route = !tactical.value() || (!invader_human && !defender_human)
                     ? ConflictRoute::instant_auto : ConflictRoute::vote;
@@ -933,14 +992,14 @@ core::Result<void> GameSession::step_galaxy(StepContext& tick_context, const sim
                 const bool invader_human = human(record.invader), defender_human = human(record.defender);
                 // Admission may wait before selection. D3/D10 use the current
                 // controllers for every route, including an initially one-human battle.
-                auto tactical = impl.tactical_selection(record, true, impl.admission->arbitration.forced_tactical);
+                auto tactical = impl.tactical_selection(record, true, false);
                 if (!tactical) { impl.failure = tactical.error(); return core::Result<void>::failure(*impl.failure); }
                 impl.admission->arbitration.route = !tactical.value() || (!invader_human && !defender_human)
                     ? ConflictRoute::instant_auto : ConflictRoute::vote;
                 if (impl.admission->arbitration.route == ConflictRoute::vote) {
                     // WGM-176: equality still waits. The session frontier advances
                     // while the strategic clock is paused; no peer wall clock participates.
-                    if (impl.vote_started && impl.tick - *impl.vote_started > *impl.multiplayer_vote_timeout) {
+                    if (impl.vote_started && !impl.untimed_votes() && impl.tick - *impl.vote_started > *impl.multiplayer_vote_timeout) {
                         if (invader_human) impl.votes.try_emplace(record.invader, true);
                         if (defender_human) impl.votes.try_emplace(record.defender, true);
                     }
@@ -949,6 +1008,14 @@ core::Result<void> GameSession::step_galaxy(StepContext& tick_context, const sim
                     if (progress.value()) impl.admission->arbitration.route = *progress.value()
                         ? ConflictRoute::tactical : ConflictRoute::instant_auto;
                 }
+            }
+            // Guards must not abort matches: a forcing gate cannot start a fight the layer refuses (no land provider),
+            // so the conflict settles through the solver, as the networked routes above do.
+            if (impl.admission->arbitration.route == ConflictRoute::tactical
+                || impl.admission->arbitration.route == ConflictRoute::pending_tactical) {
+                auto tactical = impl.tactical_selection(impl.admission->conflict, true, false);
+                if (!tactical) { impl.failure = tactical.error(); return core::Result<void>::failure(*impl.failure); }
+                if (!tactical.value()) impl.admission->arbitration.route = ConflictRoute::instant_auto;
             }
             const auto route = impl.admission->arbitration.route;
             const auto automatic = route == ConflictRoute::instant_auto || route == ConflictRoute::dialog_auto;
@@ -1189,9 +1256,9 @@ core::Result<GameTick> GameSession::finish_step(StepContext& tick_context) {
         core::Diagnostic line; line.code = "EAWR-ENTRY-0001"; line.severity = core::Severity::warning; line.message = "space entry: " + std::move(note);
         out.diagnostics.push_back(std::move(line));
     }
-    // #4058: an accepted SaveRequest is a history boundary on every peer, whether or not this peer writes the file.
-    // A recording that cannot be sealed keeps its base; the capture would refuse it as well.
-    if (std::any_of(out.save_events.begin(), out.save_events.end(),
+    // Solo saves schedule the history boundary here. Multiplayer waits for the
+    // all-peer canonical capture commitment; disk success never decides that base.
+    if (!impl.world().multiplayer() && std::any_of(out.save_events.begin(), out.save_events.end(),
         [](const auto& event) { return event.kind == galactic::GalacticEventKind::save_requested; })) {
         if (auto boundary = history_frontier()) impl.scheduled_base = std::move(boundary).value();
     }
@@ -1250,6 +1317,10 @@ core::Result<GameTick> GameSession::step(const sim::PartitionExecutor& executor)
 }
 core::Result<GameSession> GameSession::from_recording(const GameRecording& recording,
     ContentResolver content, ScriptFactory scripts, ScriptRequirement requirement) {
+    return from_recording(recording, std::move(content), std::move(scripts), requirement, {});
+}
+core::Result<GameSession> GameSession::from_recording(const GameRecording& recording,
+    ContentResolver content, ScriptFactory scripts, ScriptRequirement requirement, LayerInstaller install_layers) {
     if (auto valid = galactic::validate_replay(recording.commands); !valid) return core::Result<GameSession>::failure(valid.error());
     auto created = create(recording.commands.setup);
     if (!created) return created;
@@ -1314,6 +1385,12 @@ core::Result<GameSession> GameSession::from_recording(const GameRecording& recor
             return fail<GameSession>("invalid load prologue");
         impl.replay_fixups.emplace(fixup.key.tick, fixup);
     }
+    // #4546: land (and any other dispatcher-registered) layers rebuild through install_conflict_layer, so a recorded
+    // land child is entered by the same per-layer content, scripts, configurator and result consumers as live play.
+    if (install_layers) {
+        if (auto installed = install_layers(created.value()); !installed)
+            return core::Result<GameSession>::failure(installed.error());
+    }
     return created;
 }
 core::Result<std::vector<std::uint8_t>> GameSession::save_checkpoint_state() const {
@@ -1331,7 +1408,7 @@ core::Result<std::vector<std::uint8_t>> GameSession::save_checkpoint_state() con
             return ChildOwner{owner->conflict, std::move(state).value(), std::move(scripts).value(),
                 owner->session.record(), owner->sequences, owner->killers, owner->owns_pause, owner->controller_inputs};
         };
-        Writer out; out(std::uint32_t{5}, world.value()); checkpoint_game_owner(out, *impl_);
+        Writer out; out(std::uint32_t{6}, world.value()); checkpoint_game_owner(out, *impl_);
         out(child(impl_->child), child(impl_->staged));
         std::optional<std::vector<std::uint8_t>> resolver;
         if (auto_resolve_needs_service() && impl_->auto_state_writer) {
@@ -1350,6 +1427,8 @@ core::Result<std::vector<std::uint8_t>> GameSession::save_checkpoint_state() con
         std::vector<galactic::story::OwnerGoals> goals;
         for (const auto& [owner, held] : impl_->story_goals) goals.push_back({owner, held.state()});
         out(goals);
+        // WST-56: Lua edits of plot events, a tail that exists only when something was edited (old bytes otherwise).
+        if (story && !story->edits.empty()) out(story->edits);
         return core::Result<std::vector<std::uint8_t>>::success(std::move(out.bytes));
     } catch (const Invalid& error) { return fail<std::vector<std::uint8_t>>(error.what()); }
 }
@@ -1361,12 +1440,17 @@ core::Result<void> GameSession::load_checkpoint_state(std::span<const std::uint8
             throw Invalid("direct restore requires a fresh private game");
         Reader in(bytes); std::vector<std::uint8_t> world;
         std::uint32_t version{}; in(version);
-        if (version != 5) throw Invalid("unsupported campaign owner format");
+        if (version != 6) throw Invalid("unsupported campaign owner format");
         in(world);
         if (auto restored = impl_->world().load_checkpoint_state(world); !restored) return restored;
         const auto recorded_base = impl_->history;
         const auto recorded_vote_timeout = impl_->multiplayer_vote_timeout;
         checkpoint_game_owner(in, *impl_);
+        if (auto cursors = retain_network_producer_sequences(impl_->network_producer_sequences); !cursors)
+            throw Invalid(cursors.error().message);
+        if (impl_->network_resume_state.size() > 64U * 1024U) throw Invalid("network resume state exceeds its roster budget");
+        if (impl_->world().multiplayer() && impl_->interactive_seat.value)
+            throw Invalid("multiplayer interactive observer must be canonical zero");
         impl_->refresh_system_hold();
         if (impl_->multiplayer_vote_timeout != recorded_vote_timeout)
             throw Invalid("owner vote timeout differs from its recording");
@@ -1382,13 +1466,14 @@ core::Result<void> GameSession::load_checkpoint_state(std::span<const std::uint8
         std::optional<galactic::story::State> story; in(story);
         if (story.has_value() != impl_->story_engine.has_value())
             throw Invalid("saved story plots differ from the loaded campaign");
-        if (story) if (auto restored = impl_->story_engine->restore(std::move(*story)); !restored) return restored;
         std::vector<galactic::story::OwnerGoals> goals; in(goals);
         for (auto& row : goals) {
             if (impl_->story_goals.contains(row.owner)) throw Invalid("saved story goals repeat an owner");
             try { impl_->story_goals.emplace(row.owner, galactic::story::Goals(row.owner, std::move(row.state))); }
             catch (const std::invalid_argument& error) { throw Invalid(error.what()); }
         }
+        if (story && in.remaining()) in(story->edits); // the optional Lua-edit tail (WST-56)
+        if (story) if (auto restored = impl_->story_engine->restore(std::move(*story)); !restored) return restored;
         if (in.remaining() || impl_->tick > galactic::galactic_max_ticks || impl_->world().completed_tick() > impl_->tick
             || (!child && impl_->world().completed_tick() != impl_->tick)
             || child.has_value() != impl_->timelines->child.has_value())
@@ -1531,6 +1616,33 @@ core::Result<GameRecording> GameSession::checkpoint_recording() const {
     for (const auto& entry : result.commands.setup.outcomes) result.commands.final_tick_count = std::max(result.commands.final_tick_count, entry.completed_tick);
     for (const auto& [tick, command] : impl_->replay_fixups) result.load_fixups.push_back(command);
     return core::Result<GameRecording>::success(std::move(result));
+}
+std::span<const std::uint8_t> GameSession::network_resume_state() const noexcept { return impl_->network_resume_state; }
+core::Result<void> GameSession::retain_network_resume_state(std::span<const std::uint8_t> bytes) {
+    if (bytes.size() > 64U * 1024U) return fail<void>("network resume state exceeds its roster budget");
+    impl_->network_resume_state.assign(bytes.begin(), bytes.end());
+    return core::Result<void>::success();
+}
+core::Result<void> GameSession::retain_network_producer_sequences(const std::map<sim::SeatId, std::uint64_t>& cursors) {
+    if (cursors.size() > galactic::galactic_max_seats) return fail<void>("network producer cursor count exceeds seats");
+    for (const auto& [seat, sequence] : cursors) {
+        const auto* issuer = impl_->seat(seat);
+        if (!issuer || issuer->kind != sim::SeatKind::human) return fail<void>("network producer cursor has no human seat");
+        (void)sequence;
+    }
+    for (const auto& [seat, sequence] : cursors) {
+        auto [at, inserted] = impl_->network_producer_sequences.emplace(seat, sequence);
+        if (!inserted) at->second = std::max(at->second, sequence);
+    }
+    return core::Result<void>::success();
+}
+std::map<sim::SeatId, std::uint64_t> GameSession::producer_sequences() const {
+    auto result = impl_->network_producer_sequences;
+    for (const auto& [seat, cursor] : impl_->last) {
+        auto [at, inserted] = result.emplace(seat, cursor.second);
+        if (!inserted) at->second = std::max(at->second, cursor.second);
+    }
+    return result;
 }
 const HistoryBase& GameSession::history_base() const noexcept { return impl_->history; }
 core::Result<HistoryBoundary> history_frontier_of(const GameRecording& recording,

@@ -1,8 +1,13 @@
 #include "eawr/core/load_profile.hpp"
 #include "renderer_upload_internal.hpp"
+#include "eawr/presentation/shader_activation.hpp"
+#include <cstring>
 
 namespace eawr::presentation::godot_backend {
 namespace {
+struct ProgramPin final : shader_activation::Artifact {
+    std::shared_ptr<const CachedShader> shader;
+};
 [[nodiscard]] Variant legacy_uniform_value(const legacy::UniformValue& value) {
     return std::visit([](const auto& item) -> Variant {
         using T = std::decay_t<decltype(item)>;
@@ -19,6 +24,123 @@ namespace {
 }
 
 } // namespace
+
+core::Result<std::shared_ptr<const shader_activation::Artifact>> GodotRenderer::prewarm_shader_material(
+    const MaterialDescription& material) {
+    using Result = core::Result<std::shared_ptr<const shader_activation::Artifact>>;
+    const auto refuse = []() { return Result::failure({.code = std::string(diagnostic_codes::shader_compile_failed),
+        .message = "translated material admission or offscreen program prewarm failed", .logical_path = std::nullopt, .line = std::nullopt, .column = std::nullopt, .source_id = std::nullopt}); };
+    auto* rendering = RenderingServer::get_singleton();
+    if (!rendering || !impl_ || material.route != MaterialRoute::modern_spatial || !validate_material(material)) return refuse();
+    if (!impl_->shader_cache_) impl_->shader_cache_ = std::make_shared<GodotShaderCache>();
+    Impl::Resource resource;
+    struct Temporary final {
+        RenderingServer& rendering;
+        std::array<RID, 10U> rids{};
+        ~Temporary() { for (const auto& rid : rids) if (rid.is_valid()) rendering.free_rid(rid); }
+    } temporary{*rendering, {}};
+    // This is an offscreen compiler exercise texture only. It is never
+    // retained as an effect resource or substituted into a visible material.
+    assets::Texture texture;
+    texture.width = texture.height = 1U;
+    texture.mips.push_back({1U, 1U, 4U, std::vector<std::byte>(4U, std::byte{255U})});
+    resource.texture = Impl::create_texture(*rendering, texture);
+    temporary.rids[0U] = resource.texture;
+    if (!resource.texture.is_valid()) return refuse();
+    Impl::MaterialRefusal refusal;
+    const auto uploaded = impl_->upload_material(*rendering, material, resource, refusal);
+    temporary.rids[1U] = resource.material;
+    // CachedShader owns its shader; an uncached failure is ours to free.
+    if (!resource.shared_shader && resource.shader.is_valid()) {
+        rendering->free_rid(resource.shader);
+        resource.shader = RID();
+    }
+    if (uploaded != Impl::MaterialUpload::success || !resource.shared_shader) return refuse();
+    const auto mesh = rendering->mesh_create(); temporary.rids[2U] = mesh;
+    const auto scenario = rendering->scenario_create(); temporary.rids[3U] = scenario;
+    const auto camera = rendering->camera_create(); temporary.rids[4U] = camera;
+    const auto viewport = rendering->viewport_create(); temporary.rids[5U] = viewport;
+    const auto instance = rendering->instance_create(); temporary.rids[6U] = instance;
+    const auto skinned_mesh = rendering->mesh_create(); temporary.rids[7U] = skinned_mesh;
+    const auto skinned_instance = rendering->instance_create(); temporary.rids[8U] = skinned_instance;
+    const auto skeleton = rendering->skeleton_create(); temporary.rids[9U] = skeleton;
+    if (!mesh.is_valid() || !scenario.is_valid() || !camera.is_valid() || !viewport.is_valid() || !instance.is_valid()
+        || !skinned_mesh.is_valid() || !skinned_instance.is_valid() || !skeleton.is_valid()) return refuse();
+    Array arrays; arrays.resize(RenderingServer::ARRAY_MAX);
+    PackedVector3Array positions, normals;
+    PackedVector2Array uv;
+    PackedColorArray colors;
+    PackedFloat32Array tangents;
+    positions.push_back(Vector3(-0.5F, -0.5F, -1.0F)); positions.push_back(Vector3(0.0F, 0.5F, -1.0F));
+    positions.push_back(Vector3(0.5F, -0.5F, -1.0F));
+    for (int i = 0; i < 3; ++i) {
+        normals.push_back(Vector3(0.0F, 0.0F, 1.0F)); uv.push_back(Vector2()); colors.push_back(Color(1, 1, 1, 1));
+        tangents.push_back(1.0F); tangents.push_back(0.0F); tangents.push_back(0.0F); tangents.push_back(1.0F);
+    }
+    arrays[RenderingServer::ARRAY_VERTEX] = positions; arrays[RenderingServer::ARRAY_NORMAL] = normals;
+    arrays[RenderingServer::ARRAY_TANGENT] = tangents; arrays[RenderingServer::ARRAY_COLOR] = colors;
+    arrays[RenderingServer::ARRAY_TEX_UV] = uv; arrays[RenderingServer::ARRAY_TEX_UV2] = uv;
+    const std::array<float, 9U> coefficients{0, 0, 1, 0, 0, 1, 0, 0, 1};
+    PackedByteArray binormals; binormals.resize(sizeof(coefficients));
+    std::memcpy(binormals.ptrw(), coefficients.data(), sizeof(coefficients));
+    arrays[RenderingServer::ARRAY_CUSTOM0] = binormals;
+    const BitField<RenderingServer::ArrayFormat> format(static_cast<int64_t>(RenderingServer::ARRAY_CUSTOM_RGB_FLOAT)
+        << RenderingServer::ARRAY_FORMAT_CUSTOM0_SHIFT);
+    rendering->mesh_add_surface_from_arrays(mesh, RenderingServer::PRIMITIVE_TRIANGLES, arrays, {}, {}, format);
+    // Source palette shaders remain outside the wrapper's scope. Ordinary
+    // Godot-pre-skinned inputs still need their distinct vertex format warmed.
+    PackedInt32Array bones; PackedFloat32Array weights;
+    for (unsigned i = 0U; i < 12U; ++i) { bones.push_back(0); weights.push_back(i % 4U == 0U ? 1.0F : 0.0F); }
+    arrays[RenderingServer::ARRAY_BONES] = bones; arrays[RenderingServer::ARRAY_WEIGHTS] = weights;
+    rendering->mesh_add_surface_from_arrays(skinned_mesh, RenderingServer::PRIMITIVE_TRIANGLES, arrays, {}, {}, format);
+    if (rendering->mesh_get_surface_count(mesh) != 1 || rendering->mesh_get_surface_count(skinned_mesh) != 1) return refuse();
+    rendering->mesh_surface_set_material(mesh, 0, resource.material);
+    rendering->mesh_surface_set_material(skinned_mesh, 0, resource.material);
+    rendering->instance_set_base(instance, mesh); rendering->instance_set_scenario(instance, scenario);
+    rendering->skeleton_allocate_data(skeleton, 1, false);
+    rendering->skeleton_bone_set_transform(skeleton, 0, Transform3D());
+    rendering->instance_set_base(skinned_instance, skinned_mesh); rendering->instance_set_scenario(skinned_instance, scenario);
+    rendering->instance_attach_skeleton(skinned_instance, skeleton);
+    rendering->camera_set_orthogonal(camera, 2.0F, 0.01F, 10.0F);
+    rendering->viewport_set_size(viewport, 16, 16); rendering->viewport_set_scenario(viewport, scenario);
+    rendering->viewport_attach_camera(viewport, camera); rendering->viewport_set_update_mode(viewport, RenderingServer::VIEWPORT_UPDATE_ALWAYS);
+    rendering->viewport_set_active(viewport, true);
+    bool drawn{};
+    for (unsigned attempt = 0U; attempt < 2U && !drawn; ++attempt) {
+        rendering->force_sync(); rendering->force_draw(false, 0.0); rendering->force_sync();
+        drawn = rendering->viewport_get_render_info(viewport, RenderingServer::VIEWPORT_RENDER_INFO_TYPE_VISIBLE,
+            RenderingServer::VIEWPORT_RENDER_INFO_DRAW_CALLS_IN_FRAME) >= 2;
+    }
+    rendering->viewport_set_active(viewport, false);
+    if (!drawn) return refuse();
+    auto pin = std::make_shared<ProgramPin>(); pin->shader = std::move(resource.shared_shader);
+    return Result::success(std::move(pin));
+}
+
+core::Result<void> GodotRenderer::set_translated_parameters(const sim::EntityId entity,
+    const std::span<const MaterialBinding> parameters) {
+    auto* rendering = RenderingServer::get_singleton();
+    if (!rendering || !impl_) return core::Result<void>::failure({.code = std::string(diagnostic_codes::backend_unavailable),
+        .message = "translated instance backend is unavailable", .logical_path = std::nullopt, .line = std::nullopt, .column = std::nullopt, .source_id = std::nullopt});
+    const auto found = impl_->instances_.find(entity);
+    if (found == impl_->instances_.end() || parameters.size() > 16U)
+        return core::Result<void>::failure({.code = std::string(diagnostic_codes::invalid_material),
+            .message = "translated instance or parameter budget is invalid", .logical_path = std::nullopt, .line = std::nullopt, .column = std::nullopt, .source_id = std::nullopt});
+    for (const auto& parameter : parameters) if (std::holds_alternative<std::string>(parameter.value))
+        return core::Result<void>::failure({.code = std::string(diagnostic_codes::invalid_material),
+            .message = "translated instance parameters must be numeric", .logical_path = std::nullopt, .line = std::nullopt, .column = std::nullopt, .source_id = std::nullopt});
+    for (const auto& parameter : parameters) {
+        Variant value;
+        std::visit([&](const auto& item) {
+            using T = std::decay_t<decltype(item)>;
+            if constexpr (std::is_same_v<T, std::int32_t> || std::is_same_v<T, float>) value = item;
+            else if constexpr (std::is_same_v<T, assets::Vec3f>) value = Vector3(item.x, item.y, item.z);
+            else if constexpr (std::is_same_v<T, assets::Vec4f>) value = Vector4(item.x, item.y, item.z, item.w);
+        }, parameter.value);
+        rendering->instance_geometry_set_shader_parameter(found->second.rid, StringName(parameter.name.c_str()), value);
+    }
+    return core::Result<void>::success();
+}
 
 // Derives the shadow-receiving variant of a legacy adapter (P1-04). The
 // adapters are unshaded because they evaluate their own irradiance; receiving

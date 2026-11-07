@@ -69,6 +69,22 @@ struct LanPlayer {
 }
 
 
+// A leaver must never stop the match: the shared pause belongs to nobody once the seat that took it has left. The lowest
+// remaining human seat resumes it, as an ordinary seat-issued Resume in the agreed input (no new rule, no new wire frame).
+[[nodiscard]] inline bool lan_releases_departed_pause(const presentation::godot_backend::GalacticLanView& view,
+    std::span<const LanPlayer> players, sim::SeatId local) {
+    using namespace presentation::godot_backend;
+    if (view.phase == GalacticLanPhase::ended || !view.clock_paused) return false;
+    const auto departed = [&](sim::SeatId seat) {
+        return std::find(view.departed.begin(), view.departed.end(), seat) != view.departed.end();
+    };
+    if (!departed(view.clock_actor)) return false;
+    const LanPlayer* lowest = nullptr;
+    for (const auto& player : players)
+        if (!departed(player.seat) && (!lowest || player.seat.value < lowest->seat.value)) lowest = &player;
+    return lowest && lowest->seat == local;
+}
+
 // Clock messages expire on the presentation clock even when the agreed frontier is stopped.
 // Persistent driver receipts remain available to release pending input hints independently.
 class LanNoticeModel final {

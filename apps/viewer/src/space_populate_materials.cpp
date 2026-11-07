@@ -2,10 +2,12 @@
 #include "eawr/core/load_profile.hpp"
 #include "eawr/presentation/space/space.hpp"
 #include "frame_timer.hpp"
+#include "menu_timeline.hpp"
 #include "render_profile_viewport.hpp"
 
 #include "family_textures.hpp"
 #include "space_populate_internal.hpp"
+#include "compose_texture_cache.hpp"
 #include "shield_shell.hpp"
 
 #include "eawr/assets/assets.hpp"
@@ -84,7 +86,7 @@ namespace eawr::presentation::godot_backend {
 
 std::optional<SpacePopulation::SurfaceUpload> SpacePopulation::upload_surface(
     GodotRenderer& renderer, const vfs::Vfs& filesystem, scene::VfsAssetCache& cache,
-    std::map<std::string, assets::Texture>& textures, sim::AssetId& next_asset,
+    ComposeTextureCache& textures, sim::AssetId& next_asset,
     const std::string_view model_path, const std::uint32_t mesh_index, const std::uint32_t submesh_index,
     const scene::LegacySelector& selector, const std::string& texture_path,
     const std::optional<std::array<std::uint8_t, 3>>& colour, const std::string& identity) {
@@ -94,6 +96,10 @@ std::optional<SpacePopulation::SurfaceUpload> SpacePopulation::upload_surface(
             return std::nullopt;
         }
         const auto& model = *loaded.value();
+        if (MenuTimeline::enabled()) {
+            MenuTimeline::detail_add("surface " + std::string(model_path) + " mesh " + std::to_string(mesh_index)
+                                     + " submesh " + std::to_string(submesh_index) + " texture " + texture_path);
+        }
         const assets::Mesh& source_mesh = model.meshes[mesh_index];
         // BP-74: phase-gated meshes must be drawable when their live phase selects them.
         const bool force_visible = ieq(source_mesh.name, "buildup") || ieq(source_mesh.name, "charged");
@@ -101,15 +107,17 @@ std::optional<SpacePopulation::SurfaceUpload> SpacePopulation::upload_surface(
         const bool effect_missing = selector.program == scene::missing_effect_selector().program;
         std::optional<core::load_profile::Scope> profile;  // one phase at a time through this function
         profile.emplace(core::load_profile::Phase::surface_texture_prepare);
-        assets::Texture texture = placeholder_texture();
+        // The held copy is shared, not copied: the renderer reads it for the upload and keeps its own.
+        std::shared_ptr<const assets::Texture> texture;
         if (!effect_missing && !texture_path.empty()) {
-            auto found = textures.find(texture_path);
-            if (found == textures.end()) {
-                auto decoded = assets::load_texture(filesystem, texture_path);
-                found = textures.emplace(texture_path, decoded ? std::move(decoded.value()) : placeholder_texture()).first;
-            }
-            texture = found->second;
+            // #5989: a single-level hull texture of an opaque ship material gets its mip chain from the texture read-ahead.
+            const scene::TextureProcessing processing = texture_processing_for(selector);
+            texture = textures.get(ComposeTextureCache::key(texture_path, processing), [&]() -> std::optional<assets::Texture> {
+                auto decoded = textures.decode(filesystem, texture_path, processing);
+                return decoded ? std::move(decoded.value()) : placeholder_texture();
+            });
         }
+        if (!texture) texture = std::make_shared<const assets::Texture>(placeholder_texture());
         profile.emplace(core::load_profile::Phase::surface_material_build);
         MaterialDescription material{
             .schema_version = MaterialDescription::current_schema_version,
@@ -131,26 +139,42 @@ std::optional<SpacePopulation::SurfaceUpload> SpacePopulation::upload_surface(
             material.bindings.push_back({"Colorization", scene::colorization_binding(material.program, *colour)});
         }
         profile.emplace(core::load_profile::Phase::surface_texture_prepare);
+        // #5989: the declared textures of the family's normal-map bindings, for the opaque ship materials that get chains.
+        std::vector<std::string> normal_maps;
+        if (!effect_missing && texture_processing_for(selector) != scene::TextureProcessing::none) {
+            for (const std::string_view slot : normal_binding_names(selector)) {
+                const MaterialBinding* binding = legacy::bindings::find(material, slot);
+                if (const auto* declared = binding == nullptr ? nullptr : std::get_if<std::string>(&binding->value))
+                    normal_maps.push_back(*declared);
+            }
+        }
         const std::vector<GodotRenderer::BindingTexture> family_textures = family_binding_textures(material,
             [&](const std::string_view declared) -> std::optional<assets::Texture> {
                 const std::string path = probe(cache, "data/art/textures/", declared, texture_suffixes);
                 if (path.empty()) return std::nullopt;
-                auto found = textures.find(path);
-                if (found == textures.end()) {
-                    auto decoded = assets::load_texture(filesystem, path);
+                if (MenuTimeline::enabled()) MenuTimeline::detail_add("family texture " + path);
+                const scene::TextureProcessing processing =
+                    std::find(normal_maps.begin(), normal_maps.end(), declared) != normal_maps.end()
+                        ? scene::TextureProcessing::normal_mip_chain : scene::TextureProcessing::none;
+                const auto held = textures.get(ComposeTextureCache::key(path, processing), [&]() -> std::optional<assets::Texture> {
+                    auto decoded = textures.decode(filesystem, path, processing);
                     if (!decoded) return std::nullopt;
-                    found = textures.emplace(path, std::move(decoded.value())).first;
-                }
-                return found->second;
+                    return std::move(decoded.value());
+                });
+                if (!held) return std::nullopt;
+                return *held;
             });
         profile.emplace(core::load_profile::Phase::surface_renderer_upload);
+        std::optional<core::load_profile::DetailModelScope> upload_timer;
+        upload_timer.emplace(model_path, &core::load_profile::ModelCost::upload_ms);
         const auto uploaded = options_.reject_upload_for_test && upload_failures_.empty()
             ? core::Result<void>::failure({.code = "EAWR-SPACE-POPULATE-TEST",
-                                           .message = "injected supported surface upload failure"})
+                                           .message = "injected supported surface upload failure", .logical_path = {}, .line = {}, .column = {}, .source_id = {}})
             : renderer.upload(next_asset,
                 ModelUpload{loaded.value(),
                     ModelSurface{mesh_index, submesh_index, force_visible}},
-                texture, material, family_textures);
+                *texture, material, family_textures);
+        upload_timer.reset();
         if (!uploaded) {
             upload_failures_.push_back(identity + " shader " + submesh.shader + ": "
                                        + core::format_diagnostic(uploaded.error()));

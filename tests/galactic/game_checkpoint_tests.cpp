@@ -31,11 +31,20 @@
 #include <variant>
 #include <vector>
 
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#include <psapi.h>
+#endif
+
 namespace {
 using namespace galactic_test;
 namespace cp = eawr::checkpoint;
 namespace campaign = eawr::campaign;
 namespace tactical = eawr::sim::tactical;
+namespace auth = eawr::script::authoritative;
 using Bytes = std::vector<std::uint8_t>;
 class RestoreExecutor final : public eawr::sim::PartitionExecutor {
 public:
@@ -56,6 +65,69 @@ using eawr::testing::result_code_colon::take;
 void check(eawr::core::Result<void> result) {
     eawr::testing::must(std::move(result));
 }
+
+// CPU-only capacity fixture. Timing and process memory are observations;
+// encoded size, exact reconstruction and zero replay work are the gates.
+void checkpoint_capacity() {
+    struct Sample { std::uint32_t planets, fleets, members, lua_rows; };
+    for (const auto& sample : {Sample{8, 2, 4, 32}, Sample{150, 16, 16, 256}, Sample{4096, 128, 32, 4096}}) {
+        auto config = galactic::synthetic_galaxy({.seed = 5373, .planets = sample.planets,
+            .players = 8, .fleets_per_player = sample.fleets, .members_per_fleet = sample.members});
+        // Setup's graph-enabled planet ceiling is 4096; a short distance keeps
+        // the generated explicit routes while avoiding a dense proximity graph.
+        config.rules.maximum_fleet_movement_distance = take(eawr::sim::math::Fixed::from_integer(1));
+        config.seats.push_back({{99}, 1, galactic::SeatKind::script, 0, true, 0});
+        const auto scheduler = [&](std::uint64_t instance) {
+            auth::SessionConfig settings; settings.seed = 5373; settings.galactic_clock = true;
+            auth::ModuleManifest modules;
+            const auto source = "Rows = {}\nfor i = 1, " + std::to_string(sample.lua_rows)
+                + " do Rows[i] = {i, string.rep('x', 64), {true, i + 1}} end\n"
+                  "function main() while true do Sleep(1) end end\nCreate_Thread('main')\n";
+            check(modules.add("Capacity.lua", source));
+            auto value = take(auth::ScriptScheduler::create(settings, std::move(modules)));
+            check(value.create_instance(instance, "Capacity.lua"));
+            return value;
+        };
+        const eawr::sim::InlineExecutor executor;
+        auto original = take(campaign::GameSession::create(config));
+        check(original.install_galactic_scripts(scheduler(1), scheduler(2)));
+        for (unsigned tick = 0; tick < 2; ++tick) (void)take(original.step(executor));
+        const auto identities = cp::game_identities(config);
+        const auto begin = std::chrono::steady_clock::now();
+        const auto saved = take(cp::save_game_checkpoint(original, identities));
+        const auto captured = std::chrono::steady_clock::now();
+        expect(saved.size() <= cp::max_bytes, "small/medium/max-graph capacity fixture captures within 64 MiB");
+        cp::GameLoadOptions options;
+        options.galactic_scripts = [&]() {
+            return eawr::core::Result<cp::GameLoadOptions::GalacticSchedulers>::success({scheduler(1), scheduler(2)});
+        };
+        auto restored = take(cp::load_game_checkpoint(saved, identities, options, executor));
+        const auto loaded = std::chrono::steady_clock::now();
+        expect(restored.work.resimulated_ticks == 0 && restored.work.checkpoint_bytes == saved.size(),
+            "capacity restore decodes one checkpoint without replaying historical ticks");
+        expect(restored.session.state_sha256() == original.state_sha256()
+            && take(cp::save_game_checkpoint(restored.session, identities)) == saved,
+            "capacity fixture restores every encoded component and recaptures exactly");
+        const auto parsed = take(cp::parse_checkpoint(saved));
+        std::uint64_t section_bytes{};
+        for (const auto& section : parsed.sections) section_bytes += section.bytes.size();
+        std::uint64_t working_set{}, peak_working_set{};
+#ifdef _WIN32
+        PROCESS_MEMORY_COUNTERS counters{}; counters.cb = sizeof(counters);
+        expect(K32GetProcessMemoryInfo(GetCurrentProcess(), &counters, sizeof(counters)) != 0,
+            "capacity process memory observation is available");
+        working_set = counters.WorkingSetSize; peak_working_set = counters.PeakWorkingSetSize;
+#endif
+        std::cout << "CHECKPOINT_CAPACITY planets=" << sample.planets << " players=8 fleets=" << sample.fleets * 8
+            << " members=" << sample.fleets * 8 * sample.members << " lua_rows_per_host=" << sample.lua_rows
+            << " bytes=" << saved.size() << " decoded_section_bytes=" << section_bytes
+            << " capture_us=" << std::chrono::duration_cast<std::chrono::microseconds>(captured - begin).count()
+            << " restore_us=" << std::chrono::duration_cast<std::chrono::microseconds>(loaded - captured).count()
+            << " replay_ticks=" << restored.work.resimulated_ticks
+            << " working_set_bytes=" << working_set << " process_peak_working_set_bytes=" << peak_working_set
+            << std::endl;
+    }
+}
 galactic::GalacticSetup setup(bool coop = false) {
     galactic::SyntheticGalaxyOptions spec; spec.planets = 8; spec.players = 2;
     spec.coop_seat = coop; spec.fleets_per_player = 1; spec.members_per_fleet = 2;
@@ -70,7 +142,110 @@ galactic::GalacticSetup multiplayer_setup(bool multiplayer, bool coop) {
     if (multiplayer) galactic_test::mark_multiplayer(result);
     return result;
 }
-namespace auth = eawr::script::authoritative;
+void resume_metadata_contracts() {
+    for (const unsigned workers : {1U, 2U, 4U, 8U}) {
+        eawr::platform::ThreadWorkerAdapter executor(workers);
+        auto config = multiplayer_setup(true, true);
+        config.interactive_seat = config.seats.front().seat_id;
+        config.seats.push_back({{4}, 1, galactic::SeatKind::human, 4, false, 1});
+        config.seat_control.emplace(); config.seat_control->teams.push_back({1, config.seats.front().seat_id, true});
+        config.seat_control->controllers.push_back({1, galactic::FactionControl::human, galactic::FactionControl::ai, {}, {}});
+        config.seat_control->controllers.push_back({2, galactic::FactionControl::ai, galactic::FactionControl::passive, {3, 7, 9}, {11}});
+        auto game = take(campaign::GameSession::create(config));
+        const auto ids = cp::game_identities(config);
+        const auto seat = config.seats.front().seat_id;
+        check(game.submit({{0, seat, 17}, galactic::PauseGalaxy{}}));
+        (void)take(game.step(executor));
+        check(game.retain_network_producer_sequences({{seat, 100}})); // refused wire attempts still consume producer keys
+        const auto saved = take(cp::save_game_checkpoint(game, ids));
+        const auto container = take(cp::parse_checkpoint(saved));
+        const auto resume = take(cp::inspect_game_resume(container));
+        expect(resume.completed_tick == 1 && resume.next_send == 1 && resume.next_seal == 1 && resume.hash_tick == 1,
+            "resume cursors and initial hash record start at the completed barrier");
+        expect(resume.seats == std::vector<galactic::Seat>(game.galaxy().seats().begin(), game.galaxy().seats().end())
+            && resume.control == game.galaxy().seat_control() && resume.producer_sequences.at(seat) == 100,
+            "resume preserves logical seats, control configuration and full producer continuation");
+        expect(game.record().setup.interactive_seat.value == 0, "MP observer stays outside canonical bytes");
+        auto restored = take(cp::load_game_checkpoint(saved, ids, {}, executor));
+        expect(take(cp::save_game_checkpoint(restored.session, ids)) == saved, "resume metadata recaptures exactly");
+        check(restored.session.retain_network_producer_sequences({}));
+        check(restored.session.retain_network_producer_sequences({{seat, 17}}));
+        const auto saved_again = take(cp::save_game_checkpoint(restored.session, ids));
+        auto restored_again = take(cp::load_game_checkpoint(saved_again, ids, {}, executor));
+        expect(restored_again.session.producer_sequences().at(seat) == 100,
+            "a second save retains restored producer maxima when the seat sends nothing");
+        expect(saved_again == saved, "absent or lower network cursors cannot change a retained maximum");
+        check(restored.session.submit({{1, seat, 101}, galactic::ResumeGalaxy{}}));
+        check(game.submit({{1, seat, 101}, galactic::ResumeGalaxy{}}));
+        expect(take(restored.session.step(executor)).state_hash.get() == take(game.step(executor)).state_hash.get(),
+            "restored producer sequence continues with the same next tick");
+        auto damaged = container;
+        auto& section = *std::find_if(damaged.sections.begin(), damaged.sections.end(), [](const auto& row) {
+            return row.id == static_cast<std::uint16_t>(cp::SectionId::multiplayer_resume);
+        });
+        section.bytes[32] ^= 1;
+        expect(!cp::load_game_checkpoint(take(cp::write_checkpoint(damaged)), ids, {}, executor),
+            "a rewritten container cannot hide a changed canonical capture commitment");
+        damaged = container;
+        std::erase_if(damaged.sections, [](const auto& row) { return row.id == static_cast<std::uint16_t>(cp::SectionId::multiplayer_resume); });
+        expect(!cp::load_game_checkpoint(take(cp::write_checkpoint(damaged)), ids, {}, executor), "resume metadata is required");
+    }
+}
+void mod_description_contracts() {
+    namespace mods = eawr::mods;
+    const mods::DescriptionEntry x{mods::DescriptionKeyKind::workshop, "workshop:1", "X", "1", std::array<std::uint8_t, 32>{}};
+    const mods::DescriptionEntry y{mods::DescriptionKeyKind::mods_folder, "mods:Y", "Y", "2", std::array<std::uint8_t, 32>{}};
+    const mods::ModDescription saved_mods{true, {x, y}};
+    auto config = setup(); auto game = take(campaign::GameSession::create(config));
+    const auto ids = cp::game_identities(config); const eawr::sim::InlineExecutor executor;
+    const auto saved = take(cp::save_game_checkpoint(game, ids, {}, saved_mods));
+    const auto container = take(cp::parse_checkpoint(saved));
+    expect(take(cp::inspect_game_mods(container)) == saved_mods, "checkpoint exposes the original ordered mod description");
+    cp::GameLoadOptions options; options.mounted_mods = saved_mods;
+    auto same = take(cp::load_game_checkpoint(saved, ids, options, executor));
+    expect(same.mod_findings.empty(), "identical mounted descriptions have no notes");
+    auto unknown = take(cp::load_game_checkpoint(saved, ids, {}, executor));
+    expect(std::any_of(unknown.mod_findings.begin(), unknown.mod_findings.end(), [](const auto& finding) {
+        return finding.kind == mods::FindingKind::incomplete;
+    }), "unavailable mounted metadata produces an incomplete note");
+    options.mounted_mods = {true, {x}};
+    auto missing = take(cp::load_game_checkpoint(saved, ids, options, executor));
+    expect(!missing.mod_findings.empty() && missing.session.state_sha256() == same.session.state_sha256(),
+        "missing metadata produces notes without changing restored simulation state");
+    const auto has = [](const auto& rows, mods::FindingKind kind) {
+        return std::any_of(rows.begin(), rows.end(), [kind](const auto& row) { return row.kind == kind; });
+    };
+    expect(has(missing.mod_findings, mods::FindingKind::missing), "missing Y is reported");
+    options.mounted_mods = {true, {y, x}};
+    expect(has(take(cp::load_game_checkpoint(saved, ids, options, executor)).mod_findings, mods::FindingKind::reordered),
+        "changed mod order is reported");
+    auto changed = x; changed.version = "9"; (*changed.checksum)[0] = 1;
+    const mods::DescriptionEntry extra{mods::DescriptionKeyKind::workshop, "workshop:3", "Z", "1", {}};
+    options.mounted_mods = {true, {changed, y, extra}};
+    const auto findings = take(cp::load_game_checkpoint(saved, ids, options, executor)).mod_findings;
+    expect(has(findings, mods::FindingKind::version_changed) && has(findings, mods::FindingKind::content_changed)
+        && has(findings, mods::FindingKind::extra), "version, checksum and extra differences are all reported");
+    expect(take(cp::save_game_checkpoint(missing.session, ids, {}, saved_mods)) == saved,
+        "recapture retains original saved mod bytes");
+    const auto other = take(cp::parse_checkpoint(take(cp::save_game_checkpoint(game, ids, {}, options.mounted_mods))));
+    expect(take(cp::inspect_game_resume(container)).capture_commitment == take(cp::inspect_game_resume(other)).capture_commitment,
+        "local descriptions do not change cross-peer capture agreement");
+    auto wrong_ids = ids; wrong_ids.content[0] ^= 1;
+    expect(!cp::load_game_checkpoint(saved, wrong_ids, options, executor), "real content identity mismatch still refuses restore");
+    auto corrupt = container;
+    auto& section = *std::find_if(corrupt.sections.begin(), corrupt.sections.end(), [](const auto& value) {
+        return value.id == static_cast<std::uint16_t>(cp::SectionId::mod_list);
+    });
+    section.bytes[0] = 99;
+    expect(!cp::load_game_checkpoint(take(cp::write_checkpoint(corrupt)), ids, options, executor),
+        "malformed description is rejected even in a valid container");
+    section.bytes = *mods::encode_description(saved_mods); section.bytes[7] = 255;
+    expect(!cp::load_game_checkpoint(take(cp::write_checkpoint(corrupt)), ids, options, executor), "invalid mod length is rejected");
+    section.bytes = *mods::encode_description(saved_mods); ++section.version;
+    expect(!cp::load_game_checkpoint(take(cp::write_checkpoint(corrupt)), ids, options, executor), "unknown section version is rejected");
+    auto broken_digest = saved; broken_digest.back() ^= 1;
+    expect(!cp::load_game_checkpoint(broken_digest, ids, options, executor), "container digest detects corruption");
+}
 void nested_child_commands() {
     for (const int depth : {0, 62, 64, 65}) {
         auth::Value nested{false};
@@ -333,7 +508,7 @@ void pending_conflict_barriers(const std::uint64_t resolve_tick, const bool paus
     const bool published_progress = false) {
     const auto config = victory_setup(); const auto identities = cp::game_identities(config);
     campaign::ConflictRecord conflict; conflict.id = 9000; conflict.planet = config.planets.front().id;
-    conflict.invader = 1; conflict.defender = 2; conflict.tactical.first_free_entity_id = 9001;
+    conflict.invader = 1; conflict.defender = 2; conflict.station_owner = 1; conflict.tactical.first_free_entity_id = 9001;
     conflict.tactical.content_identity = config.content_identity;
     const auto no_content = [](const auto&) { return eawr::core::Result<tactical::TacticalContent>::success({}); };
     // The solver reports its result once the galaxy has run to `resolve_tick`; before that the conflict stays pending.
@@ -429,7 +604,7 @@ void pending_conflict_barriers(const std::uint64_t resolve_tick, const bool paus
         if (published_progress) expect(!session.pending_conflict() && !paused_now(session),
             "a save loaded during initiated auto-resolve progress finishes and resumes the galaxy");
     };
-    std::size_t windowed = 0, resaved_windowed = 0, progress_windowed = 0;
+    std::size_t windowed = 0, resaved_windowed = 0, progress_windowed = 0, station_owner_checked = 0;
     for (const auto workers : {std::size_t{1}, std::size_t{4}}) {
         const eawr::platform::ThreadWorkerAdapter pool(workers);
         for (int barrier = 0; barrier <= last_barrier; ++barrier) {
@@ -441,6 +616,12 @@ void pending_conflict_barriers(const std::uint64_t resolve_tick, const bool paus
             }
             const auto saved = take(cp::save_game_checkpoint(original, identities));
             auto restored = take(cp::load_game_checkpoint(saved, identities, options, pool));
+            if (original.pending_conflict()) {
+                ++station_owner_checked;
+                expect(restored.session.pending_conflict() && restored.session.pending_conflict()->station_owner == 1
+                    && restored.session.pending_conflict()->station_owner != restored.session.pending_conflict()->defender,
+                    "checkpoint retains the nonzero station owner distinct from the defender");
+            }
             if (published_progress && original.auto_resolve_progress() && original.auto_resolve_progress()->initiated) {
                 ++progress_windowed;
                 expect(restored.session.auto_resolve_progress() && restored.session.auto_resolve_progress()->initiated
@@ -470,6 +651,7 @@ void pending_conflict_barriers(const std::uint64_t resolve_tick, const bool paus
         }
     }
     expect(windowed > 0 && resaved_windowed > 0, "barriers and re-saves were taken inside the pause window");
+    expect(station_owner_checked > 0, "a pending conflict exercised the station owner round trip");
     if (published_progress) expect(progress_windowed > 0, "the progress save/load completion proof exercised initiated windows");
 }
 void pending_conflict_resave() {
@@ -1166,6 +1348,7 @@ void direct_child_refusals() {
         out(std::optional(clock), std::optional<campaign::ModeTimelineSnapshot>{},
             std::uint32_t{0}, eawr::sim::EntityId{0}, // interactive seat and summary hold
             std::uint64_t{0}, // story callback sequence
+            std::map<eawr::sim::SeatId, std::uint64_t>{}, Bytes{}, // network producer and clock continuation
             std::optional(row), std::optional<archive::ChildOwner>{}, std::optional<Bytes>{},
             std::optional<galactic::story::State>{}, std::vector<galactic::story::OwnerGoals>{}); // plot state, goals
         return out.bytes;
@@ -1208,7 +1391,7 @@ void direct_child_refusals() {
     (void)take(galaxy.step(executor));
     auto state = take(galaxy.save_checkpoint_state());
     archive::Reader in(state); Bytes world; std::uint32_t owner_version{};
-    in(owner_version, world); expect(owner_version == 5, "crafted refusal fixture reads the current owner format");
+    in(owner_version, world); expect(owner_version == 6, "crafted refusal fixture reads the current owner format");
     const auto offset = state.size() - in.remaining();
     state[offset] = 2; // parent tick now ahead of the galaxy clock without a child
     auto fresh = take(campaign::GameSession::create(config));
@@ -1681,6 +1864,7 @@ void summary_hold_barriers(const bool paused_planning, const bool monitored) {
 } // namespace
 int case_galactic_game_checkpoint_tests(int argc, char** argv) {
     try {
+        if (argc == 2 && std::string_view(argv[1]) == "--capacity") { checkpoint_capacity(); return failures == 0 ? 0 : 1; }
         if (argc == 2 && std::string_view(argv[1]) == "--timeline") { timeline_contracts(); return failures == 0 ? 0 : 1; }
         if (argc == 2 && std::string_view(argv[1]) == "--summary-hold") {
             for (const bool monitored : {false, true}) summary_hold_barriers(false, monitored);
@@ -1698,7 +1882,7 @@ int case_galactic_game_checkpoint_tests(int argc, char** argv) {
         if (argc == 2 && std::string_view(argv[1]) == "--pending-conflict") {
             pending_conflict_resave(); return failures == 0 ? 0 : 1;
         }
-        nested_child_commands(); large_blob_contracts<GalacticArchive>("galactic"); large_blob_contracts<TacticalArchive>("tactical"); direct_child_refusals(); direct_restore_equality(); owner_journal_refusal(); owner_journal_after_rebase(); human_command_history_growth(); future_native_frontier(); scripted_roundtrip(); victory_tail_barrier(); victory_tail_refusals(); hero_return_tail_barrier(); story_clock_refusals(); pending_conflict_resave();
+        mod_description_contracts(); resume_metadata_contracts(); nested_child_commands(); large_blob_contracts<GalacticArchive>("galactic"); large_blob_contracts<TacticalArchive>("tactical"); direct_child_refusals(); direct_restore_equality(); owner_journal_refusal(); owner_journal_after_rebase(); human_command_history_growth(); future_native_frontier(); scripted_roundtrip(); victory_tail_barrier(); victory_tail_refusals(); hero_return_tail_barrier(); story_clock_refusals(); pending_conflict_resave();
         admission_and_fixups(); prebattle_autosave_admission(); refusals(); child_roundtrip(); observer_load_clock(); child_return_and_future_input();
         scripted_child_barriers(); child_casualty_return();
         if (argc != 2) throw std::runtime_error("expected corpus directory");

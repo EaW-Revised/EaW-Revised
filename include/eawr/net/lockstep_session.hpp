@@ -102,6 +102,17 @@ struct DepartureEvent {
     friend bool operator==(const DepartureEvent&, const DepartureEvent&) = default;
 };
 
+// Agreed save controls are separate from opaque gameplay and use authenticated streams.
+inline constexpr std::uint8_t checkpoint_drain_kind = 86, checkpoint_cutoff_kind = 87,
+    checkpoint_proof_kind = 88, checkpoint_release_kind = 89;
+using CheckpointProof = std::array<std::array<std::uint8_t, 32>, 3>;
+struct CheckpointCallbacks {
+    PeerIndex host{};
+    std::function<core::Result<CheckpointProof>(const std::map<sim::SeatId, std::uint64_t>&)> capture;
+    std::function<core::Result<void>()> commit;
+    std::function<void(core::Diagnostic)> refused;
+};
+
 struct CompletedTick {
     std::uint64_t completed_tick{};
     std::string state_sha256;
@@ -120,11 +131,30 @@ public:
     virtual std::string state_hash() const = 0;
     virtual std::vector<std::uint8_t> canonical_state() const = 0;
     virtual core::Result<void> validate(const SeatInput& input) const = 0;
+    // Trusted checkpoint/log replay only. Normal wire admission always calls
+    // validate(), so a recorded membership transition cannot become human input.
+    virtual core::Result<void> validate_recovery_input(const SeatInput& input) { return validate(input); }
     virtual core::Result<void> install(std::span<const SeatInput> canonical) = 0;
     // Replay encoding of the most recently completed tick, including engine-side inputs.
     virtual core::Result<std::vector<std::uint8_t>> canonical_input() const = 0;
     virtual core::Result<CompletedTick> step() = 0;
     virtual bool is_departure(const SeatInput& input) const = 0;
+    virtual bool is_rejoin(const SeatInput&) const { return false; }
+    // True only after an accepted host SaveRequest executed at the last tick.
+    virtual bool checkpoint_requested() const { return false; }
+};
+
+struct RecoveryPeerFrontier {
+    std::uint64_t next_seal{};
+    std::optional<std::uint64_t> producer_sequence;
+    bool departed{};
+};
+struct RecoverySessionFrontier {
+    std::uint64_t completed_tick{}, input_delay{};
+    std::vector<RecoveryPeerFrontier> peers;
+    std::vector<SealedBatch> future;
+    bool split{};
+    std::uint64_t mesh_incident{};
 };
 
 // MP-6 is an intentional remake extension (walk MP-24), agreed before play.
@@ -146,6 +176,10 @@ inline constexpr std::string_view options = "EAWR-NET-1200", malformed = "EAWR-N
 enum class UnconfirmedDeparture : std::uint8_t { connection_loss, continue_alone };
 
 struct SessionOptions {
+    // Agreed completed checkpoint boundary; zero retains ordinary new-game startup.
+    std::uint64_t initial_tick{};
+    // Inclusive accepted/attempted producer maxima; an absent seat has never issued a key.
+    std::map<sim::SeatId, std::uint64_t> producer_sequences;
     // Fixed LAN MVP policy: MP-03 retail lead/rounding gives initial targets 4/6/15,
     // not simply D. D=3 is the qualified loopback default, not a retail latency claim.
     std::uint64_t input_delay{3};
@@ -211,6 +245,8 @@ public:
         std::optional<std::uint64_t> input_epoch = std::nullopt);
     // Optional observation only; never changes admission or the sealed frontier.
     [[nodiscard]] std::uint64_t next_seal() const noexcept { return next_seal_; }
+    void enable_checkpoint_barrier(CheckpointCallbacks callbacks) { checkpoint_callbacks_ = std::move(callbacks); }
+    [[nodiscard]] bool checkpoint_pending() const noexcept { return checkpoint_.has_value(); }
     // Diagnostic frontiers: first unaccepted remote tick and latest locally
     // sealed batch accepted by send(). A successful send is not a peer ACK.
     [[nodiscard]] std::uint64_t received_through(PeerIndex peer) const { return received_through_.at(peer); }
@@ -222,6 +258,16 @@ public:
     [[nodiscard]] core::Result<void> replay_timing_control(std::span<const std::uint8_t> bytes);
     using StageObserver = std::function<void(std::string_view, const SeatInput&, std::uint64_t)>;
     void set_stage_observer(StageObserver observer) { stage_observer_ = std::move(observer); }
+    // Completed sealed human/session input, before engine input regeneration.
+    // Runs only on the simulation owner; recovery keeps its own bounded copy.
+    using CommitObserver = std::function<void(std::uint64_t, std::span<const SeatInput>, const CompletedTick&)>;
+    void set_commit_observer(CommitObserver observer) { commit_observer_ = std::move(observer); }
+    [[nodiscard]] core::Result<RecoverySessionFrontier> recovery_frontier(bool obsolete_owner = false) const;
+    // Private restored owner at the agreed completed barrier, fresh transport
+    // epoch and independently proved state are prerequisites. Rejoin is one
+    // exact recorded transition; no ordinary wire command can create it.
+    [[nodiscard]] core::Result<void> restore_recovery_frontier(const RecoverySessionFrontier&,
+        std::optional<SeatInput> rejoin = {});
     // Services transport and steps at most one tick; callers may loop while a tick completes.
     [[nodiscard]] core::Result<PumpResult> pump(std::uint64_t now_ms);
     [[nodiscard]] const std::optional<WaitingFor>& waiting_for() const noexcept { return waiting_; }
@@ -252,6 +298,14 @@ public:
     [[nodiscard]] core::Result<void> retain_reconnect_control(std::uint64_t tick,
         std::span<const std::uint8_t> bytes);
     void set_message_handler(std::function<core::Result<void>(Received)> handler) { handler_ = std::move(handler); }
+    // GC checkpoint recovery has independent allocation limits and named candidate
+    // refusals. Dispatch its reserved 90..98 range before the gameplay frame cap.
+    void set_galactic_recovery_handler(std::function<void(Received)> handler) { galactic_recovery_handler_ = std::move(handler); }
+    // An obsolete owner discards ordinary traffic. A published owner awaiting
+    // release retains it in a bounded queue for normal receive after release.
+    [[nodiscard]] core::Result<void> pump_galactic_recovery(bool obsolete_owner = false, bool published_owner = false);
+    [[nodiscard]] SessionOptions recovery_options() const { return options_; }
+    void set_galactic_recovery_gate(std::function<bool()> gate) { galactic_recovery_gate_ = std::move(gate); }
     // Opt-in for modes supporting replayable synthetic departure inputs. Without it,
     // closed/silent streams retain the fail-closed LAN-1 behavior.
     using EncodeDeparture = std::function<core::Result<std::vector<std::uint8_t>>(sim::SeatCommandKey)>;
@@ -379,6 +433,23 @@ private:
     };
     [[nodiscard]] core::Diagnostic connection_loss(PeerIndex peer, std::string_view cause);
     [[nodiscard]] core::Result<PumpResult> fail(core::Diagnostic diagnostic);
+    struct CheckpointBarrier {
+        std::uint64_t epoch{}, since_ms{};
+        std::vector<std::optional<std::uint64_t>> drains;
+        std::vector<bool> voters;
+        std::map<PeerIndex, CheckpointProof> proofs;
+        std::optional<std::uint64_t> cutoff, decision_since_ms;
+        bool captured{}, release{}, proofs_matched{}, refusal_requested{};
+    };
+    [[nodiscard]] core::Result<void> begin_checkpoint();
+    [[nodiscard]] core::Result<void> receive_checkpoint(const Received&);
+    [[nodiscard]] core::Result<bool> service_checkpoint();
+    [[nodiscard]] core::Result<void> broadcast_checkpoint(const std::vector<std::uint8_t>&);
+    [[nodiscard]] core::Result<void> abort_checkpoint(std::string message, bool broadcast = true);
+    std::optional<CheckpointCallbacks> checkpoint_callbacks_;
+    std::optional<CheckpointBarrier> checkpoint_;
+    std::deque<Received> early_checkpoint_;
+    std::uint64_t completed_checkpoint_{};
     SessionAdapter* adapter_{};
     std::unique_ptr<SessionAdapter> owned_adapter_;
     MessageTransport* transport_{};
@@ -386,8 +457,9 @@ private:
     SessionOptions options_;
     PeerIndex self_{};
     std::vector<std::optional<std::uint64_t>> last_sent_batch_;
-    std::uint64_t next_seal_{}, next_sequence_{};
+    std::uint64_t initial_tick_{}, next_seal_{}, next_sequence_{};
     StageObserver stage_observer_;
+    CommitObserver commit_observer_;
     std::vector<std::uint64_t> received_through_;
     std::size_t mesh_tail_bytes_{};
     bool mesh_tail_unavailable_{};
@@ -416,6 +488,10 @@ private:
     std::optional<core::Diagnostic> failure_;
     std::optional<PeerIndex> connection_lost_peer_;
     std::function<core::Result<void>(Received)> handler_;
+    std::function<void(Received)> galactic_recovery_handler_;
+    std::function<bool()> galactic_recovery_gate_;
+    std::deque<Received> galactic_recovery_input_;
+    std::size_t galactic_recovery_input_bytes_{};
     std::function<core::Result<void>(std::span<const sim::SeatCommandKey>)> departure_handler_;
     SessionMonitor* monitor_{};
     bool recorded_zero_{};
@@ -472,6 +548,8 @@ private:
     std::uint64_t resync_epoch_{}, initial_input_delay_{};
     std::optional<std::uint64_t> refused_resync_epoch_;
     bool resync_staging_{};
+    bool recovery_split_{};
+    std::optional<SeatInput> recovery_rejoin_;
 };
 
 } // namespace eawr::net

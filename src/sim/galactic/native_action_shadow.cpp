@@ -13,6 +13,7 @@
 #include "eawr/sim/galactic/victory.hpp"
 #include "eawr/core/gc_profile.hpp"
 
+#include <atomic>
 #include <algorithm>
 #include <array>
 #include <cassert>
@@ -58,6 +59,23 @@ void GalacticSession::NativeActionShadow::Data::inherit_reads(const std::shared_
     work.copied_actor_rows += checkpoint->actor_rows.size();
     read_parent = std::move(checkpoint); read_depth = 1; ++read_checkpoints;
 }
+namespace {
+#ifdef EAWR_GALACTIC_TEST_HOOKS
+std::atomic<int> view_reuse_mode{0}; // NativeActionShadow::ViewReuse
+bool rebuild_views() noexcept { return view_reuse_mode.load(std::memory_order_relaxed) == 1; }
+bool stale_views() noexcept { return view_reuse_mode.load(std::memory_order_relaxed) == 2; }
+bool corrupt_blocker() noexcept { return view_reuse_mode.load(std::memory_order_relaxed) == 3; }
+#else
+constexpr bool rebuild_views() noexcept { return false; }
+constexpr bool stale_views() noexcept { return false; }
+constexpr bool corrupt_blocker() noexcept { return false; }
+#endif
+}
+#ifdef EAWR_GALACTIC_TEST_HOOKS
+void GalacticSession::NativeActionShadow::set_view_reuse_for_test(ViewReuse mode) noexcept {
+    view_reuse_mode.store(static_cast<int>(mode), std::memory_order_relaxed);
+}
+#endif
 std::shared_ptr<const GalacticSnapshot> GalacticSession::NativeActionShadow::Data::view() const {
     if (publication) return publication;
     const auto inherited = parent ? parent->view() : base;
@@ -185,8 +203,9 @@ std::shared_ptr<const GalacticSnapshot> GalacticSession::NativeActionShadow::Dat
         if (inherited->observer()) {
             const auto fleets = changes.fleets ? std::span<const Fleet>(*changes.fleets) : inherited->fleets();
             const auto actors = changes.actors ? std::span<const CensusObject>(*changes.actors) : inherited->actor_records();
-            changes.observations = std::make_shared<const std::vector<ObservedPlanet>>(
-                observed_planets(changes.observer ? *changes.observer : *inherited->observer(), fleets, {}, movement ? movement.get() : inherited->movement(), actors));
+            auto observed = observed_planets(changes.observer ? *changes.observer : *inherited->observer(), fleets, {}, movement ? movement.get() : inherited->movement(), actors);
+            project_ground_layout(observed, changes.control ? &*changes.control : inherited->control());
+            changes.observations = std::make_shared<const std::vector<ObservedPlanet>>(std::move(observed));
         }
     }
     // Generations are derived invalidation keys, excluded from canonical bytes.
@@ -525,7 +544,7 @@ public:
         for (const auto id : removed_) data_.fleet_rows[id] = std::nullopt;
         detached_units.finish();
         if (population_stale) data_.population_stale = true;
-        data_.publication.reset();
+        if (!stale_views()) data_.publication.reset();
     }
 };
 class GalacticSession::NativeActionShadow::Data::ControlOwner final : public FleetOwner {
@@ -608,7 +627,8 @@ core::Result<GalacticSession::NativeInvasionReceipt> GalacticSession::NativeActi
         return invalid<NativeInvasionReceipt>("invalid native invasion layer request or exhausted budget");
     const auto published = snapshot(); const auto* row = this->fleet(fleet);
     const std::array<PlanetId, 1> selected{row ? row->orbit : PlanetId{}};
-    detach(); Data::ControlOwner owner(*data_, selected);
+    detach(); if (!rebuild_views()) data_->publication = published; // unchanged rows: no rebuild
+    Data::ControlOwner owner(*data_, selected);
     auto result = session_detail::admit_native_invasion_rows(owner, player, fleet, transports, pending);
     owner.finish(); data_->publication = published; // invasion records have no snapshot publication
     if (!result) return result;
@@ -677,7 +697,7 @@ core::Result<GalacticSession::NativeFleetReceipt> GalacticSession::NativeActionS
         if (std::any_of(row.landed.begin(), row.landed.end(), [id](const auto& unit) { return unit.id == id; })) {
             selected.push_back(row.planet); break;
         }
-    detach(); ++data_->work.requests;
+    detach(); if (!rebuild_views()) data_->publication = before; ++data_->work.requests; // unchanged rows: reuse `before`
     Data::ControlOwner owner(*data_, selected);
     const std::array<EntityId, 1> units{id}; bool admission_ran{};
     auto launched = session_detail::launch_native_surface_units(owner, player, units, target, 0,
@@ -738,7 +758,7 @@ core::Result<GalacticSession::NativeFleetReceipt> GalacticSession::NativeActionS
     const auto before = data_->view();
     const auto* fleet = data_->fleet(id);
     const std::array<PlanetId, 1> selected{fleet ? fleet->orbit : PlanetId{}};
-    detach(); ++data_->work.requests;
+    detach(); if (!rebuild_views()) data_->publication = before; ++data_->work.requests; // unchanged rows: reuse `before`
     Data::ControlOwner owner(*data_, selected);
     auto landed = session_detail::land_native_transports_rows(owner, player, id, pending_local_conflict, data_->events);
     owner.finish();
@@ -756,7 +776,7 @@ core::Result<GalacticSession::NativeTransportLandingReceipt> GalacticSession::Na
         return invalid<NativeTransportLandingReceipt>("invalid native actor landing layer request or exhausted budget");
     const auto before = data_->view();
     const std::array<PlanetId, 1> selected{planet};
-    detach(); ++data_->work.requests;
+    detach(); if (!rebuild_views()) data_->publication = before; ++data_->work.requests; // unchanged rows: reuse `before`
     Data::ControlOwner owner(*data_, selected);
     auto landed = session_detail::land_native_transport_rows(owner, player, actor, planet, pending_local_conflict, live_landed, data_->events);
     owner.finish();
@@ -777,7 +797,7 @@ core::Result<GalacticSession::NativeProductionReceipt> GalacticSession::NativeAc
     const auto before = data_->view();
     if (!before->production() || !before->player_economy() || !planet(request.planet))
         return invalid<NativeProductionReceipt>("native production requires a live producer");
-    detach(); ++data_->work.requests;
+    detach(); if (!rebuild_views()) data_->publication = before; ++data_->work.requests; // unchanged rows: `current` is `before`
     auto current = data_->view();
     if (data_->population_schema && data_->population_stale) {
         const auto detached = current->fleet_control() ? std::span<const DetachedUnit>(current->fleet_control()->detached_units) : std::span<const DetachedUnit>{};
@@ -1134,11 +1154,32 @@ core::Result<std::vector<EntityId>> GalacticSession::NativeActionShadow::create_
         }
         ++data_->observer_generation; data_->population_stale = true; data_->publication.reset();
         if (base.production()->fleet_blockers) {
-            const auto projected = data_->view();
+            // The skip reads only the fleet's own record and its member subtrees, so a sorted list of
+            // those rows equals the full projected actor column without building a whole view.
+            const auto projected = rebuild_views() ? data_->view() : nullptr;
+            const auto records_of = [&](const Fleet& fleet) {
+                std::vector<CensusObject> records;
+                std::set<EntityId> visited;
+                std::vector<EntityId> pending{fleet.id};
+                for (const auto& member : fleet.members) pending.push_back(member.id);
+                while (!pending.empty()) {
+                    const auto id = pending.back(); pending.pop_back();
+                    if (!visited.insert(id).second) continue;
+                    if (const auto* actor = data_->actor(id)) records.push_back(*actor);
+                    const auto& contents = data_->movement->contents;
+                    const auto at = std::lower_bound(contents.begin(), contents.end(), id,
+                        [](const auto& row, auto key) { return row.container < key; });
+                    if (at != contents.end() && at->container == id)
+                        for (const auto& child : at->children) pending.push_back(child.id);
+                }
+                std::sort(records.begin(), records.end(), [](const auto& x, const auto& y) { return x.id < y.id; });
+                return records;
+            };
             for (const auto& fleet : placement.fleets) {
-                auto skip = fleet_combat_skip(*data_->fleet(fleet.id), projected->actor_records(), data_->movement.get());
+                const auto records = projected ? std::vector<CensusObject>{} : records_of(*data_->fleet(fleet.id));
+                auto skip = fleet_combat_skip(*data_->fleet(fleet.id), projected ? projected->actor_records() : std::span<const CensusObject>(records), data_->movement.get());
                 if (!skip) return Result::failure(skip.error());
-                data_->fleet_blockers[fleet.id] = skip.value(); data_->created_blockers.push_back(fleet.id);
+                data_->fleet_blockers[fleet.id] = corrupt_blocker() ? !skip.value() : skip.value(); data_->created_blockers.push_back(fleet.id);
             }
         }
         data_->publication.reset();

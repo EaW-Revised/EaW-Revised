@@ -5,7 +5,12 @@
 #include "eawr/campaign/synthetic.hpp"
 #include "eawr/net/desync_monitor.hpp"
 #include "eawr/net/galactic_adapter.hpp"
+#include "eawr/net/galactic_recovery.hpp"
+#include "eawr/checkpoint/game.hpp"
+#include <thread>
+#include <chrono>
 #include "eawr/platform/sim_workers.hpp"
+#include "../../src/script/foc/galactic_ai_battle_listener.hpp"
 
 #include <algorithm>
 #include <array>
@@ -357,6 +362,25 @@ void child_hash_and_execution_refusal() {
         "the sealed galaxy tick is the child's Begin barrier");
     expect(begin.state_sha256 == game.state_sha256() && begin.state_sha256 != game.galaxy().state_sha256(),
         "the adapter digest is the whole game, including child context at Begin");
+    // #5519: the exchange encoding with a child battle open is the serial galaxy encoding followed by the child's, for
+    // every worker count (parallel sections and parallel child records are only a faster way to the same bytes).
+    {
+        const auto serial_galaxy = game.galaxy().canonical_state_bytes();
+        const auto serial_child = game.battle()->canonical_state_bytes();
+        std::optional<Bytes> first;
+        for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+            const eawr::platform::ThreadWorkerAdapter parallel(workers);
+            expect(game.battle()->canonical_state_bytes(parallel) == serial_child, "the child's parallel encoding equals its serial encoding");
+            net::GalacticSessionAdapter exchange(game, parallel, options);
+            const auto state = exchange.canonical_state();
+            expect(state.size() > serial_galaxy.size() && std::equal(serial_galaxy.begin(), serial_galaxy.end(), state.begin()),
+                "the exchange encoding starts with the serial galaxy encoding");
+            expect(std::search(state.begin(), state.end(), serial_child.begin(), serial_child.end()) != state.end(),
+                "the exchange encoding carries the child's serial encoding");
+            if (!first) first = state;
+            else expect(state == *first, "the exchange encoding with a child is equal at every worker count");
+        }
+    }
     const eawr::sim::SeatCommandKey key{1, {1}, 1};
     const net::SeatInput stale{key, require(net::encode_galactic_input(key,
         galactic::TacticalLayerCommand{entry.id + 10, 5, {}}))};
@@ -372,6 +396,69 @@ void child_hash_and_execution_refusal() {
     expect(input.size() > 4 && input.front() == 1, "canonical input retains the refused tactical envelope");
     expect(battle.state_sha256 == game.state_sha256() && battle.state_sha256 != game.galaxy().state_sha256(),
         "battle ticks keep the whole-game digest");
+}
+
+void unavailable_battle_callback_coop() {
+    namespace ga = eawr::script::foc::galactic_ai;
+    namespace auth = eawr::script::authoritative;
+    namespace ai = eawr::script::foc::ai;
+    namespace cp = eawr::campaign;
+    std::vector<std::string> reference_hashes;
+    for (const auto workers : {1U, 2U, 4U, 8U}) {
+        Rig::Options options; options.workers = {workers, 2}; options.final_tick = 4; options.monitor = false;
+        auto setup = coop_policy_setup(2);
+        setup.rules.maximum_fleet_movement_distance = math::Fixed{}; // Opt in to the native graph before movement admission.
+        Rig rig(std::move(setup), options);
+        for (auto& game : rig.games) {
+            const auto fleet = std::find_if(rig.setup.fleets.begin(), rig.setup.fleets.end(), [](const auto& row) { return row.owner == 2; });
+            const auto enemy = std::find_if(rig.setup.fleets.begin(), rig.setup.fleets.end(), [](const auto& row) { return row.owner == 1; });
+            cp::ConflictRecord conflict; conflict.id = game->galaxy().next_entity_id(); conflict.planet = fleet->orbit;
+            conflict.invader = 2; conflict.defender = 1; conflict.tactical.content_identity = rig.setup.content_identity;
+            conflict.tactical.first_free_entity_id = conflict.id + 1;
+            conflict.tactical.players = {{1, 1, 1, 1}, {2, 2, 2, 1}};
+            for (const auto* row : {&*fleet, &*enemy})
+                conflict.forces.push_back({row->members.front().id, row->members.front().type, row->owner, row->id});
+            std::sort(conflict.forces.begin(), conflict.forces.end(), [](const auto& a, const auto& b) { return a.id < b.id; });
+            conflict.seats = {{{1}, 1}, {{2}, 1}};
+            require(game->configure_galactic_ai_services([&](galactic::GalacticSession& world) {
+                expect(world.graph() && world.graph()->node(fleet->orbit),
+                    "co-op battle fixture has a native movement destination before registering its listener");
+                auto actions = std::make_shared<ga::NativeActions>(world, std::make_shared<ai::GalacticFunding>(),
+                    ga::NativeActions::Placement{}, std::map<galactic::PlayerId, math::Fixed>{});
+                actions->bind_admission_gate([] { return false; });
+                actions->bind_movement([](auto, const auto&) { return eawr::core::Result<ga::NativeActions::MovementInput>::success({}); },
+                    [] { return true; }, [](auto, auto) { return eawr::core::Result<void>::success(); });
+                ga::ActionRequest move; move.kind = ga::ActionKind::move; move.player = 2; move.object = fleet->id;
+                move.target = fleet->orbit; move.members = {fleet->members.front().id}; move.taskforce = move.plan = move.block = 1;
+                expect(require(actions->admit(move)).admitted, "AI TaskForce has a native movement listener before the co-op battle");
+                cp::GalacticAiServices services; services.state = actions;
+                services.battle = ga::retained_movement_battle_listener(actions, {},
+                    std::function<auth::ScriptScheduler*()>{[] { return nullptr; }});
+                return eawr::core::Result<cp::GalacticAiServices>::success(std::move(services));
+            }));
+            // Retained forces need no deployed tactical object for this boundary test.
+            for (auto& force : conflict.forces) force.role = cp::ForceRole::retained;
+            require(game->stage_battle(conflict, {}, cp::ScriptRequirement::none));
+        }
+        for (std::uint64_t round = 0; round < 1000; ++round) {
+            rig.network.round = round;
+            for (std::size_t peer = 0; peer < rig.sessions.size(); ++peer) {
+                const auto tick = require(rig.sessions[peer].pump(round));
+                if (tick.completed) rig.hashes[peer].push_back(tick.completed->state_sha256);
+            }
+            if (rig.adapters[0]->completed_tick() == options.final_tick && rig.adapters[1]->completed_tick() == options.final_tick) break;
+        }
+        expect(rig.hashes[0].size() == options.final_tick && rig.hashes[0] == rig.hashes[1],
+            "two real co-op lockstep peers pass the former NET-0109 boundary with equal hashes");
+        for (const auto& game : rig.games) {
+            const auto notes = game->galaxy().load_notes();
+            expect(game->mode() == cp::SessionMode::battle && game->battle()->completed_tick() == options.final_tick - 1
+                && notes.size() == 1 && notes.front().code == "EAWR-LOAD-1236",
+                "AI-initiated co-op battle continues with a LoadNote and no campaign-ending network error");
+        }
+        if (workers == 1) reference_hashes = rig.hashes[0];
+        else expect(rig.hashes[0] == reference_hashes, "co-op degraded battle hashes agree on 1/2/4/8 workers");
+    }
 }
 
 void loopback(const std::string& name, const galactic::GalacticSetup& setup, const std::optional<eawr::testing::WanProfile> wan) {
@@ -873,12 +960,351 @@ void multiple_survivors_keep_confirmation_policy() {
     }
 }
 
+void recovered_membership_frontier_contracts() {
+    constexpr std::uint64_t boundary = 6, final_tick = 13;
+    for (const auto peers : {2U, 3U}) for (const auto workers : {1U, 2U, 4U, 8U}) {
+        const auto setup = coop_policy_setup(peers);
+        FakeNetwork network(peers);
+        std::vector<std::unique_ptr<eawr::platform::ThreadWorkerAdapter>> executors;
+        std::vector<std::unique_ptr<GameSession>> games;
+        std::vector<std::unique_ptr<net::GalacticSessionAdapter>> adapters;
+        std::vector<std::unique_ptr<FakeTransport>> transports;
+        std::vector<std::unique_ptr<net::LockstepSession>> sessions;
+        net::RecoverySessionFrontier frontier;
+        frontier.completed_tick = boundary; frontier.input_delay = 3;
+        frontier.mesh_incident = peers == 3 ? 7U : 0U;
+        frontier.peers.resize(peers);
+        for (auto& row : frontier.peers) row.next_seal = boundary;
+        frontier.peers.back().departed = true; frontier.peers.back().producer_sequence = 2;
+        const eawr::sim::SeatCommandKey future_key{boundary, {1}, 50};
+        const auto changed_planet = setup.planets.front().id;
+        const net::SeatInput future{future_key, require(net::encode_galactic_input(future_key,
+            galactic::DebugSetPlanetOwner{changed_planet, 3}))};
+        frontier.peers.front().next_seal = boundary + 1; frontier.peers.front().producer_sequence = 50;
+        frontier.future.push_back({0, boundary, boundary, {future}});
+        const eawr::sim::SeatCommandKey rejoin_key{boundary, {peers}, 3};
+        const net::SeatInput rejoin{rejoin_key, require(net::encode_galactic_input(rejoin_key, galactic::SeatRejoin{}))};
+        for (net::PeerIndex peer = 0; peer < peers; ++peer) {
+            executors.push_back(std::make_unique<eawr::platform::ThreadWorkerAdapter>(workers));
+            auto game = require(GameSession::create(setup));
+            for (std::uint64_t tick = 0; tick < boundary; ++tick) {
+                if (tick == boundary - 1) require(game.submit({{tick, {peers}, 2}, galactic::SeatLeave{}}));
+                require(game.step(*executors.back()));
+            }
+            games.push_back(std::make_unique<GameSession>(std::move(game)));
+            adapters.push_back(std::make_unique<net::GalacticSessionAdapter>(*games.back(), *executors.back()));
+            transports.push_back(std::make_unique<FakeTransport>(network, peer));
+            net::SessionOptions options; options.initial_tick = boundary; options.final_tick_count = final_tick;
+            if (peers == 3) options.mesh.emplace();
+            options.producer_sequences = games.back()->producer_sequences();
+            std::vector<net::PeerSeat> seats;
+            for (std::uint32_t id = 1; id <= peers; ++id) seats.push_back({{id}, true});
+            auto session = require(net::LockstepSession::create(*adapters.back(), *transports.back(), seats, options));
+            session.enable_departures([](auto key) { return net::encode_galactic_input(key, galactic::SeatLeave{}); });
+            expect(!adapters.back()->validate(rejoin), "normal human wire cannot activate a departed saved seat");
+            auto split = frontier; split.split = true;
+            expect(!session.restore_recovery_frontier(split, rejoin), "split lineage cannot restore a frontier or reactivate its peer");
+            auto wrong = rejoin; wrong.bytes = future.bytes;
+            expect(!session.restore_recovery_frontier(frontier, wrong), "ordinary gameplay cannot masquerade as a recorded rejoin");
+            require(session.restore_recovery_frontier(frontier, rejoin));
+            expect(session.mesh_incident_id() == frontier.mesh_incident, "private recovery preserves the agreed room mesh counter");
+            expect(!session.submit([](auto) { return eawr::core::Result<Bytes>::success({1}); }),
+                "local admission waits for the first recorded rejoin tick");
+            sessions.push_back(std::make_unique<net::LockstepSession>(std::move(session)));
+        }
+        bool returning_submitted{};
+        for (std::uint64_t round = 0; round < 300; ++round) {
+            network.round = round;
+            for (auto& session : sessions) require(session->pump(round));
+            if (!returning_submitted && games.back()->completed_tick() > boundary) {
+                const auto key = require(sessions.back()->submit([](auto stamp) {
+                    return net::encode_galactic_input(stamp, galactic::ResumeGalaxy{});
+                }));
+                expect(key.seat.value == peers && key.sequence == 4, "recovered input continues the saved logical seat and inclusive sequence");
+                returning_submitted = true;
+            }
+            if (std::all_of(games.begin(), games.end(), [](const auto& game) { return game->completed_tick() == final_tick; })) break;
+        }
+        for (std::size_t peer = 0; peer < games.size(); ++peer) {
+            expect(games[peer]->completed_tick() == final_tick && adapters[peer]->state_hash() == adapters.front()->state_hash(),
+                "recovered membership and sealed future input agree through N+k on every peer and worker count");
+            const auto seats = games[peer]->galaxy().seats();
+            const auto returned = std::find_if(seats.begin(), seats.end(), [peers](const auto& row) { return row.seat_id.value == peers; });
+            expect(returned != seats.end() && returned->active, "the one recorded transition reactivates its original saved seat");
+            const auto planets = games[peer]->galaxy().snapshot()->planets();
+            const auto changed = std::find_if(planets.begin(), planets.end(), [changed_planet](const auto& row) { return row.id == changed_planet; });
+            expect(changed != planets.end() && changed->owner == 3, "already accepted future input survives the private frontier install");
+        }
+    }
+}
+
+net::RecoveryDigest recovery_digest(std::string_view text) {
+    net::RecoveryDigest digest{};
+    if (text.size() != 64) throw std::runtime_error("state hash is not SHA256");
+    const auto nibble = [](char value) -> unsigned {
+        if (value >= '0' && value <= '9') return static_cast<unsigned>(value - '0');
+        if (value >= 'a' && value <= 'f') return static_cast<unsigned>(value - 'a') + 10U;
+        throw std::runtime_error("noncanonical hash");
+    };
+    for (std::size_t index = 0; index < digest.size(); ++index)
+        digest[index] = static_cast<std::uint8_t>((nibble(text[index * 2]) << 4U) | nibble(text[index * 2 + 1]));
+    return digest;
+}
+std::optional<net::GalacticRecoveryWorker::Result> wait_recovery(net::GalacticRecoveryWorker& worker,
+    const net::GalacticRecoveryAnchor& barrier) {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (auto result = worker.take(barrier)) return result;
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    throw std::runtime_error("private recovery worker did not complete");
+}
+void checkpoint_recovery_contracts() {
+    using Refusal = net::GalacticRecoveryRefusal;
+    const Bytes large_log(2 * net::save_chunk_bytes + 17, 42);
+    const auto first_chunk = require(net::GalacticRecoveryStream::chunk(1, large_log, 0));
+    const auto last_chunk = require(net::GalacticRecoveryStream::chunk(1, large_log, 2 * net::save_chunk_bytes));
+    net::GalacticRecoveryStream ordered(1);
+    expect(ordered.receive(first_chunk) == Refusal::none && ordered.receive(last_chunk) == Refusal::malformed,
+        "out-of-order catch-up chunks refuse within their fixed bound");
+    auto changed_chunk = first_chunk; changed_chunk.back() ^= 1;
+    expect(ordered.receive(changed_chunk) == Refusal::malformed, "changed duplicate catch-up chunk refuses");
+    net::GalacticRecoveryStream other_epoch(2), tiny(1, 16);
+    expect(other_epoch.receive(first_chunk) == Refusal::divergent_epoch, "stale epoch chunks cannot enter a new incident");
+    expect(tiny.receive(first_chunk) == Refusal::limit && tiny.progress() == 0, "oversized catch-up allocates no payload storage");
+    for (const auto peers : {2U, 3U}) for (const auto workers : {1U, 2U, 4U, 8U}) {
+        const auto setup = coop_policy_setup(peers);
+        const auto identities = eawr::checkpoint::game_identities(setup);
+        eawr::platform::ThreadWorkerAdapter executor(workers);
+        auto game = require(GameSession::create(setup));
+        net::GalacticSessionAdapter adapter(game, executor);
+        for (unsigned tick = 0; tick < 7; ++tick) require(adapter.step());
+        require(game.retain_network_resume_state(adapter.checkpoint_network_state()));
+        auto bytes = std::make_shared<const Bytes>(require(eawr::checkpoint::save_game_checkpoint(game, identities)));
+        net::GalacticRecoveryAnchor anchor{1, 7, {}, recovery_digest(adapter.state_hash())}; anchor.lineage.fill(17);
+        std::vector<net::PeerSeat> seats;
+        for (std::uint32_t peer = 0; peer < peers; ++peer) seats.push_back({{peer + 1}, true});
+        net::GalacticRecoveryLog log(4096);
+        expect(log.checkpoint(anchor, bytes, seats) == Refusal::none, "agreed checkpoint opens bounded recovery history");
+        for (std::uint64_t tick = 7; tick < 19; ++tick) {
+            std::vector<net::SeatInput> inputs;
+            if (tick == 9 || tick == 13) {
+                galactic::CommandPayload payload = tick == 9 ? galactic::CommandPayload{galactic::PauseGalaxy{}}
+                    : galactic::CommandPayload{galactic::ResumeGalaxy{}};
+                const eawr::sim::SeatCommandKey key{tick, {1}, tick};
+                inputs.push_back({key, require(net::encode_galactic_input(key, payload))});
+            }
+            if (tick == 16 && peers == 3) {
+                const eawr::sim::SeatCommandKey key{tick, {2}, tick};
+                inputs.push_back({key, require(net::encode_galactic_input(key, galactic::SeatLeave{}))});
+            }
+            require(adapter.install(inputs)); require(adapter.step());
+            expect(log.append(tick, inputs, recovery_digest(adapter.state_hash())) == Refusal::none,
+                "sealed log retains pause windows and another peer departure");
+        }
+        net::GalacticRecoveryPackage package;
+        expect(log.package(peers - 1, {anchor, {peers}}, package) == Refusal::none,
+            "authenticated saved seat obtains the checkpoint and complete sealed suffix");
+        net::GalacticRecoveryWorker::Restore restore = [identities, workers](const auto& candidate)
+            -> eawr::core::Result<std::unique_ptr<net::SessionAdapter>> {
+            eawr::checkpoint::GameLoadOptions options; options.script_requirement = eawr::campaign::ScriptRequirement::none;
+            const eawr::sim::InlineExecutor restore_executor;
+            auto restored = eawr::checkpoint::load_game_checkpoint(*candidate.bytes, identities, options, restore_executor);
+            if (!restored) return eawr::core::Result<std::unique_ptr<net::SessionAdapter>>::failure(restored.error());
+            auto game = std::make_shared<GameSession>(std::move(restored).value().session);
+            auto executor = std::make_shared<eawr::platform::ThreadWorkerAdapter>(workers);
+            auto adapter = net::GalacticSessionAdapter::owned(std::move(game), std::move(executor));
+            if (!adapter) return eawr::core::Result<std::unique_ptr<net::SessionAdapter>>::failure(adapter.error());
+            return eawr::core::Result<std::unique_ptr<net::SessionAdapter>>::success(std::move(adapter).value());
+        };
+        const auto request_wire = require(net::encode_galactic_recovery_request({anchor, {peers}, 1}));
+        const auto request = require(net::decode_galactic_recovery_request(request_wire));
+        expect(request.anchor == anchor && request.seat.value == peers, "recovery request binds saved seat and exact lineage anchor");
+        net::GalacticRecoveryControl vote{1, package.frontier.completed_tick, 0, peers - 1,
+            net::GalacticRecoveryStage::vote, package.frontier, {}};
+        vote.sealed_log.fill(5);
+        const auto vote_wire = require(net::encode_galactic_recovery_control(vote));
+        const auto decoded_vote = require(net::decode_galactic_recovery_control(vote_wire));
+        expect(decoded_vote.transfer_epoch == 1 && decoded_vote.target == peers - 1 && decoded_vote.frontier == package.frontier
+            && decoded_vote.sealed_log == vote.sealed_log, "authenticated proof binds the exact incident, saved peer and sealed frontier");
+        auto wrong_vote = vote_wire; wrong_vote[25] = 255;
+        expect(!net::decode_galactic_recovery_control(wrong_vote), "unknown recovery proof stages refuse");
+        wrong_vote = vote_wire; wrong_vote.push_back(0);
+        expect(!net::decode_galactic_recovery_control(wrong_vote), "proof suffix cannot smuggle input");
+        auto request_tail = request_wire; request_tail.push_back(0);
+        expect(!net::decode_galactic_recovery_request(request_tail), "hostile request suffix refuses cleanly");
+        auto wire = require(net::encode_galactic_recovery_log(package));
+        net::GalacticRecoveryStream incoming(anchor.epoch);
+        for (std::size_t offset = 0; offset < wire.size(); offset += net::save_chunk_bytes) {
+            const auto chunk = require(net::GalacticRecoveryStream::chunk(anchor.epoch, wire, offset));
+            expect(incoming.receive(chunk) == Refusal::none, "bounded catch-up chunks assemble independently of gameplay");
+            const auto progress = incoming.progress();
+            expect(incoming.receive(chunk) == Refusal::none && incoming.progress() == progress,
+                "duplicate catch-up frames do not grow memory or advance progress");
+        }
+        expect(incoming.complete(), "whole catch-up suffix received");
+        package = require(net::decode_galactic_recovery_log(incoming.bytes(), bytes));
+        auto trailing_wire = wire; trailing_wire.push_back(0);
+        expect(!net::decode_galactic_recovery_log(trailing_wire, bytes), "trailing sealed-log bytes refuse");
+        net::GalacticRecoveryWorker worker;
+        expect(worker.start(package, restore) == Refusal::none, "private catch-up starts without touching the live owner");
+        expect(worker.start(package, restore) == Refusal::busy, "a second catch-up is bounded to one worker");
+        auto result = wait_recovery(worker, package.frontier);
+        expect(result && result->refusal == Refusal::none && result->owner
+            && result->owner->state_hash() == adapter.state_hash(), "checkpoint catch-up reproduces N+k on all worker counts");
+        const auto live_hash = adapter.state_hash();
+        auto wrong = anchor; ++wrong.epoch;
+        expect(log.package(peers - 1, {wrong, {peers}}, package) == Refusal::divergent_epoch, "divergent epochs refuse recovery");
+        wrong = anchor; wrong.lineage[0] ^= 1;
+        expect(log.package(peers - 1, {wrong, {peers}}, package) == Refusal::divergent_epoch, "split descendants cannot reconcile");
+        wrong = anchor; wrong.state[0] ^= 1;
+        expect(log.package(peers - 1, {wrong, {peers}}, package) == Refusal::anchor_hash, "divergent anchor hashes refuse recovery");
+        expect(log.package(peers - 1, {anchor, {1}}, package) == Refusal::seat_binding, "a replacement cannot claim another saved seat");
+        expect(log.package(peers - 1, {anchor, {peers}}, package) == Refusal::none, "refusals leave the valid recovery usable");
+        auto hostile = package; hostile.ticks[1].tick = hostile.ticks[0].tick;
+        expect(worker.start(std::move(hostile), restore) == Refusal::none, "bounded hostile log enters only private staging");
+        result = wait_recovery(worker, package.frontier);
+        expect(result && result->refusal == Refusal::malformed && !result->owner, "duplicate/out-of-order catch-up rows cannot publish");
+        auto barrier = package.frontier; ++barrier.completed_tick;
+        expect(worker.start(package, restore) == Refusal::none, "a fresh catch-up can follow a hostile candidate");
+        result = wait_recovery(worker, barrier);
+        expect(result && result->refusal == Refusal::stale_barrier && !result->owner, "a stale catch-up cannot replace a later owner");
+        expect(adapter.state_hash() == live_hash, "every refusal preserves the running match owner");
+        net::GalacticRecoveryLog short_log(44);
+        expect(short_log.checkpoint(anchor, bytes, seats) == Refusal::none, "small log accepts checkpoint independently of byte transfer");
+        for (const auto& row : package.ticks) static_cast<void>(short_log.append(row.tick, row.inputs, row.state));
+        expect(short_log.retained_bytes() <= 44 && short_log.package(peers - 1, {anchor, {peers}}, hostile) == Refusal::log_too_old,
+            "expired recovery refuses by name within its fixed memory budget");
+        log.invalidate();
+        expect(log.package(peers - 1, {anchor, {peers}}, hostile) == Refusal::unavailable,
+            "an unconfirmed split invalidates the shared checkpoint");
+        std::cout << "checkpoint recovery peers=" << peers << " workers=" << workers << " state=" << live_hash << '\n';
+    }
+}
+
 } // namespace
+
+// #5519: the lockstep exchange encoding feeds the desync bundle's session.bin. One peer receives a pause no other peer saw;
+// both peers' bundles must then hold the byte-identical SERIAL encoding of an agreed exchange tick: the earlier baseline
+// when the divergence starts in the first half of the exchange window, the newest tick otherwise. Run with one worker
+// (serial exchange encode) and four (sections encoded concurrently).
+void forced_mismatch_bundles() {
+    for (const std::size_t workers : {1U, 4U}) {
+        for (const std::uint64_t divergence : {12U, 17U}) {
+            const std::string where = "forced mismatch workers=" + std::to_string(workers) + " at tick " + std::to_string(divergence) + ": ";
+            Rig::Options options;
+            options.final_tick = 200;
+            options.workers = {workers};
+            Rig rig(versus_setup(), options);
+            std::array<std::map<std::uint64_t, Bytes>, 2> serial; // oracle: fresh serial galaxy encoding at each exchange tick
+            bool injected = false;
+            // The deliberately inconsistent engine source of one peer: an AI-seat ownership change the other never sees.
+            const auto planet = rig.setup.planets[5 % rig.setup.planets.size()].id;
+            rig.adapters[1]->set_engine_source([&](const GameSession&, std::uint64_t tick) {
+                std::vector<galactic::GameCommand> produced;
+                if (tick == divergence) {
+                    injected = true;
+                    produced.push_back({{tick, {3}, 9000}, galactic::DebugSetPlanetOwner{planet, 3}});
+                }
+                return eawr::core::Result<std::vector<galactic::GameCommand>>::success(std::move(produced));
+            });
+            rig.run(6000, [&](const std::uint64_t) {
+                for (net::PeerIndex peer = 0; peer < 2; ++peer) {
+                    const auto tick = rig.adapters[peer]->completed_tick();
+                    if (tick % 10 == 0 && !serial[peer].contains(tick))
+                        serial[peer].emplace(tick, rig.games[peer]->galaxy().canonical_state_bytes());
+                }
+            });
+            expect(injected, where + "the one-peer command was injected");
+            for (net::PeerIndex peer = 0; peer < 2; ++peer) {
+                expect(rig.monitors[peer]->report().has_value(), where + "every peer holds a desync report"
+                    + (rig.failure ? " (session failure " + rig.failure->code + ": " + rig.failure->message + ")" : std::string()));
+                if (!rig.monitors[peer]->report()) continue;
+                const auto& report = *rig.monitors[peer]->report();
+                const auto file = std::find_if(report.bundle.files.begin(), report.bundle.files.end(),
+                    [](const auto& entry) { return entry.name == "session.bin"; });
+                expect(file != report.bundle.files.end() && !file->bytes.empty(), where + "the bundle holds a session encoding");
+                if (file == report.bundle.files.end()) continue;
+                expect(report.encoding_tick % 10 == 0 && serial[peer].contains(report.encoding_tick),
+                    where + "the retained encoding is an agreed exchange tick");
+                if (!serial[peer].contains(report.encoding_tick)) continue;
+                expect(file->bytes == serial[peer].at(report.encoding_tick),
+                    where + "session.bin equals the fresh serial encoding of its tick, byte for byte");
+                if (divergence < 15) expect(report.encoding_tick < report.detected_at, where + "an early divergence keeps the earlier baseline");
+                else expect(report.encoding_tick == report.detected_at, where + "a late divergence keeps the newest encoding");
+            }
+        }
+    }
+}
+
+// A phase that always fails: the exchange encode must discard partial buffers and fall back to the serial encode.
+class FailingExecutor final : public eawr::sim::PartitionExecutor {
+public:
+    [[nodiscard]] std::size_t worker_count() const noexcept override { return 4; }
+    [[nodiscard]] eawr::core::Result<void> execute(std::size_t, const std::function<void(std::size_t)>&) const override {
+        eawr::core::Diagnostic error;
+        error.code = "EAWR-TEST-EXECUTOR";
+        error.message = "forced phase failure";
+        return eawr::core::Result<void>::failure(std::move(error));
+    }
+};
+
+// #5519: the exchange encoding is the serial canonical encoding for every worker count, also when the worker phase fails.
+void exchange_encode_equals_serial() {
+    auto game = require(GameSession::create(versus_setup()));
+    const eawr::platform::ThreadWorkerAdapter stepping(1);
+    const FailingExecutor failing;
+    std::size_t compared = 0;
+    for (std::uint64_t tick = 0; tick < 45; ++tick) {
+        static_cast<void>(require(game.step(stepping)));
+        if (game.completed_tick() % 10 != 0) continue;
+        const auto serial = game.galaxy().canonical_state_bytes();
+        for (const std::size_t workers : {1U, 2U, 4U, 8U, 10U}) {
+            const eawr::platform::ThreadWorkerAdapter executor(workers);
+            expect(game.galaxy().exchange_state_bytes(executor) == serial,
+                "exchange encoding equals the serial encoding at " + std::to_string(workers) + " workers, tick " + std::to_string(tick));
+        }
+        expect(game.galaxy().exchange_state_bytes(failing) == serial, "a failed worker phase falls back to the serial encoding");
+        ++compared;
+    }
+    expect(compared >= 4, "several exchange ticks were compared");
+}
+
+// #5519: a loaded checkpoint resets the exchange offer cache and scratch buffers; the next exchange encode rebuilds them
+// inside a parallel task and still equals the serial encoding (and the donor's).
+void exchange_encode_after_checkpoint_load() {
+    const eawr::platform::ThreadWorkerAdapter stepping(1);
+    auto donor = require(GameSession::create(versus_setup()));
+    for (std::uint64_t tick = 0; tick < 20; ++tick) static_cast<void>(require(donor.step(stepping)));
+    const auto saved = require(donor.save_checkpoint_state());
+    const auto donor_serial = donor.galaxy().canonical_state_bytes();
+    for (const std::size_t workers : {1U, 4U}) {
+        const eawr::platform::ThreadWorkerAdapter executor(workers);
+        auto target = require(GameSession::create(versus_setup()));
+        // Prime the cache and scratch on the fresh game (restore needs a fresh private game), so a stale cache would show after the load.
+        expect(target.galaxy().exchange_state_bytes(executor) == target.galaxy().canonical_state_bytes(),
+            "exchange equals serial before the load at " + std::to_string(workers) + " workers");
+        require(target.load_checkpoint_state(saved));
+        const auto serial = target.galaxy().canonical_state_bytes();
+        expect(serial == donor_serial, "the loaded state encodes like the donor at " + std::to_string(workers) + " workers");
+        expect(target.galaxy().exchange_state_bytes(executor) == serial,
+            "exchange equals serial after the load at " + std::to_string(workers) + " workers");
+        static_cast<void>(require(target.step(stepping)));
+        expect(target.galaxy().exchange_state_bytes(executor) == target.galaxy().canonical_state_bytes(),
+            "exchange equals serial one tick after the load at " + std::to_string(workers) + " workers");
+    }
+}
 
 int main() {
     try {
+        exchange_encode_equals_serial();
+        exchange_encode_after_checkpoint_load();
+        forced_mismatch_bundles();
+        recovered_membership_frontier_contracts();
+        checkpoint_recovery_contracts();
         classification_and_codec();
         child_hash_and_execution_refusal();
+        unavailable_battle_callback_coop();
         loopback("versus", versus_setup(), std::nullopt);
         loopback("versus-wan", versus_setup(), eawr::testing::wan_profiles[1]);
         loopback("coop-4-seats", coop_setup(), std::nullopt);

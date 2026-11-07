@@ -103,13 +103,14 @@ struct PendingBattleAlertInputs {
     bool active_mode{}, queue_tactical{}, multiplayer{}, authorized_issuer{};
     bool always_bypass{}, linked_tactical{}, tutorial_player{}, tutorial_forced{}, story_prevented{};
     bool campaign_conflict_queued{};
+    bool untimed{}; // co-op: the vote has no deadline
     std::uint32_t active_speech_events{};
     std::uint64_t elapsed_wall_ms{}, timeout_ms{}; // WGM-176 owner clock and authored timeout
 };
 struct PendingBattleAlertView {
     sim::galactic::PlayerId local{};
     bool visible{}, single_button{}, graph_visible{}, begin_admitted{}, resolve_admitted{};
-    bool waiting_for_opponent{}, timeout_due{};
+    bool waiting_for_opponent{}, timeout_due{}, untimed{};
     std::uint64_t elapsed_wall_ms{}, timeout_ms{};
 };
 [[nodiscard]] inline PendingBattleAlertView pending_battle_alert_view(const ConflictRecord& conflict,
@@ -122,9 +123,9 @@ struct PendingBattleAlertView {
     view.waiting_for_opponent = inputs.multiplayer && vote.has_value();
     view.begin_admitted = view.visible && choice_ready && inputs.authorized_issuer && !view.waiting_for_opponent;
     view.resolve_admitted = view.begin_admitted && !view.single_button && !inputs.campaign_conflict_queued;
-    view.elapsed_wall_ms = inputs.elapsed_wall_ms; view.timeout_ms = inputs.timeout_ms;
+    view.elapsed_wall_ms = inputs.elapsed_wall_ms; view.timeout_ms = inputs.timeout_ms; view.untimed = inputs.untimed;
     // WGM-176: equality waits; yes/zero is a Begin preference, never withdraw.
-    view.timeout_due = view.begin_admitted && inputs.multiplayer && inputs.elapsed_wall_ms > inputs.timeout_ms;
+    view.timeout_due = view.begin_admitted && inputs.multiplayer && !inputs.untimed && inputs.elapsed_wall_ms > inputs.timeout_ms;
     return view;
 }
 

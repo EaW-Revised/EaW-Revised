@@ -1,4 +1,5 @@
 #include "eawr/data/ui/text_database.hpp"
+#include "eawr/vfs/vfs.hpp"
 
 #include <algorithm>
 #include <array>
@@ -202,9 +203,26 @@ struct BuiltinText final {
     std::string_view key;
     std::u16string_view value;
 };
-constexpr std::array<BuiltinText, 3> builtin_texts{{
+constexpr std::array<BuiltinText, 20> builtin_texts{{
     // ADR-020 project caption; an authored language database overrides this default.
     {"TEXT_EAWR_GIFT_UNITS", u"Gift"},
+    {"TEXT_EAWR_TWEAKS", u"Tweaks"},
+    {"TEXT_EAWR_PERFORMANCE", u"Performance"},
+    {"TEXT_EAWR_RENDER_THREAD", u"Render thread (restart)"},
+    {"TEXT_EAWR_PARTICLE_THREADS", u"Particle threads"},
+    {"TEXT_EAWR_SIMULATION_THREADS", u"Simulation threads"},
+    {"TEXT_EAWR_DEPTH_PREPASS", u"Depth pre-pass"},
+    {"TEXT_EAWR_AUTOMATIC", u"Automatic"},
+    {"TEXT_EAWR_SEPARATE", u"Separate (default)"},
+    {"TEXT_EAWR_SELECTION_HOTKEYS", u"Selection hotkeys"},
+    {"TEXT_EAWR_ANIMATED_LOADING_BACKGROUND", u"Animated loading screen background"},
+    {"TEXT_EAWR_HOVER_OWNER_NAMES", u"Show player names when hovering units"},
+    {"TEXT_EAWR_REINFORCEMENT_AREAS", u"Reinforcement areas only while placing"},
+    {"TEXT_EAWR_OFF", u"Off (default, retail)"},
+    {"TEXT_EAWR_ON", u"On"},
+    {"TEXT_EAWR_DEFAULTS", u"Defaults"},
+    {"TEXT_EAWR_APPLY", u"Apply"},
+    {"TEXT_EAWR_ACCEPT", u"Accept"},
     {"TEXT_MODS_OPTIONS", u"Mods"},
     {"TEXT_SELECT_MOD_TITLE", u"Select Mod"},
 }};

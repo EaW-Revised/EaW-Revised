@@ -61,6 +61,7 @@ struct ScriptedTacticalSession::Impl {
     std::function<bool(const TacticalOrder&)> order_admission;
     std::function<core::Result<void>()> shared_mode_service;
     bool authoritative_hash{true};            // #895: off, the tick's combined hash stays empty
+    sim::StateHashPolicy hash_policy{sim::StateHashPolicy::always}; // the requested world policy
     std::function<std::uint64_t()> clock;     // #957: measurement only, null without one
 
     [[nodiscard]] std::uint64_t now() const { return clock ? clock() : 0; }
@@ -173,7 +174,13 @@ core::Result<ScriptedTacticalSession> ScriptedTacticalSession::restore(
         auto& key = expected_keys[command.key.player_id];
         key = std::max(key, std::pair(command.key.tick, command.key.sequence + 1U));
     }
-    if (expected_keys != saved.last_keys) return refuse("child routing cursors disagree with accepted input");
+    // SAE-10: an accepted reinforcement whose search failed advanced its issuer's cursor but is never recorded,
+    // so a saved cursor may lead the recorded input; the loop above keeps every saved cursor in an executed tick.
+    for (const auto& [player, key] : expected_keys) {
+        const auto saved_key = saved.last_keys.find(player);
+        if (saved_key == saved.last_keys.end() || saved_key->second < key)
+            return refuse("child routing cursors disagree with accepted input");
+    }
     for (std::size_t index = 0; index < saved.pending.size(); ++index) {
         const auto& command = saved.pending[index];
         if (command.issuer == 0 || command.verb.empty() || saved.completed_tick == 0
@@ -274,12 +281,18 @@ core::Result<ScriptedTick> ScriptedTacticalSession::step(
             return core::Result<ScriptedTick>::failure(scoring.error());
         }
     }
+    // The authoritative hash derives from the world's, so it needs the world's: only a session
+    // that skips the authoritative hash may also skip the world's.
+    impl.world.set_state_hash_policy(impl.authoritative_hash ? sim::StateHashPolicy::always : impl.hash_policy);
     auto world = impl.world.step(executor);
     if (!world) {
         impl.failure = world.error();
         return core::Result<ScriptedTick>::failure(world.error());
     }
-    out.world = std::move(world).value();
+    {
+        core::tick_profile::Scope world_scope("serial.bridge.world_move");
+        out.world = std::move(world).value();
+    }
     if (impl.shared_mode_service) {
         auto published = impl.shared_mode_service();
         if (!published) { impl.failure = published.error(); return core::Result<ScriptedTick>::failure(published.error()); }
@@ -337,10 +350,13 @@ core::Result<ScriptedTick> ScriptedTacticalSession::step(
     }
     // Turn and barrier output share per-instance sequences. The engine merges
     // both services before routing or saving the next tick's commands.
-    std::sort(out.scripts.commands.begin(), out.scripts.commands.end(), [](const auto& left, const auto& right) {
-        return std::tie(left.issuer, left.sequence) < std::tie(right.issuer, right.sequence);
-    });
-    impl.pending = out.scripts.commands;
+    {
+        core::tick_profile::Scope sort_scope("serial.bridge.sort");
+        std::sort(out.scripts.commands.begin(), out.scripts.commands.end(), [](const auto& left, const auto& right) {
+            return std::tie(left.issuer, left.sequence) < std::tie(right.issuer, right.sequence);
+        });
+        impl.pending = out.scripts.commands;
+    }
     if (!impl.authoritative_hash) return core::Result<ScriptedTick>::success(std::move(out));
     core::tick_profile::Scope capture("serial.bridge.capture");
     auto script_hash = script_state_hash(executor);
@@ -368,6 +384,14 @@ void ScriptedTacticalSession::set_state_hasher(std::shared_ptr<sim::StateHasher>
 }
 
 void ScriptedTacticalSession::set_shared_mode_service(std::function<core::Result<void>()> service) { impl_->shared_mode_service = std::move(service); }
+void ScriptedTacticalSession::set_state_hash_policy(const sim::StateHashPolicy policy) noexcept {
+    impl_->hash_policy = policy;
+}
+
+sim::StateHashPolicy ScriptedTacticalSession::state_hash_policy() const noexcept {
+    return impl_->authoritative_hash ? sim::StateHashPolicy::always : impl_->hash_policy;
+}
+
 void ScriptedTacticalSession::set_authoritative_hash(const bool every_tick) noexcept {
     impl_->authoritative_hash = every_tick;
 }

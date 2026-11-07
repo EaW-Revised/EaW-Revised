@@ -141,6 +141,8 @@ void write_catalog(const std::filesystem::path& root) {
     write(root / "XML" / "CampaignFiles.xml", "<Campaign_Files></Campaign_Files>");
     write(root / "XML" / "SFXEventFiles.xml", "<SFXEvent_Files></SFXEvent_Files>");
     write(root / "XML" / "eawr_scene_objects.xml", R"xml(<Objects>
+<SpaceProp Name="SYNTH_QLU1MOI5PTT3"><Model_Name>Eawr_Scene_Prop.alo</Model_Name></SpaceProp>
+<SpaceProp Name="SYNTH_OIVRHNPFF4K4"><Model_Name>Eawr_Scene_Prop.alo</Model_Name></SpaceProp>
 <GroundBuildable Name="EAWR_SCENE_PROP">
   <Land_Model_Name>Eawr_Scene_Prop.alo</Land_Model_Name>
   <Scale_Factor>1.5</Scale_Factor>

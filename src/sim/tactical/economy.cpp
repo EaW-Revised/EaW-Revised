@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <array>
 #include <string>
+#include <limits>
 
 namespace eawr::sim::tactical {
 
@@ -31,6 +32,46 @@ bool reinforcement_inside_bounds(const std::optional<std::array<math::Fixed, 4>>
     return !bounds || (point.x >= (*bounds)[0] && point.y >= (*bounds)[1]
         && point.x <= (*bounds)[2] && point.y <= (*bounds)[3]);
 }
+
+namespace economy_load {
+std::string decimal(const math::Fixed value) {
+    const auto raw = value.raw();
+    const auto magnitude =
+        raw < 0 ? std::uint64_t{0} - static_cast<std::uint64_t>(raw) : static_cast<std::uint64_t>(raw);
+    const auto scale = static_cast<std::uint64_t>(math::Fixed::scale);
+    auto text = (raw < 0 ? std::string("-") : std::string{}) + std::to_string(magnitude / scale);
+    auto remainder = magnitude % scale;
+    if (remainder)
+        text += '.';
+    while (remainder) {
+        remainder *= 10;
+        text += static_cast<char>('0' + remainder / scale);
+        remainder %= scale;
+    }
+    return text;
+}
+
+void append(core::LoadNoteBuffer& notes, const char* code, const std::string& object, const std::string& tag,
+    std::string authored, std::string effective, const std::string& message,
+    const core::LoadAction action, const bool retail_default, const std::string_view diagnostic_code) {
+    core::LoadNote note;
+    note.code = code;
+    note.object = object;
+    note.tag = tag;
+    note.authored_value = std::move(authored);
+    note.effective_value = std::move(effective);
+    note.action = action;
+    note.diagnostic_code = diagnostic_code;
+    note.message = "economy rules: " + message;
+    if (retail_default) {
+        note.classification = core::LoadCategory::retail_accepts;
+        note.retail = "LSA-P5";
+    }
+    notes.append(std::move(note));
+}
+} // namespace economy_load
+
+using economy_load::decimal;
 
 namespace {
 
@@ -150,6 +191,164 @@ const UpgradeProfile* EconomyRules::upgrade(const TypeId type) const noexcept {
     const auto found = std::lower_bound(upgrades.begin(), upgrades.end(), type,
         [](const UpgradeProfile& entry, const TypeId value) { return entry.type < value; });
     return found != upgrades.end() && found->type == type ? &*found : nullptr;
+}
+
+void normalize_economy(EconomyRules& rules, core::LoadNoteBuffer& notes) {
+    constexpr auto unit = math::Fixed::scale;
+    constexpr auto coordinate = max_motion_coordinate * unit;
+    const auto name = [&](const TypeId type) {
+        const auto found = rules.load_notes.type_names.find(type);
+        return found == rules.load_notes.type_names.end() ? "type#" + std::to_string(type) : found->second;
+    };
+    const auto emit = [&](const char* code, const std::string& object, const char* tag,
+                          std::string authored, std::string effective, const char* message,
+                          const core::LoadAction action = core::LoadAction::clamped) {
+        economy_load::append(notes, code, object, tag, std::move(authored), std::move(effective), message, action);
+    };
+    const auto clamp = [&](math::Fixed& value, const std::int64_t low, const std::int64_t high,
+                           const char* code, const std::string& object, const char* tag, const char* message) {
+        const auto effective = std::clamp(value.raw(), low, high);
+        if (effective == value.raw()) return;
+        emit(code, object, tag, decimal(value), decimal(math::Fixed::from_raw(effective)), message);
+        value = math::Fixed::from_raw(effective);
+    };
+    const auto frames = [&](std::uint32_t& value, const std::string& object, const char* tag, const char* code) {
+        const auto effective = std::min(value, 86400U * 30U);
+        if (effective == value) return;
+        emit(code, object, tag, std::to_string(value), std::to_string(effective), "duration is out of range");
+        value = effective;
+    };
+    for (auto& profile : rules.command_bonuses) {
+        if (profile.battlefield) clamp(profile.reveal_delta, -8 * unit, 8 * unit, "EAWR-LOAD-0356", name(profile.type),
+            "reveal_delta", "battlefield reveal contribution exceeds supported bounds");
+        for (auto& value : profile.bonus.percentages)
+            clamp(value, -8 * unit, 8 * unit, "EAWR-LOAD-0356", name(profile.type),
+                "command_bonus", "command bonus outside supported bounds");
+    }
+    for (auto& point : rules.pads.capture) {
+        clamp(point.radius, 0, coordinate, "EAWR-LOAD-0357", name(point.type), "Capture_Radius", "invalid capture profile");
+        clamp(point.transition_seconds, 0, 86400 * unit, "EAWR-LOAD-0357", name(point.type),
+            "Capture_Time", "invalid capture profile");
+        frames(point.rebuild_frames, name(point.type), "rebuild_frames", "EAWR-LOAD-0351");
+    }
+    // A malformed construction purchase is omitted, preventing every purchase route.
+    std::erase_if(rules.pads.construction, [&](const auto& child) {
+        const bool bad = child.price.raw() < 0 || child.price.raw() > max_credits_raw || child.seconds == 0
+            || child.seconds > 86400 || child.ai_seconds > 86400;
+        if (bad) {
+            emit("EAWR-LOAD-0357", name(child.type), "construction", decimal(child.price),
+                "unavailable offer", "invalid construction profile", core::LoadAction::skipped_object);
+            for (auto& menu : rules.menus) for (auto& option : menu.options) if (option.type == child.type) {
+                option.available = false;
+                option.disabled_reason = "Invalid construction price or build time";
+            }
+        }
+        return bad;
+    });
+    for (auto& profile : rules.pads.respawn) frames(profile.frames, name(profile.type), "Tactical_Respawn_Time_In_Secs", "EAWR-LOAD-0357");
+    for (auto& player : rules.players) {
+        const auto object = "player#" + std::to_string(player.player);
+        clamp(player.credits, 0, max_credits_raw, "EAWR-LOAD-0358", object, "credits", "credits out of range");
+        if (player.credit_cap) clamp(*player.credit_cap, 0, max_credits_raw, "EAWR-LOAD-0358", object,
+            "credit_cap", "campaign credit cap out of range");
+        if (player.strategic_credits) clamp(*player.strategic_credits, 0, max_credits_raw, "EAWR-LOAD-0358", object,
+            "strategic_credits", "retained strategic credits require an AI and a valid balance");
+        clamp(player.credit_multiplier, 0, max_credits_raw, "EAWR-LOAD-0358", object,
+            "Credit_Multiplier", "credit multiplier out of range");
+        clamp(player.ai_build_time_multiplier, 1, max_credits_raw, "EAWR-LOAD-0358", object,
+            "Space_Build_Time_Multiplier", "AI build time multiplier out of range");
+    }
+    for (auto& menu : rules.menus) for (auto& option : menu.options) {
+        const bool bad = option.price.raw() < 0 || option.price.raw() > max_credits_raw
+            || (option.available && ((option.price.raw() == 0 && option.kind != BuildKind::structure)
+                || option.build_frames == 0 || option.ai_build_frames == 0));
+        if (!bad) continue;
+        emit("EAWR-LOAD-0355", name(option.type), "purchase", decimal(option.price),
+            "unavailable offer", "an available option has no valid price or build time", core::LoadAction::skipped_object);
+        option.available = false;
+        option.disabled_reason = "Invalid purchase price or build time";
+        option.price = math::Fixed::from_raw(std::clamp(option.price.raw(), std::int64_t{0}, max_credits_raw));
+    }
+    for (auto& stream : rules.income) {
+        clamp(stream.per_frame, 0, max_credits_raw, "EAWR-LOAD-0359", name(stream.source),
+            "income", "an income amount is out of range");
+        for (auto& bonus : stream.bonuses)
+            clamp(bonus.per_frame, 0, max_credits_raw, "EAWR-LOAD-0359", name(stream.source),
+                "income_bonus", "an income bonus is out of range");
+    }
+    for (auto& entry : rules.prevention)
+        clamp(entry.radius, 0, coordinate, "EAWR-LOAD-0360", name(entry.type),
+            "Reinforcement_Prevention_Radius", "a prevention radius is out of range");
+    for (auto& entry : rules.footprints) {
+        clamp(entry.layer_z, -coordinate, coordinate, "EAWR-LOAD-0361", name(entry.type),
+            "Layer_Z_Adjust", "a layer height is out of range");
+        if (!entry.box) continue;
+        auto& box = *entry.box;
+        for (auto* value : {&box.min_x, &box.min_y, &box.max_x, &box.max_y})
+            clamp(*value, -coordinate, coordinate, "EAWR-LOAD-0361", name(entry.type),
+                "placement_box", "a placement box is not ordered or is out of range");
+        if (box.min_x > box.max_x || box.min_y > box.max_y) {
+            emit("EAWR-LOAD-0361", name(entry.type), "placement_box", "unordered", "ordered",
+                "a placement box is not ordered or is out of range");
+            if (box.min_x > box.max_x) std::swap(box.min_x, box.max_x);
+            if (box.min_y > box.max_y) std::swap(box.min_y, box.max_y);
+        }
+    }
+    for (auto& entry : rules.bounty_values)
+        clamp(entry.second, 0, std::numeric_limits<std::int64_t>::max(), "EAWR-LOAD-0362", name(entry.first),
+            "Bounty", "invalid bounty value ordering or amount");
+    std::vector<TypeId> disabled(rules.disabled_types.begin(), rules.disabled_types.end());
+    for (auto& upgrade : rules.upgrades) {
+        for (auto& bounty : upgrade.bounties)
+            clamp(bounty.percentage, 0, std::numeric_limits<std::int64_t>::max(), "EAWR-LOAD-0362", name(upgrade.type),
+                "Bounty_Percentage", "invalid bounty source percentage or factions");
+        std::erase_if(upgrade.income_modifiers, [&](const auto& modifier) {
+            const auto* stream = rules.stream(modifier.target_source);
+            const bool bad = !stream || stream->base_value.raw() < 0 || stream->base_value.raw() > max_credits_raw
+                || stream->interval_seconds.raw() <= 0;
+            if (bad) emit("EAWR-LOAD-0359", name(upgrade.type), "income_modifier", "invalid target stream",
+                "omitted modifier", "an income modifier requires an authored target stream value and interval",
+                core::LoadAction::skipped_object);
+            return bad;
+        });
+        for (auto& modifier : upgrade.stealth_duration)
+            clamp(modifier.percentage, -unit + 1, 8 * unit, "EAWR-LOAD-0363", name(upgrade.type),
+                "stealth_duration", "a stealth duration modifier is outside supported bounds");
+        const bool unsupported = std::any_of(upgrade.bonuses.begin(), upgrade.bonuses.end(), [](const auto& bonus) {
+            return std::any_of(bonus.percentages.begin(), bonus.percentages.end(), [](const auto value) {
+                return value.raw() > 8 * math::Fixed::scale;
+            });
+        });
+        if (unsupported && !rules.disabled_types.contains(upgrade.type)) {
+            emit("EAWR-LOAD-0364", name(upgrade.type), "upgrade_bonus", "above +8", "unavailable offer",
+                "upgrade bonus above project support limit requires an unavailable upgrade", core::LoadAction::skipped_object);
+            disabled.push_back(upgrade.type);
+            for (auto& menu : rules.menus) for (auto& option : menu.options) if (option.type == upgrade.type) {
+                option.available = false;
+                option.disabled_reason = "Upgrade " + name(upgrade.type) + " bonus above project support limit (+8)";
+            }
+        }
+    }
+    std::sort(disabled.begin(), disabled.end());
+    disabled.erase(std::unique(disabled.begin(), disabled.end()), disabled.end());
+    if (!std::equal(disabled.begin(), disabled.end(), rules.disabled_types.begin(), rules.disabled_types.end()))
+        rules.disabled_types = std::move(disabled);
+    clamp(rules.collision_distance, 0, coordinate, "EAWR-LOAD-0365", "economy rules",
+        "Space_Reinforcement_Collision_Check_Distance", "the reinforcement collision distance is out of range");
+    clamp(rules.vulnerability, -4 * unit, 0, "EAWR-LOAD-0365", "economy rules",
+        "Space_Elevated_Vulnerability_Factor", "the arrival vulnerability is outside [-4, 0]");
+}
+
+core::Result<EconomyRules> prepare_economy(const EconomyRules& source,
+    const std::span<const Player> players, core::LoadNoteBuffer& notes) {
+    for (const auto& note : source.load_notes.pending) notes.append(note);
+    auto prepared = core::normalize_owned_load_table(source, notes, normalize_economy,
+        [players](const EconomyRules& owned) {
+            return owned.empty() && owned.command_bonuses.empty()
+                ? core::Result<void>::success() : validate_economy(owned, players);
+        });
+    if (prepared) prepared.value().load_notes = {};
+    return prepared;
 }
 
 core::Result<void> validate_economy(const EconomyRules& rules, const std::span<const Player> players) {

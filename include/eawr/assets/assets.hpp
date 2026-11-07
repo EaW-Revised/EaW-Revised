@@ -1,12 +1,13 @@
 #pragma once
 
 #include "eawr/core/result.hpp"
-#include "eawr/vfs/vfs.hpp"
+#include "eawr/vfs/vfs_fwd.hpp"
 
 #include <array>
 #include <cstddef>
 #include <cstdint>
 #include <span>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <variant>
@@ -20,6 +21,9 @@ struct Source final {
     std::string layer_id;
     vfs::AssetOrigin origin{vfs::AssetOrigin::loose};
     std::uint64_t stored_size{0};
+    // Non-zero when the texture carries mip levels generated after loading (assets::extend_mip_chain): the number of levels
+    // the file itself holds. A reader of `logical_path` gets those levels only.
+    std::uint8_t authored_levels{0};
 };
 
 [[nodiscard]] Source source_from(const vfs::AssetRecord& record);
@@ -242,6 +246,9 @@ inline constexpr std::string_view mega_texture_rectangle = "EAWR-ASSET-0014";
     const vfs::Vfs& filesystem, std::string_view logical_path);
 // Automatic lookup accepts exactly one sibling page named <stem>.dds or
 // <stem>.tga. If both exist, callers must use the explicit page-path overload.
+// Find an entry in shadowed directories, keeping each directory paired with its own page.
+[[nodiscard]] core::Result<std::optional<MegaTextureAtlas>> load_shadowed_atlas_entry(
+    const vfs::Vfs& filesystem, std::string_view mtd_path, std::string_view entry);
 [[nodiscard]] core::Result<MegaTextureAtlas> load_mega_texture_atlas(
     const vfs::Vfs& filesystem, std::string_view mtd_path);
 [[nodiscard]] core::Result<MegaTextureAtlas> load_mega_texture_atlas(

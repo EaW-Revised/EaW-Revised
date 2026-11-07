@@ -56,6 +56,25 @@ private:
 // order. All matrices and pool ownership stage before any state is published.
 class LiveExecutionStateContributor final : public TrackedStateContributor {
 public:
+    class PhaseSavepoint {
+    public:
+        struct Work { std::size_t retained_publications{}, routes{}; };
+        ~PhaseSavepoint();
+        PhaseSavepoint(const PhaseSavepoint&) = delete;
+        PhaseSavepoint& operator=(const PhaseSavepoint&) = delete;
+        [[nodiscard]] Work work() const noexcept;
+        [[nodiscard]] core::Result<void> commit();
+        [[nodiscard]] core::Result<void> rollback();
+    private:
+        struct Saved;
+        explicit PhaseSavepoint(std::unique_ptr<Saved>);
+        std::unique_ptr<Saved> saved_;
+        friend class LiveExecutionStateContributor;
+    };
+    // Serial owner, all writers bound. No retained row/matrix/archive copy.
+    // Contributor and borrowed runtime owners outlive the token.
+    [[nodiscard]] core::Result<std::unique_ptr<PhaseSavepoint>> begin_phase();
+    void replace_route(gc::PlayerId, ExecutionRoutes);
     // Borrowed state is untracked until its runtime binds every writer to this
     // owner. Debug/full verification checks the opt-in promise at each hash.
     void enable_revision_tracking();
@@ -69,14 +88,18 @@ public:
         const sim::PartitionExecutor& executor)
         : retained_(retained), routes_(routes), pool_(std::move(pool)), inputs_(std::move(inputs)),
           validator_(std::move(validator)), executor_(executor) {}
+    LiveExecutionStateContributor(const LiveExecutionStateContributor&) = delete;
+    LiveExecutionStateContributor& operator=(const LiveExecutionStateContributor&) = delete;
     [[nodiscard]] core::Result<NativeState> capture() const override;
     [[nodiscard]] core::Result<void> restore(const NativeState&) override;
     [[nodiscard]] core::Result<std::string> state_hash() const override;
     [[nodiscard]] core::Result<std::string> record_sync_hash(bool cold = false) const override;
-    [[nodiscard]] std::size_t record_byte_upper_bound() const noexcept override { return tracked_ ? records_.byte_size() + 1024 : 0; }
+    [[nodiscard]] std::size_t record_byte_upper_bound() const noexcept override { return tracked_ && !records_dirty_ ? records_.byte_size() + 1024 : 0; }
 private:
     core::RecordDigest records_;
     bool tracked_{};
+    PhaseSavepoint::Saved* phase_{};
+    bool phase_abandoned_{}, records_dirty_{};
     ExecutionRetainedState& retained_;
     std::map<gc::PlayerId, ExecutionRoutes>& routes_;
     std::shared_ptr<FreestoreInput> pool_;

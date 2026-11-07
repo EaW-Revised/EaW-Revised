@@ -12,6 +12,7 @@
 #include <string>
 #include <optional>
 #include "../support/env.hpp"
+#include "eawr/vfs/vfs.hpp"
 #include "../support/check.hpp"
 #include "../support/result.hpp"
 // WGA-58..60/66/246..253: installed Normal plan selection and paid Lua consumer.
@@ -484,6 +485,17 @@ int main(int argc, char** argv) {
         const auto station = std::find_if(content->types.begin(), content->types.end(),
             [](const auto& row) { return row.second.starbase && row.second.next_base; });
         expect(station != content->types.end(), "installed station chain available for missing-link boundary");
+        {
+            const auto broken = must(eawr::data::with_overrides(loaded.catalog,
+                std::array{eawr::data::ValueOverride{station->second.name, "Variant_Of_Existing_Type", {"MISSING_VARIANT_BASE"}}}));
+            const auto skipped = cp::prepare_ai_selection_content(fs, broken, data, types, planned);
+            expect(skipped && !skipped.value()->types.contains(station->first),
+                "selection omits an original type whose variant base is missing");
+            const auto cyclic = must(eawr::data::with_overrides(loaded.catalog,
+                std::array{eawr::data::ValueOverride{station->second.name, "Variant_Of_Existing_Type", {station->second.name}}}));
+            expect(!cp::prepare_ai_selection_content(fs, cyclic, data, types, planned),
+                "selection still refuses a variant cycle");
+        }
         const auto dangling_catalog = must(eawr::data::with_overrides(loaded.catalog,
             std::array{eawr::data::ValueOverride{station->second.name, "Next_Level_Base", {"UNRESOLVED_NEXT_BASE"}}}));
         const auto dangling_content = must(cp::prepare_ai_selection_content(fs, dangling_catalog, data, types, planned));

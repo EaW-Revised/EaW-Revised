@@ -13,7 +13,7 @@ struct PlanetIncomeContribution {
     bool blocked{};
     friend bool operator==(const PlanetIncomeContribution&, const PlanetIncomeContribution&) = default;
 };
-[[nodiscard]] core::Result<std::vector<IncomeCurvePoint>> parse_income_curve(std::string_view);
+[[nodiscard]] core::Result<std::vector<IncomeCurvePoint>> parse_income_curve(std::string_view, bool allow_duplicate_x = false);
 [[nodiscard]] core::Result<math::Fixed> evaluate_income_curve(std::span<const IncomeCurvePoint>, math::Fixed);
 // All additive contributions use the unmultiplied basic income (WGEP-06).
 [[nodiscard]] core::Result<PlanetIncomeContribution> planet_income_contribution(

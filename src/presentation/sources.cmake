@@ -3,7 +3,23 @@
 # ROOT_ONLY lists preserve the root build's existing additional units.
 
 set(EAWR_PRESENTATION_SOURCES
+    "${CMAKE_CURRENT_LIST_DIR}/shader_material.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/shader_material_activation.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/shader_evaluation.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/shader_activation.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/shader_activation_snapshot.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/shader_stage/effect_source.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/shader_stage/effect_activation.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/shader_stage/source.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/shader_techniques.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/shader_states.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/shader_runtime.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/shader_lowering.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/shader_stage/session.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/shader_stage/scan.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/shader_stage/translate.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/shader_stage/reflection.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/shader_stage/wire.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/shader_bindings.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/galactic_pause.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/animation/animation.cpp"

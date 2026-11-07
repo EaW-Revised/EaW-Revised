@@ -1,6 +1,7 @@
 #pragma once
 
 #include "eawr/sim/tactical/session.hpp"
+#include "eawr/sim/tactical/fighters.hpp"
 #include "eawr/sim/tactical/space.hpp"
 
 #include <algorithm>

@@ -15,6 +15,8 @@
 #include <string>
 #include <optional>
 #include "../support/env.hpp"
+#include "eawr/vfs/vfs.hpp"
+#include "../support/result.hpp"
 #include "galactic_support.hpp"
 #include "galactic_ai_world.hpp"
 #include "galactic_ai_selection_content.hpp"
@@ -46,6 +48,7 @@ namespace cp = eawr::campaign;
 using galactic_test::expect;
 using eawr::sim::math::Fixed;
 using ai::real;
+using eawr::testing::must;
 
 void memory_boundary_contract() {
     namespace diag = eawr::diagnostics;
@@ -297,6 +300,22 @@ std::string path_coefficient_reader_contracts(unsigned workers) {
     expect(static_cast<bool>(restored.world->restore(saved)) && restored.query("Internal", 20) == real(1)
         && restored.query("EnemyExternal", 20) == real(0)
         && restored.world->state_hash().value() == host.world->state_hash().value(), "WGA-493 derived load rebuild keeps unchanged-snapshot answers and native bytes");
+    for (const bool clear : {false, true}) {
+        auto phase = must(host.world->begin_phase(executor));
+        auto changed = control; changed.state[1].current = whole(0);
+        const auto changed_snapshot = clear ? fixture(2, 1, 2, false)
+            : fixture(2, 1, 2, false, {}, {}, {}, {}, changed);
+        must(host.world->bind(changed_snapshot, {}, executor, 2, 100));
+        must(host.world->publish_path_coefficients(executor));
+        expect(phase->work().coefficient_graphs > 0, "perception phase retains displaced coefficient graphs by move");
+        if (clear) expect(!host.query("Internal", 20), "missing owning control clears derived coefficient availability");
+        else expect(host.query("Internal", 20) == real(0), "coefficient phase really changes the native query answer");
+        static_cast<void>(host.world->take_path_coefficient_diagnostics());
+        must(phase->rollback());
+        expect(host.query("Internal", 20) == real(1) && host.query("EnemyExternal", 20) == real(0)
+            && host.world->state_hash().value() == saved_hash && host.world->synchronized_frame() == 1,
+            "perception rollback restores published or cleared coefficient graphs, original physical inputs and canonical hash");
+    }
     control.state[1].current = whole(0);
     expect(static_cast<bool>(host.world->bind(fixture(2, 1, 2, false, {}, {}, {}, {}, control), {}, executor, 2, 100))
         && host.query("Internal", 20) == real(1), "ordinary binding retains the last coefficient publication");

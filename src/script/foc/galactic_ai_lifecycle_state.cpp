@@ -42,6 +42,11 @@ std::string encoded(const LifecycleState& state) {
         settings(bytes, player.policy.goal_categories); settings(bytes, player.policy.goal_types);
         settings(bytes, player.policy.plan_categories); settings(bytes, player.policy.plan_types); settings(bytes, player.policy.plan_names);
     }
+    // Existing successful lifecycle v2 bytes stay byte-identical.
+    if (!state.retired_providers.empty()) {
+        text(bytes, "native-provider-retirement-v1"); word(bytes, state.retired_providers.size());
+        for (const auto& [player, reason] : state.retired_providers) { word(bytes, player); word(bytes, static_cast<std::uint64_t>(reason)); }
+    }
     return bytes;
 }
 std::string digest(std::string_view bytes) {
@@ -120,6 +125,19 @@ core::Result<LifecycleState> decoded(Reader& in) {
         player.policy.plan_categories = in.settings<bool>(); player.policy.plan_types = in.settings<bool>(); player.policy.plan_names = in.settings<bool>();
         state.players.push_back(std::move(player));
     }
+    if (!in.bad && !in.bytes.empty()) {
+        if (in.text() != "native-provider-retirement-v1") return Result::failure(lifecycle_error("unknown lifecycle retirement tail"));
+        const auto retired = in.count(16);
+        if (!retired || retired > state.players.size()) return Result::failure(lifecycle_error("invalid lifecycle retirement count"));
+        gc::PlayerId previous{};
+        for (std::size_t index = 0; index < retired && !in.bad; ++index) {
+            const auto player = in.identity(); const auto reason = in.word();
+            if (!player || player <= previous || (reason != 1 && reason != 2)
+                || std::none_of(state.players.begin(), state.players.end(), [&](const auto& row) { return row.selected.player == player; }))
+                return Result::failure(lifecycle_error("invalid lifecycle retirement identity or reason"));
+            previous = player; state.retired_providers.emplace(player, static_cast<NativeProviderFault>(reason));
+        }
+    }
     if (in.bad || !in.bytes.empty()) return Result::failure(lifecycle_error("malformed or trailing lifecycle component bytes"));
     return Result::success(std::move(state));
 }
@@ -131,7 +149,7 @@ std::vector<std::uint8_t> lifecycle_record(const LifecycleState& state, std::str
     std::string bytes;
     if (!player) {
         record.version = state.version; record.clocks = state.clocks; record.admission = state.admission;
-        record.service_periods = state.service_periods; text(bytes, configuration);
+        record.service_periods = state.service_periods; record.retired_providers = state.retired_providers; text(bytes, configuration);
     } else {
         for (const auto& row : state.players) if (row.selected.player == player) { record.players.push_back(row); break; }
     }
@@ -158,6 +176,8 @@ std::size_t Manager::record_byte_upper_bound() const noexcept {
     return bytes;
 }
 core::Result<std::string> Manager::record_sync_hash(bool cold) const {
+    if (impl_->phase_abandoned) return core::Result<std::string>::failure(lifecycle_error("unsettled lifecycle phase"));
+    if (impl_->service_threw) return core::Result<std::string>::failure(lifecycle_error("lifecycle callback threw before publication"));
     if (impl_->failure) return core::Result<std::string>::failure(*impl_->failure);
     if (cold) return core::Result<std::string>::success(impl_->rebuild_records().digest(component_domain));
     auto sums = impl_->records.shards();
@@ -176,7 +196,10 @@ std::string lifecycle_configuration_digest(const LifecycleSetup& setup, const ai
     for (const auto& plan : plans) { text(bytes, plan.name); word(bytes, plan.goals.size()); for (const auto& goal : plan.goals) text(bytes, goal); }
     return digest(bytes);
 }
-core::Result<std::string> Manager::lifecycle_hash() const { return core::Result<std::string>::success(digest(encoded(impl_->state))); }
+core::Result<std::string> Manager::lifecycle_hash() const {
+    if (impl_->phase_abandoned || impl_->service_threw) return core::Result<std::string>::failure(lifecycle_error("unsettled lifecycle phase"));
+    return core::Result<std::string>::success(digest(encoded(impl_->state)));
+}
 core::Result<NativeState> Manager::capture() const {
     if (auto verified = verify_record_sync_hash(); !verified) return core::Result<NativeState>::failure(verified.error());
     if (impl_->failure) return core::Result<NativeState>::failure(*impl_->failure);

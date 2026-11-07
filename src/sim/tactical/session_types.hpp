@@ -151,6 +151,8 @@ struct LiveUnit {
     bool garrison_unit{}; // WU-37: per-object birth provenance, not inherited by new wingmen.
     std::optional<Sighting> sighting{}; // WMV-13 (#719): the order's target, last seen
     std::optional<PositionHistory> position_history{};
+    // TL-03: Lua Make_Invulnerable(true): blocks combat and environment damage; checkpointed and hashed.
+    bool script_invulnerable{};
 };
 
 // WNO-23/42: one boundary for capture and conversion. Notifications run with the new

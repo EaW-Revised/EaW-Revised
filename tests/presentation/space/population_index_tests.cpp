@@ -2,6 +2,7 @@
 #include "eawr/presentation/space/population_index.hpp"
 #include "eawr/presentation/skin_pose.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <bit>
 #include <array>
@@ -93,6 +94,44 @@ void test_linear_frame_budget() {
         expect(index.opacity_changed(1, 1.0F), "recompose explicitly restores opaque state for reused IDs");
         expect(index.opacity_changed(ships - 1, .5F), "release and recompose invalidate opacity");
     }
+}
+
+void test_append_equals_rebuild() {
+    // Proxy growth appends ships past the existing rows; the incremental index must equal a full rebuild.
+    std::vector<Piece> pieces;
+    std::vector<Clip> clips;
+    const auto add_ship = [&](const std::size_t ship) {
+        for (std::size_t surface = 0; surface < 3; ++surface) {
+            pieces.push_back({{1 + 13 * pieces.size(), 1, {}}, ship, {}, surface == 2, surface == 1});
+            if (surface == 0) clips.push_back({ship});
+        }
+    };
+    pieces.push_back({{999999, 1, {}}, std::nullopt});
+    for (std::size_t ship = 0; ship < 5; ++ship) add_ship(ship);
+    space::PopulationIndex incremental;
+    incremental.rebuild(5, pieces, clips, hull);
+    EntityId reused = 0;
+    expect(incremental.opacity_changed(1, .5F), "opacity cached before growth");
+    for (std::size_t grown = 5; grown < 9; grown += 2) {
+        const auto first_piece = pieces.size();
+        const auto first_clip = clips.size();
+        add_ship(grown);
+        add_ship(grown + 1);
+        incremental.append(grown + 2, pieces, first_piece, clips, first_clip, hull);
+        space::PopulationIndex full;
+        full.rebuild(grown + 2, pieces, clips, hull);
+        for (std::size_t ship = 0; ship < grown + 3; ++ship) {
+            const auto same = [](const auto lhs, const auto rhs) { return std::equal(lhs.begin(), lhs.end(), rhs.begin(), rhs.end()); };
+            expect(same(incremental.pieces(ship), full.pieces(ship)) && same(incremental.entities(ship), full.entities(ship))
+                   && same(incremental.entities(ship, true), full.entities(ship, true))
+                   && same(incremental.clips(ship), full.clips(ship)), "append equals a full rebuild");
+        }
+        reused = incremental.entities(grown).front();
+    }
+    expect(reused != 0, "appended ships are indexed");
+    expect(!incremental.opacity_changed(1, .5F), "growth keeps the cached opacity of existing ships");
+    incremental.truncate(5);
+    expect(incremental.ship_count() == 5 && incremental.entities(5).empty(), "truncate drops the appended rows");
 }
 
 void test_attachment_marks() {
@@ -254,6 +293,7 @@ void test_exact_parallel_compose() {
 
 int main() {
     test_linear_frame_budget();
+    test_append_equals_rebuild();
     test_attachment_marks();
     test_exact_parallel_compose();
     test_parallel_visibility_and_palettes();

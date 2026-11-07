@@ -1,4 +1,4 @@
-# `eawr_mods_service` protocol (`eawr-mods-protocol` 1.6)
+# `eawr_mods_service` protocol (`eawr-mods-protocol` 1.12)
 
 This is the contract between the game repository, which owns `eawr_mods_service` (`apps/mods_service`), and the
 launcher repository, whose Godot manager starts the service and talks to it. The design behind it is
@@ -64,14 +64,14 @@ Members of the request other than these three are ignored.
 ### Ordering and concurrency
 
 - The service reads requests in order. Ordinary methods are answered in the order they arrive.
-- Methods marked **long** in section 6 (only the load check in v1) run in the background: while one is running,
+- Methods marked **long** in section 6 (load check and records in 1.9) run in the background: while one is running,
   the service keeps reading and answering other requests, so their responses can arrive before the long
   request's response. The launcher matches responses by `id`, never by position.
 - Responses and events are written whole: lines never interleave.
 
 ## 3. Versioning
 
-- The protocol version is `MAJOR.MINOR`, now **1.6**.
+- The protocol version is `MAJOR.MINOR`, now **1.14**.
   - A minor version only adds: new methods, new optional request members, new result members, new events, new
     error codes. A launcher written for 1.0 works against any 1.x service.
   - A major version may break anything. The service speaks exactly one major version.
@@ -109,6 +109,9 @@ codes below are protocol failures of a whole request.
 | `EAWR-MODS-SVC-0009` | cancelled | the request's `id` | a long request ended by its cancel method (implemented in 1.3) |
 | `EAWR-MODS-SVC-0010` | busy | the request's `id` | a long method started while another of the same kind runs (implemented in 1.3) |
 | `EAWR-MODS-SVC-0011` | internal error | the request's `id` | the service failed in a way that is its own bug, including an answer it could not fit into the line limit |
+| `EAWR-MODS-SVC-0014` | invalid load notes | the request's `id` | the load notes file is malformed, unsupported, or oversized |
+| `EAWR-MODS-SVC-0015` | invalid settings | the request's `id` | the settings file is invalid or unsupported and was not changed |
+| `EAWR-MODS-SVC-0016` | profile locked | the request's `id` | (1.12) `profile.save` or `profile.delete` named a profile that a running game instance holds, or a game instance's state file exists but cannot be read (fail closed); `error.data` = `{"profile": id, "instances": [n, ...]}` plus `"unreadable": [n, ...]` when a state could not be read. Nothing was written or deleted |
 
 `EAWR-MODS-SVC-0012` is reserved for the `game.find` **result diagnostic** "installation not found";
 it is not a whole-request error. `EAWR-MODS-SVC-0013` is a load-check **warning diagnostic** for an
@@ -136,6 +139,7 @@ Domain codes in result rows retain their core meanings:
 | `EAWR-MODS-0017` | Data overwrite detected (inventory comparison deferred) |
 | `EAWR-MODS-0018` | Scan incomplete |
 | `EAWR-MODS-0019` | Player order reverses a parent or declared sibling constraint |
+| `EAWR-MODS-0020` | No content digest for a mod folder (the `note` of its `content` says why) |
 | `EAWR-MODS-0100` | Malformed profile JSON |
 | `EAWR-MODS-0101` | Unsupported profile format/version |
 | `EAWR-MODS-0102` | Invalid profile id |
@@ -176,12 +180,14 @@ provisional shape; the ticket named builds them and fixes the shape in this file
 | `mods.changes` | implemented (1.5) | Workshop metadata polling |
 | `mods.discover` | implemented (MM-S1b) | |
 | `chain.resolve` | implemented (MM-S1b) | |
+| `settings.set_builtin_layer` | implemented (protocol 1.8) | |
 | `chain.check` | implemented (MM-S1c, protocol 1.2) | |
 | `profile.list`, `profile.load`, `profile.save`, `profile.delete` | implemented (MM-S1b) | |
 | `loadcheck.start` | implemented (1.3) | long |
 | `loadcheck.cancel`, `loadcheck.result` | implemented (1.3) | |
 | `files.page` | implemented (1.4) | cached file index |
-| `records.query`, `records.get` | planned (MM-10) | |
+| `records.index`, `records.get` | implemented (1.9) | long; cached record index |
+| `records.cancel` | implemented (1.9) | |
 | `source.get` | planned (MM-10) | |
 | `identity.codes` | planned (MM-14) | |
 
@@ -199,9 +205,9 @@ The first request of every session.
 - `protocol` (object, required): `major` (integer >= 0) and `min_minor` (integer >= 0).
 
 ```json
-{"id": 1, "result": {"protocol": {"major": 1, "minor": 6}, "service_version": "0.1.0",
-  "engine_build": "0.1.0+<commit>+gcsync3", "game_release": "0.1.0",
-  "capabilities": ["chain.check", "chain.resolve", "files.page", "game.find", "hello", "loadcheck.cancel", "loadcheck.result", "loadcheck.start", "mods.changes", "mods.discover", "profile.delete", "profile.list", "profile.load", "profile.save", "shutdown"]}}
+{"id": 1, "result": {"protocol": {"major": 1, "minor": 11}, "service_version": "0.1.0",
+  "engine_build": "0.1.0+<commit>+gcsync3", "game_release": "0.1.0", "kit_build": "0.1.0 (<7-hex commit>)",
+  "capabilities": ["chain.check", "chain.resolve", "files.page", "game.find", "hello", "loadcheck.cancel", "loadcheck.result", "loadcheck.start", "loadnotes.read", "mods.changes", "mods.discover", "profile.delete", "profile.list", "profile.load", "profile.save", "settings.set_builtin_layer", "shutdown"]}}
 ```
 
 - `protocol`: the version this service speaks.
@@ -210,6 +216,10 @@ The first request of every session.
   every build and is informational).
 - `game_release`: the game release version this service ships with (the project version for a local build). The
   launcher's release manifest range (for example `game >=0.3.0 <0.4.0`) is checked against this.
+- `kit_build` (1.10): the player-facing form of `engine_build`, `<label> (<short commit>)` plus ` dirty` for a modified
+  tree. A release build sets the label to the kit (for example `0.3.2g`) through the `EAWR_KIT_LABEL` configure
+  override; a development build's label is the project version. Display only. `game_release` stays a plain version
+  for the manifest range check. Older services omit it: show `engine_build`.
 - `capabilities`: the implemented method names, sorted.
 
 Errors: `EAWR-MODS-SVC-0005` when a required member is missing or has the wrong type, `EAWR-MODS-SVC-0006` on a
@@ -274,6 +284,19 @@ hints: Workshop ids and display names), `edges` (the player's own parent edges).
 each entry with its provenance (`player`, `modinfo`, `known-chain`, `launch-script`), plus missing-parent and
 update-state rows.
 
+Protocol 1.8 appends a derived row to `rows` after all user layers, in highest-priority-first order:
+`{key:"builtin:revised",kind:"builtin",name:"Revised",enabled:boolean,root:string|null,
+why:"builtin",state:"installed"|"missing",note:string|null}`. The root is the player folder's
+`Revised`, or the `revised_layer_path` development override when set. The root contains `Data`; a missing `Data` folder produces a
+row with null root and a note, without changing launchability. A relative override is ignored with a note. `layers` remains the user layer list
+used for profiles. `profile.load` appends the same derived row, including for old or empty profiles.
+
+### `settings.set_builtin_layer` (protocol 1.8)
+
+`{key:"builtin:revised",enabled:boolean}` writes the shared `eawr-settings.cfg` and returns
+`{key:"builtin:revised",enabled:boolean}`. The preference defaults to true when absent. Invalid keys
+or non-boolean values return `0005`; a write failure is an internal error. Invalid or unsupported settings return `0015` without writing. Unknown settings are preserved. The engine-side reader is part of the SK engine-mount follow-up (legacy EAWR-5443, EAWR-5453), not this service change. Once that reader ships, it reads this preference at start, so changes apply on the next start; the launcher disables the switch while a game runs. The row is never stored in a profile: `profile.save` rejects `builtin:` keys, and `profile.load` removes them from old files with a note.
+
 ### `chain.check` (implemented, MM-S1c, protocol 1.2)
 
 Checks an explicit player order, **first layer = top / highest priority**, as in profiles.
@@ -314,6 +337,31 @@ writes a profile file. `profile.list` returns id, name and status per profile; `
 returns the profile object; `profile.save` takes a profile object, validates it and writes it, returning the saved
 object (or diagnostics rows and an error); `profile.delete` takes `id`.
 
+### `profile.locks` (1.12), and the lock on `profile.save` / `profile.delete`
+
+Several game instances can run at once (`EAWR.exe --instance n`, apps/launcher/README.md). While any live instance
+runs a saved profile, that profile is read-only: `profile.save` (any change, including a rename or new layers) and
+`profile.delete` for its id answer `EAWR-MODS-SVC-0016` and change nothing. Playing it again in another instance
+is allowed and is not the service's business. The lock is derived by the service itself from the launcher's state
+files: `launcher/game-running.json` (instance 1) and `instances/<n>/launcher/game-running.json` under the user-data
+folder, each counted only while the process it names is alive (PID plus creation time, so a reused PID does not
+hold a lock; a state written without `process_start_time` by an older launcher is judged by its PID alone). A
+state without a profile id (a vanilla instance) and a missing state file hold nothing. A state file that exists
+but cannot be opened, is larger than 64 KiB or is not the expected JSON is **not** free: which profile it names is
+unknown, so every `profile.save` and `profile.delete` fails closed with `EAWR-MODS-SVC-0016` (message: the state
+of instance n could not be read; `error.data.unreadable` lists the instances) until that file is fixed or removed.
+Two managers see the same locks. It does not read pending `next-action.json` requests; a manager keeps its own
+pending lock between submitting a request and the game's state file appearing.
+
+The check and the write are not one atomic step: a game that starts between the lock check and the file write of
+a `profile.save` takes the profile as it was written. This window (milliseconds) is accepted; the launcher reads
+the profile again when it starts the next game, and the manager locks the profile before it submits a request.
+
+`profile.locks` takes no params and returns `{"locked": [{"profile": "<id>", "instances": [1, 3]}, ...],
+"unreadable": [n, ...]}`: `locked` sorted by profile id, instances ascending, an empty array when nothing is running;
+`unreadable` the instances whose state file could not be read (normally empty). A client written for an earlier 1.x
+service finds the method missing from `capabilities` and treats nothing as locked by the service.
+
 ### Protocol 1.1 method details
 
 `game.find {hint?: string|null}` returns `{root: string|null, kind: "steam"|"other"|"none",
@@ -341,7 +389,7 @@ diagnostics, not transport errors. Invalid known-chain JSON/schema is `0005` wit
 `error.data.diagnostics`. The launcher must check `launchable` before saving a chain for play.
 
 `profile.save {profile}` returns `{profile}`. The create intent `{id,name,layers:[{key,root}]}` fills all defaults
-through the core profile parser: `eawr-mod-profile` v1, chain order, no separators, front-end launch, safe render
+through the core profile parser: `eawr-mod-profile` v1, chain order, no separators, front-end launch, separate render
 thread, null frame-rate override and empty accepted state. A full profile uses the same parser and atomic writer.
 `profile.list` returns `{profiles:[{id,name,status}],next_cursor}` sorted by filename.
 `profile.load {id}` returns `{profile,rows:[{key,name,why,state}],status}` and uses core key re-resolution for missing
@@ -504,12 +552,121 @@ its structure/key and atomically installs it only after the chain's before/after
 validated parsed cache is retained in memory; replacing it invalidates its paging tokens. Mod roots remain
 read-only. No file index bytes are added to the profile or the 1.3 load-check report envelope.
 
-### `records.query`, `records.get` (planned, MM-10)
+### `records.index`, `records.get`, `records.cancel` (protocol 1.9)
 
-`records.query` searches objects by name, tag or filter (changed by any mod, changed by a layer, several mods
-author the same tag), paged. `records.get` returns one object's finished per-tag rows: vanilla value, each layer's
-authored value, effective value, how (`own`, `overridden`, `inherited`, `merged`, `added`, `DROPPED`), and the
-source location of each cell.
+`records.index` accepts
+`{"profile":"<id>","filters":{"object":"","tag":"","changed_by_layer":"",
+"several_mods_same_tag":false,"dropped":false},"limit":100,"cursor":null}`. Filters are optional and
+combine; object and tag search are case-insensitive substrings. A page returns
+`{"chain_fingerprint":"<fingerprint>","layers":[{"key":"<layer>","kind":"<kind>","priority":0}],
+"counts":{"own":0,"overridden":0,"inherited":0,"merged":0,"added":0,"dropped":0},
+"total":0,"rows":[{"id":"<id>","type":"<type>","category":"<category>","layers":["<layer>"]}],
+"next_cursor":null}`. Counts describe matching records' tag rows before paging; a continuation cursor is opaque
+and bound to the profile, fingerprint and filters. Limits are 1..500. The first request for a chain builds its
+index in the background and emits `records.progress` events with `stage`, `done` and `total`; its response follows
+completion. `records.cancel` takes `{"request":<id>}` and returns `{"cancelled":true}` when it cancels the
+active build, otherwise false. The cancelled request receives `EAWR-MODS-SVC-0009`.
+
+`records.get` takes `{"profile":"<id>","id":"<object>","category":"<category>"}` and returns
+`{"chain_fingerprint":"<fingerprint>","id":"<object>","type":"<type>","category":"<category>",
+"variant_chain":["<type>"],"tags":[{"tag":"<tag>","vanilla":[<value>],
+"authored":[{"object_id":"<object>","source":<location>,"registry_order":0,"definition_order":0,"winner":true,
+"values":[<node>]}],"effective":[<value>],"how":"own"}]}`. The category disambiguates object IDs.
+An authored column is a definition occurrence; `object_id` matches an entry in `variant_chain`, so the client can
+place it under that type. Duplicates in one layer remain separate; its location identifies
+the layer. A location is `{"logical_path":"<path>","source_id":"<source>","layer_id":"<layer>",
+"line":1,"column":1}`. A node is `{"name":"<tag>","raw_text":"<text>","attributes":[{"name":"<name>",
+"value":"<value>","source":<location>}],"children":[<node>],"source":<location>}`; empty raw text is
+an authored empty value, rendered `(empty)` by the client. An effective value is
+`{"node":<node>,"provenance":"<how>","source_object_id":"<type>"}`. `how` is `own`, `overridden`,
+`inherited`, `merged`, `added` or `dropped`. Source locations and source object IDs preserve the origin of inherited
+values. The service rejects missing, stale or unclean profiles rather than silently inspecting a different chain.
+
+Both reads are long requests. Only one records request runs at a time; a second returns
+`EAWR-MODS-SVC-0010`. An engine-linked `eawr_loadcheck --records` helper owns the index and resolves it on
+its single request thread. Helpers remain in memory per saved profile and chain fingerprint until shutdown;
+cancel, profile replacement/deletion, and installation changes discard affected helpers. There is no on-disk
+record cache. Shutdown and stdin EOF cancel outstanding work and close all owned helpers.
+
+`changed_by_layer` matches a tag authored by that layer whose parsed value differs from the vanilla effective
+value (including a new tag). Comparison ignores source locations. `several_mods_same_tag` requires two distinct
+mod layers authoring the same tag; duplicate occurrences in one layer count once. Tag, layer, same-tag and
+dropped predicates must match the same tag row. Classification counts cover all tags of matching records,
+including records absent from the profile after registry replacement. Category strings are `game_objects`,
+`hardpoints`, `abilities`, `factions`, `campaigns` and `sfx`; `variant_chain` contains object IDs, derived to base.
+
+Missing layers, redirected saved roots, stripped legacy built-ins and unresolved chain warnings/errors return
+`EAWR-MODS-SVC-0005` before starting a helper. Registry-wide failures (an unreadable registry file; a single object's variant problem is flagged instead, protocol 1.11) and changes to the chain
+while a request runs return `EAWR-MODS-SVC-0011`. An unknown object/category pair returns
+`EAWR-MODS-SVC-0005`. The recorded `records.jsonl` session uses a tiny synthetic chain and exercises paging, filters and detail.
+
+Protocol 1.11 (additive; a 1.9/1.10 client that ignores unknown members keeps working):
+
+- **Flagged objects.** An object the engine cannot resolve (a variant cycle, including an object that is a variant
+  of itself, or a missing variant base) no longer fails `records.index`. It stays in the index, and its `rows`
+  entry (and its `records.get` answer) carries the optional member
+  `"diagnostic":{"code":"<engine code>","message":"<text naming the chain>"}`. Its `records.get` answer is a normal
+  detail with `"tags":[]`; an object whose variant chain leads into the broken one is flagged the same way. A
+  flagged object contributes no tag rows to `counts` and matches only a request with no tag, `changed_by_layer`, `several_mods_same_tag` or `dropped` filter (an `object` filter alone still finds it). The
+  member is absent for every other object. Other records index normally.
+- **Size-capped detail.** `records.get` keeps its answer under the line limit by construction (a margin below
+  1 MiB is reserved for the envelope). When all tags do not fit, the answer holds the leading tags and adds
+  `"truncated":true`, `"next_tag_offset":N`, `"tag_count":<total>` and `"tag_offset":<this slice start>`; the client
+  asks again with the optional request member `"tag_offset":N` (non-negative integer; default 0) and gets the next
+  slice in the same shape, until `truncated` is absent. `tag_count` and `tag_offset` are also present on
+  a follow-up slice. Answers that fit are byte-identical to 1.10 (no new members). A single tag row larger than half the answer budget (about 0.5 MiB)
+  is sent as its name and `how` only, with empty `vanilla`, `authored` and `effective` arrays and
+  `"too_large":true`. An out-of-range `tag_offset` returns `EAWR-MODS-SVC-0005`.
+  Compatibility: a 1.10 service answered an oversize detail with `EAWR-MODS-SVC-0011`; a 1.11 service answers a
+  partial `tags` list instead, so a client that wants every tag must honour `truncated` (a launcher that ignores
+  it silently shows a partial list). A client checks `hello` for protocol minor >= 11 before relying on this.
+- **Paging cost.** `records.index` computes the matching rows and `counts` once per filter and chain; further pages
+  of the same filter only slice the list. A request answered by an already built helper checks the chain fingerprint
+  once (before the answer), not again after it; the request that builds the index still checks before and after.
+  No on-disk cache.
+
+Protocol 1.13 (additive; older clients are unaffected):
+
+- **Fingerprint reuse window.** A records request used to hash every file of the chain (mods and game) on each page,
+  about 0.2-0.3 s warm. Now the service reuses the chain fingerprint it took for the same profile (same saved
+  layers, helper still loaded) for **2 seconds**. Inside the window a page is answered by the loaded helper without a
+  new walk. The window ends at once on any `profile.save`, `profile.delete`, `mods.discover`, `mods.changes`,
+  `game.find`, `settings.set_builtin_layer` or `chain.*` request (every method other than `hello`,
+  `profile.list`, `profile.locks`, `profile.load`, `loadnotes.read`, `files.page` and `loadcheck.*`, which only read the chain), and when the client sends the new
+  optional request member `"fresh": true` (boolean, on `records.index` and `records.get`; default false; any other
+  type returns `EAWR-MODS-SVC-0005`; a 1.12 service ignored a non-boolean `fresh`, 1.13 rejects it). A `fresh` request always re-fingerprints, and a changed chain then builds a new
+  helper as before. Files edited by hand during the 2 seconds are seen by the next request after the window or by
+  `fresh`. The window changes no answer content, only when a changed chain is noticed.
+  The one case the window hides: a file rewritten on disk by something other than this service, within 2 seconds of
+  the last fingerprint and without any service call in between. Only `fresh: true` notices that inside the window.
+  Clients should send `fresh: true` on an explicit user Refresh (the launcher needs a follow-up to do so); ordinary
+  paging must not.
+
+Protocol 1.14 (additive; older clients ignore the new members):
+
+- **Content digest.** Every mod record (`mods.discover` rows) gains `content`:
+  `{"state": "ready"|"pending"|"unavailable", "sha256": "", "files": 0, "bytes": 0, "note": ""}`. It is a SHA-256
+  over the mod's file bytes, not just the cheap `fingerprint.tree`: one line `<relative path>\t<size>\t<sha256 of
+  the file>\n` per regular file, sorted by the path's UTF-8 bytes, '/' separators, original case, links and
+  junctions not followed. `ready`: `sha256` covers `files` files / `bytes` bytes. `pending`: a background job is
+  hashing; `files` / `bytes` are the progress so far. `unavailable`: `note` says why ("tree not walked",
+  "capped walk", "incomplete walk", "no files", "folder missing", "unreadable file <relative path>",
+  "changed while hashing: <relative path>", "folder changed since it was scanned", "cancelled", "internal error: ..."); an empty
+  note means nobody asked. Where the service applies a digest to a record (the C++ `ContentDigests::apply`, used by the
+  game's save path) a requested digest that cannot be made also adds the record warning `EAWR-MODS-0020`;
+  `chain.resolve` rows carry only the `content` object, not that warning.
+- **Who starts a job.** `mods.discover` only reports cache hits (`ready`) and never reads a mod file.
+  `chain.resolve` returns immediately and, for each layer of the chain, adds `content` to its `rows` entry: `ready`
+  from the cache, or `pending` with one low-priority job queued. The job runs on one worker thread, reads in 1 MiB
+  chunks at background I/O priority and pauses briefly after every 64 MiB. When the records were discovered with
+  `walk_trees: false` there is no tree fingerprint to key on: the answer is `unavailable` with note "tree not walked"
+  and no job starts. The next `chain.resolve` or `mods.discover` shows the result.
+- **Cache.** `<user data>/mods/cache/content/content-<id>.json`, keyed by the mod key plus `fingerprint.tree` and
+  `tree_files`; an unchanged tree is a lookup with zero mod-file reads, a changed fingerprint recomputes. An
+  interrupted run keeps `content-<id>.partial.json` (per-file hashes keyed by relative path, size and mtime) so the
+  next run skips finished files. A missing, corrupt or old-format cache file is recomputed, never an error.
+  In C++ (`ModRecord::content`, `eawr/mods/content_digest.hpp`) the same service object offers request, progress,
+  cancel and wait-with-timeout for the game's save path.
 
 ### `source.get` (planned, MM-10)
 
@@ -547,7 +704,7 @@ its fake service. They are never edited by hand (hand-written drafts in the laun
 such, below).
 
 - File: `<name>.jsonl`, UTF-8, one JSON object per line, LF line ends.
-- Line 1 is a meta line: `{"dir": "meta", "msg": {"protocol": "1.6", "recorded_by": "eawr_mods_service"}}`. A
+- Line 1 is a meta line: `{"dir": "meta", "msg": {"protocol": "1.14", "recorded_by": "eawr_mods_service"}}`. A
   hand-written draft has `{"dir": "meta", "msg": {"draft": true, "protocol": "1.0"}}` instead.
 - Every other line is one exchanged message in the order it crossed the pipe:
   - `{"dir": "c2s", "msg": {...}}`: a request the service read;
@@ -557,9 +714,9 @@ such, below).
   `\u00XX` of the byte), and a line over the limit as
   `{"dir": "c2s", "oversize_bytes": <byte count>}`. (These two forms are a refinement of the first envelope: a
   malformed line is exactly what `malformed.jsonl` must show.)
-- `hello` results (and the `error.data` of `EAWR-MODS-SVC-0006`) contain `service_version`, `engine_build` and
-  `game_release`, which change with every build. The committed transcripts store them normalised, as
-  `"service_version":"0.0.0"`, `"engine_build":"0.0.0+transcript"` and `"game_release":"0.0.0"`; every other byte
+- `hello` results (and the `error.data` of `EAWR-MODS-SVC-0006`) contain `service_version`, `engine_build`,
+  `game_release` and `kit_build`, which change with every build. The committed transcripts store them normalised, as
+  `"service_version":"0.0.0"`, `"engine_build":"0.0.0+transcript"`, `"game_release":"0.0.0"` and `"kit_build":"0.0.0 (transcript)"`; every other byte
   is what the service wrote. A consumer that checks versions treats these values as placeholders.
 - Recording is a test-only switch: `eawr_mods_service --transcript <file>` writes the transcript while it serves
   stdin and stdout as usual.
@@ -587,3 +744,16 @@ is malformed; neither field supplies a name when its usable string is absent.
 Transcript comparison normalizes service-version/build/release hello values, integer `elapsed_ms` to zero,
 and native-root-dependent 64-hex `chain_fingerprint` values to 64 zeroes. Raw contract assertions validate
 duration type/wall time, fingerprint stability and changes, and status transitions before normalization.
+
+### `loadnotes.read` (protocol 1.7)
+
+Request `{"profile":"<id>"}` reads the last game-written load notes for a saved profile.
+Alternatively, `{"chain_fingerprint":"<64 lowercase hex characters>"}` reads notes written without a profile for that chain. Supply exactly one address.
+The result is `{"report":<document-or-null>,"current_chain_fingerprint":"<key>"}`.
+A missing file returns null. The report contains the writer's schema version, profile and
+chain identity, game version, timestamp, totals, truncation flag and groups; each group's
+`notes` are the finished rows described in [load notes](load-notes.md). Compare the report's
+chain fingerprint with `current_chain_fingerprint` to detect a changed chain; an empty current fingerprint means
+the identity is unavailable and the report is unverified. Check `capabilities` before calling this method.
+An unsafe path returns `EAWR-MODS-SVC-0005`. Malformed
+or unsupported documents return `EAWR-MODS-SVC-0014`.

@@ -6,9 +6,9 @@
 // fight (--replay-out), and it runs with the replay path's content: the M2 fog grid, the ability
 // table and the fixture's victory rules (no star base, so the battle never ends early).
 //
-//   path_bench --melee s|m|l [--seed 601] [--ticks 4500] [--workers 1,2,4,8,hardware]
+//   path_bench --melee s|m|l|xl [--seed 601] [--ticks 4500] [--workers 1,2,4,8,hardware]
 //              [--game-root <dir>] [--csv <prefix>] [--replay-out <file>] [--timing on|off] [--list 1]
-//              [--execution live|legacy] [--profile on [--profile-interval <us>]]
+//              [--execution live|legacy] [--hash on|off] [--profile on [--profile-interval <us>]]
 //
 // Prints each worker count's cost per tick of every named phase and of the serial remainder
 // (mean, p99, worst over the fight) against the 30 Hz tick budget, and the live unit, craft and
@@ -77,6 +77,7 @@ struct Options {
     bool list = false;
     bool profile = false;
     bool live_execution = true;
+    bool hash = true;
     unsigned profile_interval_us = 1000;
 };
 
@@ -113,7 +114,7 @@ template <typename T>
         if (index + 1 >= argc) return std::nullopt;
         const std::string_view value(argv[++index]);
         if (argument == "--melee") {
-            if (value != "s" && value != "m" && value != "l") return std::nullopt;
+            if (value != "s" && value != "m" && value != "l" && value != "xl") return std::nullopt;
             options.size = std::string(value);
         } else if (argument == "--game-root") {
             options.game_root = std::string(value);
@@ -148,6 +149,9 @@ template <typename T>
         } else if (argument == "--execution") {
             if (value != "live" && value != "legacy") return std::nullopt;
             options.live_execution = value == "live";
+        } else if (argument == "--hash") {
+            if (value != "on" && value != "off") return std::nullopt;
+            options.hash = value == "on";
         } else if (argument == "--profile") {
             if (value != "on" && value != "off") return std::nullopt;
             options.profile = value == "on";
@@ -273,7 +277,7 @@ struct Run {
 
 [[nodiscard]] std::optional<Run> run(
     const Content& content, const tactical::TacticalReplay& replay, const std::size_t workers,
-    const bool live_execution, Sampler* sampler) {
+    const bool live_execution, const bool hash_enabled, Sampler* sampler) {
     const auto victory = skirmish::victory_rules(replay.setup, content.tables, skirmish::human_slots(skirmish::m2_fixture()));
     auto created = tactical::TacticalSession::from_replay(replay, content.content.sensors, content.content.durability,
         content.content.motion, content.content.fog, content.content.combat, victory, content.content.abilities,
@@ -283,7 +287,8 @@ struct Run {
         return std::nullopt;
     }
     auto session = std::move(created).value();
-    if (live_execution) session.set_state_hasher(std::make_shared<eawr::platform::ThreadStateHasher>());
+    if (!hash_enabled) session.set_state_hash_policy(eawr::sim::StateHashPolicy::on_demand);
+    if (live_execution && hash_enabled) session.set_state_hasher(std::make_shared<eawr::platform::ThreadStateHasher>());
     std::vector<eawr::sim::StateHash> pending;
     pending.reserve(replay.final_tick_count);
     const eawr::platform::ThreadWorkerAdapter pool(workers, live_execution
@@ -310,7 +315,7 @@ struct Run {
             std::cerr << "path_bench --melee: step " << tick + 1 << ": " << eawr::core::format_diagnostic(stepped.error()) << '\n';
             return std::nullopt;
         }
-        pending.push_back(std::move(stepped.value().state_hash));
+        if (hash_enabled) pending.push_back(std::move(stepped.value().state_hash));
         TickRecord record;
         record.ms = std::chrono::duration<double, std::milli>(elapsed).count();
         record.phases = executor.tick;
@@ -350,6 +355,7 @@ struct Stats {
     double mean{};
     double p99{};
     double worst{};
+    double p95{};
 };
 
 [[nodiscard]] Stats stats(std::vector<double> values) {
@@ -363,6 +369,8 @@ struct Stats {
     auto rank = static_cast<std::size_t>(0.99 * static_cast<double>(values.size()) + 0.999999);
     rank = std::clamp<std::size_t>(rank, 1, values.size());
     out.p99 = values[rank - 1];
+    auto rank95 = static_cast<std::size_t>(0.95 * static_cast<double>(values.size()) + 0.999999);
+    out.p95 = values[std::clamp<std::size_t>(rank95, 1, values.size()) - 1];
     out.worst = values.back();
     return out;
 }
@@ -433,8 +441,19 @@ void report(const Run& run, const std::size_t workers, const bool timing) {
         const auto phase = stats(values);
         std::cout << "    | " << name << " | " << phase.mean << " | " << phase.p99 << " | " << phase.worst << " |\n";
     }
+    double serial_per_unit = 0;
+    std::size_t ticks_with_units = 0;
+    for (const auto& record : run.ticks) {
+        if (record.units != 0) {
+            serial_per_unit += serial_ms(record) * 1000.0 / static_cast<double>(record.units);
+            ++ticks_with_units;
+        }
+    }
+    std::cout << "    mean serial microseconds per live unit: "
+              << (ticks_with_units == 0 ? 0.0 : serial_per_unit / static_cast<double>(ticks_with_units)) << '\n';
     const auto rest = stats(serial);
     std::cout << "    | serial remainder | " << rest.mean << " | " << rest.p99 << " | " << rest.worst << " |\n";
+    std::cout << "    tick summary: mean " << total.mean << " ms, p95 " << total.p95 << " ms, max " << total.worst << " ms\n";
     std::cout << "    tick budget " << tick_budget_ms << " ms: " << over << " ticks over it\n";
 }
 
@@ -452,7 +471,7 @@ void write_csv(const std::string& path, const Run& run) {
             out << ',' << (found == record.phases.end() ? 0.0 : found->second);
         }
         out << ',' << serial_ms(record) << ',' << record.units << ',' << record.craft << ',' << record.squadrons << ','
-            << record.projectiles << ',' << run.hashes[index] << ',' << record.fog_copied_bytes << '\n';
+            << record.projectiles << ',' << (run.hashes.empty() ? std::string{} : run.hashes[index]) << ',' << record.fog_copied_bytes << '\n';
     }
 }
 
@@ -496,9 +515,9 @@ int attach_main(const int argc, const char* const argv[]) {
 int melee_main(const int argc, const char* const argv[]) {
     const auto options = parse_options(argc, argv);
     if (!options) {
-        std::cerr << "usage: path_bench --melee s|m|l [--seed <n>] [--ticks <n>] [--workers <n|hardware>[,...]]\n"
+        std::cerr << "usage: path_bench --melee s|m|l|xl [--seed <n>] [--ticks <n>] [--workers <n|hardware>[,...]]\n"
                      "                  [--game-root <dir>] [--csv <prefix>] [--replay-out <file>] [--timing on|off]\n"
-                     "                  [--list 1] [--execution live|legacy] [--profile on [--profile-interval <us>]]\n";
+                     "                  [--list 1] [--execution live|legacy] [--hash on|off] [--profile on [--profile-interval <us>]]\n";
         return 2;
     }
     if (!options->game_root) {
@@ -508,7 +527,8 @@ int melee_main(const int argc, const char* const argv[]) {
     auto content = load(*options->game_root);
     if (!content) return 1;
     auto melee = skirmish::build_melee(
-        content->tables, content->start, *skirmish::melee_size(options->size), options->seed, options->ticks);
+        content->tables, content->start, options->size == "xl" ? skirmish::MeleeSize::xl : *skirmish::melee_size(options->size),
+        options->seed, options->ticks);
     if (!melee) {
         std::cerr << "path_bench --melee: " << eawr::core::format_diagnostic(melee.error()) << '\n';
         return 1;
@@ -518,7 +538,7 @@ int melee_main(const int argc, const char* const argv[]) {
               << melee.value().squadrons << " squadrons (" << melee.value().craft << " craft), "
               << replay->setup.units.size() << " units in all, " << options->ticks
               << " ticks; hardware threads " << eawr::platform::ThreadWorkerAdapter::hardware_worker_count()
-              << "; execution " << (options->live_execution ? "live" : "legacy") << '\n';
+              << "; hash " << (options->hash ? "on" : "off") << "; execution " << (options->live_execution ? "live" : "legacy") << '\n';
     if (options->replay_out) {
         auto bytes = tactical::write_replay(*replay);
         if (!bytes) {
@@ -538,7 +558,7 @@ int melee_main(const int argc, const char* const argv[]) {
     for (const auto workers : options->workers) {
         std::optional<Sampler> sampler;
         if (options->profile) sampler.emplace(options->profile_interval_us);
-        const auto result = run(*content, *replay, workers, options->live_execution, sampler ? &*sampler : nullptr);
+        const auto result = run(*content, *replay, workers, options->live_execution, options->hash, sampler ? &*sampler : nullptr);
         if (!result) return 1;
         if (sampler) std::cout << "  (profiled: the sampling perturbs these tick times)\n";
         report(*result, workers, options->timing);
@@ -548,13 +568,16 @@ int melee_main(const int argc, const char* const argv[]) {
         }
         std::string joined;
         for (const auto& hash : result->hashes) joined += hash;
-        std::cout << "    hashes digest "
-                  << eawr::sim::sha256_hex(std::span(reinterpret_cast<const std::uint8_t*>(joined.data()), joined.size()))
-                  << '\n';
+        if (options->hash) {
+            std::cout << "    hashes digest "
+                      << eawr::sim::sha256_hex(std::span(reinterpret_cast<const std::uint8_t*>(joined.data()), joined.size()))
+                      << '\n';
+        }
         if (options->csv) write_csv(*options->csv + "-" + options->size + "-w" + std::to_string(workers) + ".csv", *result);
         double sum = 0;
         for (const auto& record : result->ticks) sum += record.ms;
         means.emplace_back(workers, sum / static_cast<double>(std::max<std::size_t>(result->ticks.size(), 1)));
+        if (!options->hash) continue;
         if (!reference) {
             reference = result->hashes;
         } else if (*reference != result->hashes) {
@@ -570,7 +593,8 @@ int melee_main(const int argc, const char* const argv[]) {
         }
         std::cout << '\n';
     }
-    if (agree) std::cout << "every worker count agrees on every tick's state hash\n";
+    if (agree && options->hash) std::cout << "every worker count agrees on every tick's state hash\n";
+    if (!options->hash) std::cout << "per-tick hashing disabled; worker equality was not checked\n";
     return agree ? 0 : 1;
 }
 

@@ -73,6 +73,9 @@ inline constexpr std::string_view tactical_shell_fallback_model = "i_tactical_co
 [[nodiscard]] std::string command_bar_mega_texture(const data::ui::CommandBarCatalog& catalog);
 
 enum class ShellBlend : std::uint8_t { alpha, additive };
+// How a shell mesh's shader blends it. The alpha family (MeshAlpha and its gloss variant, which a mod's
+// shell may use for its panels) blends by alpha; MeshAdditive adds. Any other shader draws nothing here.
+[[nodiscard]] std::optional<ShellBlend> shell_blend(std::string_view shader);
 
 // One textured shell mesh, drawn as its triangles with their authored
 // (repeating) UVs; the texture is a file under Data/Art/Textures.

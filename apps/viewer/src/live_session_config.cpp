@@ -309,7 +309,9 @@ namespace {
         // #3925: the options button and the in-game menu's controls (its Options, Back, Quit Game, Resume
         // buttons and the quit confirmation's Yes and No).
         const bool menu = hud == "options" || hud == "b_option_t" || hud == "menu_options" || hud == "menu_back"
-            || hud == "menu_quit" || hud == "menu_resume" || hud == "menu_yes" || hud == "menu_no";
+            || hud == "menu_quit" || hud == "menu_resume" || hud == "menu_yes" || hud == "menu_no"
+            // #3989: the menu's Save, the Save page's first listed save and its Save button.
+            || hud == "menu_save" || hud == "menu_save_first" || hud == "menu_save_button";
         const auto gift_seat = hud.starts_with("gift_to_") ? parse_u64(hud.substr(8)) : std::nullopt;
         const bool gift = hud == "gift" || (gift_seat && *gift_seat != 0
             && *gift_seat <= std::numeric_limits<std::uint32_t>::max());
@@ -386,7 +388,7 @@ bool LiveSessionView::parse_argument(const std::string_view name, const std::opt
                                      Options& options, bool& value_used, std::string& error) {
     value_used = false;
     if (name.substr(0, 12) != "--eawr-live-" && !name.starts_with("--eawr-skirmish-")
-        && name != "--eawr-land-bindings" && name != "--eawr-audio-preload") return false;
+        && name != "--eawr-land-bindings" && name != "--eawr-land-vehicles-only" && name != "--eawr-audio-preload" && name != "--eawr-particle-lane") return false;
     if (!value) {
         error = "missing value for " + std::string(name);
         return true;
@@ -400,6 +402,9 @@ bool LiveSessionView::parse_argument(const std::string_view name, const std::opt
         options.fixture = text;
     } else if (name == "--eawr-land-bindings") {
         options.land_bindings = ViewerPath{text}.native();
+    } else if (name == "--eawr-land-vehicles-only") {
+        if (text != "on" && text != "off") error = "--eawr-land-vehicles-only expects on or off";
+        options.land_vehicles_only = text == "on";
     } else if (name == "--eawr-live-lan-test") {
         if (text != "waiting" && text != "paused" && text != "desync" && text != "result" && text != "result_join" && text != "loss"
             && text != "barrier" && text != "peer_left" && text != "failed_peer" && text != "reconnecting" && text != "resyncing" && text != "held" && text != "catching_up" && text != "proving"
@@ -557,7 +562,8 @@ bool LiveSessionView::parse_argument(const std::string_view name, const std::opt
                     "<tick>:key:<name>, each with optional +shift, +ctrl or +alt, "
                     "<tick>:mdrag:<dx>,<dy> or <tick>:mclick:centre, each with optional +ctrl, "
                     "or <tick>:wheel:<in|out>, or <tick>:<click|rclick|hover|press|release>:hud=<pause|fast_forward|resume|quit|"
-                    "b_reinforcement|r_close|r_RRCC|tqueueNN|attack|attack_move|move|waypoint|stop|guard|gift|gift_to_N|special_weapon|retreat|options|menu_options|menu_back|menu_quit|menu_resume|menu_yes|menu_no>; "
+                    "b_reinforcement|r_close|r_RRCC|tqueueNN|attack|attack_move|move|waypoint|stop|guard|gift|gift_to_N|special_weapon|retreat|options|menu_options|menu_back|menu_quit|menu_resume|menu_yes|menu_no|menu_save|menu_save_first|"
+                    "menu_save_button>; "
                     "f<frame> in place of <tick> fires on that frame after the warm-up";
         } else {
             options.inputs.push_back(std::move(*input));
@@ -699,6 +705,18 @@ bool LiveSessionView::parse_argument(const std::string_view name, const std::opt
         options.hashes_path = ViewerPath{text}.native();
     } else if (name == "--eawr-live-replay-out") {
         options.replay_path = ViewerPath{text}.native();
+    } else if (name == "--eawr-live-save-at") {
+        // <tick>:<file>; the tick is digits only, so the first ':' splits it from a drive-letter path.
+        const auto colon = text.find(':');
+        const auto tick = colon == std::string::npos ? std::optional<std::uint64_t>{} : parse_u64(std::string_view(text).substr(0, colon));
+        if (!tick || *tick == 0 || *tick > tactical::max_ticks || colon + 1 >= text.size()) {
+            error = "--eawr-live-save-at expects <tick>:<file> with a tick of 1 or later";
+        } else {
+            options.save_tick = *tick;
+            options.save_path = ViewerPath{text.substr(colon + 1)}.native();
+        }
+    } else if (name == "--eawr-live-load") {
+        options.load_path = ViewerPath{text}.native();
     } else {
         value_used = false;
         error = "unknown live session option " + std::string(name);

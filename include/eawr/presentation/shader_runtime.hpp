@@ -12,7 +12,7 @@ struct RuntimeFile {
     std::string_view sha256;
     std::uint64_t size{};
 };
-enum class Status { disabled, missing_package, integrity_failure, unsupported_platform, missing_export, abi_mismatch, ready };
+enum class Status { disabled, missing_package, integrity_failure, unsupported_platform, missing_export, abi_mismatch, ready, load_failure };
 enum class Backend { vkd3d, spirv_cross };
 using Function = void (*)();
 
@@ -33,6 +33,9 @@ public:
     void close() noexcept;
     [[nodiscard]] Status status() const noexcept;
     [[nodiscard]] const std::string& diagnostic() const noexcept;
+    // Empty for closed, refused or deliberately replaced identities. This
+    // attests only the complete reviewed pin, never a manifest supplied by disk.
+    [[nodiscard]] std::string_view verified_lock_sha256() const noexcept;
     // Public C exports only. Function pointers and library-owned storage are
     // valid until close/destruction. Free allocations via their originating DLL.
     [[nodiscard]] Function public_export(Backend backend, const char* name) const noexcept;

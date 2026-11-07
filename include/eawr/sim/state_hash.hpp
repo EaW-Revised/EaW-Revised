@@ -30,6 +30,21 @@ private:
     std::shared_ptr<const Source> source_;
 };
 
+// When a tactical session encodes and hashes the state of each completed tick. A tick's state
+// can only be hashed at that tick, so a consumer that needs the hash of a later tick has to
+// ask for `always` before that tick runs; the hash of the CURRENT state is always available on
+// request (TacticalSession::state_sha256), whatever the policy.
+enum class StateHashPolicy : std::uint8_t {
+    // Every step encodes the completed tick's state and hashes it: the default, and the only
+    // policy that replay recording with verification, lockstep, desync checks, headless
+    // digests and tests may use.
+    always,
+    // Steps skip the encode and the hash: TacticalTick::state_sha256 and state_hash stay empty.
+    // Only for a session nobody compares per tick (solo real-time play). The simulation state,
+    // every digest that is computed and every replay are the same either way.
+    on_demand,
+};
+
 // Hashes canonical state bytes off the stepping thread: hash() returns at once and the digest is
 // sim::sha256_hex of the bytes, the value the synchronous path computes. The platform layer
 // provides the thread (platform::ThreadStateHasher); the simulation never starts one itself.

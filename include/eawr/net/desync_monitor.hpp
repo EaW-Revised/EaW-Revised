@@ -9,6 +9,7 @@
 #include <functional>
 #include <map>
 #include <optional>
+#include <set>
 #include <span>
 #include <string>
 #include <string_view>
@@ -25,6 +26,11 @@ class MessageTransport;
 // hashes "eawr-net-desync-v1" followed by LE u64 tick + both digests per row.
 inline constexpr std::uint8_t desync_combined_kind = 32;
 inline constexpr std::uint8_t desync_rows_kind = 33;
+// Kind 34 = incident evidence, sent once per peer after a diagnosed disagreement when
+// DesyncOptions::share_evidence is on: LE u64 first/last tick of the window, LE u32 count, then per entry
+// LE u64 tick, LE u32 length and the sender's canonical input batch of that tick. Only ticks whose input
+// hash differs from a peer's are sent; the receiver checks every batch against that peer's authenticated row.
+inline constexpr std::uint8_t desync_evidence_kind = 34;
 
 struct DiagnosticFile {
     std::string name; // Fixed relative filename; no paths supplied by a peer.
@@ -70,14 +76,28 @@ struct DesyncReport {
 };
 
 struct DesyncOptions {
+    std::uint64_t initial_tick{}; // Agreed restored boundary; the first row always exchanges.
     std::uint64_t exchange_every{30}; // 1..4096 completed ticks; zero barrier and end always exchange
     std::uint64_t input_delay{3}; // Match SessionOptions; bounds an agreed departure cutoff by 2*D+2.
     std::size_t keep_exchange_points{2};
-    std::size_t max_retained_bytes{16 * 1024 * 1024}; // payload budget; row metadata additionally bounded by interval/roster
+    // Payload budget; row metadata additionally bounded by interval/roster. Sized so keep_exchange_points canonical encodings
+    // of a campaign galaxy plus a child battle (about 12 MB each) are retained; the retained encodings are the bundle's
+    // session.bin and cost at most this much memory per peer.
+    std::size_t max_retained_bytes{64 * 1024 * 1024};
     DiagnosticSink diagnostic_sink; // caller chooses the user-data directory or another destination
     std::string match_identity;
     std::vector<std::uint8_t> match_setup;
     std::string build_identity;
+    // After a diagnosed disagreement every peer ships its differing canonical input batches to the others, so
+    // each peer's bundle can name what differed without the other machine's folder. Off keeps the v1 wire exchange.
+    bool share_evidence{};
+    // Per evidence frame; the receiver refuses more. It must fit the match transport's frame limit (1 MiB by
+    // default) with its header, so the default leaves room; batches over the budget are listed in evidence-notes.txt.
+    std::size_t max_evidence_bytes{512 * 1024};
+    // Optional replayable record of the match so far (setup plus sealed inputs and per-tick hashes), written
+    // to the bundle as session-journal.bin when it fits max_journal_bytes. Called on the monitor's thread.
+    std::function<std::vector<std::uint8_t>()> replay_journal;
+    std::size_t max_journal_bytes{32 * 1024 * 1024};
 };
 
 // Driven by LockstepSession: never polls the transport itself, sleeps or starts threads.
@@ -113,6 +133,14 @@ public:
     [[nodiscard]] bool ready_for_resync() const override;
     [[nodiscard]] core::Result<void> on_resync(std::uint64_t tick, std::string_view hash) override;
     [[nodiscard]] const std::optional<DesyncReport>& recovered_report() const noexcept { return recovered_report_; }
+    // True while an active incident still lacks a peer's evidence (DesyncOptions::share_evidence). Deliberately not part
+    // of waiting_for_peers(): a closed link must not turn a diagnosed desync into a connection-loss error.
+    [[nodiscard]] bool waiting_for_evidence() const noexcept {
+        if (!options_.share_evidence || !report_ || report_->diagnostic_only || failed_) return false;
+        for (PeerIndex peer = 0; peer < active_peers_.size(); ++peer)
+            if (peer != transport_.self() && active_peers_[peer] && !evidence_received_.contains(peer)) return true;
+        return false;
+    }
     [[nodiscard]] bool waiting() const noexcept { return waiting_; }
     [[nodiscard]] bool setup_agreed() const noexcept { return setup_agreed_; }
     [[nodiscard]] std::optional<std::uint64_t> peer_confirmed_tick() const noexcept {
@@ -124,6 +152,9 @@ public:
         }
         return previous_->local.last;
     }
+    // Read-only GC checkpoint source election: only the diagnosed minority
+    // chooses a source, from a strict majority of at least three active peers.
+    [[nodiscard]] std::optional<PeerIndex> checkpoint_recovery_source() const;
     [[nodiscard]] bool agreed_end() const noexcept { return ended_ && !waiting_ && !frozen_ && !failed_; }
     [[nodiscard]] const std::optional<DesyncReport>& report() const noexcept { return report_; }
     [[nodiscard]] std::size_t retained_bytes() const noexcept { return retained_bytes_; }
@@ -167,6 +198,12 @@ private:
     std::vector<std::optional<std::uint64_t>> departure_ticks_;
     std::vector<DepartedDivergence> departed_divergences_;
     std::uint64_t retained_input_delay_{};
+    // Incident evidence: the remote peers' authenticated differing input batches and who has sent theirs.
+    std::map<std::uint32_t, std::map<std::uint64_t, std::vector<std::uint8_t>>> remote_inputs_;
+    std::set<std::uint32_t> evidence_received_;
+    bool evidence_sent_{};
+    std::string evidence_notes_; // what this peer could not ship, listed in the bundle
+    std::optional<std::vector<std::uint8_t>> journal_cache_; // one materialisation per incident
 
     [[nodiscard]] core::Result<void> exchange(bool end, std::span<const std::uint8_t> encoding);
     [[nodiscard]] core::Result<void> evaluate();
@@ -177,6 +214,8 @@ private:
     void diagnose(const std::vector<Row>& rows, const std::map<std::uint32_t, std::vector<Row>>& remote, bool active = true);
     [[nodiscard]] core::Result<void> evaluate_previous();
     void build_bundle();
+    void send_evidence(const std::vector<Row>& rows, const std::map<std::uint32_t, std::vector<Row>>& remotes);
+    [[nodiscard]] core::Result<void> receive_evidence(std::uint32_t from, std::span<const std::uint8_t> frame);
 };
 
 } // namespace eawr::net

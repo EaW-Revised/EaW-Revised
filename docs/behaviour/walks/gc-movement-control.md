@@ -948,6 +948,11 @@ is paused; missing choices default to yes only after elapsed ticks exceed the in
 preserving WGM-176's strict inequality. Stock 15 seconds therefore remains pending at 450 elapsed
 ticks. No local wall clock or presentation timeout controls this transition.
 
+Owner deviation (2026-10-30, not retail): when the agreed roster has at most one human side (co-op), the vote has no
+deadline. Nothing defaults, the countdown is hidden, and the prompt waits until every voting side has chosen;
+any auto-resolve choice still wins. The rule is derived from the sealed seat-control teams on every peer, so no
+format field carries it. Two or more human sides keep the strict timeout above.
+
 For this deterministic session policy, any no choice selects auto-resolve and yes choices from every
 voting (human) side select Begin. A side can vote once; stale/conflicting/unauthorized choices are execution refusals
 shared by every peer. This aggregation is the GCMP-06 implementation policy, not additional retail

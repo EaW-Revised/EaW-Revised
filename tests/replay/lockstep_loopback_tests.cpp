@@ -4,6 +4,7 @@
 // hold the committed *.eawr-replay files.
 
 #include "../support/check.hpp"
+#include "eawr/sim/replay.hpp"
 #include "../support/lockstep_loopback.hpp"
 #include "eawr/platform/sim_workers.hpp"
 #include "eawr/sim/tactical/replay.hpp"

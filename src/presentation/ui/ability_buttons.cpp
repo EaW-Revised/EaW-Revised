@@ -1,10 +1,18 @@
 #include "eawr/presentation/ui/ability_buttons.hpp"
+#include "eawr/presentation/ui/hud_shell.hpp"
 
 #include <algorithm>
 #include <array>
 #include <map>
 
 namespace eawr::presentation::ui {
+std::string resolved_ability_icon(const std::string_view type, const std::uint32_t ability,
+                                  const data::Catalog* objects, const std::function<bool(std::string_view)>& available) {
+    // AB-04, WLAB-81: authored art wins when it can be drawn.
+    auto icon = ability_card_looks(type, ability, objects, nullptr).icon;
+    if (icon.empty() || !available || !available(icon)) return std::string(ability_icon(ability));
+    return icon;
+}
 namespace {
 
 // AB-04: the engine's icon per UnitAbilityType value (FoC debug build); empty where it has none.
@@ -103,7 +111,7 @@ bool ability_targeted(const std::uint32_t ability) noexcept {
 }
 
 AbilityBar ability_bar(const CardLayout& layout, const std::span<const CardUnit> units, const AbilityState& state,
-                       const std::function<std::string(const CardUnit&, bool)>& icon) {
+                       const std::function<std::string_view(const CardUnit&, bool)>& icon) {
     AbilityBar bar;
     // AB-01: one group per ability, in slot order; its columns are the columns of its cards.
     std::map<std::uint32_t, Group> groups;
@@ -143,6 +151,8 @@ AbilityBar ability_bar(const CardLayout& layout, const std::span<const CardUnit>
             bool all_autofire = true;
             double recharge = 0.0;
             bool has_dial = false;
+            const CardUnit* icon_unit = nullptr;
+            bool icon_ready = false;
             for (const std::size_t index : group.units) {
                 const CardUnit& unit = units[index];
                 const std::uint32_t own = second ? unit.second_ability : unit.ability;
@@ -161,9 +171,18 @@ AbilityBar ability_bar(const CardLayout& layout, const std::span<const CardUnit>
                     recharge = std::max(recharge, current->recharge);
                 }
                 button.units.push_back(unit.id);
-                if (button.icon.empty() && icon) button.icon = icon(unit, second);
+                // AB-04: use the last visited unit, stopping at the first ready one.
+                // Normalize the traversal by entity ID so card order cannot change the art.
+                const bool ready = current->status == AbilityStatus::ready;
+                if (!icon_unit || (ready && !icon_ready)
+                    || (ready && icon_ready && unit.id < icon_unit->id)
+                    || (!ready && !icon_ready && unit.id > icon_unit->id)) {
+                    icon_unit = &unit;
+                    icon_ready = ready;
+                }
             }
             if (hidden || button.units.empty()) continue;
+            if (icon && icon_unit) button.icon = icon(*icon_unit, second);
             if (button.icon.empty()) button.icon = std::string(ability_icon(shown));
             button.disabled = all_disabled;
             button.autofire = all_autofire;
@@ -186,7 +205,7 @@ AbilityBar ability_bar(const CardLayout& layout, const std::span<const CardUnit>
             mark.second = second;
             // AB-08: the icon shows while the ability is active or recharging, and on autofire too.
             if (current->status == AbilityStatus::active || current->status == AbilityStatus::recharging || current->autofire) {
-                mark.icon = icon ? icon(unit, second) : std::string();
+                if (icon) mark.icon = icon(unit, second);
                 if (mark.icon.empty()) mark.icon = std::string(ability_icon(ability));
             }
             if (current->status == AbilityStatus::recharging || (current->status == AbilityStatus::active && current->recharge < 1.0)) {

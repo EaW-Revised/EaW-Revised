@@ -1,4 +1,6 @@
 #include "scene_content.hpp"
+#include "eawr/data/xml.hpp"
+#include "eawr/vfs/vfs.hpp"
 #include "eawr/assets/asset_names.hpp"
 #include "eawr/core/text.hpp"
 
@@ -100,6 +102,10 @@ std::map<std::string, ProductionArt> load_production_art(
         auto looks = presentation::ui::unit_card_looks(definition.id, &catalog, text, false);
         ProductionArt art;
         art.galactic_model = model_path(fields.text("Galactic_Model_Name"));
+        art.base_position = fields.text("Base_Position");
+        art.every_marker_type = fields.text("Place_Other_Type_At_Every_Specific_Marker_Position");
+        art.additional_structure = fields.text("Tactical_Additional_Structure_Type");
+        art.base_shield_radius = fields.number("Base_Shield_Radius").value_or(0.0F);
         // GHUD-S78: non-buildable bases (including neutral bases) still have display art.
         art.station = fields.flag("Build_Tab_Space_Station") || fields.number("Base_Level").value_or(0.0F) > 0.0F;
         art.sold_sound = fields.text("SFXEvent_Sold_Tactical");
@@ -323,8 +329,12 @@ core::Result<SceneContent> load_scene_content(const vfs::Vfs& filesystem, const 
     if (campaign->is_multiplayer.value_or(false)
         && (!multiplayer_observer_faction || multiplayer_observer_faction->empty()))
         return core::Result<SceneContent>::failure(failure("multiplayer scene requires a local observer faction"));
-    if (multiplayer_observer_faction && !campaign->is_multiplayer.value_or(false))
-        return core::Result<SceneContent>::failure(failure("observer faction override requires a multiplayer campaign"));
+    // An observer faction override belongs to a networked session: a multiplayer entry, or a single-player entry
+    // played in co-op (listed, no tutorial or story flag, with an authored human faction).
+    if (multiplayer_observer_faction && !campaign->is_multiplayer.value_or(false)
+        && (!campaign->is_listed.value_or(true) || campaign->tutorial.value_or(false)
+            || campaign->is_story_campaign.value_or(false) || campaign->starting_active_player.empty()))
+        return core::Result<SceneContent>::failure(failure("observer faction override requires a multiplayer or co-op campaign"));
     auto active = players.find(folded(multiplayer_observer_faction.value_or(campaign->starting_active_player)));
     if (active == players.end()) return core::Result<SceneContent>::failure(failure("campaign has no drawable active faction"));
     result.snapshot.seats = {{1, active->second, true, true}, {2, active->second, true, true}};
@@ -356,6 +366,18 @@ core::Result<SceneContent> load_scene_content(const vfs::Vfs& filesystem, const 
         item.id = next_object++;
         item.name = location;
         item.ability = planet_ability_metadata(*planet, language ? &language.value() : nullptr, result.diagnostics);
+        item.weather.icon = planet->planet_weather_icon;
+        if (language) {
+            const auto localized = [&](const std::string& key) {
+                const auto* entry = key.empty() ? nullptr : language.value().find(key);
+                return entry ? data::ui::to_utf8(entry->value) : std::string{};
+            };
+            item.weather.name = localized(planet->planet_weather_name);
+            item.weather.info = localized(planet->planet_weather_info);
+            item.info = {localized(planet->describe_tactical), localized(planet->describe_advantage),
+                localized(planet->describe_history), localized(planet->describe_weather),
+                localized(planet->describe_terrain), localized(planet->describe_population)};
+        }
         item.model = model_path(planet->galactic_model_name);
         item.position = {planet->galactic_position->x, planet->galactic_position->y, planet->galactic_position->z};
         item.scale = sim::math::Fixed::from_raw(static_cast<std::int64_t>(std::llround(*scale * static_cast<double>(sim::math::Fixed::scale))));
@@ -366,6 +388,7 @@ core::Result<SceneContent> load_scene_content(const vfs::Vfs& filesystem, const 
             if (folded(home.name) == folded(location) && owner != players.end()) item.owner = owner->second;
         }
         PlanetArt art;
+        art.land_tactical_map = planet->land_tactical_map;
         // WGP-01b: first true layer flag wins.
         if (fields.flag("In_Background")) art.layer = SceneLayer::background;
         else if (fields.flag("In_Midground")) art.layer = SceneLayer::midground;

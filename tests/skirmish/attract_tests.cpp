@@ -119,6 +119,40 @@ void cycle_and_clocks() {
     expect(manager.idle_since_ms() == 270000, "MAT-06: a window activation refreshes it");
 }
 
+void restart_and_failed_candidates() {
+    AttractSettings settings;
+    settings.maps = {"A.ted", "B.ted", "C.ted"};
+    AttractManager first(settings);
+    first.init(0);
+    expect(first.advance(0) == std::optional<std::size_t>(0), "first process selection");
+    first.shutdown();
+    AttractManager restarted(settings, static_cast<std::int64_t>(*first.map_index()));
+    restarted.init(1);
+    skirmish::AttractCandidates candidates(settings.maps.size());
+    expect(candidates.next(restarted, 1) == std::optional<std::size_t>(1), "restart continues sequence");
+    // Model two asynchronous failures: the host requests the next candidate on each failure.
+    expect(candidates.next(restarted, 2) == std::optional<std::size_t>(2), "failure skips to next candidate");
+    expect(candidates.next(restarted, 3) == std::optional<std::size_t>(0), "failure wraps once");
+    expect(!candidates.next(restarted, 4), "all failed candidates stop after one pass");
+    candidates.reset(settings.maps.size());
+    expect(candidates.next(restarted, 5) == std::optional<std::size_t>(1), "new attempt starts after last selection");
+    AttractManager changed(settings, 5);
+    changed.init(0);
+    expect(changed.advance(0) == std::optional<std::size_t>(0), "stale index wraps for a shorter list");
+
+    AttractManager retry(settings);
+    retry.init(0);
+    skirmish::AttractCandidates attempts(settings.maps.size());
+    std::vector<std::size_t> tried;
+    std::optional<std::size_t> loaded;
+    while (const auto index = attempts.next(retry, 0)) {
+        tried.push_back(*index);
+        if (*index == 1) { loaded = index; break; } // candidate 0 fails; 1 loads
+    }
+    expect((tried == std::vector<std::size_t>{0, 1}) && loaded == std::optional<std::size_t>(1),
+        "failed load advances to the first successful candidate");
+}
+
 void start_timeout_pause() {
     AttractSettings settings;
     settings.menu_attract = true;
@@ -290,6 +324,7 @@ int main() {
     settings_read();
     map_paths();
     cycle_and_clocks();
+    restart_and_failed_candidates();
     start_timeout_pause();
     dialogs_and_keys();
     wrapping_clocks();

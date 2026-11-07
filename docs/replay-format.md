@@ -360,9 +360,10 @@ reserved (zero) and unit_count uint64 entity IDs, nonzero and strictly increasin
 | 22 | Cancel entry (PU-17, PU-63, WPR-31) | uint32 queue (0 units, 1 upgrades), uint32 reserved (zero), nonzero uint64 entry identity; no unit | 48 |
 | 23 | AI reservation debit (WAS-25) | positive int64 Q24 credit amount; no unit | 40 |
 | 24 | Prepaid AI buy (WAS-26) | uint64 type ID; one station unit | 48 |
-| 25 | Repair hardpoint (WSL-40; OrderKind 21) | uint32 authored hardpoint index below 255, uint32 reserved (zero); exactly one listed station | 48 |
+| 25 | Repair hardpoint (WSL-40; OrderKind 21) | uint32 authored hardpoint index below 65535, uint32 reserved (zero); exactly one listed station | 48 |
 | 26 | Reinforce with explicit facing (WR-X01) | uint64 type ID, three int64 point raw values, uint64 pool token (zero for ordinary admission), int64 yaw raw in [0, 360) degrees; no unit | 80 |
 | 33 | Battle control transition (ADR-020; OrderKind 27) | uint32 departed seat, CTRL policy v4 for exactly one faction; no unit list entries; engine provenance only | 64 + 16s + 8f |
+| 34 | Script invulnerable (TL-03; OrderKind 28) | uint32 enabled (0 or 1), uint32 reserved (zero); one or more listed units, a squadron also covering its members; script host only | 40 + 8n |
 
 The explicit-facing reinforcement command is an EAWR extension. Its facing drives both the arrival-lane placement sweep and the spawned unit's rotation and flight direction. Each drop carries the local player's chosen value; absence of a wheel choice retains opcodes 11/19 and the player's authored FoC facing, including their existing bytes. A present zero yaw is an explicit choice. Negative yaw and yaw at or above 360 degrees are rejected during command validation.
 
@@ -381,7 +382,7 @@ Opcode 25 records `RepairHardpointPayload` and maps to command/order kind 21.
 Its body is exactly 48 bytes, excluding the uint32 length prefix: the common
 24-byte fields, uint32 hardpoint index, uint32 reserved zero, uint32 unit count
 of 1, uint32 reserved zero, and one nonzero uint64 station entity ID. The index
-addresses the station type's authored HardPoints list; 255 and higher are invalid.
+addresses the station type's authored HardPoints list; 65535 and higher are invalid.
 Nonzero reserved data, another unit-list shape or an invalid index fail parsing
 or command validation.
 
@@ -725,6 +726,7 @@ SHA-256 consumes, without padding:
 | optional | With live nebula contact state (WHZ-20/21): ASCII `NEBC`, uint64 count, then ascending-ID records of uint64 unit ID, uint8 present, uint8 has-frame and uint64 last contact frame (zero when has-frame is zero). Absent when empty. |
 | optional | With cached ion-storm contact (WHZ-30/31): ASCII `STMC`, uint64 count, then ascending-ID records of uint64 unit ID and uint64 last shield-service contact frame. Absent when empty. |
 | optional | While a live unit's damage tracking holds damage (WCC-82, AB-42): coordinator-reserved ASCII `DTRK`, uint64 count, then ascending-ID records of uint64 unit ID, int64 window damage raw (hull and shield lost since the rate window last closed) and int64 damage rate raw (per second). Absent when every window and rate is zero. |
+| optional | With any unit holding a Lua `Make_Invulnerable(true)` flag (TL-03): ASCII `SINV`, uint32 block version 1, uint64 flagged count, then the uint64 IDs of the flagged units in ascending order. It follows the garrison birth marks and precedes the craft block; it is absent while no unit is flagged, so other sessions hash as before. The same flag is archived in the tactical checkpoint (see the checkpoint format). |
 | optional | With converted hero purchases (WHE-02/06/07/49): coordinator-reserved ASCII `HERO`, uint64 carrier count, then ascending carrier-ID records of uint64 carrier ID, uint64 logical purchase type and uint64 contained count. Each contained record stores uint64 identity ID, uint64 type, uint64 parent, uint8 flags and uint64 member count followed recursively by its ordered members. Flag bits 0â€“7 mean named, generic, limbo, model visible, collidable, selected, movement coordinated and preserved combat. Riders and team members retain authored creation order. The block is absent without converted purchases; initial replay units cannot carry this derived state. |
 | optional | While jammer-only sources are registered: coordinator-reserved ASCII `PDEF`, uint64 source count, then uint64 source IDs in registration order. Static shield/passive declarations register at creation; jammer-only owners append on activation and leave on termination/death. The block is absent with no active jammer-only sources; static creation order then follows stable IDs. Staged changes commit only after a successful tick. |
 | optional | With nested special-handler state (WHE-09/10/12): coordinator-reserved ASCII `SPAB`, uint64 owner count, then ascending owner-ID records of uint64 owner ID, uint32 service-cancelled, uint32 zero and uint64 slot count. Declared-order slots store uint32 flags (bits 0 enabled, 1 cancelled, 2 successful despawn), uint32 context-present, uint64 next service frame, optional context (uint64 owner and target, uint32 mode: 0 space/1 ground/2 galactic, uint32 flags: owner exists/type exists/death clone/map editor), uint64 tracked-target count and ascending uint64 target IDs. Activation clears its context after Apply; ordinary committed slots therefore have no context. The block is absent with no nested slots. |
@@ -875,7 +877,8 @@ reinforce), uint8 reason (0 none, 1 unit_not_live, 2 unit_not_owned, 3 target_no
 4 target_not_hostile, 5 not_damageable, 6 hardpoint_invalid, 7 target_is_unit, 8 ability_unavailable;
 Station purchasing: 9 cannot_produce, 10 queue_full, 11 insufficient_credits, 12 no_queue_entry, 13 not_in_pool,
 14 no_population_room, 15 invalid_position, 16 no_economy, 17 arriving, 18 battle_decided), uint8 hardpoint index
-(`hardpoint_destroyed` only, else zero), uint64 sequence and uint64 unit. A destruction event
+(`hardpoint_destroyed` only, else zero; an index of 255 or more is written as 0xFF followed by a uint32
+index, so events below 255 keep their bytes; a plain uint32 replaces this at the next format bump), uint64 sequence and uint64 unit. A destruction event
 carries the unit's owner as player, sequence zero and order none; a victory event carries
 the winner as player and the deciding star base as unit. A spin-away event is like a
 destruction event: the killed craft's owner and ID.
@@ -1433,7 +1436,7 @@ with its borrowed native child remains the route for parent-owned return and ret
 services. The native file header's size limits apply at file export/load, never to live
 campaign admission.
 
-## Optional cooperative battle controllers
+## Cooperative battle controllers
 
 Tag 18 (`replay_extension_controllers`) is the optional controller foundation of ADR-020.
 It uses the existing uint16 tag/length framing and a version-4 body: uint32 version,
@@ -1447,8 +1450,10 @@ and effective control mode, except that a passive side may retain its inactive
 controller identities after an unsupported takeover. Those seats authorize no input.
 Shared structures carry zero; zero cannot authorize a
 mobile unit. Squadron roots and attached members have identical controller fields.
-The policy requires campaign metadata and a cooperative human side; skirmish and
-solo battle creation leave it absent. Native campaign SKSU is loader metadata and
+The policy requires campaign metadata and a cooperative human side. Final GC entry
+derives it from the authoritative roster whenever either participating faction has
+at least two active human seats, without a lobby option. Skirmish, solo,
+one-human-per-side and no-human battle creation leave it absent. Native campaign SKSU is loader metadata and
 may coexist with the policy. The controller roster uses the GC envelope resource
 bound of 256 seats, independently of the tactical faction count. Classification is explicit setup metadata;
 this foundation does not infer structure capabilities or enable command gates.
@@ -1509,7 +1514,8 @@ controller in the same snapshot. Gifts retain orders, faction ownership, shared
 credits/population/fog and campaign return identity. Heroes and arriving called-in
 units are transferable; shared structures are not. A carrier's launched squadrons
 remain independent, while future launches inherit its new controller. There is no
-cooldown, transfer history, reclaim or automatic rebalance. The policy remains opt-in.
+cooldown, transfer history, reclaim or automatic rebalance. The same roster-derived
+GC entry rule enables the policy for gifts.
 
 ### Engine departure boundaries
 
@@ -1534,3 +1540,23 @@ controller identities; this never grants command authority or reports AI takeove
 The optional controller setup extension now requires v4. Its field layout is
 unchanged. All co-op synthetic fixtures use the current extension; older opt-in
 extensions are rejected. Policy-disabled replay and encoding bytes are unchanged.
+
+## Galactic checkpoint agreement
+
+The GC setup domain is `galactic-campaign-v2` and its `GCSU` payload requires wire version 2.
+After the roster's tick-zero claim it appends a u8 start discriminator (0 new campaign,
+1 checkpoint), u64 initial completed tick, and four 32-byte SHA-256 values: checkpoint file,
+restored state, sealed frontier and accepted mapping/terms. New campaigns require zero for
+all continuation fields; checkpoint starts require a nonzero tick and all four digests.
+This changes no tactical or skirmish replay container, command or hash bytes.
+The checkpoint mod-description section changes checkpoint bytes and the capture
+commitment input, but does not change the galactic replay wire schema or version.
+
+For an intentional GC format upgrade, build the opt-in target once with
+`cmake --build --preset windows-msvc-ninja --target galactic_corpus_upgrade`.
+It runs the existing synthetic C++ generators into a fresh directory, publishes the
+complete GC fixture inventory and generated hash CSVs, and updates only their binary
+allowlist digests in `tools/publish_scan/config.json`. It also writes
+`tests/galactic/corpus-upgrade.zip` under the build directory for offload retrieval.
+Ordinary builds and CTest never regenerate fixtures. Review the generated diff before
+committing; tactical and skirmish fixtures are outside this upgrade target.

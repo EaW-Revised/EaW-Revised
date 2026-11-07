@@ -1,4 +1,5 @@
 #include "eawr/core/gc_load_trace.hpp"
+#include "eawr/core/content_chain.hpp"
 
 #include <iostream>
 #include <string>
@@ -47,5 +48,38 @@ int main() {
     const auto next_solo = trace.finish("b");
     expect(next_solo && !has(*next_solo, "failed_ready") && has(*next_solo, " next_ready@5.0+7.0"),
         "solo retry discards failed phases and measures from its new origin");
+
+    trace.begin("sp_start", true, first_origin);
+    trace.span("gc.attract_stop", first_origin, first_origin + std::chrono::milliseconds(15));
+    trace.begin("sp", !trace.kind_is("sp_start"), next_origin);
+    const auto anchored = trace.finish("b");
+    expect(anchored && has(*anchored, "[sp_start]") && has(*anchored, " gc.attract_stop@0.0+15.0"),
+        "scene entry preserves the menu Start origin and teardown span");
+
+    // Equal profile names do not establish equal installed content: a changed
+    // game/mod root or precedence chain must choose the fresh-mount path.
+    const std::string setup_game = "game-a", setup_mod = "mod-a";
+    const std::vector<std::string> setup_layers = {"mod", "expansion", "base"};
+    const auto reuse = [&](const std::string& game, const std::string& mod,
+                           const std::vector<std::string>& layers) {
+        return eawr::core::content_chain_matches(setup_game, setup_mod, "remake", setup_layers,
+            game, mod, "remake", layers);
+    };
+    expect(reuse("game-a", "mod-a", setup_layers), "identical resolved chain reuses setup");
+    expect(!reuse("game-b", "mod-a", setup_layers), "same profile with different game root loads fresh");
+    expect(!reuse("game-a", "mod-b", setup_layers), "same profile with different mod root loads fresh");
+    expect(!reuse("game-a", "mod-a", {"expansion", "mod", "base"}),
+        "same profile with different layer order loads fresh");
+    expect(!eawr::core::content_chain_matches(setup_game, setup_mod, "remake", setup_layers,
+        setup_game, setup_mod, "foc", setup_layers), "different profile loads fresh");
+
+    trace.begin("sp_start", true);
+    trace.cancel();
+    expect(!trace.active() && !trace.kind_is("sp_start") && !trace.finish("b"), "refused Start drops its origin");
+    trace.begin("sp", true);
+    trace.span("direct_retry", first_origin, first_origin + std::chrono::milliseconds(1));
+    const auto retried = trace.finish("b");
+    expect(retried && !has(*retried, "attract_stop") && has(*retried, "direct_retry"),
+        "cancelled menu load cannot contaminate a later direct load");
     return failures == 0 ? 0 : 1;
 }

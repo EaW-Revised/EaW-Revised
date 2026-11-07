@@ -92,6 +92,7 @@ ordering constraints between siblings are not dependency edges in that list.
 | EAWR-MODS-0016 | Script hint needs player confirmation |
 | EAWR-MODS-0017 | Non-retail XML/MEG in FoC Data |
 | EAWR-MODS-0018 | Bounded scan incomplete |
+| EAWR-MODS-0020 | No content digest for a mod folder |
 
 The cache fingerprint is SHA-256 over domain `eawr-chain-fingerprint:1;`, then
 length-prefixed UTF-8 fields for each ordered key, presence marker, manifest,

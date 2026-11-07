@@ -31,6 +31,15 @@ public:
         const std::lock_guard lock(mutex_);
         return active_;
     }
+    [[nodiscard]] bool kind_is(std::string_view kind) const {
+        const std::lock_guard lock(mutex_);
+        return active_ && kind_ == kind;
+    }
+    void cancel() {
+        const std::lock_guard lock(mutex_);
+        active_ = false;
+        entries_.clear();
+    }
     void span(std::string_view name, const Clock::time_point start, const Clock::time_point end) {
         const std::lock_guard lock(mutex_);
         if (active_) entries_.push_back({std::string(name), milliseconds(origin_, start), milliseconds(start, end)});

@@ -1,9 +1,23 @@
 #include "tactical_hud_internal.hpp"
 #include "eawr/presentation/ui/world_encyclopedia.hpp"
+#include "eawr/presentation/ui/ability_buttons.hpp"
 
 namespace eawr::presentation::godot_backend {
 using tactical_hud_detail::text;
 using tactical_hud_detail::rect2;
+
+const std::string& TacticalHud::ability_button_icon(const std::string& type, const std::uint32_t ability) {
+    State& state = *state_;
+    const auto type_found = state.ability_icons.find(type);
+    if (type_found != state.ability_icons.end()) {
+        const auto found = type_found->second.find(ability);
+        if (found != type_found->second.end()) return found->second;
+    }
+    auto icon = model::resolved_ability_icon(type, ability, state.objects, [&state](const std::string_view name) {
+        return state.command_texture(std::string(name), "ability button", true).is_valid();
+    });
+    return state.ability_icons[type].emplace(ability, std::move(icon)).first->second;
+}
 
 namespace tactical_hud_detail {
 [[nodiscard]] String text(const std::string_view value) {
@@ -46,6 +60,7 @@ void TacticalHud::set_ability_hover(const std::string& type, const std::uint32_t
     state.ability_hover_kind = ability;
     state.ability_hover_component = component;
     auto content = model::ability_card_looks(type, ability, state.objects, state.text_database ? &*state.text_database : nullptr);
+    content.icon = ability_button_icon(type, ability);
     state.cards->set_external_hover((std::uint64_t{1} << 62U) + component,
         content.name.empty() ? std::nullopt : std::optional(std::move(content)));
 }

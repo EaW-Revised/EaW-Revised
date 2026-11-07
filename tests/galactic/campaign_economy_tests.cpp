@@ -1,4 +1,5 @@
 #include "../support/result.hpp"
+#include "eawr/vfs/vfs.hpp"
 #include "galactic_support.hpp"
 #include "eawr/campaign/setup.hpp"
 #include "eawr/checkpoint/game.hpp"
@@ -368,6 +369,14 @@ void persistence(const std::filesystem::path& fixtures) {
         gc::GalacticReplay replay; replay.setup = setup; replay.final_tick_count = 8;
         const auto bytes = gc::write_replay(replay).value(); const auto decoded = gc::parse_replay(bytes).value();
         expect(decoded.setup == setup && gc::write_replay(decoded).value() == bytes, "economy+graph+fleet+seat extensions round trip canonically");
+        auto stale = bytes;
+        stale[12] = 1; stale[13] = stale[14] = stale[15] = 0;
+        stale.resize(100); // The extension table is incomplete; rules refusal must precede its parse.
+        const auto stale_result = gc::parse_replay(stale);
+        expect(!stale_result && stale_result.error().code == gc::diagnostic_codes::replay_version
+            && stale_result.error().message == "recorded under galactic rules version 1, this build runs "
+                + std::to_string(gc::galactic_rules_version),
+            "stale rules are refused before parsing extensions");
         auto streamed = gc::GalacticSession::from_replay(decoded).value();
         for (unsigned tick = 0; tick < 4; ++tick) {
             static_cast<void>(combined.step(executor).value()); static_cast<void>(streamed.step(executor).value());
@@ -411,8 +420,10 @@ void persistence(const std::filesystem::path& fixtures) {
                 if (parsed) expect(!parsed.value().setup.player_economy && gc::write_replay(parsed.value()).value() == old,
                     "current-rules economy-absent corpus bytes round trip");
                 else expect(parsed.error().code == gc::diagnostic_codes::replay_version
-                    && parsed.error().message == "recorded under galactic rules version 1, this build runs 2",
-                    "stale rules-1 economy-absent corpus is refused explicitly until batch regeneration");
+                    && old.size() >= 10 && (std::uint16_t{old[8]} | (std::uint16_t{old[9]} << 8)) != gc::galactic_replay_format_version
+                    && parsed.error().message == "unsupported galactic replay version "
+                        + std::to_string(std::uint16_t{old[8]} | (std::uint16_t{old[9]} << 8)),
+                    "stale-format economy-absent corpus is refused explicitly until batch regeneration");
                 ++legacy_count;
             }
         }
@@ -428,8 +439,10 @@ void persistence(const std::filesystem::path& fixtures) {
                     "production replay carries both economy and production extensions");
                 expect(gc::write_replay(production.value()).value() == production_bytes, "production replay bytes round trip canonically");
             } else expect(production.error().code == gc::diagnostic_codes::replay_version
-                && production.error().message == "recorded under galactic rules version 1, this build runs 2",
-                "stale rules-1 production corpus is refused explicitly until batch regeneration");
+                && production_bytes.size() >= 10 && (std::uint16_t{production_bytes[8]} | (std::uint16_t{production_bytes[9]} << 8)) != gc::galactic_replay_format_version
+                && production.error().message == "unsupported galactic replay version "
+                    + std::to_string(std::uint16_t{production_bytes[8]} | (std::uint16_t{production_bytes[9]} << 8)),
+                "stale-format production corpus is refused explicitly until batch regeneration");
             ++production_count;
         }
         expect(production_count >= 3, "all three production fixtures checked");

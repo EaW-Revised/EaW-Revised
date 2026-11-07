@@ -47,6 +47,7 @@ LandMovement movement(const Field& field, std::size_t squads = 1, std::size_t me
         LandMovingSquad s;
         s.object = static_cast<sim::EntityId>(10000 + i);
         s.position = centre(2, 3); s.maximum_speed = whole(20); s.rear_extent = whole(6);
+        s.collision_class = units::LandCollisionGroup::infantry; // WLPA-82: the container's class makes it a body
         auto req = request(*field.terrain, 2, 3, 12, 3);
         LandPathArena arena;
         s.path = LandPathService::plan(field.occupancy, arena, req);
@@ -84,6 +85,91 @@ void speed_rules() {
     expect(land_member_desired_speed(whole(10), whole(20), whole(-5), false) == Fixed::from_ratio(15, 2).value(), "overshoot uses squared fraction");
     expect(land_member_desired_speed(whole(10), whole(20), whole(-10), false) == Fixed{}, "overshoot clamp reaches zero");
     expect(land_member_desired_speed(whole(10), whole(20), whole(100), true) == Fixed{}, "turn requests zero speed");
+}
+
+LandMovement::Checkpoint straggler_wait_guard(const sim::PartitionExecutor& executor, bool restore) {
+    auto field = make_field(std::vector<std::string>(9, std::string(15, '.')));
+    auto initial = movement(field, 1, 1).checkpoint();
+    initial.squads[0].position = centre(5, 3);
+    initial.squads[0].path = plan(field, request(*field.terrain, 5, 3, 12, 3));
+    initial.members[0].position = centre(2, 3);
+    initial.members[0].profile.maximum_speed = Fixed{};
+    auto moving = LandMovement::from_checkpoint(initial).value();
+    const auto end = initial.squads[0].path.nodes.back();
+    for (int i = 0; i < 250; ++i) {
+        expect(static_cast<bool>(moving.step(field.occupancy, executor, dt)), "straggler guard step");
+        if (i == 14 && restore) {
+            const auto saved = moving.checkpoint();
+            expect(saved.squads[0].straggler_wait_remaining < land_straggler_wait_visits,
+                "straggler wait has retained qualified visits");
+            expect(saved.members[0].straggler_best_lag > Fixed{}, "straggler best lag is retained");
+            moving = LandMovement::from_checkpoint(saved).value();
+        }
+    }
+    expect(moving.squads()[0].position == end, "stalled straggler releases leader through path end");
+    return moving.checkpoint();
+}
+
+void straggler_near_hold_paths() {
+    sim::InlineExecutor serial;
+    auto field = make_field(std::vector<std::string>(9, std::string(15, '.')));
+    for (const bool corner : {false, true}) {
+        auto state = movement(field, 1, 1).checkpoint();
+        state.squads[0].position = centre(5, 3);
+        const auto end = corner ? centre(10, 7) : centre(12, 3);
+        state.squads[0].path = {LandPathStatus::found,
+            corner ? std::vector<sim::math::Vec2>{centre(5, 3), centre(10, 3), end}
+                   : std::vector<sim::math::Vec2>{centre(5, 3), end}, whole(200)};
+        state.members[0].position = state.squads[0].position;
+        state.members[0].profile.maximum_speed = Fixed{};
+        auto moving = LandMovement::from_checkpoint(state).value();
+        for (int i = 0; i < 500; ++i)
+            expect(static_cast<bool>(moving.step(field.occupancy, serial, dt)), "near-hold straggler step");
+        expect(moving.squads()[0].position == end, "near-hold straggler releases through path end, including a corner");
+    }
+}
+
+void straggler_progress_guard() {
+    sim::InlineExecutor serial;
+    auto field = make_field(std::vector<std::string>(9, std::string(15, '.')));
+    auto state = movement(field, 1, 1).checkpoint();
+    state.squads[0].position = centre(5, 3);
+    state.squads[0].path = plan(field, request(*field.terrain, 5, 3, 12, 3));
+    state.members[0].position = centre(2, 3);
+    state.members[0].profile.maximum_speed = Fixed{};
+    const auto start = state.squads[0].position;
+    for (int i = 0; i < 45; ++i) {
+        state.members[0].position.x = Fixed::from_raw(centre(2, 3).x.raw() + i * (Fixed::scale / 30));
+        auto moving = LandMovement::from_checkpoint(state).value();
+        expect(static_cast<bool>(moving.step(field.occupancy, serial, dt)), "catching straggler step");
+        state = moving.checkpoint();
+        expect(state.squads[0].position == start, "leader waits while straggler gains ground");
+    }
+    state.members[0].position = centre(2, 3);
+    state.members[0].straggler_best_lag = Fixed::from_raw(-1);
+    state.squads[0].straggler_wait_remaining = land_straggler_wait_visits;
+    for (int i = 0; i < 40; ++i) {
+        state.members[0].position.x = Fixed::from_raw(centre(2, 3).x.raw() + (i % 2) * (Fixed::scale / 30));
+        auto moving = LandMovement::from_checkpoint(state).value();
+        expect(static_cast<bool>(moving.step(field.occupancy, serial, dt)), "jittering straggler step");
+        state = moving.checkpoint();
+    }
+    expect(state.squads[0].position != start && state.squads[0].straggler_wait_remaining == 0,
+        "jitter without new progress releases the leader");
+    auto spliced = LandMovement::from_checkpoint(state).value();
+    const auto anchor = spliced.splice_anchor(0);
+    expect(anchor.has_value(), "released moving squad has splice anchor");
+    if (anchor) {
+        LandPath splice{LandPathStatus::found, {*anchor, centre(12, 3)}, whole(100)};
+        expect(spliced.splice_path(0, splice) == LandMovement::SpliceResult::installed, "new splice accepted after release");
+        expect(spliced.squads()[0].straggler_wait_remaining == land_straggler_wait_visits
+            && spliced.members()[0].straggler_best_lag == Fixed::from_raw(-1), "splice re-arms straggler guard");
+    }
+    auto reordered = LandMovement::from_checkpoint(state).value();
+    LandPath path{LandPathStatus::found, {state.squads[0].position, centre(12, 3)}, whole(100)};
+    expect(reordered.install_path(0, path, 0), "new order accepted after release");
+    expect(reordered.squads()[0].straggler_wait_remaining == land_straggler_wait_visits
+        && reordered.members()[0].straggler_best_lag == Fixed::from_raw(-1), "new order re-arms straggler guard");
 }
 
 void zero_heading_boundaries() {
@@ -143,10 +229,11 @@ LandMovement::Checkpoint follow(const sim::PartitionExecutor& executor, bool res
     expect(moving.squads()[0].path.nodes.size() > 2, "obstacle requires a squad path detour");
     for (int tick = 0; tick < 1600; ++tick) {
         expect(static_cast<bool>(moving.step(field.occupancy, executor, dt)), "movement step succeeds");
-        for (const auto& m : moving.members()) {
-            const auto x = land_cell_of(m.position.x, whole(20), field.columns);
-            const auto y = land_cell_of(m.position.y, whole(20), field.rows);
-            expect(x && y && field.occupancy.admits(*x, *y, m.mask), "members never commit inside the obstacle");
+        {
+            // WLPA-36/69: only the container tests its centre point; a soldier has no terrain test and may clip a corner.
+            const auto x = land_cell_of(moving.squads()[0].position.x, whole(20), field.columns);
+            const auto y = land_cell_of(moving.squads()[0].position.y, whole(20), field.rows);
+            expect(x && y && field.occupancy.admits(*x, *y, walker), "the container never commits inside the obstacle");
         }
         if (restore && (tick == 0 || tick == 19 || tick == 290 || tick == 650 || tick == 1250)) {
             const auto saved = moving.checkpoint();
@@ -265,6 +352,115 @@ void neighbour_contract() {
     expect(!index.safe(), "extreme arithmetic keeps the original full-scan diagnostic path");
 }
 
+// WLPA-88/89: a squad that is walking keeps walking through a re-order. The new path (searched from the node the squad
+// finishes its segment at) is spliced in behind it; a first corner beyond the smooth-start gate is refused untouched.
+LandMovement::Checkpoint reorder_splice(const sim::PartitionExecutor& executor, bool restore) {
+    auto field = make_field(std::vector<std::string>(9, std::string(15, '.')));
+    auto moving = movement(field, 1, 3);
+    const auto reload = [&] { if (restore) moving = LandMovement::from_checkpoint(moving.checkpoint()).value(); };
+    for (int i = 0; i < 10; ++i) {
+        expect(static_cast<bool>(moving.step(field.occupancy, executor, dt)), "walk before the re-order");
+        reload();
+    }
+    expect(moving.squads()[0].speed > Fixed{}, "the squad is translating before the re-order");
+    const auto anchor = moving.bounded_splice_anchor(0);
+    if (anchor) moving.cut_splice_anchor(0, *anchor);
+    expect(anchor && *anchor == moving.squads()[0].path.nodes[moving.squads()[0].next_node],
+        "WLPA-88 the anchor is the node that ends the current segment");
+    if (!anchor) return moving.checkpoint();
+    // The search runs from the anchor while the squad keeps walking; the anchor holds until it is reached.
+    auto replacement = request(*field.terrain, 12, 3, 12, 7);
+    replacement.start = *anchor;
+    const auto path = plan(field, replacement);
+    expect(path.status == LandPathStatus::found && path.nodes.front() == *anchor, "the replacement starts at the anchor");
+    for (int i = 0; i < 5; ++i) {
+        expect(static_cast<bool>(moving.step(field.occupancy, executor, dt)), "walk during the search");
+        expect(moving.squads()[0].speed > Fixed{} && moving.splice_anchor(0) == anchor, "no stop while the re-order is searched");
+        reload();
+    }
+    // A path that does not start at the anchor, or one for a squad with no anchor, is refused with no change.
+    const auto before = moving.checkpoint();
+    auto stale = path; stale.nodes.front() = at(1, 1);
+    expect(moving.splice_path(0, stale) == LandMovement::SpliceResult::rejected && moving.checkpoint() == before,
+        "a stale anchor is refused untouched");
+    expect(moving.splice_path(0, path) == LandMovement::SpliceResult::installed, "WLPA-88 the search result splices in");
+    const auto& squad = moving.squads()[0];
+    expect(squad.order == LandMoveOrder::following && !squad.turning && squad.next_node == 1
+        && squad.path.nodes.size() == path.nodes.size() + 1 && squad.path.nodes.front() == squad.position
+        && squad.path.nodes[1] == *anchor, "the squad finishes the current segment, then follows the new path");
+    int ticks = 0;
+    while (moving.squads()[0].order == LandMoveOrder::following && ticks < 900) {
+        expect(static_cast<bool>(moving.step(field.occupancy, executor, dt)), "walk the spliced path");
+        if (moving.squads()[0].order == LandMoveOrder::following)
+            expect(moving.squads()[0].speed > Fixed{} && !moving.squads()[0].turning, "never zero speed across the splice window");
+        ++ticks;
+        if (ticks % 7 == 0) reload();
+    }
+    expect(moving.squads()[0].order == LandMoveOrder::reached && moving.squads()[0].position == path.nodes.back(),
+        "the spliced order completes at the new destination");
+    return moving.checkpoint();
+}
+
+void reorder_gate() {
+    auto field = make_field(std::vector<std::string>(9, std::string(15, '.')));
+    sim::InlineExecutor executor;
+    const auto slow = [&](Fixed rate) {
+        auto moving = movement(field, 1, 3);
+        auto saved = moving.checkpoint();
+        for (auto& member : saved.members) member.profile.turn_rate = rate;
+        moving = LandMovement::from_checkpoint(saved).value();
+        for (int i = 0; i < 10; ++i) expect(static_cast<bool>(moving.step(field.occupancy, executor, dt)), "walk");
+        return moving;
+    };
+    const auto from_anchor = [&](const LandMovement& moving, std::int64_t to_x, std::int64_t to_y) {
+        auto req = request(*field.terrain, 12, 3, to_x, to_y);
+        req.start = *moving.splice_anchor(0);
+        return plan(field, req);
+    };
+    // WLPA-89 interim gate: smooth when the slowest member turns through the corner within one second (a quarter turn here).
+    auto sharp = slow(Fixed::from_ratio(1, 10).value());
+    const auto before = sharp.checkpoint();
+    expect(sharp.splice_path(0, from_anchor(sharp, 12, 7)) == LandMovement::SpliceResult::sharp && sharp.checkpoint() == before,
+        "a corner the slowest member cannot turn in a second falls back and changes nothing");
+    expect(sharp.splice_path(0, from_anchor(sharp, 14, 3)) == LandMovement::SpliceResult::installed,
+        "a collinear continuation is smooth at any turn rate");
+    auto smooth = slow(whole(1));
+    expect(smooth.splice_path(0, from_anchor(smooth, 12, 7)) == LandMovement::SpliceResult::installed,
+        "a quarter turn is smooth when the slowest member turns a full turn per second");
+    auto fixed = slow(Fixed{});
+    expect(fixed.splice_path(0, from_anchor(fixed, 12, 7)) == LandMovement::SpliceResult::installed,
+        "a squad with a non-turning member never turns in place");
+    // Only a squad translating on its own path has an anchor: a dropped, yielded or still-turning squad keeps the old drop.
+    auto moving = slow(whole(1));
+    expect(moving.yield(0, 99, 1) && !moving.splice_anchor(0), "a yielded squad has no anchor");
+    expect(moving.drop_order(0) && !moving.splice_anchor(0), "a dropped squad has no anchor");
+    // Standing start unchanged (WLPA-68): an accepted path from a non-moving squad turns in place first.
+    auto replacement = request(*field.terrain, 12, 3, 12, 7);
+    replacement.start = moving.squads()[0].position;
+    expect(moving.install_path(0, plan(field, replacement), 0) && moving.squads()[0].turning,
+        "a standing start still turns in place before walking");
+    auto turning_saved = slow(whole(1)).checkpoint();
+    turning_saved.squads[0].turning = true;
+    expect(!LandMovement::from_checkpoint(turning_saved).value().splice_anchor(0), "a squad still turning has no anchor");
+    auto stopped_saved = slow(whole(1)).checkpoint();
+    stopped_saved.squads[0].speed = Fixed{};
+    expect(!LandMovement::from_checkpoint(stopped_saved).value().splice_anchor(0), "a stopped squad has no anchor");
+    auto short_leg = slow(whole(1));
+    while (short_leg.squads()[0].order == LandMoveOrder::following
+        && short_leg.bounded_splice_anchor(0) != short_leg.splice_anchor(0))
+        expect(static_cast<bool>(short_leg.step(field.occupancy, executor, dt)), "approach the end of the short leg");
+    const auto short_anchor = short_leg.bounded_splice_anchor(0);
+    expect(short_anchor && short_anchor == short_leg.splice_anchor(0), "a short remaining leg keeps its endpoint");
+    if (short_anchor) {
+        const auto path = from_anchor(short_leg, 12, 7);
+        expect(short_leg.splice_path(0, path) == LandMovement::SpliceResult::installed, "short leg replacement installs");
+        for (int i = 0; i < 900 && short_leg.squads()[0].order == LandMoveOrder::following; ++i)
+            expect(static_cast<bool>(short_leg.step(field.occupancy, executor, dt)), "finish short leg replacement");
+        expect(short_leg.squads()[0].order == LandMoveOrder::reached && short_leg.squads()[0].position == path.nodes.back(),
+            "short leg replacement reaches its destination");
+    }
+}
+
 void allocation_and_stress() {
     auto field = make_field(std::vector<std::string>(9, std::string(15, '.')));
     sim::InlineExecutor executor;
@@ -281,7 +477,8 @@ void allocation_and_stress() {
     auto retained_field = make_field(std::vector<std::string>(9, std::string(15, '.')));
     auto retained_seed = movement(retained_field, 2, 1).checkpoint();
     for (auto& s : retained_seed.squads) s.order = LandMoveOrder::idle;
-    for (auto& m : retained_seed.members) m.profile.radius = whole(6);
+    // Deployed soldiers cannot be sent away, so the overlapping idle containers keep one retained stopped/stopped row.
+    for (auto& m : retained_seed.members) { m.profile.radius = whole(6); m.state = LandWalkState::deployed; }
     auto retained = LandMovement::from_checkpoint(std::move(retained_seed)).value();
     for (std::uint64_t frame = 0; frame < 8; ++frame) {
         expect(static_cast<bool>(retained.step(retained_field.occupancy, executor, dt)), "warm retained contact motion");
@@ -307,6 +504,7 @@ void allocation_and_stress() {
         const auto elapsed = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - begin).count();
         std::cout << "synthetic-land workers=" << workers << " squads=49 members=882 ticks=150 ms_per_tick=" << elapsed / 150 << '\n';
         const auto saved = stress.checkpoint();
+        if (workers == 1U) std::cout << "land contacts bodies before=882 after=" << stress.body_count() << '\n';
         if (!reference) reference = saved;
         else expect(saved == *reference, "multi-squad 882-member final checkpoint equals across worker counts");
     }
@@ -320,12 +518,26 @@ void allocation_and_stress() {
 }
 
 int main() {
-    speed_rules(); zero_heading_boundaries(); lifecycle_and_gates(); neighbour_contract();
+    speed_rules(); straggler_progress_guard(); straggler_near_hold_paths(); zero_heading_boundaries(); lifecycle_and_gates(); neighbour_contract(); reorder_gate();
+    {
+        sim::InlineExecutor spliced;
+        const auto reference = reorder_splice(spliced, false);
+        expect(reorder_splice(spliced, true) == reference, "WLPA-88 save/restore mid-splice continues identically");
+        for (std::size_t workers : {1U, 2U, 4U, 8U}) {
+            platform::ThreadWorkerAdapter executor(workers);
+            expect(reorder_splice(executor, true) == reference, "WLPA-88 1/2/4/8 workers match across the splice");
+        }
+        test_support::ReverseOrderExecutor reverse(8);
+        expect(reorder_splice(reverse, true) == reference, "WLPA-88 reverse partition order matches across the splice");
+    }
     sim::InlineExecutor serial;
+    const auto stalled = straggler_wait_guard(serial, false);
+    expect(straggler_wait_guard(serial, true) == stalled, "straggler guard restores mid-count");
     const auto reference = follow(serial, false);
     expect(follow(serial, true) == reference, "save/restore continues identically");
     for (std::size_t workers : {1U, 2U, 4U, 8U}) {
         platform::ThreadWorkerAdapter executor(workers);
+        expect(straggler_wait_guard(executor, true) == stalled, "straggler guard matches at 1/2/4/8 workers");
         expect(follow(executor, true) == reference, "1/2/4/8 workers and arbitrary checkpoint ticks match");
     }
     test_support::ReverseOrderExecutor reverse(8);

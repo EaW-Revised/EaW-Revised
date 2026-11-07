@@ -4,7 +4,7 @@
 #include "eawr/core/result.hpp"
 #include "eawr/data/galactic/galactic_data.hpp"
 #include "eawr/sim/galactic/story_engine.hpp"
-#include "eawr/vfs/vfs.hpp"
+#include "eawr/vfs/vfs_fwd.hpp"
 
 #include <string>
 #include <string_view>

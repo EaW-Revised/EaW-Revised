@@ -8,6 +8,7 @@
 #include <memory>
 #include <optional>
 #include <span>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -52,13 +53,24 @@ public:
     GalacticSessionAdapter(campaign::GameSession& game, const sim::PartitionExecutor& executor,
         GalacticAdapterOptions options = {});
 
+    // Private recovery construction retains the fresh game, services and pool
+    // until publication transfers the game to the live owner.
+    [[nodiscard]] static core::Result<std::unique_ptr<GalacticSessionAdapter>> owned(
+        std::shared_ptr<campaign::GameSession>, std::shared_ptr<const sim::PartitionExecutor>,
+        GalacticAdapterOptions = {}, std::shared_ptr<const void> runtime_services = {});
+    [[nodiscard]] std::shared_ptr<campaign::GameSession> owned_game() const noexcept { return owned_game_; }
+    [[nodiscard]] std::shared_ptr<const void> runtime_services() const noexcept { return runtime_services_; }
     // Rebind once the agreed owner transfers from setup to its live worker pool.
-    void bind_executor(const sim::PartitionExecutor& executor) noexcept { executor_ = &executor; }
+    void bind_executor(const sim::PartitionExecutor& executor) noexcept {
+        executor_ = &executor;
+        if (owned_executor_.get() != &executor) owned_executor_.reset();
+    }
     std::uint64_t completed_tick() const override;
     [[nodiscard]] std::optional<sim::SeatId> pause_actor() const { return pause_actor_; }
     std::string state_hash() const override;
     std::vector<std::uint8_t> canonical_state() const override;
     core::Result<void> validate(const SeatInput& input) const override;
+    core::Result<void> validate_recovery_input(const SeatInput& input) override;
     core::Result<void> install(std::span<const SeatInput> canonical) override;
     // Replay encoding of the tick completed last: count:u32 (0 for an empty tick), then per command tick:u64, seat:u32, sequence:u64,
     // length:u32 and the seat input bytes, in canonical order. Human and engine-side commands alike; the AI's native
@@ -66,6 +78,11 @@ public:
     core::Result<std::vector<std::uint8_t>> canonical_input() const override;
     core::Result<CompletedTick> step() override;
     bool is_departure(const SeatInput& input) const override;
+    bool is_rejoin(const SeatInput& input) const override;
+    bool checkpoint_requested() const override;
+    void set_save_host(sim::SeatId host) { save_host_ = host; }
+    [[nodiscard]] std::vector<std::uint8_t> checkpoint_network_state() const { return clock_state(); }
+    [[nodiscard]] core::Result<void> restore_network_state(std::span<const std::uint8_t>);
 
     // Trusted engine-side commands (AI and script seats) are generated on EVERY peer inside the same
     // completeness/monitor-gated step, never sent as human wire commands (CP-2). The source runs after install
@@ -85,6 +102,9 @@ public:
 private:
     [[nodiscard]] core::Result<sim::galactic::GameCommand> authorize(const SeatInput& input) const;
     [[nodiscard]] const sim::galactic::Seat* seat(sim::SeatId id) const;
+    std::shared_ptr<const void> runtime_services_;
+    std::shared_ptr<const sim::PartitionExecutor> owned_executor_;
+    std::shared_ptr<campaign::GameSession> owned_game_;
     campaign::GameSession* game_{};
     const sim::PartitionExecutor* executor_{};
     [[nodiscard]] std::vector<std::uint8_t> clock_state() const;
@@ -95,12 +115,14 @@ private:
     std::vector<sim::SeatId> clock_refusals_;
     std::vector<sim::galactic::Seat> roster_; // tick-zero seats, ascending seat identity
     bool debug_commands_{};
+    std::optional<sim::SeatId> save_host_;
     EngineSource engine_source_;
     std::optional<campaign::GameTick> last_tick_;
     std::vector<core::Diagnostic> refused_;
     std::size_t tick_refusal_begin_{};
     // Every command this adapter submitted for the tick in flight (installed human input, then engine input).
     std::vector<sim::galactic::GameCommand> tick_commands_;
+    std::set<sim::SeatCommandKey> recovery_rejoins_;
     std::vector<std::uint8_t> last_input_; // canonical encoding of the tick completed last
 };
 

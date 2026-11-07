@@ -7,6 +7,7 @@
 #include "eawr/platform/sim_workers.hpp"
 #include "eawr/script/authoritative/tactical_bridge.hpp"
 #include "eawr/sim/tactical/session.hpp"
+#include "eawr/sim/world.hpp"
 #include "eawr/core/tick_profile.hpp"
 
 #include <algorithm>
@@ -31,7 +32,8 @@ using Clock = std::chrono::steady_clock;
 // records completed barrier rows; workers write only their fixed callback/job slots.
 class MeasuredExecutor final : public sim::PartitionExecutor {
 public:
-    explicit MeasuredExecutor(const sim::PartitionExecutor& executor) : executor_(executor) {}
+    explicit MeasuredExecutor(const sim::PartitionExecutor& executor, const bool detailed)
+        : executor_(executor), detailed_(detailed), origin_(detailed ? Clock::now() : Clock::time_point{}) {}
     std::size_t worker_count() const noexcept override { return executor_.worker_count(); }
     core::Result<void> execute(const std::size_t count,
         const std::function<void(std::size_t)>& partition) const override {
@@ -50,7 +52,9 @@ public:
         // a long callback from the surrounding dispatch/join interval; they are
         // separate diagnostic rows, never additional worker barrier cost.
         std::vector<double> partition_ms(count);
-        const bool sample_jobs = name == "plan-searches" || name == "script-instances";
+        const bool sample_jobs = detailed_ || name == "plan-searches" || name == "script-instances";
+        struct Callback final { Clock::time_point begin{}; std::size_t thread{}; };
+        std::vector<Callback> callbacks(detailed_ ? count : 0);
         std::vector<core::tick_profile::Recording> job_recordings(sample_jobs ? count : 0);
         const auto job_count = core::tick_profile::active
             ? std::exchange(core::tick_profile::active->pending_jobs, std::size_t{}) : 0;
@@ -63,13 +67,18 @@ public:
             const core::tick_profile::Pause pause;
             const auto sampled = [&](const std::size_t index) {
                 const auto began = Clock::now();
+                if (detailed_) {
+                    callbacks[index].begin = began;
+                    callbacks[index].thread = std::hash<std::thread::id>{}(std::this_thread::get_id());
+                }
                 if (sample_jobs) {
                     // Job capture is independent of serial scopes; its vector
                     // was reserved on the caller thread before dispatch.
                     core::tick_profile::JobCapture capture(job_recordings[index]);
                     partition(index);
                 } else partition(index);
-                partition_ms[index] = std::chrono::duration<double, std::milli>(Clock::now() - began).count();
+                const auto ended = Clock::now();
+                partition_ms[index] = std::chrono::duration<double, std::milli>(ended - began).count();
             };
             return name.empty() ? executor_.execute(count, sampled) : executor_.execute_phase(name, count, sampled);
         }();
@@ -78,6 +87,19 @@ public:
         const std::string label = name.empty() ? std::string("unnamed") : std::string(name);
         const auto phase_index = phases.size();
         phases.push_back({"worker." + label, elapsed});
+        if (detailed_) {
+            const auto stamp = [&](const Clock::time_point point) {
+                return std::to_string(std::chrono::duration_cast<std::chrono::nanoseconds>(point - origin_).count());
+            };
+            const auto prefix = "profile.barrier." + std::to_string(phase_index) + "." + label + "." + stamp(started);
+            partition_costs.push_back({prefix, elapsed});
+            for (std::size_t index = 0; index < callbacks.size(); ++index) {
+                // Retain every callback, including empty ranges: gaps and overlap are observations.
+                partition_costs.push_back({"profile.callback." + std::to_string(phase_index) + "." + label
+                    + "." + std::to_string(index) + "." + std::to_string(callbacks[index].thread)
+                    + "." + stamp(callbacks[index].begin), partition_ms[index]});
+            }
+        }
         double maximum = 0.0, sum = 0.0;
         for (const auto sample : partition_ms) { maximum = std::max(maximum, sample); sum += sample; }
         partition_costs.push_back({"partition-max." + label, maximum});
@@ -87,6 +109,8 @@ public:
                 + "." + std::to_string(index), partition_ms[index]});
             for (const auto& job : job_recordings[index].costs) {
                 if (!job.name.starts_with("job.")) continue;
+                if (detailed_) partition_costs.push_back({"profile.job." + label + "." + std::string(job.name.substr(4))
+                    + "." + std::to_string(job.identity) + "." + std::to_string(job.type), job.ms});
                 std::string job_label = "partition-job." + label + "." + std::to_string(phase_index)
                     + "." + std::to_string(index)
                     + "." + std::string(job.name.substr(4)) + "." + std::to_string(job.identity);
@@ -110,6 +134,8 @@ private:
     const sim::PartitionExecutor& executor_;
     const std::thread::id owner_{std::this_thread::get_id()};
     mutable bool measuring_{};
+    bool detailed_{};
+    Clock::time_point origin_{};
 };
 
 } // namespace
@@ -282,13 +308,18 @@ public:
           event_log_({std::max(options.event_history, std::max<std::size_t>(options.history, 2)), options.event_bytes}),
           rebuild_world_(std::move(rebuild_world)) {
         options_.history = std::max<std::size_t>(options_.history, 2);
+        // A lockstep driver reads each tick's hash for its per-tick rows and desync checks.
+        if (options_.step_driver || options_.recorded_step_driver) options_.state_hash_policy = sim::StateHashPolicy::always;
         // #637: each tick's state hash is computed off the simulation thread.
         auto hasher = std::make_shared<ThreadStateHasher>();
-        if (session_) session_->set_state_hasher(std::move(hasher));
-        else {
+        if (session_) {
+            session_->set_state_hasher(std::move(hasher));
+            session_->set_state_hash_policy(options_.state_hash_policy);
+        } else {
             scripted_->set_state_hasher(std::move(hasher));
             // #895: the live tick reads only the world's hash; the script hash is on request.
             scripted_->set_authoritative_hash(false);
+            scripted_->set_state_hash_policy(options_.state_hash_policy);
             // #957: the AI step and the Lua service are timed apart (cost phases "ai" and "lua").
             scripted_->set_step_clock([] {
                 return static_cast<std::uint64_t>(
@@ -311,6 +342,44 @@ public:
     }
 
     ~Impl() { stop(); }
+
+    // Starts the simulation thread of an Impl built with launch = false.
+    void launch() { thread_ = std::thread([this] { run(); }); }
+
+    // Before launch(), for a session restored from a battle save at tick T: the tick hashes of ticks 1..T
+    // are not known (empty entries keep tick_hashes() indexed by tick), and every issuer continues one
+    // past the newest command key it was given, recorded or routed (the AI's routing cursors cover a
+    // dropped reinforcement, SAE-10).
+    core::Result<void> seed_restored() {
+        hashes_.assign(static_cast<std::size_t>(world().completed_tick()), sim::StateHash{});
+        for (const auto& command : scripted_->record().commands) {
+            auto& sequence = sequences_[command.key.player_id];
+            sequence = std::max(sequence, command.key.sequence + 1U);
+        }
+        auto saved = scripted_->save_scripts();
+        if (!saved) return core::Result<void>::failure(saved.error());
+        for (const auto& [player, key] : saved.value().last_keys) {
+            auto& sequence = sequences_[player];
+            sequence = std::max(sequence, key.second);
+        }
+        return core::Result<void>::success();
+    }
+
+    // Any thread: a player's save, taken by the simulation thread between two ticks (save_now).
+    void request_save(SaveSink sink) {
+        if (!sink) return;
+        {
+            const std::lock_guard lock(mutex_);
+            save_request_ = std::move(sink);
+        }
+        wake_.notify_all();
+    }
+
+    std::uint64_t next_sequence(const tactical::PlayerId player) const {
+        const std::lock_guard lock(session_mutex_);
+        const auto found = sequences_.find(player);
+        return found == sequences_.end() ? 0U : found->second;
+    }
 
     core::Result<void> submit(LiveOrder order) {
         {
@@ -389,6 +458,15 @@ public:
 
     std::span<const std::pair<sim::EntityId, sim::EntityId>> land_roster() const noexcept { return land_roster_; }
 
+    // Debug overlay (read-only): null when the lock is busy (the caller keeps its last copy) or the world is not land.
+    std::shared_ptr<const tactical::LandOverlayData> land_overlay() const {
+        const std::unique_lock lock(session_mutex_, std::try_to_lock);
+        if (!lock.owns_lock()) return nullptr;
+        const auto* movement = world().land_movement();
+        if (movement == nullptr) return nullptr;
+        return std::make_shared<const tactical::LandOverlayData>(tactical::build_land_overlay(*movement));
+    }
+
     LiveFrame frame() const {
         const std::lock_guard lock(mutex_);
         return frame_;
@@ -400,6 +478,11 @@ public:
             if (snapshot->completed_tick() == tick) return snapshot;
         }
         return nullptr;
+    }
+
+    LiveSession::SnapshotHistory history_copy() const {
+        const std::lock_guard lock(mutex_);
+        return LiveSession::SnapshotHistory(history_.begin(), history_.end());
     }
 
     std::shared_ptr<const LiveFog> fog_at(const std::uint64_t tick) const {
@@ -456,7 +539,17 @@ public:
         std::vector<std::string> hashes;
         hashes.reserve(hashes_.size());
         for (const auto& hash : hashes_) hashes.push_back(hash.get());
+        // on_demand: the last tick's state is still the current state, so its hash is not lost.
+        if (!hashes.empty() && hashes.back().empty() && hashes_.size() == world().completed_tick())
+            hashes.back() = world().state_sha256();
         return hashes;
+    }
+
+    void require_tick_hashes() {
+        const std::lock_guard lock(session_mutex_);
+        options_.state_hash_policy = sim::StateHashPolicy::always;
+        if (scripted_) scripted_->set_state_hash_policy(sim::StateHashPolicy::always);
+        else session_->set_state_hash_policy(sim::StateHashPolicy::always);
     }
 
     tactical::TacticalReplay record() const {
@@ -556,6 +649,7 @@ private:
         Clock::duration interval{};
         for (;;) {
             bool held = false;
+            SaveSink requested;
             {
                 std::unique_lock lock(mutex_);
                 // Paused, or at the halt tick: no tick may run (TM-07, BEP-02).
@@ -564,7 +658,7 @@ private:
                 };
                 const auto due = [&] {
                     if (stopping_ || failure_) return true;
-                    if (!inbox_.empty() || rebase_) return true;
+                    if (!inbox_.empty() || rebase_ || save_request_) return true;
                     if (holding()) return false;
                     if (options_.pacing == Pacing::driven) return target_ > frame_.latest->completed_tick();
                     return false;
@@ -588,7 +682,10 @@ private:
                 }
                 interval = interval_;
                 held = holding();
+                requested = std::exchange(save_request_, {});
             }
+            // A player's save runs here, between two ticks, also while the battle is paused.
+            if (requested) save_now(std::move(requested));
             // Orders for a tick that already ran are refused now; the rest wait for their tick.
             submit_due(world().completed_tick(), false);
             pacing_lag_ms_ = dropped_wall_ms_ = 0.0;
@@ -607,14 +704,14 @@ private:
                 const auto due_ticks = static_cast<std::uint64_t>(elapsed / interval);
                 const std::uint64_t behind = clock_tick + due_ticks > world().completed_tick()
                     ? clock_tick + due_ticks - world().completed_tick() : 0U;
-                if (options_.measure_phases && behind > 0U) {
+                if ((options_.measure_phases || options_.cadence_profile) && behind > 0U) {
                     const auto deadline = clock_start + interval * static_cast<std::int64_t>(
                         world().completed_tick() + 1U - clock_tick);
                     pacing_lag_ms_ = std::max(0.0,
                         std::chrono::duration<double, std::milli>(now - deadline).count());
                 }
                 if (behind > options_.max_catch_up) {
-                    if (options_.measure_phases) dropped_wall_ms_ = pacing_lag_ms_;
+                    if (options_.measure_phases || options_.cadence_profile) dropped_wall_ms_ = pacing_lag_ms_;
                     // Too slow for real time: drop the missed time rather than spiral.
                     clock_start = now - interval;
                     clock_tick = world().completed_tick();
@@ -625,6 +722,7 @@ private:
             submit_due(world().completed_tick(), true);
             const auto before = world().completed_tick();
             if (!step(executor)) return;
+            if (!options_.step_driver) save_if_due();
             if (options_.step_driver && world().completed_tick() == before) {
                 // A completeness wait must service I/O without a busy loop or sim time.
                 std::unique_lock lock(mutex_);
@@ -696,7 +794,7 @@ private:
     }
 
     bool step(const ThreadWorkerAdapter& executor, bool advance_allowed = true) {
-        MeasuredExecutor measured(executor);
+        MeasuredExecutor measured(executor, options_.detailed_profile);
         core::tick_profile::Recording serial;
         const sim::PartitionExecutor& step_executor = options_.measure_phases
             ? static_cast<const sim::PartitionExecutor&>(measured) : executor;
@@ -716,6 +814,9 @@ private:
                 const auto run = [&] { return scripted_ ? step_scripted(step_executor, script_refusals) : session_->step(step_executor); };
                 if (!options_.measure_phases) return run();
                 core::tick_profile::Capture capture(serial);
+                // The caller capture admits inline path jobs; partition callbacks install their own slots.
+                std::optional<core::tick_profile::JobCapture> jobs;
+                if (options_.detailed_profile) jobs.emplace(serial);
                 core::tick_profile::Scope scope("serial.session");
                 return run();
             };
@@ -829,6 +930,12 @@ private:
                     cost.phases = {{"step", std::max(0.0, step_ms - ai_ms_ - lua_ms_)}, {"ai", ai_ms_}, {"lua", lua_ms_},
                         {"fog", fog_ms}};
                 }
+                if (options_.cadence_profile) {
+                    cost.phases.push_back({"cadence.completed-steady-ms",
+                        std::chrono::duration<double, std::milli>(frame_.latest_published.time_since_epoch()).count()});
+                    cost.phases.push_back({"cadence.total-ms", cost.total_ms});
+                    cost.phases.push_back({"cadence.clock-reset", dropped_wall_ms_ > 0.0 ? 1.0 : 0.0});
+                }
                 if (options_.measure_phases) {
                     // Pacing lateness/discarded wall time are observations, not
                     // additional work and never inputs to the clock policy.
@@ -846,14 +953,46 @@ private:
                     if (scripted_) cost.phases.push_back({"world", world_ms_});
                     cost.phases.insert(cost.phases.end(), measured.phases.begin(), measured.phases.end());
                     cost.phases.insert(cost.phases.end(), measured.partition_costs.begin(), measured.partition_costs.end());
-                    for (const auto& phase : serial.costs) cost.phases.push_back({std::string(phase.name), phase.ms});
+                    for (const auto& phase : serial.costs) {
+                        if (phase.name.starts_with("job.") && options_.detailed_profile)
+                            cost.phases.push_back({"profile.job.inline." + std::string(phase.name.substr(4))
+                                + "." + std::to_string(phase.identity) + "." + std::to_string(phase.type), phase.ms});
+                        else cost.phases.push_back({std::string(phase.name), phase.ms});
+                    }
                 }
                 costs_.push_back(std::move(cost));
-                if (costs_.size() > tick_cost_history) costs_.pop_front();
+                // Detailed callback rows are large; bound diagnostic retention independently of sim history.
+                const auto cost_limit = options_.detailed_profile ? std::size_t{64} : tick_cost_history;
+                if (costs_.size() > cost_limit) costs_.pop_front();
             }
         }
         published_.notify_all();
         return static_cast<bool>(tick);
+    }
+
+    // Simulation thread only, between two ticks: the battle's save bytes, or why it cannot be saved.
+    core::Result<std::vector<std::uint8_t>> save_bytes() {
+        if (!scripted_ || !options_.scripts || !options_.scripts->save || options_.step_driver) {
+            core::Diagnostic error; error.code = "EAWR-PLATFORM-0600";
+            error.message = "This battle cannot be saved: it runs without the AI host that saves it.";
+            return core::Result<std::vector<std::uint8_t>>::failure(std::move(error));
+        }
+        const std::lock_guard lock(session_mutex_);
+        return options_.scripts->save(*scripted_);
+    }
+
+    // Simulation thread only, between two ticks: Options::save_at's save, handed to its sink once.
+    void save_if_due() {
+        if (!options_.save_at || save_done_ || world().completed_tick() != *options_.save_at) return;
+        save_done_ = true;
+        auto bytes = save_bytes();
+        if (options_.save_sink) options_.save_sink(*options_.save_at, std::move(bytes));
+    }
+
+    // Simulation thread only, between two ticks: a request_save.
+    void save_now(SaveSink sink) {
+        const auto tick = world().completed_tick();
+        sink(tick, save_bytes());
     }
 
     core::Result<std::shared_ptr<LiveStepContext>> recovery_context(const ThreadWorkerAdapter& executor) {
@@ -993,6 +1132,8 @@ private:
     std::vector<sim::StateHash> hashes_; // resolved by tick_hashes()
     // Per issuer: one past the last sequence the session accepted, from either path.
     std::map<tactical::PlayerId, std::uint64_t> sequences_;
+    bool save_done_{}; // simulation thread only: Options::save_at has been handled
+    SaveSink save_request_; // guarded by mutex_: a player's save the simulation thread has not taken yet
     // Simulation thread only: taken orders waiting for their tick, in arrival order.
     std::vector<LiveOrder> held_;
 
@@ -1068,6 +1209,11 @@ core::Result<std::unique_ptr<LiveSession>> LiveSession::start_impl(
             return StartResult::failure(std::move(error));
         }
     }
+    if (options.save_at && (options.step_driver || options.recorded_step_driver || *options.save_at == 0)) {
+        core::Diagnostic error; error.code = "EAWR-PLATFORM-0600";
+        error.message = "A battle save needs a solo session and a save tick of 1 or later.";
+        return StartResult::failure(std::move(error));
+    }
     if (!replay && options.recorded_step_driver) {
         core::Diagnostic error; error.code = "EAWR-PLATFORM-0600";
         error.message = "A recorded session driver requires replay playback.";
@@ -1137,6 +1283,54 @@ core::Result<std::unique_ptr<LiveSession>> LiveSession::start(
     return start_impl(replay.setup, content, std::move(options), &replay);
 }
 
+core::Result<std::unique_ptr<LiveSession>> LiveSession::start(const std::span<const std::uint8_t> checkpoint,
+    const tactical::TacticalSetup& setup, const tactical::TacticalContent& content, Options options) {
+    using StartResult = core::Result<std::unique_ptr<LiveSession>>;
+    const auto refuse = [](std::string message) {
+        core::Diagnostic error; error.code = "EAWR-PLATFORM-0600"; error.message = std::move(message);
+        return StartResult::failure(std::move(error));
+    };
+    if (options.workers == 0 || options.workers > ThreadWorkerAdapter::max_worker_count)
+        return refuse("live session worker count must be 1 to 256");
+    if (!options.scripts || !options.scripts->restore || !options.scripts->wrap)
+        return refuse("Loading a battle save needs the battle's AI host.");
+    if (options.step_driver || options.recorded_step_driver)
+        return refuse("A battle save loads only into a solo session.");
+    if (options.save_at && *options.save_at == 0) return refuse("A battle save needs a save tick of 1 or later.");
+    // The same initializer as a fresh start (start_impl's rebuild_world), from the saved battle's log.
+    const LiveWorldFactory world = [content](const tactical::TacticalReplay& log) {
+        if (log.setup.domain == tactical::BattleDomain::land) return tactical::TacticalSession::from_replay(log, content);
+        return tactical::TacticalSession::from_replay(log, content.sensors, content.durability, content.motion,
+            content.fog, content.combat, content.victory, content.abilities, content.economy, content.map_box);
+    };
+    std::optional<script::authoritative::ScriptedTacticalSession> restored;
+    {
+        core::load_profile::Scope lua_scope(core::load_profile::Phase::lua);
+        // A direct state load runs no ticks; the executor only serves the re-simulation path, never taken here.
+        const sim::InlineExecutor executor;
+        auto loaded = options.scripts->restore(checkpoint, setup, world, executor);
+        if (!loaded) return StartResult::failure(loaded.error());
+        restored.emplace(std::move(loaded).value());
+    }
+    if (options.load_note_sink) {
+        core::LoadNoteCollector collected;
+        for (const auto& note : content.load_notes) collected.append(note);
+        const auto notes = collected.snapshot();
+        options.load_note_sink(notes);
+    }
+    // Recovery rebuilds a lockstep battle from tick zero; a loaded solo battle has none.
+    const auto no_recovery = []() -> core::Result<tactical::TacticalSession> {
+        core::Diagnostic error; error.code = "EAWR-PLATFORM-0600";
+        error.message = "A loaded battle cannot be rebuilt from tick zero.";
+        return core::Result<tactical::TacticalSession>::failure(std::move(error));
+    };
+    auto impl = std::make_unique<Impl>(std::nullopt,
+        std::make_unique<script::authoritative::ScriptedTacticalSession>(std::move(*restored)), options, no_recovery, false);
+    if (auto seeded = impl->seed_restored(); !seeded) return StartResult::failure(seeded.error());
+    impl->launch();
+    return StartResult::success(std::unique_ptr<LiveSession>(new LiveSession(std::move(impl))));
+}
+
 core::Result<std::vector<std::string>> headless_tick_hashes(
     const tactical::TacticalReplay& replay,
     const std::span<const tactical::SensorProfile> sensors,
@@ -1194,6 +1388,7 @@ bool LiveSession::wait_for(const std::uint64_t tick, const std::chrono::millisec
     return impl_->wait_for(tick, timeout);
 }
 LiveFrame LiveSession::frame() const { return impl_->frame(); }
+std::shared_ptr<const sim::tactical::LandOverlayData> LiveSession::land_overlay() const { return impl_->land_overlay(); }
 std::span<const std::pair<sim::EntityId, sim::EntityId>> LiveSession::land_roster() const noexcept { return impl_->land_roster(); }
 std::optional<bool> LiveSession::reinforcement_point(const tactical::PlayerId player, const tactical::TypeId type,
     const sim::math::Vec3& point, const std::optional<sim::math::Fixed> facing_yaw) const {
@@ -1206,6 +1401,15 @@ LiveSession::ProductionView LiveSession::production_view(const tactical::PlayerI
 std::shared_ptr<const tactical::TacticalSnapshot> LiveSession::snapshot_at(const std::uint64_t tick) const {
     return impl_->snapshot_at(tick);
 }
+LiveSession::SnapshotHistory LiveSession::history_copy() const { return impl_->history_copy(); }
+std::shared_ptr<const tactical::TacticalSnapshot> LiveSession::snapshot_in(
+    const SnapshotHistory& history, const std::uint64_t tick) noexcept {
+    // The same scan as snapshot_at(): a tick is kept once.
+    for (const auto& snapshot : history) {
+        if (snapshot->completed_tick() == tick) return snapshot;
+    }
+    return nullptr;
+}
 std::shared_ptr<const LiveFog> LiveSession::fog_at(const std::uint64_t tick) const { return impl_->fog_at(tick); }
 LiveEvents LiveSession::events_after(const std::uint64_t after, const std::uint64_t through) const {
     return impl_->events_after(after, through);
@@ -1217,10 +1421,13 @@ std::vector<LiveTickCost> LiveSession::tick_costs_after(const std::uint64_t afte
 std::optional<core::Diagnostic> LiveSession::failure() const { return impl_->failure(); }
 std::vector<core::Diagnostic> LiveSession::rejected_orders() const { return impl_->rejected_orders(); }
 std::size_t LiveSession::worker_count() const noexcept { return impl_->worker_count(); }
+std::uint64_t LiveSession::next_sequence(const tactical::PlayerId player) const { return impl_->next_sequence(player); }
+void LiveSession::request_save(SaveSink sink) { impl_->request_save(std::move(sink)); }
 diagnostics::MemoryCapacity LiveSession::memory_capacity() const { return impl_->memory_capacity(); }
 LiveScriptReport LiveSession::script_report() const { return impl_->script_report(); }
 void LiveSession::stop() { impl_->stop(); }
 std::vector<std::string> LiveSession::tick_hashes() const { return impl_->tick_hashes(); }
+void LiveSession::require_tick_hashes() { impl_->require_tick_hashes(); }
 tactical::TacticalReplay LiveSession::record() const { return impl_->record(); }
 
 tactical::TacticalReplay LiveSession::failure_record() const { return impl_->failure_record(); }

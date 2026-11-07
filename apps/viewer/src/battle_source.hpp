@@ -1,8 +1,11 @@
 #pragma once
 
+#include <cstddef>
+#include <functional>
 #include <memory>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace eawr::data { class Catalog; }
 namespace eawr::vfs { class Vfs; }
@@ -32,6 +35,15 @@ public:
     [[nodiscard]] virtual BattleAiCapability ai_capability() const noexcept = 0;
     [[nodiscard]] virtual bool prepare(BattlePreparation& prepared, const vfs::Vfs& files,
         const data::Catalog& catalog, std::string_view map_path, std::string& failure) const = 0;
+    // The same preparation as ordered stages (each reports its own failure text): run back to back they are
+    // prepare(); the attract load queues them as separate load steps. A source without finer stages is one stage.
+    // The arguments must outlive the stages.
+    using Stage = std::function<bool(std::string&)>;
+    // How many of the first prepare_stages() may run off the main thread, back to back on one worker (see
+    // OffloadedStages): those stages touch no engine object and no state the main thread reads before they finish.
+    [[nodiscard]] virtual std::size_t offloaded_stages() const noexcept { return 0; }
+    [[nodiscard]] virtual std::vector<Stage> prepare_stages(BattlePreparation& prepared, const vfs::Vfs& files,
+        const data::Catalog& catalog, std::string_view map_path) const;
 };
 
 // Select the setup-time source using the existing CLI fixture spellings.

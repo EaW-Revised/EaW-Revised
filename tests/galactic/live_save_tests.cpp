@@ -531,6 +531,24 @@ void campaign_identity(std::size_t workers, const std::string& directory) {
     expect(bad.diagnostic && !bad.campaign, "a malformed identity section is listed with its diagnostic");
     std::filesystem::remove(std::filesystem::path(directory) / "bad-identity.eawrsave");
 }
+void mounted_mod_notes(std::size_t workers, const std::string& directory) {
+    namespace mods = eawr::mods;
+    const mods::DescriptionEntry x{mods::DescriptionKeyKind::workshop, "workshop:1", "X", "1", {}};
+    const mods::DescriptionEntry y{mods::DescriptionKeyKind::mods_folder, "mods:Y", "Y", "2", {}};
+    auto source = options(workers, directory); source.saves.mounted_mods = {true, {x, y}};
+    auto writer = take(platform::LiveGameSession::start(setup(), source));
+    source.saves.mounted_mods.entries.clear();
+    (void)save(*writer, "mods");
+    auto local = options(workers, directory); local.saves.mounted_mods = {true, {x}};
+    auto reader = take(platform::LiveGameSession::start(setup(), local));
+    auto prepared = take(reader->prepare_load("mods", false));
+    std::vector<eawr::core::LoadNote> notes;
+    local.load_note_sink = [&](std::span<const eawr::core::LoadNote> batch) { notes.insert(notes.end(), batch.begin(), batch.end()); };
+    auto restored = take(platform::LiveGameSession::start(std::move(prepared), local));
+    expect(std::any_of(notes.begin(), notes.end(), [](const auto& note) { return note.object == "Y"; }),
+        "local restore reports the missing mounted mod while permitting the restore");
+    writer->stop(); reader->stop(); restored->stop();
+}
 void disk_failure(std::size_t workers, const std::string& directory) {
     const auto blocked = std::filesystem::path(directory) / "blocked-directory";
     { std::ofstream file(blocked, std::ios::binary); file << "keep"; }
@@ -556,7 +574,7 @@ int case_galactic_live_save_tests(int argc, char** argv) {
         for (const auto workers : {1U, 2U, 4U, 8U}) {
             const auto root = (std::filesystem::path(directory) / std::to_string(workers)).string();
             galaxy_roundtrip(workers, root); player_load(workers, root); pending_roundtrip(workers, root); prebattle_autosave(workers, root + "-prebattle"); child_roundtrip(workers, root);
-            disk_failure(workers, root); campaign_identity(workers, root); discovery_roundtrip(workers, root);
+            disk_failure(workers, root); campaign_identity(workers, root); discovery_roundtrip(workers, root); mounted_mod_notes(workers, root);
             const auto bytes = saved_bytes(root);
             if (reference_bytes.empty()) reference_bytes = bytes;
             else expect(reference_bytes == bytes, "all live save boundaries have identical bytes on 1/2/4/8 workers");

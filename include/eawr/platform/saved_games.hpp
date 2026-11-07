@@ -12,7 +12,9 @@
 
 #include "eawr/platform/live_game_session.hpp"
 
+#include <cstdint>
 #include <filesystem>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -21,6 +23,13 @@ namespace eawr::platform {
 
 // A missing directory lists no saves; a directory that cannot be read, or more than 1024 saves, fails.
 [[nodiscard]] core::Result<std::vector<LiveSaveSlot>> list_saved_games(const std::filesystem::path& directory);
+// #3989: writes a battle save (LiveSession::request_save's checkpoint) by its stored name as
+// `<directory>/<name>.eawrsave` (created when missing), with `hints` as its presentation-hints section
+// (0x8000) when not empty, as the live session's disk worker writes a campaign save: an unreadable
+// checkpoint, an invalid name, a symbolic link and, without `overwrite`, an existing save are refused.
+// Blocking work: call it off the frame and simulation threads.
+[[nodiscard]] core::Result<void> write_battle_save(const std::filesystem::path& directory, std::string_view name,
+    std::span<const std::uint8_t> checkpoint, std::span<const std::uint8_t> hints, bool overwrite);
 // Removes one save by its stored name. Refuses an invalid name and a symbolic link.
 [[nodiscard]] core::Result<void> delete_saved_game(const std::filesystem::path& directory, std::string_view name);
 // The save name rule: 1 to 64 of letters, digits, space, '-' and '_', with no space at either end.

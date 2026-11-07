@@ -200,6 +200,36 @@ the space implementation. `MovementClass`, `Company_Units`, `Create_Team`,
 `Max_Squad_Size`, population/capture/buildability and ability tags are the land
 combat/pathing/abilities handoff, not another copy of their mechanics here.
 
+## Plan audit metric
+
+Run the game-data CTest `land_ai_plan_audit` with `EAWR_EAW_GAME_ROOT` set.
+It prints a stable, sorted report and writes `tests/skirmish/land-ai-plan-audit.txt`
+under the build tree. `plans_with_zero_missing_calls / total` counts plans that
+did not call an unbound global, binding-object member or handle method. Missing
+calls are ranked by the number of affected plans, with names breaking ties.
+Only the measured zero-missing floor is pinned; improvements raise that floor.
+
+Each mounted land-directory plan receives one forced start, a synthetic target,
+already assembled forces selected from its authored teams, 500,000 credits and
+10,000 population capacity. The harness observes 420 script ticks, retaining the
+normal host bindings and recording final state, issued script orders and new
+script diagnostics for each plan. An inert plan issued no script orders during
+that window. Orders are requests, including native engine requests; the static
+fixture does not prove that a battlefield accepted them or that a plan won.
+Definition/load failures remain visible as error rows and inert plans.
+The land script host reads passive object/account storage through the shared
+tactical adapter; the audit does not step the land simulation or test its economy.
+
+The counting sink exists only when explicitly supplied by the test. Global names
+defined or assigned in mounted scripts remain nil when unset; a conservative
+text scan builds that inventory. Other unbound global lookups and missing host
+members return callable stubs, whose invocation counts the name and returns nil.
+The scan can miss dynamic assignments or include names in comments and strings;
+an unrecognized nil global remains truthy under the audit and can change a branch.
+Normal runs retain nil misses; the sink adds no saved or hashed state. The metric
+describes calls observed in this fixture, not how well the AI plays, and zero
+missing calls does not imply zero script errors or complete branch coverage.
+
 ## Unverified seams and retail cases
 
 | Seam | What remains unknown | Evidence/case needed |

@@ -4,6 +4,8 @@
 #include "galactic_support.hpp"
 #include "raid_fixture.hpp"
 #include "eawr/core/gc_profile.hpp"
+#include "eawr/platform/agreed_campaign.hpp"
+#include "eawr/vfs/vfs.hpp"
 #include "eawr/core/sha256.hpp"
 #include "eawr/campaign/live_setup.hpp"
 #include "eawr/platform/sim_workers.hpp"
@@ -11,6 +13,7 @@
 #include "ai_campaign_gate.hpp"
 #include "ai_learning_gate.hpp"
 #include "ai_history_diff.hpp"
+#include "ai_quality_run.hpp"
 #include "../../src/campaign/galactic_ai_usability.hpp"
 #include "eawr/campaign/live_conflict.hpp"
 #include "eawr/campaign/space_entry.hpp"
@@ -39,10 +42,19 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <thread>
 #include <utility>
 #include <variant>
 #include <vector>
+#include <ctime>
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#endif
 
 namespace {
 using namespace galactic_test;
@@ -357,6 +369,68 @@ void freestore_movement_probe(cp::GameSession& game, const cp::GalacticAiRuntime
     } catch (const std::exception& error) { out.failure = error.what(); }
     movement_probes.push_back(std::move(out));
 }
+// R1 (co-op design): the installed single-player map with one human team and AI factions only, run under networked
+// transport with multiplayer rules and again with single-player rules. Reports whether a victory condition fires.
+int coop_victory_r1(std::uint64_t ticks) {
+    const auto root = game_root();
+    std::vector<eawr::vfs::MountSpec> mounts;
+    for (const auto& [id, folder] : {std::pair{"expansion", "corruption"}, std::pair{"base", "GameData"}})
+        mounts.push_back(must(eawr::vfs::resolve_manifest_mount(id, root / folder / "Data")).mount);
+    auto files = must(eawr::vfs::Vfs::mount(mounts));
+    const auto loaded = must(eawr::data::load_catalog(files, eawr::data::Profile::foc));
+    const auto data = must(eawr::data::galactic::load_galactic_data(files, loaded.catalog));
+    const auto types = eawr::units::galactic_type_table(loaded.catalog);
+    constexpr std::string_view campaign = "Sandbox_Equal_Footing_Underworld";
+    const auto* source = data.campaign(campaign);
+    expect(source && source->starting_active_player == "Underworld", "stock campaign authors the Underworld human seat");
+    for (const auto flavour : {cp::CampaignRulesFlavour::multiplayer, cp::CampaignRulesFlavour::single_player}) {
+        cp::CampaignSetupOptions options; options.seed = 42;
+        options.mode = cp::CampaignSetupMode::multiplayer; options.rules_flavour = flavour;
+        std::vector<ga::PlayerSelection> selected;
+        for (const auto& faction : data.factions) {
+            const auto id = static_cast<galactic::PlayerId>(options.players.size() + 1);
+            const bool human = faction.name == source->starting_active_player;
+            const bool ai = faction.name == "Empire" || faction.name == "Rebel";
+            options.players.push_back({{id, id, 0}, faction.name, human || ai || !faction.is_playable.value_or(false)});
+            if (human || ai) options.seats.push_back({galactic::SeatId{id}, id, human ? galactic::SeatKind::human : galactic::SeatKind::ai,
+                id - 1, true, human ? 1U : 0U});
+            if (ai) selected.push_back({id, faction.name == "Empire" ? "BASICEMPIRE" : "BASICREBEL", "NORMAL", {}, {}});
+        }
+        const auto human_seat = std::find_if(options.seats.begin(), options.seats.end(),
+            [](const auto& seat) { return seat.kind == galactic::SeatKind::human; });
+        if (human_seat == options.seats.end()) throw std::runtime_error("co-op fixture needs a human faction");
+        auto teammate = *human_seat;
+        teammate.seat_id = galactic::SeatId{static_cast<std::uint32_t>(data.factions.size() + 1)};
+        teammate.lobby_slot = static_cast<std::uint32_t>(data.factions.size());
+        options.seats.push_back(teammate);
+        std::vector<std::string> originals; for (const auto& type : types.types) originals.push_back(type.name);
+        std::sort(originals.begin(), originals.end());
+        for (const auto& name : originals) options.types.push_back({options.types.size() + 1, name});
+        const auto plan = must(cp::plan_live_campaign_setup(files, data, types, campaign, options, "Normal_Default"));
+        const auto prepared = must(cp::prepare_stock_galactic_ai_runtime(files, loaded.catalog, data, types, plan, selected,
+            std::make_shared<eawr::platform::ThreadWorkerAdapter>(1), false, 4096, 4096));
+        expect(plan.human_observers().size() == 1 && prepared->story_players.shared_local_player ==
+            (flavour == cp::CampaignRulesFlavour::single_player ? std::optional{plan.human_observers().front()} : std::nullopt),
+            "prepared story players expose the agreed human faction only under networked single-player rules");
+        const auto services = must(cp::prepare_live_campaign_services(files, loaded.catalog, data, types, plan, "Normal_Default"));
+        auto root_owner = must(cp::CampaignRoot::create(plan, services));
+        const eawr::platform::ThreadWorkerAdapter executor(1);
+        bool fired = false; std::uint64_t first_tick = 0;
+        for (std::uint64_t tick = 0; tick < ticks; ++tick) {
+            must(root_owner.game()->step(executor));
+            const auto& victory = root_owner.game()->galaxy().snapshot()->victory();
+            if (!fired && victory && (victory->pending || victory->result_dispatched)) { fired = true; first_tick = tick + 1; }
+        }
+        std::cout << "R1 real map " << campaign << " " << (flavour == cp::CampaignRulesFlavour::multiplayer ? "multiplayer" : "single_player")
+                  << " rules, human team vs AI: victory fired within " << ticks << " ticks = " << (fired ? "yes" : "no");
+        if (fired) std::cout << " (first at tick " << first_tick << ")";
+        std::cout << std::endl;
+        // Measured on the installed map: the human team does not win against AI-only opposition within the window
+        // under either rules flavour. The window is 1800 ticks (one minute), past the 30-frame victory delay.
+        expect(!fired, "co-op human team vs AI only does not end the campaign early on the installed single-player map");
+    }
+    return failures ? 2 : 0;
+}
 int installed(bool release, const std::filesystem::path& directory, bool benchmark, std::uint64_t probe_frames = 0,
     std::size_t probe_workers = 1, bool human_encounter_only = false, bool hash_baseline = false) {
     const auto root = game_root();
@@ -484,7 +558,8 @@ int installed(bool release, const std::filesystem::path& directory, bool benchma
                 return movement_probes.back().failure.empty() ? 0 : 2;
             }
             const auto report = galactic_campaign_gate::run(*root_owner.game(), *setup, configuration, observed, directory,
-                galactic_learning_gate::probe(directory / "learning.json"), human_encounter_only, hash_baseline);
+                galactic_learning_gate::probe(directory / "learning.json"), human_encounter_only, hash_baseline,
+                !benchmark && !human_encounter_only && !hash_baseline);
             report.write(std::cout);
             if (hash_baseline) return report.mature_samples == 512 && report.failure.empty() && !failures ? 0 : 2;
             if (human_encounter_only) return report.stop_reason == "unattended_human_encounter_advanced" && report.failure.empty() ? 0 : 2;
@@ -518,19 +593,24 @@ struct InstalledLive final {
     eawr::data::LoadResult loaded;
     eawr::data::galactic::GalacticData data;
     eawr::units::GalacticTypeTable types;
-    static constexpr std::string_view campaign = "Sandbox_Equal_Footing_Underworld";
+    std::string campaign;
     cp::CampaignSetupOptions setup;
     galactic::SeatId human{};
     std::set<galactic::PlayerId> ai_players;
-    static std::shared_ptr<const eawr::vfs::Vfs> mount_installed() {
+    static std::shared_ptr<const eawr::vfs::Vfs> mount_installed(const std::string& mod_root) {
+        auto layers = mod_root.empty() ? std::vector<eawr::vfs::LayerRoot>{} : eawr::vfs::mod_chain_roots(mod_root);
+        layers.emplace_back("expansion", game_root() / "corruption" / "Data");
+        layers.emplace_back("base", game_root() / "GameData" / "Data");
+        auto chain = must(eawr::vfs::resolve_manifest_chain(layers));
         std::vector<eawr::vfs::MountSpec> mounts;
-        for (const auto& [id, folder] : {std::pair{"expansion", "corruption"}, std::pair{"base", "GameData"}})
-            mounts.push_back(must(eawr::vfs::resolve_manifest_mount(id, game_root() / folder / "Data")).mount);
+        for (auto& manifest : chain) mounts.push_back(std::move(manifest.mount));
         return std::make_shared<const eawr::vfs::Vfs>(must(eawr::vfs::Vfs::mount(mounts)));
     }
-    InstalledLive() : files(mount_installed()), loaded(must(eawr::data::load_catalog(*files, eawr::data::Profile::foc))),
+    explicit InstalledLive(std::string mod_root = {}, std::string campaign_name = "Sandbox_Equal_Footing_Underworld")
+        : files(mount_installed(mod_root)), loaded(must(eawr::data::load_catalog(*files,
+              mod_root.empty() ? eawr::data::Profile::foc : eawr::data::Profile::remake))),
         data(must(eawr::data::galactic::load_galactic_data(*files, loaded.catalog))),
-        types(eawr::units::galactic_type_table(loaded.catalog)) {
+        types(eawr::units::galactic_type_table(loaded.catalog)), campaign(std::move(campaign_name)) {
         const auto* source = data.campaign(campaign);
         if (!source) throw std::runtime_error("installed live AI campaign missing");
         setup.seed = 42;
@@ -551,8 +631,8 @@ struct InstalledLive final {
         std::sort(originals.begin(), originals.end());
         for (const auto& name : originals) setup.types.push_back({setup.types.size() + 1, name});
     }
-    [[nodiscard]] auto prepare(bool install_native_ai, ga::ServicePeriods periods = ga::retail_service_periods) const {
-        return must(eawr::platform::PreparedLiveCampaign::create(files, loaded.catalog, data, types, campaign, setup, "Normal_Default", install_native_ai, periods));
+    [[nodiscard]] auto prepare(bool install_native_ai, ga::ServicePeriods periods = ga::retail_service_periods, bool observe = false) const {
+        return must(eawr::platform::PreparedLiveCampaign::create(files, loaded.catalog, data, types, campaign, setup, "Normal_Default", install_native_ai, periods, observe));
     }
 };
 struct ProfileEvidence final {
@@ -885,6 +965,53 @@ std::string environment_or(const char* name, std::string fallback) {
     return value && *value ? std::string(value) : fallback;
 #endif
 }
+// #5519: the lockstep exchange encoding equals the serial canonical encoding on the installed stock campaign (real
+// production offer tables, census and fleets) at every 30th tick, for 1, 2, 4 and 8 workers.
+int exchange_encode(const std::uint64_t ticks) {
+    const InstalledLive fixture;
+    auto prepared = fixture.prepare(false);
+    auto& game = eawr::platform::AgreedCampaignAccess::session(*prepared);
+    const eawr::platform::ThreadWorkerAdapter stepping(1);
+    std::uint64_t compared = 0;
+    for (std::uint64_t i = 0; i < ticks; ++i) {
+        static_cast<void>(must(game.step(stepping)));
+        if (game.completed_tick() % 30 != 0) continue;
+        const auto serial = game.galaxy().canonical_state_bytes();
+        for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+            const eawr::platform::ThreadWorkerAdapter executor(workers);
+            expect(game.galaxy().exchange_state_bytes(executor) == serial,
+                "exchange encoding equals the serial encoding at " + std::to_string(workers) + " workers, tick " + std::to_string(game.completed_tick()));
+        }
+        ++compared;
+    }
+    expect(compared > 0, "at least one exchange tick was compared");
+    return failures ? 1 : 0;
+}
+// Workshop folder of a mod id, searched like the quality sweep does; empty when this host does not have it.
+std::string workshop_mod_folder(const std::string& id) {
+    std::vector<std::filesystem::path> roots;
+    if (const auto configured = environment_or("EAWR_WORKSHOP_ROOT", ""); !configured.empty()) roots.emplace_back(configured);
+    const auto installed_root = game_root();
+    roots.push_back(installed_root.parent_path().parent_path() / "workshop" / "content" / "32470");
+    roots.push_back(installed_root.parent_path() / "workshop" / "content" / "32470");
+    roots.push_back(installed_root.parent_path().parent_path() / "mods" / "workshop" / "content" / "32470");
+    for (const auto& base : roots) {
+        std::error_code unreadable;
+        if (std::filesystem::is_directory(base / id, unreadable) && !unreadable) return (base / id).string();
+    }
+    return {};
+}
+// Process CPU time (user + kernel, all threads) in ms, for CPU% of the logical processors next to ms/tick.
+double process_cpu_ms() {
+#ifdef _WIN32
+    FILETIME created{}, exited{}, kernel{}, user{};
+    if (!GetProcessTimes(GetCurrentProcess(), &created, &exited, &kernel, &user)) return 0.0;
+    const auto to_ms = [](const FILETIME& t) { return static_cast<double>((static_cast<std::uint64_t>(t.dwHighDateTime) << 32) | t.dwLowDateTime) / 1e4; };
+    return to_ms(kernel) + to_ms(user);
+#else
+    return 1000.0 * static_cast<double>(std::clock()) / CLOCKS_PER_SEC;
+#endif
+}
 // Command-line form of the EAWR_TICK_PROFILE_* environment, for pool jobs that cannot set it: modes and workers are
 // comma lists, "hw" in the workers list is std::thread::hardware_concurrency(). The environment still wins.
 int tick_profile(std::filesystem::path directory, std::uint64_t ticks, std::string default_modes = "off,on",
@@ -899,7 +1026,15 @@ int tick_profile(std::filesystem::path directory, std::uint64_t ticks, std::stri
         if (worker_text == "hw") worker_text = std::to_string(std::max(1u, std::thread::hardware_concurrency()));
     std::map<std::string, std::uint64_t> mode_digest;
     std::filesystem::create_directories(directory);
-    const InstalledLive fixture;
+    std::string profile_mod_root = environment_or("EAWR_TICK_PROFILE_MOD_ROOT", "");
+    if (const auto mod_id = environment_or("EAWR_TICK_PROFILE_MOD_ID", ""); profile_mod_root.empty() && !mod_id.empty()) {
+        profile_mod_root = workshop_mod_folder(mod_id);
+        if (profile_mod_root.empty()) { std::cout << "SKIPPED: workshop mod " << mod_id << " is not installed on this host" << std::endl; return 77; }
+    }
+    // Statistics (not the csv) cover only ticks from this offset on, so the opening can be left out (steady state).
+    const std::uint64_t stats_from = std::stoull(environment_or("EAWR_TICK_PROFILE_STATS_FROM", "0"));
+    const InstalledLive fixture(profile_mod_root,
+        environment_or("EAWR_TICK_PROFILE_CAMPAIGN", "Sandbox_Equal_Footing_Underworld"));
     constexpr auto phase_count = static_cast<std::size_t>(gp::Phase::count);
     constexpr auto cpu_begin = static_cast<std::size_t>(gp::Phase::perception);
     for (const auto& mode : modes) for (const auto& worker_text : worker_counts) {
@@ -907,11 +1042,41 @@ int tick_profile(std::filesystem::path directory, std::uint64_t ticks, std::stri
         Live::Options options; options.workers = workers; options.pacing = Live::Pacing::driven;
         options.saves.directory = (directory / ("saves-" + mode + "-w" + worker_text)).string();
         auto live = must(Live::start(fixture.prepare(mode == "on"), options));
+        // The paused galaxy never steps on its own (#5518): an AI invasion of the human seat parks the session on a
+        // ready conflict choice that a presentation would answer. Answer it once per conflict by resolving, as a
+        // player pressing Resolve, and report any other wait by name instead of timing out on the tick.
+        eawr::sim::EntityId answered_conflict{};
         const auto advance = [&](std::uint64_t tick) {
+            using Clock = std::chrono::steady_clock;
             live->advance_to(tick);
-            if (!live->wait_for(tick, std::chrono::minutes(30))) {
-                const auto error = live->failure();
-                throw std::runtime_error(error ? eawr::core::format_diagnostic(*error) : "tick profile frame timed out");
+            const auto began = Clock::now();
+            while (!live->wait_for(tick, std::chrono::milliseconds(500))) {
+                if (const auto error = live->failure()) throw std::runtime_error(eawr::core::format_diagnostic(*error));
+                const auto elapsed = Clock::now() - began;
+                const auto frame = live->frame();
+                const auto waiting = eawr::platform::awaited_input(frame);
+                if (elapsed > std::chrono::minutes(30))
+                    throw std::runtime_error("tick profile frame timed out at tick " + std::to_string(tick) + (waiting ? ": " + waiting->describe() : std::string()));
+                if (!waiting) continue;
+                if (waiting->kind == eawr::platform::LiveAwaitedInput::Kind::conflict_choice && waiting->conflict != answered_conflict && frame.latest) {
+                    bool answered = false;
+                    for (const auto& seat : frame.latest->seats()) {
+                        if (const auto order = eawr::platform::battle_choice_order(frame, seat.seat_id, waiting->conflict, false)) {
+                            live->submit(*order);
+                            answered_conflict = waiting->conflict;
+                            answered = true;
+                            const auto& conflict = frame.pending_conflict->conflict;
+                            std::cerr << "TICK-PROFILE-ANSWER tick=" << tick << " session_tick=" << frame.session_tick << " conflict=" << conflict.id
+                                << " layer=" << (conflict.layer == eawr::campaign::BattleLayer::land ? "land" : "space") << " planet=" << conflict.planet
+                                << " invader=" << conflict.invader << " defender=" << conflict.defender << " human_seat=" << seat.seat_id.value
+                                << " pause_depth=" << frame.latest->clock().pause_depth << std::endl;
+                            break;
+                        }
+                    }
+                    if (answered) continue; // otherwise a forced or unadmitted choice falls through to the named failure below
+                }
+                if (elapsed > std::chrono::seconds(20))
+                    throw std::runtime_error("tick profile cannot publish tick " + std::to_string(tick) + ": " + waiting->describe());
             }
         };
         advance(1);
@@ -920,7 +1085,9 @@ int tick_profile(std::filesystem::path directory, std::uint64_t ticks, std::stri
         std::vector<Row> rows;
         rows.reserve(ticks);
         const bool was_enabled = gp::enabled.exchange(true, std::memory_order_relaxed);
+        double cpu_begin_ms = process_cpu_ms(), cpu_end_ms = cpu_begin_ms;
         for (std::uint64_t index = 0; index < ticks; ++index) {
+            if (index == stats_from) cpu_begin_ms = process_cpu_ms();
             const auto tick = live->completed_tick() + 1;
             const auto before = gp::snapshot();
             const auto begin = std::chrono::steady_clock::now();
@@ -933,6 +1100,7 @@ int tick_profile(std::filesystem::path directory, std::uint64_t ticks, std::stri
             if (state_digest) row.snapshot_hash = live->frame().latest->sha256();
             rows.push_back(row);
         }
+        cpu_end_ms = process_cpu_ms();
         gp::enabled.store(was_enabled, std::memory_order_relaxed);
         const auto label = mode + "-w" + worker_text;
         if (state_digest) {
@@ -980,6 +1148,9 @@ int tick_profile(std::filesystem::path directory, std::uint64_t ticks, std::stri
                 for (const unsigned char c : hash) digest = (digest ^ c) * 1099511628211ULL;
             }
         }
+        double measured_wall_ms = 0;
+        if (stats_from > 0 && stats_from < rows.size()) rows.erase(rows.begin(), rows.begin() + static_cast<std::ptrdiff_t>(stats_from));
+        for (const auto& row : rows) measured_wall_ms += row.wall_ms;
         const auto stats = [](std::vector<double> values) {
             std::sort(values.begin(), values.end());
             const auto at = [&](std::size_t percent) { return values[(values.size() * percent + 99) / 100 - 1]; };
@@ -994,6 +1165,11 @@ int tick_profile(std::filesystem::path directory, std::uint64_t ticks, std::stri
             std::cerr << "tick profile: " << label << " hashes differ from the first worker count of mode " << mode << "\n";
             ++failures;
         }
+        const auto logical = std::max(1u, std::thread::hardware_concurrency());
+        std::cout << "TICK-CPU " << label << " stats_from=" << stats_from << " ticks=" << rows.size() << " logical=" << logical
+            << " workers=" << workers << " cpu_ms_per_tick=" << (cpu_end_ms - cpu_begin_ms) / static_cast<double>(rows.size())
+            << " wall_ms_per_tick=" << measured_wall_ms / static_cast<double>(rows.size())
+            << " cpu_percent_of_logical=" << 100.0 * (cpu_end_ms - cpu_begin_ms) / (measured_wall_ms * logical) << std::endl;
         std::cout << "TICK-PROFILE " << label << " ticks=" << rows.size() << " hash_fnv=" << digest
             << " hashes=" << hashes_all.size() << " step_ms avg/p50/p95/p99/max=" << step_stats[0] << '/' << step_stats[1]
             << '/' << step_stats[2] << '/' << step_stats[3] << '/' << step_stats[4]
@@ -1039,11 +1215,60 @@ int tick_profile(std::filesystem::path directory, std::uint64_t ticks, std::stri
     }
     return failures ? 1 : 0;
 }
+// Async-AI quality sweep (tools/gc_quality): one seed of one arm, compact NDJSON decision log
+// (ai_quality_run.hpp). --quality-run <dir|-> <ticks> <seed> <arm> <probe> <profile> [workshop ids, ';' chain | -] [campaign | -].
+// Workshop ids resolve through EAWR_WORKSHOP_ROOT or the Steam layout beside the game root; a missing
+// mod folder skips the case (exit 77) so a host without the mod never reports a failure.
+int quality_run(int argc, char** argv) {
+    if (argc < 8) throw std::runtime_error("--quality-run <dir|-> <ticks> <seed> <arm> <probe> <profile> [mod ids|-] [campaign|-]");
+    galactic_quality_run::Options options;
+    options.directory = std::string_view(argv[2]) == "-" ? std::filesystem::path{} : std::filesystem::path(argv[2]);
+    options.ticks = std::stoull(argv[3]);
+    options.seed = std::stoull(argv[4]);
+    options.arm = argv[5];
+    options.probe = argv[6];
+    options.profile = argv[7];
+    std::string chain;
+    const std::string mods = argc > 8 && std::string_view(argv[8]) != "-" ? argv[8] : "";
+    std::string campaign = argc > 9 && std::string_view(argv[9]) != "-" ? argv[9] : "Sandbox_Equal_Footing_Underworld";
+    // Workshop folders: EAWR_WORKSHOP_ROOT, beside a Steam game root, beside a mirrored game root, or in a mods folder beside the mirror.
+    std::vector<std::filesystem::path> workshop_roots;
+    if (const auto configured = environment_or("EAWR_WORKSHOP_ROOT", ""); !configured.empty()) workshop_roots.emplace_back(configured);
+    const auto installed_root = game_root();
+    workshop_roots.push_back(installed_root.parent_path().parent_path() / "workshop" / "content" / "32470");
+    workshop_roots.push_back(installed_root.parent_path() / "workshop" / "content" / "32470");
+    workshop_roots.push_back(installed_root.parent_path().parent_path() / "mods" / "workshop" / "content" / "32470");
+    std::size_t begin = 0;
+    while (!mods.empty() && begin <= mods.size()) {
+        const auto end = mods.find(';', begin);
+        const auto id = mods.substr(begin, end == std::string::npos ? std::string::npos : end - begin);
+        std::filesystem::path folder;
+        for (const auto& base : workshop_roots) {
+            std::error_code unreadable; // a folder the host may not read counts as absent
+            if (std::filesystem::is_directory(base / id, unreadable) && !unreadable) { folder = base / id; break; }
+        }
+        if (folder.empty()) {
+            std::cout << "SKIPPED: workshop mod " << id << " is not installed on this host" << std::endl;
+            return 77;
+        }
+        chain += (chain.empty() ? "" : ";") + folder.string();
+        if (end == std::string::npos) break;
+        begin = end + 1;
+    }
+    InstalledLive fixture(chain, campaign);
+    fixture.setup.seed = options.seed;
+    options.campaign = campaign;
+    return galactic_quality_run::run(fixture, options, ga::retail_service_periods);
+}
 } // namespace
 int main(int argc, char** argv) {
     try {
         if (argc > 1 && std::string_view(argv[1]) == "--human-encounter")
             return installed(true, argc > 2 ? argv[2] : "out/galactic-human-encounter", true, 0, 1, true);
+        if (argc > 1 && std::string_view(argv[1]) == "--coop-victory-r1") return coop_victory_r1(argc > 2 ? std::stoull(argv[2]) : 600);
+        if (argc > 1 && std::string_view(argv[1]) == "--quality-run") return quality_run(argc, argv);
+        if (argc > 1 && std::string_view(argv[1]) == "--exchange-encode")
+            return exchange_encode(argc > 2 ? std::stoull(argv[2]) : 300);
         if (argc > 1 && std::string_view(argv[1]) == "--tick-profile")
             return tick_profile(argc > 2 ? argv[2] : "out/galactic-tick-profile", argc > 3 ? std::stoull(argv[3]) : 30,
                 argc > 4 ? argv[4] : "off,on", argc > 5 ? argv[5] : "1");
@@ -1122,6 +1347,7 @@ int main(int argc, char** argv) {
         prepared_restore_contracts();
         authored_selection_contracts();
         mp_ai_uses_authored_faction_basic_ai();
+        shared_story_local_player_needs_sp_rules_and_one_human();
         mp_ai_uses_agreed_difficulty_mapping();
         mp_ai_preserves_human_inactive_and_ambient_absence();
         mp_ai_refuses_unsupported_playable_inputs();
@@ -1135,6 +1361,7 @@ int main(int argc, char** argv) {
         actor_parent_depth_contracts();
         sparse_actor_change_contracts();
         free_fleet_signal_contracts();
+        native_provider_isolation_contracts();
         real_factory_contracts();
         real_factory_contracts(true);
         real_factory_contracts(false, true);

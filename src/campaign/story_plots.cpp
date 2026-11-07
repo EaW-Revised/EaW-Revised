@@ -1,4 +1,5 @@
 #include "eawr/campaign/story_plots.hpp"
+#include "eawr/data/xml.hpp"
 
 #include "eawr/core/text.hpp"
 #include "eawr/data/retail_values.hpp"

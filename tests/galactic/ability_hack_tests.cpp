@@ -37,7 +37,8 @@ bool locked(const gc::GalacticSession& world, gc::PlayerId player, gc::TypeId ty
     return false;
 }
 void paid(const eawr::sim::PartitionExecutor& pool, std::vector<std::string>& hashes) {
-    const auto config = hack_setup(); auto game = take(eawr::campaign::GameSession::create(config));
+    auto config = hack_setup(); config.control->planets[0].ground_layout = {{ground_structure, 7}};
+    auto game = take(eawr::campaign::GameSession::create(config));
     const auto prepared = prepare(game, config, pool, hashes);
     const auto* menu = game.galaxy().snapshot()->hero_action_menus();
     expect(menu && menu->hack && menu->hack->live_prepared == prepared && menu->hack->prepared.prepared_price == f(300)
@@ -47,6 +48,8 @@ void paid(const eawr::sim::PartitionExecutor& pool, std::vector<std::string>& ha
         "hack prepared payload round trips");
     auto forged = prepared; forged.price = f(1);
     order(game, 2, gc::ExecutePreparedAbility{forged}); hashes.push_back(take(game.step(pool)).state_hash.get());
+    expect(game.galaxy().snapshot()->control()->planets[0].ground_layout == std::vector<gc::GroundLayoutEntry>{{ground_structure, 7}},
+        "a forged hack leaves the existing layout intact");
     expect(game.galaxy().snapshot()->player_economy()->players[1].credits == f(1000) && !locked(game.galaxy(), 1, weapon_type),
         "a forged price refuses before any debit or lock");
     order(game, 3, gc::ExecutePreparedAbility{prepared}); hashes.push_back(take(game.step(pool)).state_hash.get());
@@ -56,6 +59,7 @@ void paid(const eawr::sim::PartitionExecutor& pool, std::vector<std::string>& ha
     expect(!present(world, actor(config)) && !present(world, weapon(config)), "hacker and every orbital fleet member leave through canonical loss");
     expect(snapshot->fleets().empty() || std::none_of(snapshot->fleets().begin(), snapshot->fleets().end(),
         [&](const auto& fleet) { return fleet.orbit == config.planets[0].id; }), "no orbital fleet remains at the planet");
+    expect(snapshot->control()->planets[0].ground_layout.empty(), "successful hack clears the layout");
     expect(snapshot->control()->planets[0].destroyed && snapshot->control()->planets[0].starbase.level == 0
         && snapshot->control()->planets[0].landed.empty(), "shared ruins, starbase clear and surface cleanup apply");
     expect(snapshot->control()->state[0].current_player == neutral_player
@@ -72,6 +76,22 @@ void paid(const eawr::sim::PartitionExecutor& pool, std::vector<std::string>& ha
         hashes.push_back(take(game.step(pool)).state_hash.get());
         expect(take(fresh.session.step(pool)).state_hash.get() == hashes.back(), "saved hack continuation equals the uninterrupted state");
     }
+}
+void battle_loss_layout_projection() {
+    auto config = hack_setup(); config.control->planets[0].ground_layout = {{ground_structure, 7}};
+    config.observer->human_observers = {1}; config.observer->solo_reference_human = 1;
+    for (auto& record : config.observer->records) if (record.player == 1 && record.planet == config.planets[0].id)
+        record.mask |= gc::bit(gc::Intelligence::ground_contents);
+    auto world = take(gc::GalacticSession::create(config));
+    const auto before = world.snapshot();
+    const auto has_marker = [](const auto& snapshot) {
+        return std::any_of(snapshot->observations().begin(), snapshot->observations().end(), [](const auto& row) {
+            return row.player == 1 && !row.ground_layout.empty();
+        });
+    };
+    expect(has_marker(before), "owner sees the ground marker before a battle loss");
+    take(world.apply_battle_losses(std::array{ground_structure}));
+    expect(!has_marker(world.snapshot()) && has_marker(before), "battle loss refreshes projection while preserving the old snapshot");
 }
 void refusals(const eawr::sim::PartitionExecutor& pool, std::vector<std::string>& hashes) {
     {   // WGCH-112: unaffordable current funds fail before any debit or mutation.
@@ -150,6 +170,7 @@ void spy_transfer(const eawr::sim::PartitionExecutor& pool, std::vector<std::str
 }
 } // namespace
 int case_galactic_ability_hack_tests() {
+    battle_loss_layout_projection();
     try {
         std::vector<std::string> baseline; eawr::platform::ThreadWorkerAdapter one(1);
         paid(one, baseline); refusals(one, baseline); ai_route(one, baseline); spy_transfer(one, baseline);

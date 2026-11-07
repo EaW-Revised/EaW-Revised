@@ -275,7 +275,7 @@ void UiGalleryMode::State::build_load_game_page(Control& root) {
             }
             return found;
         };
-        const auto click_row = [this, viewport, list](const std::optional<std::size_t> row) {
+        const auto click_row = [viewport, list](const std::optional<std::size_t> row) {
             ItemList* items = list();
             if (!row || items == nullptr || static_cast<int32_t>(*row) >= items->get_item_count()) return;
             const Rect2 rect = items->get_item_rect(static_cast<int32_t>(*row));
@@ -353,7 +353,7 @@ void UiGalleryMode::State::build_load_game_page(Control& root) {
                                                                                                     : "another row was selected";
                              }});
         box_steps.push_back({"Delete asks again",
-                             [this, viewport, centre] { send_click(*viewport, centre("IDC_DELETE_GAME_BUTTON")); },
+                             [viewport, centre] { send_click(*viewport, centre("IDC_DELETE_GAME_BUTTON")); },
                              [this]() -> std::string {
                                  return load_alive() && load_screen->box_open() ? std::string{}
                                                                                  : "Delete did not open the confirmation";
@@ -389,7 +389,7 @@ void UiGalleryMode::State::build_load_game_page(Control& root) {
                                  return button_disabled("IDC_LOAD_GAME_BUTTON") ? "Load is disabled" : std::string{};
                              }});
         box_steps.push_back({"Load opens the Loading box",
-                             [this, viewport, centre] { send_click(*viewport, centre("IDC_LOAD_GAME_BUTTON")); },
+                             [viewport, centre] { send_click(*viewport, centre("IDC_LOAD_GAME_BUTTON")); },
                              [] { return std::string{}; }});
         box_steps.push_back({refuses ? "a refusing launcher keeps the screen open with the reason"
                                      : "the launcher gets the save and the screen closes",
@@ -424,7 +424,7 @@ void UiGalleryMode::State::build_load_game_page(Control& root) {
                                                                               : "Delete is enabled with no saved games";
                          }});
     box_steps.push_back({"the recordings check lists the replay store",
-                         [this, viewport, centre] { send_click(*viewport, centre("IDC_CHECK_RECORDINGS")); },
+                         [viewport, centre] { send_click(*viewport, centre("IDC_CHECK_RECORDINGS")); },
                          [this, list]() -> std::string {
                              if (!load_alive()) return "the screen closed";
                              if (!load_screen->model().show_recordings()) return "the check did not switch the list";
@@ -434,7 +434,7 @@ void UiGalleryMode::State::build_load_game_page(Control& root) {
                                  ? std::string{} : "the list does not show every recording";
                          }});
     box_steps.push_back({"selecting a recording enables Load and Delete",
-                         [this, viewport, list] {
+                         [viewport, list] {
                              ItemList* items = list();
                              if (items == nullptr || items->get_item_count() == 0) return;
                              const Rect2 rect = items->get_item_rect(0);
@@ -446,7 +446,7 @@ void UiGalleryMode::State::build_load_game_page(Control& root) {
                              return button_disabled("IDC_DELETE_GAME_BUTTON") ? "Delete stayed disabled" : std::string{};
                          }});
     box_steps.push_back({"Delete asks for confirmation and No keeps the file",
-                         [this, viewport, centre] { send_click(*viewport, centre("IDC_DELETE_GAME_BUTTON")); },
+                         [viewport, centre] { send_click(*viewport, centre("IDC_DELETE_GAME_BUTTON")); },
                          [this]() -> std::string {
                              if (!load_alive() || !load_screen->box_open()) return "Delete did not open the confirmation";
                              return load_screen->model().visible().empty() ? "the list lost its recording" : std::string{};
@@ -463,7 +463,7 @@ void UiGalleryMode::State::build_load_game_page(Control& root) {
                              return load_screen->model().visible().empty() ? "No deleted the recording" : std::string{};
                          }});
     box_steps.push_back({"Load plays the selected recording",
-                         [this, viewport, centre] { send_click(*viewport, centre("IDC_LOAD_GAME_BUTTON")); },
+                         [viewport, centre] { send_click(*viewport, centre("IDC_LOAD_GAME_BUTTON")); },
                          [this]() -> std::string {
                              if (!load_play) return "Load did not choose a recording";
                              return load_play->first.empty() ? "the chosen recording has no path" : std::string{};

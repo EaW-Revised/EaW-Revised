@@ -14,6 +14,7 @@ void EawrLanLobby::refresh_staging() {
     std::optional<skirmish::FixtureOptions> built;
     if (impl.host && impl.map_index >= 0) built = staging_options(impl.selection);
     match_->pump_setup(built ? *built : skirmish::FixtureOptions{});
+    review_host_mods();
     const LanView view = match_->view();
     const bool online = impl.join_selection.source() == model::LobbySourceKind::online;
     refresh_staging_connections(impl, view, online);
@@ -304,9 +305,7 @@ void EawrLanLobby::refresh_staging_roster(Impl& impl, PageState& state, Resource
         // WSS-12/13: every playable catalog faction, as the setup screen lists them; a map whose stations
         // cannot start a pick refuses it at Start (project limit), it does not hide the entry.
         std::vector<std::string> factions;
-        if (map != nullptr) {
-            for (const auto& entry : skirmish::setup_factions(*resources.content->catalog)) factions.push_back(entry.name);
-        }
+        for (const auto& entry : skirmish::setup_factions(*resources.content->catalog)) factions.push_back(entry.name);
         impl.row_states.clear();
         for (std::size_t index = 0; index < dialog_rows; ++index) {
             const model::StagingRow& row = rows[index];
@@ -379,17 +378,29 @@ void EawrLanLobby::refresh_staging_roster(Impl& impl, PageState& state, Resource
                     name->set_visible(combo_shown);
                     if (combo_shown) { name->set_position(rect.position + Vector2(rect.size.x * 0.7F, 0)); name->set_size(Vector2(rect.size.x * 0.3F, rect.size.y)); }
                 }
-            } else if (rename) rename->set_visible(false);
+            } else {
+                if (rename) rename->set_visible(false);
+                // #4542: a row the guest vacated keeps the narrow combo rect set above; restore the authored one.
+                if (name != nullptr) {
+                    if (const auto* authored = find_gadget(*state.dialog, "IDC_PLAYER_NAME_" + suffix)) {
+                        const Rect2 rect = local_rect(*state.dialog, *authored);
+                        name->set_position(rect.position);
+                        name->set_size(rect.size);
+                    }
+                }
+            }
             const bool filled = shown && row.occupied();
             if (faction != nullptr) {
                 faction->clear();
                 faction->set_visible(filled);
-                for (const std::string& value : factions) faction->add_item(text(value));
-                if (!row.faction.empty() && factions.empty()) faction->add_item(text(row.faction));
-                for (int item = 0; item < faction->get_item_count(); ++item) {
-                    if (utf8(faction->get_item_text(item)) == row.faction) faction->select(item);
+                for (const std::string& value : factions) {
+                    faction->add_item(text(model::faction_display_name(*resources.content->catalog,
+                        resources.text ? &*resources.text : nullptr, value)));
                 }
-                faction->set_disabled(!choices_editable);
+                for (std::size_t item = 0; item < factions.size(); ++item) {
+                    if (factions[item] == row.faction) faction->select(static_cast<int>(item));
+                }
+                faction->set_disabled(!choices_editable || factions.empty());
             }
             if (colour != nullptr) {
                 colour->clear();
@@ -445,6 +456,12 @@ void EawrLanLobby::refresh_staging_roster(Impl& impl, PageState& state, Resource
             row_state.accepted = row.accepted;
             row_state.enabled = editable || choices_editable;
             row_state.visible = shown;
+            if (name != nullptr) {
+                row_state.name_width = name->get_size().x;
+                if (const auto* authored_name = find_gadget(*state.dialog, "IDC_PLAYER_NAME_" + suffix)) {
+                    row_state.name_authored_width = local_rect(*state.dialog, *authored_name).size.x;
+                }
+            }
             impl.row_states.push_back(std::move(row_state));
         }
         // The preview follows the map.
@@ -525,6 +542,7 @@ bool EawrLanLobby::run_action(const std::string& action) {
     const auto number = [](const std::string& value, std::uint32_t& out) {
         return !value.empty() && std::from_chars(value.data(), value.data() + value.size(), out).ec == std::errc{};
     };
+    if (verb == "hover" || verb == "click" || verb == "click_row") return run_pointer_action(verb, argument);
     if (verb == "source") return action_source(argument);
     if (verb == "cancel_join") return action_cancel_join();
     if (verb == "name" && page_ != Page::staging) return action_name(argument);
@@ -554,6 +572,14 @@ bool EawrLanLobby::run_action(const std::string& action) {
     if (verb == "staging_dropdown" && page_ == Page::staging) return action_staging_dropdown(argument, number);
     if (verb == "options" && page_ == Page::staging) return action_options(argument, number);
 
+    if (verb == "load_game" && page_ == Page::staging && match_->galactic_room()) { handle_button("EAWR_GC_LOAD_GAME"); return true; }
+    // The list's own Cancel button, pressed as a click would (the real signal path, not a shortcut).
+    if (verb == "load_cancel" && impl.list() != nullptr) {
+        auto* cancel = impl.list()->gadget("IDC_LOAD_CANCEL_BUTTON");
+        if (cancel == nullptr) return false;
+        cancel->emit_signal("pressed");
+        return true;
+    }
     if (verb == "host") return action_host(impl, argument);
     if (verb == "join") return action_join(impl, argument);
     if (verb == "password") return action_password(impl, argument);
@@ -716,7 +742,8 @@ bool EawrLanLobby::action_host(Impl& impl, const std::string& argument) {
     if (auto* edit = EAWR_CONTROL(EawrUiEdit, "IDC_INTERNET_GAME_NAME_EDIT")) edit->set_text(text(name));
     if (auto* edit = EAWR_CONTROL(EawrUiEdit, "IDC_INTERNET_GAME_PASSWORD_EDIT"); edit != nullptr && online) edit->set_text(text(room_password));
     begin_hosting();
-    return page_ == Page::staging;
+    // A Campaign room waits for the content load on a worker; the script then waits for the staging page.
+    return page_ == Page::staging || impl.host_pending;
 }
 
 bool EawrLanLobby::action_join(Impl& impl, const std::string& argument) {
@@ -859,6 +886,7 @@ bool EawrLanLobby::action_staging_selection(const std::string& verb, const std::
 
 bool EawrLanLobby::action_start(Impl& impl) {
     refresh_staging();
+    if (match_->galactic_room() && !impl.start_enabled) return false;
     if (match_->galactic_room()) {
         // GC: the room's own validation gates Start (two humans, the human-seat limit, the campaign rules).
         match_->start(skirmish::FixtureOptions{});
@@ -923,6 +951,22 @@ bool EawrLanLobby::condition(const std::string& wanted) const {
         return count_of(count) && impl.players.size() >= count;
     }
     if (key == "staging") return page_ == Page::staging;
+    if (key == "load_list") return impl.list() != nullptr;
+    if (key == "load_list_closed") return impl.list() == nullptr;
+    // load_outcome: the list is up, or the header shows something other than the title and the
+    // transitional lines (a visible error); listing_pending: the saved-game listing has not returned or been given up.
+    if (key == "load_outcome") {
+        if (impl.list() != nullptr) return true;
+        const auto* header = EAWR_CONTROL(EawrUiLabel, "IDC_INTERNET_DIALOG_HEADER");
+        if (header == nullptr || !resources_) return false;
+        const std::string shown = utf8(header->get_text());
+        const std::string title = utf8(resolved(resources_->text, impl.host ? "TEXT_INTERNET_HOST_GAME_TITLE" : "TEXT_INTERNET_JOIN_GAME_TITLE"));
+        return !shown.empty() && shown != title && shown != "Checking saved games" && shown != "Loading campaign content..."
+            && shown != "Reading saved game";
+    }
+    if (key == "listing_pending") return impl.checkpoint_listing.valid();
+    if (key == "content_ready") return impl.galactic_backend && impl.galactic_backend->content_ready();
+    if (key == "host_pending") return impl.host_pending;
     if (key == "box") return impl.box != nullptr;
     if (key == "prompt") return impl.prompt.has_value();
     if (key == "prompt_ready") return impl.prompt && !impl.prompt->waiting;

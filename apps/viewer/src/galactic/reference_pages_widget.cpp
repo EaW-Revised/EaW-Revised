@@ -339,7 +339,16 @@ void ReferencePages::refresh(GalacticMode::State& state) {
         for (auto& gadget : dialog_->gadgets) if (gadget.id == "IDC_DATA_CHART_IMAGE")
             if (auto* control = Object::cast_to<TextureRect>(gadget.control)) { control->set_texture(ImageTexture::create_from_image(image)); control->show(); }
     } else if (model_.tab == page::ReferenceTab::log) {
-        set_text("IDC_HINTS", "Advisor log and reference legend are unavailable.");
+        if (model_.facts.legend.empty()) set_text("IDC_HINTS", "Advisor log and reference legend are unavailable.");
+        // GREF-19: authored order fills only the dialog slots that exist; colour and full alpha per entry.
+        for (std::size_t index = 0; index < model_.facts.legend.size(); ++index) {
+            const auto& entry = model_.facts.legend[index];
+            set_icon("IDC_PA_ICON" + std::to_string(index), &entry.icon);
+            for (auto& gadget : dialog_->gadgets) if (gadget.id == "IDC_PA_TEXT" + std::to_string(index) && gadget.control) {
+                caption(gadget.control, entry.text);
+                gadget.control->set_modulate(Color(entry.colour.r, entry.colour.g, entry.colour.b, 1));
+            }
+        }
         for (auto& gadget : dialog_->gadgets) if (gadget.control && gadget.kind == "check")
             if (auto* button = Object::cast_to<BaseButton>(gadget.control)) button->set_disabled(true);
     } else {

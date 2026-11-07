@@ -24,6 +24,9 @@ inline constexpr std::string_view kCancelled = "EAWR-MODS-SVC-0009";
 inline constexpr std::string_view kBusy = "EAWR-MODS-SVC-0010";
 inline constexpr std::string_view kInternalError = "EAWR-MODS-SVC-0011";
 
+inline constexpr std::string_view kInvalidLoadNotes = "EAWR-MODS-SVC-0014";
+inline constexpr std::string_view kProfileLocked = "EAWR-MODS-SVC-0016";   // 1.12: a running game instance holds the profile
+
 struct Reply {
     std::string result;          // a JSON object's text, when error_code is empty
     std::string_view error_code; // one of the codes above

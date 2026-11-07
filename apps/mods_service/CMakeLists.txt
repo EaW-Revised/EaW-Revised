@@ -13,10 +13,16 @@ set(EAWR_MODS_SERVICE_SOURCES
     src/loadcheck.cpp
     src/methods.cpp
     src/model_methods.cpp
+    src/profile_locks.cpp
+    src/records.cpp
     src/service.cpp
     ${EAWR_MODS_SOURCES}
     "${PROJECT_SOURCE_DIR}/apps/launcher/src/install_discovery.cpp"
+    "${PROJECT_SOURCE_DIR}/apps/launcher/src/instance.cpp"
     "${PROJECT_SOURCE_DIR}/apps/launcher/src/launcher_state.cpp"
+    "${PROJECT_SOURCE_DIR}/src/presentation/ui/settings.cpp"
+    "${PROJECT_SOURCE_DIR}/src/platform/ui_files.cpp"
+    "${PROJECT_SOURCE_DIR}/src/core/diagnostic.cpp"
     "${PROJECT_SOURCE_DIR}/src/core/sha256.cpp"
     "${PROJECT_SOURCE_DIR}/src/core/json_text.cpp"
     "${EAWR_BUILD_IDENTITY_CPP}"
@@ -32,5 +38,7 @@ if(WIN32)
 endif()
 set_target_properties(eawr_mods_service PROPERTIES
     MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+find_package(Threads REQUIRED)
+target_link_libraries(eawr_mods_service PRIVATE Threads::Threads)
 target_compile_features(eawr_mods_service PRIVATE cxx_std_20)
 eawr_target_project_warnings(eawr_mods_service)

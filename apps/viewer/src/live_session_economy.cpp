@@ -154,6 +154,12 @@ std::optional<std::array<std::uint8_t, 3>> LiveSessionView::model_colour_of_type
                                                                                  const sim::tactical::TypeId type_id) const {
     // WBP-52: a pad's capture progress feeds the model's colourisation constant, so it takes the model's colour.
     if (tables_) {
+        // presentation_types_ holds every unit of the table once its frame indexing has run (first match wins, like the
+        // scan below), so a lookup replaces one string CRC per unit; the scan covers the frames before that.
+        if (!presentation_types_.empty()) {
+            const auto found = presentation_types_.find(type_id);
+            return found != presentation_types_.end() ? model_colour(player, found->second->id) : model_colour(player, std::string{});
+        }
         for (const auto& unit : tables_->units) {
             if (battle::type_id(unit.id) == type_id) return model_colour(player, unit.id);
         }

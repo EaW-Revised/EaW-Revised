@@ -6,6 +6,7 @@
 // banking in turns (BK-01 to BK-05); its FoC roll values re-pinned the `tactical-motion` hashes.
 
 #include "../support/check.hpp"
+#include "eawr/sim/tactical/fighters.hpp"
 #include "eawr/platform/sim_workers.hpp"
 #include "eawr/sim/math/math.hpp"
 #include "eawr/sim/replay.hpp"
@@ -28,6 +29,7 @@
 #include <string>
 #include <string_view>
 #include <tuple>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -114,6 +116,208 @@ void test_validation() {
     tactical::TacticalSetup setup;
     setup.players = {{1, 1, 1, tactical::player_flag_commandable}};
     expect(!tactical::TacticalSession::create(setup, {}, {}, unsorted), "a session rejects an invalid motion table");
+}
+
+void test_motion_normalization() {
+    auto authored = foc_table();
+    authored.profiles[0].max_speed = Fixed{};
+    authored.profiles[0].turn_in_place_slowdown = Fixed{};
+    authored.rules.guard_range = units(-1);
+    authored.nebula_disable_seconds = units(4000);
+    eawr::core::LoadNoteBuffer notes;
+    const auto owned = tactical::prepare_motion(authored, notes);
+    expect(owned && owned.value().profiles[0].max_speed == Fixed::from_raw(one / 16)
+        && owned.value().rules.guard_range == Fixed{} && owned.value().nebula_disable_seconds == units(3600),
+        "class C motion normalizes an owned copy to effective bounds");
+    expect(authored.profiles[0].max_speed == Fixed{}, "normalization retains the caller's authored table");
+    eawr::core::LoadNoteCollector collector;
+    collector.merge(notes);
+    expect(collector.snapshot().size() == 4, "one note for each changed motion field");
+    if (owned) {
+        eawr::core::LoadNoteBuffer second;
+        const auto again = tactical::prepare_motion(owned.value(), second);
+        eawr::core::LoadNoteCollector repeated;
+        repeated.merge(second);
+        expect(again && again.value() == owned.value() && repeated.snapshot().empty(),
+            "motion normalization is idempotent and emits no unchanged notes");
+    }
+    tactical::TacticalSetup setup;
+    setup.players = {{1, 1, 1, tactical::player_flag_commandable}, {2, 2, 2, tactical::player_flag_commandable}};
+    auto session = tactical::TacticalSession::create(setup, {}, {}, authored, {}, {}, {}, {}, {}, {}, &notes);
+    expect(static_cast<bool>(session), "session binding normalizes authored motion before validation");
+    if (session) {
+        const eawr::sim::InlineExecutor executor;
+        expect(static_cast<bool>(session.value().step(executor)), "degraded motion session steps");
+    }
+    // Tiny moving footprints are bounded by the actual ring arithmetic, including extreme factors.
+    for (const auto factor : {Fixed::from_raw(1), decimal("1.2")}) {
+        auto tiny = foc_table();
+        tiny.avoidance = tactical::AvoidanceRules{units(24), decimal(".2"), units(100), decimal(".8"),
+            units(15), decimal(".66"), factor, decimal(".25"), decimal("1.7"), decimal(".5"),
+            decimal(".5"), 3500, 6, 90, 45, units(1024)};
+        tiny.footprints = {{corvette_type, tactical::SpaceLayer::corvette, {}, {}, units(1)},
+            {acclamator_type, tactical::SpaceLayer::frigate, {}, {}, factor.raw() == 1 ? Fixed{} : units(100)},
+            {station_type, tactical::SpaceLayer::static_object, {}, {}, Fixed::from_raw(1)}};
+        eawr::core::LoadNoteBuffer ring_notes;
+        const auto bounded = tactical::prepare_motion(tiny, ring_notes);
+        expect(bounded && (factor.raw() == 1 ? bounded.value().footprints[0].radius == Fixed{}
+                                             : bounded.value().footprints[0].radius > tiny.footprints[0].radius)
+            && bounded.value().avoidance->occupation_radius == factor
+            && bounded.value().footprints[1] == tiny.footprints[1]
+            && bounded.value().footprints[2] == tiny.footprints[2],
+            "only the undersized mover degrades; occupation factor and other units are unchanged");
+        if (!bounded) continue;
+        eawr::core::LoadNoteCollector ring_collector;
+        ring_collector.merge(ring_notes);
+        const auto captured = ring_collector.snapshot();
+        expect(std::count_if(captured.begin(), captured.end(), [](const auto& note) {
+            return note.code == "EAWR-LOAD-0160" && note.action == eawr::core::LoadAction::clamped;
+        }) == 1, "tiny mover radius emits exactly one degrade note");
+        for (const auto& note : captured)
+            if (note.code == "EAWR-LOAD-0160") expect(note.authored_value == "1"
+                && (factor.raw() == 1 ? note.effective_value == "0" : note.effective_value != "0"),
+                "ring fallback note names the authored and effective mover radius");
+        if (factor.raw() != 1) {
+            auto below = bounded.value();
+            below.footprints[0].radius = Fixed::from_raw(below.footprints[0].radius.raw() - 1);
+            expect(!tactical::validate_motion(below), "feasible mover gets the minimum positive safe ring radius");
+        }
+        auto live = tactical::TacticalSession::create(setup, {}, {}, bounded.value());
+        expect(static_cast<bool>(live), "ring-bounded motion session creates");
+        if (live) {
+            const eawr::sim::InlineExecutor executor;
+            expect(static_cast<bool>(live.value().step(executor)), "ring-bounded motion session steps");
+        }
+    }
+}
+
+void test_motion_boundaries() {
+    const auto avoidance = [] {
+        return tactical::AvoidanceRules{units(24), decimal(".2"), units(100), decimal(".8"),
+            units(15), decimal(".66"), decimal("1.2"), decimal(".25"), decimal("1.7"),
+            decimal(".5"), decimal(".5"), 3500, 6, 90, 45, units(50)};
+    };
+    const auto note_count = [](eawr::core::LoadNoteBuffer& buffer, const std::string_view code) {
+        eawr::core::LoadNoteCollector collector;
+        collector.merge(buffer);
+        const auto captured = collector.snapshot();
+        return std::count_if(captured.begin(), captured.end(), [&](const auto& note) { return note.code == code; });
+    };
+    const auto fixed = [&](const auto& select, const std::int64_t minimum, const std::int64_t maximum,
+                           const std::string_view code) {
+        std::vector<std::int64_t> values{minimum - 1, minimum, maximum};
+        if (maximum != INT64_MAX) values.push_back(maximum + 1);
+        for (const auto authored : values) {
+            auto table = foc_table();
+            table.avoidance = avoidance();
+            table.footprints = {{station_type, tactical::SpaceLayer::static_object}};
+            select(table) = Fixed::from_raw(authored);
+            eawr::core::LoadNoteBuffer notes;
+            auto owned = tactical::prepare_motion(table, notes);
+            expect(owned && select(owned.value()).raw() == std::clamp(authored, minimum, maximum),
+                std::string(code) + ": fixed boundary has its exact effective value");
+            expect(note_count(notes, code) == (authored < minimum || authored > maximum ? 1 : 0),
+                std::string(code) + ": only changed fixed boundaries emit one note");
+        }
+    };
+    fixed([](auto& t) -> auto& { return t.rules.arc_degrees; }, 1, 180 * one, "EAWR-LOAD-0151");
+    fixed([](auto& t) -> auto& { return t.rules.expansion_distance; }, 1, 262144 * one, "EAWR-LOAD-0151");
+    fixed([](auto& t) -> auto& { return t.rules.guard_range; }, 0, 262144 * one, "EAWR-LOAD-0153");
+    fixed([](auto& t) -> auto& { return t.nebula_disable_seconds; }, 0, 3600 * one, "EAWR-LOAD-0154");
+    fixed([](auto& t) -> auto& { return t.profiles[0].max_speed; }, one / 16, 1024 * one, "EAWR-LOAD-0155");
+    fixed([](auto& t) -> auto& { return t.profiles[0].acceleration; }, one / 4096, 1024 * one, "EAWR-LOAD-0155");
+    fixed([](auto& t) -> auto& { return t.profiles[0].deceleration; }, one / 4096, 1024 * one, "EAWR-LOAD-0155");
+    fixed([](auto& t) -> auto& { return t.profiles[0].rate_of_turn; }, one / 128, 1024 * one, "EAWR-LOAD-0155");
+    fixed([](auto& t) -> auto& { return t.profiles[0].roll_rate; }, 0, 1024 * one, "EAWR-LOAD-0156");
+    fixed([](auto& t) -> auto& { return t.profiles[0].turn_in_place_slowdown; }, 1, INT64_MAX, "EAWR-LOAD-0156");
+    fixed([](auto& t) -> auto& { return t.footprints[0].x_extent; }, 0, 262144 * one, "EAWR-LOAD-0157");
+    fixed([](auto& t) -> auto& { return t.footprints[0].y_extent; }, 0, 262144 * one, "EAWR-LOAD-0157");
+    fixed([](auto& t) -> auto& { return t.footprints[0].radius; }, 0, 262144 * one, "EAWR-LOAD-0157");
+    fixed([](auto& t) -> auto& { return t.footprints[0].obstacle_offset.x; }, -262144 * one, 262144 * one, "EAWR-LOAD-0157");
+    fixed([](auto& t) -> auto& { return t.footprints[0].obstacle_offset.y; }, -262144 * one, 262144 * one, "EAWR-LOAD-0157");
+    fixed([](auto& t) -> auto& { return t.avoidance->max_rotations; }, one, 360 * one, "EAWR-LOAD-0158");
+    fixed([](auto& t) -> auto& { return t.avoidance->wait_speed; }, 1, one, "EAWR-LOAD-0158");
+    fixed([](auto& t) -> auto& { return t.avoidance->wait_frames; }, 0, 1024 * one, "EAWR-LOAD-0158");
+    fixed([](auto& t) -> auto& { return t.avoidance->wait_cost; }, 0, 1024 * one, "EAWR-LOAD-0158");
+    fixed([](auto& t) -> auto& { return t.avoidance->min_obstacle_cost; }, 1, 1024 * one, "EAWR-LOAD-0158");
+    fixed([](auto& t) -> auto& { return t.avoidance->path_cost_coefficient; }, 1, one, "EAWR-LOAD-0158");
+    fixed([](auto& t) -> auto& { return t.avoidance->occupation_radius; }, 1, 1024 * one, "EAWR-LOAD-0158");
+    fixed([](auto& t) -> auto& { return t.avoidance->failure_cutoff; }, 0, 1024 * one, "EAWR-LOAD-0158");
+    fixed([](auto& t) -> auto& { return t.avoidance->failure_expansions; }, 1, 1024 * one, "EAWR-LOAD-0158");
+    fixed([](auto& t) -> auto& { return t.avoidance->failure_rotation; }, 0, 1024 * one, "EAWR-LOAD-0158");
+    fixed([](auto& t) -> auto& { return t.avoidance->failure_forward; }, 0, 1024 * one, "EAWR-LOAD-0158");
+    fixed([](auto& t) -> auto& { return t.avoidance->destination_search_increment; }, 1, 1024 * one, "EAWR-LOAD-0158");
+    const auto count = [&](const auto& select, const std::uint64_t maximum, bool with_avoidance, const std::string_view code) {
+        for (const auto authored : {std::uint64_t{0}, std::uint64_t{1}, maximum, maximum + 1}) {
+            auto table = foc_table();
+            if (with_avoidance) {
+                table.avoidance = avoidance();
+                table.rules.reevaluation_frames = 65536;
+            }
+            auto& field = select(table);
+            field = static_cast<std::remove_reference_t<decltype(field)>>(authored);
+            eawr::core::LoadNoteBuffer notes;
+            auto owned = tactical::prepare_motion(table, notes);
+            expect(owned && select(owned.value()) == std::clamp(authored, std::uint64_t{1}, maximum),
+                std::string(code) + ": count boundary has its exact effective value");
+            expect(note_count(notes, code) == (authored < 1 || authored > maximum ? 1 : 0),
+                std::string(code) + ": only changed count boundaries emit one note");
+        }
+    };
+    count([](auto& t) -> auto& { return t.rules.reevaluation_frames; }, 65536, false, "EAWR-LOAD-0152");
+    count([](auto& t) -> auto& { return t.avoidance->max_expansions; }, 1U << 20, true, "EAWR-LOAD-0158");
+    count([](auto& t) -> auto& { return t.avoidance->tries; }, 16, true, "EAWR-LOAD-0158");
+    count([](auto& t) -> auto& { return t.avoidance->tracking_interval; }, 65536, true, "EAWR-LOAD-0158");
+    count([](auto& t) -> auto& { return t.avoidance->tracking_windows; }, 1024, true, "EAWR-LOAD-0158");
+    count([](auto& t) -> auto& { return t.avoidance->search_delay; }, 1024, true, "EAWR-LOAD-0158");
+    for (const bool budget : {true, false}) {
+        for (const auto authored : {std::uint64_t{0}, std::uint64_t{1}, UINT64_MAX}) {
+            auto table = foc_table();
+            table.avoidance = avoidance();
+            (budget ? table.avoidance->search_budget : table.avoidance->search_slice) = authored;
+            eawr::core::LoadNoteBuffer notes;
+            auto owned = tactical::prepare_motion(table, notes);
+            expect(owned && (budget ? owned.value().avoidance->search_budget : owned.value().avoidance->search_slice)
+                == std::max(authored, std::uint64_t{1}), "0158: work budgets have a positive floor and no invented ceiling");
+            expect(note_count(notes, "EAWR-LOAD-0158") == (authored == 0 ? 1 : 0), "0158: work budget notes only on change");
+        }
+    }
+    for (const auto interval : {1U, 2U}) {
+        auto table = foc_table();
+        table.avoidance = avoidance();
+        table.avoidance->search_delay = 1;
+        table.rules.reevaluation_frames = interval;
+        eawr::core::LoadNoteBuffer notes;
+        auto owned = tactical::prepare_motion(table, notes);
+        expect(owned && owned.value().rules.reevaluation_frames == 2 && owned.value().avoidance->search_delay == 1,
+            "0159: an interval of one becomes two and a valid interval stays unchanged");
+        expect(note_count(notes, "EAWR-LOAD-0159") == (interval == 1 ? 1 : 0), "0159: one relationship note only on change");
+    }
+    for (const auto delay : {9U, 10U, 11U}) {
+        auto table = foc_table();
+        table.avoidance = avoidance();
+        table.avoidance->search_delay = delay;
+        eawr::core::LoadNoteBuffer notes;
+        auto owned = tactical::prepare_motion(table, notes);
+        expect(owned && owned.value().avoidance->search_delay == 9, "0159: sliced searches land before reevaluation");
+        expect(note_count(notes, "EAWR-LOAD-0159") == (delay == 9 ? 0 : 1), "0159: delay clamp emits one note");
+    }
+    // Session binding preserves its historical footprint-only gate, including replay binding.
+    auto inert = foc_table();
+    inert.profiles.clear();
+    inert.footprints = {{5}, {3}};
+    tactical::TacticalSetup setup;
+    setup.players = {{1, 1, 1, tactical::player_flag_commandable}, {2, 2, 2, tactical::player_flag_commandable}};
+    auto live = tactical::TacticalSession::create(setup, {}, {}, inert);
+    expect(static_cast<bool>(live), "profile-empty binding gains no footprint refusal");
+    if (live) {
+        const eawr::sim::InlineExecutor executor;
+        expect(static_cast<bool>(live.value().step(executor)), "profile-empty session steps");
+    }
+    tactical::TacticalReplay replay;
+    replay.setup = setup;
+    auto rebuilt = tactical::TacticalSession::from_replay(replay, {}, {}, inert);
+    expect(static_cast<bool>(rebuilt), "profile-empty replay binding gains no footprint refusal");
 }
 
 void test_rules() {
@@ -939,6 +1143,8 @@ int main(const int argc, char** argv) {
     }
     test_waypoints();
     test_validation();
+    test_motion_normalization();
+    test_motion_boundaries();
     test_rules();
     test_turn_duration_scales();
     test_super_capital_math();

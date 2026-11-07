@@ -374,7 +374,8 @@ std::map<std::string, eawr::assets::Model> models(const float engine_x) {
 }
 
 Loaded load(const std::filesystem::path& root, const std::map<std::string, eawr::assets::Model>& assets,
-    const std::string_view difficulty, const eawr::sim::tactical::BattleDomain domain) {
+    const std::string_view difficulty, const eawr::sim::tactical::BattleDomain domain,
+    const std::vector<std::string>& extra_types) {
     Loaded result;
     const std::array mounts{eawr::vfs::MountSpec{"base", root, "data", {}}};
     auto mounted = eawr::vfs::Vfs::mount(mounts);
@@ -393,6 +394,7 @@ Loaded load(const std::filesystem::path& root, const std::map<std::string, eawr:
         return found == assets.end() ? nullptr : &found->second;
     };
     input.types = {"Skirmish_Test_Base", "Test_Frigate", "Test_Squadron", "Test_Squadron_Pair"};
+    input.types.insert(input.types.end(), extra_types.begin(), extra_types.end());
     auto tables = eawr::units::load_unit_tables(input);
     expect(static_cast<bool>(tables), "synthetic tables load");
     if (tables) result.tables = std::move(tables).value();

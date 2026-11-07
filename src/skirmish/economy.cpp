@@ -1,8 +1,11 @@
 #include "eawr/skirmish/start.hpp"
+#include "eawr/vfs/vfs.hpp"
+#include "eawr/units/content_selection.hpp"
 
 #include "eawr/script/numeric/q24_boundary.hpp"
 #include "eawr/skirmish/ai.hpp"
 #include "eawr/skirmish/placement.hpp"
+#include "eawr/sim/tactical/motion.hpp"
 #include "eawr/skirmish/roster_gate.hpp"
 #include "skirmish_internal.hpp"
 
@@ -10,6 +13,7 @@
 #include <string>
 #include <sstream>
 #include <utility>
+#include <limits>
 
 // #530 (docs/behaviour/space-purchasing.md): the economy content of a skirmish from its start and
 // the unit tables. Nothing here is per faction or per station level: a station's menu is its own
@@ -25,6 +29,24 @@ using sim::math::Fixed;
     return detail::error(diagnostic_codes::input, "economy rules: " + std::move(message));
 }
 
+using tactical::economy_load::decimal;
+
+void note_value(core::LoadNoteBuffer& notes, const char* code, const std::string& object,
+    const std::string& tag, std::string authored, std::string effective, const std::string& message,
+    const core::LoadAction action = core::LoadAction::clamped, const bool retail_default = false) {
+    tactical::economy_load::append(notes, code, object, tag, std::move(authored), std::move(effective),
+        message, action, retail_default, diagnostic_codes::input);
+}
+
+Fixed duration(Fixed value, core::LoadNoteBuffer& notes, const char* code,
+    const std::string& object, const char* tag, const bool allow_zero = false) {
+    const auto effective = Fixed::from_raw(std::clamp(value.raw(), allow_zero ? std::int64_t{0} : Fixed::scale,
+        86400 * Fixed::scale));
+    if (effective != value) note_value(notes, code, object, tag, decimal(value), decimal(effective),
+        "duration is out of range");
+    return effective;
+}
+
 // WTA-45 (#735): what an AI player's difficulty does to its income and production time. Without a mounted
 // difficulty table (synthetic content) both come from the selected difficulty of the unit tables.
 struct AiEconomyScale final {
@@ -32,20 +54,38 @@ struct AiEconomyScale final {
     Fixed build_time;
 };
 
-[[nodiscard]] core::Result<AiEconomyScale> ai_economy_scale(
-    const StartInputs& inputs, const StartPlayer& player, const units::UnitTables& tables) {
+// #3207 G1-c: the same conversion serves a land start (`land`), which reads Land_Build_Time_Multiplier.
+[[nodiscard]] core::Result<AiEconomyScale> scaled_ai_economy(const StartInputs& inputs, const StartPlayer& player,
+    AiEconomyScale scale, const bool land, core::LoadNoteBuffer& notes) {
     using Result = core::Result<AiEconomyScale>;
-    const Fixed one = Fixed::from_raw(Fixed::scale);
-    AiEconomyScale scale{tables.ai_credit_multiplier.value_or(one), tables.pad_ai_build_multiplier.value_or(one)};
     if (player.human || !player.lobby || !inputs.difficulty || ai_player_type(inputs, player).empty()) return Result::success(scale);
     const auto adjustment = player_difficulty(inputs, player);
-    const auto credit = script::numeric::to_fixed(adjustment.credit);
-    const auto build_time = script::numeric::to_fixed(adjustment.space_build_time);
-    if (!credit || !build_time) return Result::failure(failure("AI difficulty multiplier is out of range"));
-    if (credit.value().raw() < 0 || build_time.value().raw() <= 0) return Result::failure(failure("AI difficulty multiplier is not positive"));
-    scale.credit = credit.value();
-    scale.build_time = build_time.value();
+    const auto convert = [&](const script::numeric::LuaNumber value, const bool positive, const char* tag) {
+        const auto converted = script::numeric::to_fixed(value);
+        constexpr auto limit = (std::int64_t{1} << 32) * Fixed::scale;
+        const auto lower = positive ? std::int64_t{1} : std::int64_t{0};
+        const auto raw = converted ? converted.value().raw()
+            : (value < script::numeric::LuaNumber{0} ? lower : limit);
+        const auto effective = Fixed::from_raw(std::clamp(raw, lower, limit));
+        if (!converted || effective != converted.value()) {
+            char text[128]{};
+            const auto size = script::numeric::ActiveBackend::format_lua(text, sizeof(text), value.repr);
+            note_value(notes, "EAWR-LOAD-0350", player.faction, tag, std::string(text, std::min(size, sizeof(text) - 1)),
+                decimal(effective), "AI difficulty multiplier is out of range or is not positive");
+        }
+        return effective;
+    };
+    scale.credit = convert(adjustment.credit, false, "Credit_Multiplier");
+    scale.build_time = land ? convert(adjustment.land_build_time, true, "Land_Build_Time_Multiplier")
+                            : convert(adjustment.space_build_time, true, "Space_Build_Time_Multiplier");
     return Result::success(scale);
+}
+
+[[nodiscard]] core::Result<AiEconomyScale> ai_economy_scale(
+    const StartInputs& inputs, const StartPlayer& player, const units::UnitTables& tables, core::LoadNoteBuffer& notes) {
+    const Fixed one = Fixed::from_raw(Fixed::scale);
+    return scaled_ai_economy(inputs, player,
+        AiEconomyScale{tables.ai_credit_multiplier.value_or(one), tables.pad_ai_build_multiplier.value_or(one)}, false, notes);
 }
 
 // PU-13: whole frames of `seconds` at 30 frames a second, rounded to nearest.
@@ -63,24 +103,36 @@ struct AiEconomyScale final {
 
 } // namespace
 
+core::Result<AiLandEconomy> land_ai_economy(
+    const StartInputs& inputs, const StartPlayer& player, core::LoadNoteBuffer& notes) {
+    const Fixed one = Fixed::from_raw(Fixed::scale);
+    auto scale = scaled_ai_economy(inputs, player, AiEconomyScale{one, one}, true, notes);
+    if (!scale) return core::Result<AiLandEconomy>::failure(scale.error());
+    return core::Result<AiLandEconomy>::success(AiLandEconomy{scale.value().credit, scale.value().build_time});
+}
+
 core::Result<tactical::PadRules> capture_rules(const tactical::TacticalSetup& setup,
-    const StartInputs& inputs, const units::UnitTables& tables) {
+    const StartInputs& inputs, const units::UnitTables& tables, core::LoadNoteBuffer* load_notes) {
     using Result = core::Result<tactical::PadRules>;
+    core::LoadNoteBuffer local_notes;
+    auto& notes = load_notes ? *load_notes : local_notes;
     tactical::PadRules rules;
+    const units::ContentTypeSelection selection(tables);
+    selection.emit_notes(tables, diagnostic_codes::input, &notes);
     for (const auto& player : setup.players) {
         const auto faction = std::find_if(inputs.factions.begin(), inputs.factions.end(),
             [&](const StartFaction& entry) { return entry.neutral && faction_id(entry.name) == player.faction_id; });
         if (faction != inputs.factions.end()) rules.neutral = player.player_id;
     }
     for (const auto& type : tables.units) {
+        if (!selection.keeps(type)) continue;
         // WBP-50: capture and palette queries use the projectile-collidable domain.
         rules.influence.push_back({type_id(type.id), type.influences_capture, type.construction_blocker,
             type.living_projectile_collision});
         if (type.tactical_respawn_seconds && type.tactical_respawn_seconds->raw() > 0) {
-            if (type.tactical_respawn_seconds->raw() > 86400 * Fixed::scale) {
-                return Result::failure(failure("tactical respawn duration is out of range"));
-            }
-            rules.respawn.push_back({type_id(type.id), frames_of(*type.tactical_respawn_seconds)});
+            const auto seconds = duration(*type.tactical_respawn_seconds, notes, "EAWR-LOAD-0351", type.id,
+                "Tactical_Respawn_Time_In_Secs");
+            rules.respawn.push_back({type_id(type.id), frames_of(seconds)});
         }
         if (type.capture_point && type.capture_radius && type.capture_seconds) {
             tactical::CaptureProfile profile;
@@ -101,20 +153,33 @@ core::Result<tactical::PadRules> capture_rules(const tactical::TacticalSetup& se
             profile.build_pad = type.build_pad;
             profile.destroy_when_child_dies = type.destroy_when_child_dies;
             if (type.pad_rebuild_seconds && type.pad_rebuild_seconds->raw() > 0) {
-                if (type.pad_rebuild_seconds->raw() > 86400 * Fixed::scale) {
-                    return Result::failure(failure("pad rebuild duration is out of range"));
-                }
-                profile.rebuild_frames = frames_of(*type.pad_rebuild_seconds);
+                profile.rebuild_frames = frames_of(duration(*type.pad_rebuild_seconds, notes, "EAWR-LOAD-0351",
+                    type.id, "pad_rebuild_seconds"));
             }
             if (type.build_attachment.position) {
                 const auto scale = type.scale_factor.value_or(Fixed::from_raw(Fixed::scale));
-                const auto x = sim::math::multiply(type.build_attachment.position->x, scale);
-                const auto y = sim::math::multiply(type.build_attachment.position->y, scale);
-                const auto z = sim::math::multiply(type.build_attachment.position->z, scale);
-                if (!x || !y || !z) return Result::failure(!x ? x.error() : !y ? y.error() : z.error());
-                // WBP-13, R-ROT-01: model coordinates get the fixed +90-degree turn
-                // before the pad's facing transforms the attachment into world space.
-                profile.attachment = {Fixed::from_raw(-y.value().raw()), x.value(), z.value()};
+                bool degraded = false;
+                std::string diagnostic;
+                const auto scaled = [&](const Fixed value) {
+                    const auto product = sim::math::multiply(value, scale);
+                    if (product) return product.value();
+                    degraded = true;
+                    diagnostic = product.error().message;
+                    constexpr auto limit = tactical::max_motion_coordinate * Fixed::scale;
+                    return Fixed::from_raw((value.raw() < 0) != (scale.raw() < 0) ? -limit : limit);
+                };
+                const auto x = scaled(type.build_attachment.position->x);
+                const auto y = scaled(type.build_attachment.position->y);
+                const auto z = scaled(type.build_attachment.position->z);
+                const bool bad_turn = y.raw() == std::numeric_limits<std::int64_t>::min();
+                const auto turned_x = bad_turn ? tactical::max_motion_coordinate * Fixed::scale : -y.raw();
+                profile.attachment = {Fixed::from_raw(turned_x), x, z}; // WBP-13, R-ROT-01
+                if (degraded || bad_turn) note_value(notes, "EAWR-LOAD-0361", type.id, "Build_Attachment",
+                    decimal(type.build_attachment.position->x) + "," + decimal(type.build_attachment.position->y)
+                        + "," + decimal(type.build_attachment.position->z) + " scale " + decimal(scale),
+                    decimal(profile.attachment.x) + "," + decimal(profile.attachment.y) + "," + decimal(profile.attachment.z),
+                    diagnostic.empty() ? "attachment rotation is out of range" : diagnostic);
+
             }
             rules.capture.push_back(std::move(profile));
         }
@@ -133,28 +198,42 @@ core::Result<tactical::PadRules> capture_rules(const tactical::TacticalSetup& se
 core::Result<tactical::EconomyRules> economy_rules(
     const SkirmishStart& start, const StartInputs& inputs, const units::UnitTables& tables, const bool campaign) {
     using Result = core::Result<tactical::EconomyRules>;
-    const auto scalar = [&tables](const std::string_view tag) -> std::optional<Fixed> {
-        for (const auto& constant : tables.constants.scalars) {
-            if (constant.tag == tag) return constant.value;
-        }
+    core::LoadNoteBuffer notes;
+    for (const auto& note : inputs.placement_load_notes) notes.append(note);
+    const auto read = [&tables](const std::string_view tag) -> std::optional<Fixed> {
+        for (const auto& constant : tables.constants.scalars)
+            if (constant.tag == tag && constant.value) return constant.value;
         return std::nullopt;
     };
-    const auto build_multiplier = scalar("Tactical_Build_Time_Multiplier");
-    const auto vulnerability = scalar("Space_Elevated_Vulnerability_Factor");
-    const auto vulnerable_seconds = scalar("Space_Elevated_Vulnerability_Duration");
-    const auto collision_distance = scalar("Space_Reinforcement_Collision_Check_Distance");
+    const auto scalar = [&read, &notes](const std::string_view tag, const std::int64_t fallback) -> Fixed {
+        const auto value = read(tag);
+        if (!value) {
+            // LSA-P5: omitted constants retain defaults; values from stock GameConstants.xml.
+            note_value(notes, "EAWR-LOAD-0352", "GameConstants", std::string(tag), "missing", std::to_string(fallback),
+                "needs Tactical_Build_Time_Multiplier and the Space_Elevated_Vulnerability constants",
+                core::LoadAction::default_used, true);
+        }
+        return value.value_or(Fixed::from_raw(fallback * Fixed::scale));
+    };
+    // xml-fallback: Tactical_Build_Time_Multiplier
+    const auto build_multiplier = scalar("Tactical_Build_Time_Multiplier", 1);
+    // xml-fallback: Space_Elevated_Vulnerability_Factor
+    const auto vulnerability = scalar("Space_Elevated_Vulnerability_Factor", -3);
+    // xml-fallback: Space_Elevated_Vulnerability_Duration
+    const auto vulnerable_seconds = scalar("Space_Elevated_Vulnerability_Duration", 5);
+    // xml-fallback: Space_Reinforcement_Collision_Check_Distance
+    const auto collision_distance = scalar("Space_Reinforcement_Collision_Check_Distance", 200);
     if (start.match.start_tech < 0 || start.match.max_tech < start.match.start_tech) {
         return Result::failure(failure("invalid lobby tech levels"));
     }
-    if (!build_multiplier || !vulnerability || !vulnerable_seconds || !collision_distance) {
-        return Result::failure(failure("needs Tactical_Build_Time_Multiplier and the "
-                                       "Space_Elevated_Vulnerability constants"));
-    }
     tactical::EconomyRules rules;
+    const units::ContentTypeSelection selection(tables);
     rules.campaign = campaign;
+    for (const auto& type : tables.units) if (selection.keeps(type)) rules.load_notes.type_names.emplace(type_id(type.id), type.id);
+    for (const auto& type : tables.obstacles) rules.load_notes.type_names.emplace(type_id(type.id), type.id);
     rules.match_policy = replay_policy(start.match);
     rules.disabled_types = roster_disabled_types();
-    auto capture = capture_rules(start.setup, inputs, tables);
+    auto capture = capture_rules(start.setup, inputs, tables, &notes);
     if (!capture) return Result::failure(capture.error());
     rules.pads = std::move(capture).value();
     // Skirmish starts also expose their resolved lobby names. Retain this exact
@@ -164,7 +243,7 @@ core::Result<tactical::EconomyRules> economy_rules(
             [&](const StartFaction& entry) { return entry.neutral && detail::iequals(entry.name, player.faction); });
         if (faction != inputs.factions.end()) rules.pads.neutral = player.player.player_id;
     }
-    rules.collision_distance = *collision_distance; // WR-25
+    rules.collision_distance = collision_distance; // WR-25
 
     // MAT-15: a demo battle's players keep an account (the reinforcement pool) without a lobby slot,
     // credits, income or a start marker.
@@ -178,19 +257,27 @@ core::Result<tactical::EconomyRules> economy_rules(
         // MAT-15: neutral has no pool account and needs no AI difficulty data.
         if (attract && faction != inputs.factions.end() && faction->neutral) continue;
         if (!player.human && !tables.ai_credit_multiplier) {
-            return Result::failure(failure("AI credits require selected difficulty data"));
+            note_value(notes, "EAWR-LOAD-0353", player.faction, "Credit_Multiplier", "missing", "1",
+                "AI credits require selected difficulty data", core::LoadAction::default_used, true);
         }
-        const auto scale = ai_economy_scale(inputs, player, tables);
+        if (!player.human && !tables.pad_ai_build_multiplier) note_value(notes, "EAWR-LOAD-0353", player.faction,
+            "Space_Build_Time_Multiplier", "missing", "1", "AI construction needs selected difficulty build-time data",
+            core::LoadAction::default_used, true);
+        const auto scale = ai_economy_scale(inputs, player, tables, notes);
         if (!scale) return Result::failure(scale.error());
         // A demo player of a faction with no unit cap (neutral objects, or content that sets none) holds no
         // pool; the battle still runs, it just does not refill that player.
         if (attract && (faction == inputs.factions.end() || !faction->space_unit_cap)) continue;
         if (faction == inputs.factions.end() || !faction->space_unit_cap) {
-            return Result::failure(failure("faction " + player.faction + " has no Space_Tactical_Unit_Cap"));
+            // Class C: no sourced retail cap default. Zero keeps the account and all
+            // placed units, while preventing unbounded new reinforcement admission.
+            note_value(notes, "EAWR-LOAD-0353", player.faction, "Space_Tactical_Unit_Cap", "missing", "0",
+                faction == inputs.factions.end() ? "player faction is absent; using zero unit cap"
+                    : "faction has no Space_Tactical_Unit_Cap", core::LoadAction::default_used);
         }
         if (attract) {
             rules.players.push_back(tactical::EconomyPlayer{
-                player.player.player_id, Fixed{}, *faction->space_unit_cap, true, Fixed{}});
+                player.player.player_id, Fixed{}, (faction != inputs.factions.end() ? faction->space_unit_cap.value_or(0) : 0), true, Fixed{}});
             rules.players.back().start_tech = static_cast<std::uint32_t>(start.match.start_tech);
             rules.players.back().max_tech = static_cast<std::uint32_t>(start.match.max_tech);
             rules.players.back().credit_multiplier = scale.value().credit;
@@ -204,7 +291,7 @@ core::Result<tactical::EconomyRules> economy_rules(
         // unassigned zero facing vector; equivalence of those representations is unverified.
         const auto yaw = marker == start.markers.end() ? Fixed{} : marker->yaw_degrees;
         rules.players.push_back(tactical::EconomyPlayer{
-            player.player.player_id, start.match.credits, *faction->space_unit_cap, !player.human, yaw});
+            player.player.player_id, start.match.credits, (faction != inputs.factions.end() ? faction->space_unit_cap.value_or(0) : 0), !player.human, yaw});
         rules.players.back().start_tech = static_cast<std::uint32_t>(start.match.start_tech);
         rules.players.back().max_tech = static_cast<std::uint32_t>(start.match.max_tech);
         rules.players.back().credit_multiplier = scale.value().credit;
@@ -215,6 +302,7 @@ core::Result<tactical::EconomyRules> economy_rules(
     if (campaign && start.setup.campaign) rules.players = start.setup.campaign->players;
 
     for (const auto& type : tables.units) {
+        if (!selection.keeps(type)) continue;
         const auto& production = type.production;
         if (campaign) {
             auto bounty = (tables.campaign_multiplayer ? type.bounty_mp : type.bounty_sp).value_or(Fixed::from_raw(-Fixed::scale));
@@ -240,16 +328,20 @@ core::Result<tactical::EconomyRules> economy_rules(
                 type.tactical_sell_percentage.value_or(Fixed::from_raw(Fixed::scale / 2))});
         }
         if (type.under_construction && !type.constructed_type.empty() && production.build_time_seconds) {
-            const auto whole_seconds = production.build_time_seconds->trunc_to_integer();
-            if (whole_seconds <= 0 || whole_seconds > 86400) return Result::failure(failure("pad build duration is out of range"));
+            const auto bounded = duration(*production.build_time_seconds, notes, "EAWR-LOAD-0354", type.id, "Tactical_Build_Time");
+            const auto whole_seconds = bounded.trunc_to_integer();
             const auto seconds = static_cast<std::uint32_t>(whole_seconds);
-            if (!tables.pad_ai_build_multiplier) return Result::failure(failure("pad construction needs difficulty build-time data"));
-            // WBP-15: truncate the authored seconds before the AI multiplier, then truncate again.
-            const auto ai_time = sim::math::multiply(Fixed::from_raw(whole_seconds * Fixed::scale), *tables.pad_ai_build_multiplier);
-            if (!ai_time) return Result::failure(ai_time.error());
-            const auto ai_whole_seconds = ai_time.value().trunc_to_integer();
-            if (ai_whole_seconds < 0 || ai_whole_seconds > 86400) return Result::failure(failure("AI pad build duration is out of range"));
-            const auto ai_seconds = static_cast<std::uint32_t>(ai_whole_seconds);
+            if (!tables.pad_ai_build_multiplier) note_value(notes, "EAWR-LOAD-0353", type.id,
+                "Space_Build_Time_Multiplier", "missing", "1", "pad construction needs difficulty build-time data",
+                core::LoadAction::default_used, true);
+            // WBP-15: truncate before and after the AI multiplier. Zero remains valid.
+            const auto ai_time = sim::math::multiply(Fixed::from_raw(whole_seconds * Fixed::scale),
+                tables.pad_ai_build_multiplier.value_or(Fixed::from_raw(Fixed::scale)));
+            const auto ai_effective = duration(ai_time ? ai_time.value() : Fixed::from_raw(86400 * Fixed::scale),
+                notes, "EAWR-LOAD-0354", type.id, "AI_Tactical_Build_Time", true);
+            if (!ai_time) note_value(notes, "EAWR-LOAD-0354", type.id, "AI_Tactical_Build_Time", "overflow", "86400",
+                "AI pad build duration is out of range");
+            const auto ai_seconds = static_cast<std::uint32_t>(ai_effective.trunc_to_integer());
             rules.pads.construction.push_back({type_id(type.id), type_id(type.constructed_type),
                 (campaign ? production.build_cost_campaign : production.build_cost_multiplayer).value_or(Fixed{}), seconds, ai_seconds, type.child_persists});
         }
@@ -270,7 +362,7 @@ core::Result<tactical::EconomyRules> economy_rules(
                 if ((!start.match.allow_heroes && std::binary_search(inputs.named_heroes.begin(), inputs.named_heroes.end(), option.type))
                     || (!start.match.allow_superweapons && std::binary_search(inputs.superweapons.begin(), inputs.superweapons.end(), option.type))) continue;
                 option.disabled_reason = roster_disabled_reason(name);
-                const auto* built = tables.find(name);
+                const auto* built = selection.find(name);
                 if (built != nullptr && built->production.level_up && menu.next_level != 0
                     && rules.disabled_types.contains(menu.next_level)) {
                     option.disabled_reason = roster_disabled_reason(production.next_level);
@@ -287,7 +379,8 @@ core::Result<tactical::EconomyRules> economy_rules(
                     if (option.disabled_reason.empty()) option.disabled_reason = roster_disabled_reason(built->constructed_type);
                     option.kind = tactical::BuildKind::structure;
                     option.price = (campaign ? costs.build_cost_campaign : costs.build_cost_multiplayer).value_or(Fixed{});
-                    const auto seconds = costs.build_time_seconds ? costs.build_time_seconds->trunc_to_integer() : 0;
+                    const auto seconds = costs.build_time_seconds
+                        ? duration(*costs.build_time_seconds, notes, "EAWR-LOAD-0354", built->id, "Tactical_Build_Time").trunc_to_integer() : 0;
                     option.build_frames = static_cast<std::uint32_t>(std::max<std::int64_t>(0, seconds)) * 30;
                     option.ai_build_frames = option.build_frames;
                     option.available = option.disabled_reason.empty() && built->under_construction
@@ -305,20 +398,26 @@ core::Result<tactical::EconomyRules> economy_rules(
                     if (id == option.type || std::find(option.higher_upgrades.begin(), option.higher_upgrades.end(), id)
                         != option.higher_upgrades.end()) break;
                     option.higher_upgrades.push_back(id);
-                    const auto* higher = tables.find(successor);
+                    const auto* higher = selection.find(successor);
                     successor = higher != nullptr ? higher->production.next_upgrade : std::string{};
                 }
                 option.queue = detail::iequals(costs.production_queue, "Tactical_Upgrades") ? tactical::BuildQueue::upgrades
                                                                                               : tactical::BuildQueue::units;
                 option.price = (campaign ? costs.build_cost_campaign : costs.build_cost_multiplayer).value_or(Fixed{});
                 if (costs.build_time_seconds) {
-                    const auto seconds = sim::math::multiply(*costs.build_time_seconds, *build_multiplier);
-                    if (!seconds) return Result::failure(seconds.error());
-                    option.build_frames = frames_of(seconds.value());
+                    const auto seconds = sim::math::multiply(*costs.build_time_seconds, build_multiplier);
+                    const bool invalid_time = !seconds || seconds.value().raw() <= 0
+                        || seconds.value().raw() > 86400 * Fixed::scale;
+                    if (invalid_time) {
+                        note_value(notes, "EAWR-LOAD-0355", built->id, "Tactical_Build_Time",
+                            decimal(*costs.build_time_seconds), "unavailable offer",
+                            "purchase build duration is out of range", core::LoadAction::skipped_object);
+                        option.disabled_reason = "Invalid purchase build time";
+                    } else option.build_frames = frames_of(seconds.value());
                     option.ai_build_frames = option.build_frames; // SK-42: Normal's Space_Build_Time_Multiplier is 1
                 }
                 option.population = units::population_in_space(costs.population_value, costs.space_override_population_value);
-                const auto* deployed = built->deployed_space_type.empty() ? nullptr : tables.find(built->deployed_space_type);
+                const auto* deployed = built->deployed_space_type.empty() ? nullptr : selection.find(built->deployed_space_type);
                 option.available = option.disabled_reason.empty() && option.price.raw() > 0 && option.build_frames > 0
                     && (costs.upgrade_object || built->hull.has_value() || !built->members.empty()
                         || (deployed != nullptr && (deployed->hull.has_value() || !deployed->members.empty())));
@@ -340,7 +439,8 @@ core::Result<tactical::EconomyRules> economy_rules(
                     && std::none_of(costs.income_bonuses.begin(), costs.income_bonuses.end(), [&](const units::IncomeBonus& bonus) {
                         return (bonus.activation_style.empty() || detail::iequals(bonus.activation_style, "Space_Automatic"))
                             && std::any_of(tables.units.begin(), tables.units.end(), [&](const units::UnitType& target) {
-                            return !target.production.income.empty() && detail::iequals(target.id, bonus.target_source);
+                            return selection.keeps(target) && !target.production.income.empty()
+                                && selection.find(bonus.target_source) == &target;
                         });
                     })) {
                     option.available = false;
@@ -361,6 +461,7 @@ core::Result<tactical::EconomyRules> economy_rules(
                 profile.bonus.stacking_category = authored.stacking_category;
                 profile.bonus.percentages = authored.percentages;
                 for (const auto& target : tables.units) {
+                    if (!selection.keeps(target)) continue;
                     const auto id = type_id(target.id);
                     if (target.category_bits != 0 && tactical::special_type_matches(authored.filter, id, target.category_bits)
                         && std::find(authored.excluded_containers.begin(), authored.excluded_containers.end(), id)
@@ -387,8 +488,10 @@ core::Result<tactical::EconomyRules> economy_rules(
             for (const auto& authored : production.stealth_duration_bonuses) {
                 // WST-03: the debug build stores the multiplier less one.
                 const auto percentage = sim::math::subtract(authored.multiplier, Fixed::from_raw(Fixed::scale));
-                if (!percentage) return Result::failure(percentage.error());
-                upgrade.stealth_duration.push_back({authored.stacking_category, percentage.value(), authored.all_allies});
+                if (!percentage) note_value(notes, "EAWR-LOAD-0363", type.id, "stealth_duration",
+                    decimal(authored.multiplier), "-1 + one fixed-point quantum", "a stealth duration modifier is outside supported bounds");
+                upgrade.stealth_duration.push_back({authored.stacking_category,
+                    percentage ? percentage.value() : Fixed::from_raw(-Fixed::scale + 1), authored.all_allies});
             }
             upgrade.consume_after_special_fire = type.consume_after_special_fire;
             for (const auto& unlock : type.special_unlocks) if (unlock.enable)
@@ -398,8 +501,9 @@ core::Result<tactical::EconomyRules> economy_rules(
                 bonus.stacking_category = authored.stacking_category;
                 bonus.percentages = authored.percentages;
                 for (const auto& target : tables.units) {
+                    if (!selection.keeps(target)) continue;
                     const bool exact = std::any_of(authored.types.begin(), authored.types.end(),
-                        [&](const std::string& name) { return detail::iequals(name, target.id); });
+                        [&](const std::string& name) { return selection.find(name) == &target; });
                     const bool category = std::any_of(authored.categories.begin(), authored.categories.end(),
                         [&](const std::string& name) { return std::any_of(target.category_mask.begin(), target.category_mask.end(),
                             [&](const std::string& mask) { return detail::iequals(name, mask); }); });
@@ -417,8 +521,9 @@ core::Result<tactical::EconomyRules> economy_rules(
                 }
                 rule.all_allies = authored.all_allies;
                 for (const auto& target : tables.units) {
+                    if (!selection.keeps(target)) continue;
                     const bool exact = std::any_of(authored.types.begin(), authored.types.end(),
-                        [&](const std::string& name) { return detail::iequals(name, target.id); });
+                        [&](const std::string& name) { return selection.find(name) == &target; });
                     const bool category = std::any_of(authored.categories.begin(), authored.categories.end(),
                         [&](const std::string& name) { return std::any_of(target.category_mask.begin(), target.category_mask.end(),
                             [&](const std::string& mask) { return detail::iequals(name, mask); }); });
@@ -433,16 +538,19 @@ core::Result<tactical::EconomyRules> economy_rules(
                 // space source selects this automatic consumer. Explicit ground styles stay out.
                 if (authored.target_source.empty() || (!authored.activation_style.empty()
                     && !detail::iequals(authored.activation_style, "Space_Automatic"))) continue;
-                const auto target = std::find_if(tables.units.begin(), tables.units.end(),
-                    [&](const units::UnitType& candidate) { return detail::iequals(candidate.id, authored.target_source); });
-                if (target == tables.units.end() || target->production.income.empty()) continue;
+                const auto* target = selection.find(authored.target_source);
+                if (target == nullptr || target->production.income.empty()) continue;
                 tactical::IncomeModifier modifier;
                 modifier.target_source = type_id(target->id);
                 modifier.stacking_category = authored.stacking_category;
                 const auto one = Fixed::from_raw(Fixed::scale);
                 const auto percentage = sim::math::subtract(authored.multiplier.value_or(one), one);
                 const auto interval = sim::math::subtract(authored.interval_multiplier.value_or(one), one);
-                if (!percentage || !interval) return Result::failure(!percentage ? percentage.error() : interval.error());
+                if (!percentage || !interval) {
+                    note_value(notes, "EAWR-LOAD-0359", type.id, "income_modifier", "overflow", "omitted modifier",
+                        "an income modifier is out of range", core::LoadAction::skipped_object);
+                    continue;
+                }
                 modifier.percentage = percentage.value();
                 modifier.additive = authored.additive.value_or(Fixed{});
                 modifier.interval_percentage = interval.value();
@@ -459,21 +567,26 @@ core::Result<tactical::EconomyRules> economy_rules(
             tactical::IncomeProfile income;
             income.source = type_id(type.id);
             auto base = per_frame(*stream.base_value, *stream.interval_seconds);
-            if (!base) return Result::failure(base.error());
-            income.per_frame = base.value();
+            if (!base) note_value(notes, "EAWR-LOAD-0359", type.id, "income",
+                decimal(*stream.base_value), "0", "an income amount is out of range");
+            income.per_frame = base ? base.value() : Fixed{};
             income.base_value = *stream.base_value;
             income.interval_seconds = *stream.interval_seconds;
             income.split_with_allies = stream.split_with_allies;
             income.full_amount_to_everyone = stream.full_amount_to_everyone;
             for (const auto& bonus : production.income_bonuses) {
-                if (!bonus.additive || (!bonus.target_source.empty() && !detail::iequals(bonus.target_source, type.id))) {
+                if (!bonus.additive || (!bonus.target_source.empty() && selection.find(bonus.target_source) != &type)) {
                     continue;
                 }
                 const auto hardpoint = std::find_if(type.hardpoints.begin(), type.hardpoints.end(),
                     [&](const units::Hardpoint& entry) { return detail::iequals(entry.special_ability_name, bonus.name); });
                 if (hardpoint == type.hardpoints.end()) continue; // enabled by nothing M2 has
                 auto amount = per_frame(*bonus.additive, *stream.interval_seconds);
-                if (!amount) return Result::failure(amount.error());
+                if (!amount) {
+                    note_value(notes, "EAWR-LOAD-0359", type.id, "income_bonus", decimal(*bonus.additive), "omitted bonus",
+                        "an income bonus is out of range", core::LoadAction::skipped_object);
+                    continue;
+                }
                 income.bonuses.push_back(tactical::IncomeBonus{
                     amount.value(), static_cast<std::uint32_t>(hardpoint - type.hardpoints.begin())});
             }
@@ -504,6 +617,7 @@ core::Result<tactical::EconomyRules> economy_rules(
             id, detail::iequals(layer, "SuperCapital") ? std::nullopt : box, height.value_or(Fixed{})});
     };
     for (const auto& type : tables.units) {
+        if (!selection.keeps(type)) continue;
         footprint(type.id, placement_box(type), type.movement.space_layer, type.movement.layer_z_adjust);
     }
     for (const auto& obstacle : tables.obstacles) {
@@ -539,31 +653,23 @@ core::Result<tactical::EconomyRules> economy_rules(
                 Fixed::from_raw(*width / 2), Fixed::from_raw(*height / 2)};
         }
     }
-    // WPR-51: +8 is a project support limit, not a retail or fixed-point limit.
-    // Preserve authored values and diagnose only the unavailable upgrade, not the session.
-    std::vector<tactical::TypeId> disabled(rules.disabled_types.begin(), rules.disabled_types.end());
-    for (const auto& upgrade : rules.upgrades) {
-        const bool unsupported = std::any_of(upgrade.bonuses.begin(), upgrade.bonuses.end(), [](const auto& bonus) {
-            return std::any_of(bonus.percentages.begin(), bonus.percentages.end(), [](const Fixed value) {
-                return value.raw() > 8 * Fixed::scale;
-            });
-        });
-        if (!unsupported) continue;
-        disabled.push_back(upgrade.type);
-        const auto source = std::find_if(tables.units.begin(), tables.units.end(),
-            [&](const auto& unit) { return type_id(unit.id) == upgrade.type; });
-        const auto name = source != tables.units.end() ? source->id : std::to_string(upgrade.type);
-        for (auto& menu : rules.menus) for (auto& option : menu.options) if (option.type == upgrade.type) {
-            option.available = false;
-            option.disabled_reason = "Upgrade " + name + " bonus above project support limit (+8)";
-        }
-    }
-    std::sort(disabled.begin(), disabled.end());
-    disabled.erase(std::unique(disabled.begin(), disabled.end()), disabled.end());
-    rules.disabled_types = std::move(disabled);
     rules.max_queue = 5; // PU-14: FoC's built-in Max_Build_Queue; its data does not set it
-    rules.vulnerability = *vulnerability;
-    rules.vulnerability_frames = frames_of(*vulnerable_seconds);
+    rules.vulnerability = vulnerability;
+    rules.vulnerability_frames = frames_of(duration(vulnerable_seconds, notes, "EAWR-LOAD-0351",
+        "GameConstants", "Space_Elevated_Vulnerability_Duration", true));
+    tactical::normalize_economy(rules, notes);
+    core::LoadNoteCollector collected;
+    collected.merge(notes);
+    rules.load_notes.pending = collected.snapshot();
+    for (auto note : rules.load_notes.pending) {
+        if (note.object == "economy rules" || note.object == "GameConstants")
+            for (const auto& constant : tables.constants.scalars)
+                if (constant.tag == note.tag && !constant.text.empty()) note.authored_value = constant.text;
+        notes.append(std::move(note));
+    }
+    core::LoadNoteCollector bounded;
+    bounded.merge(notes);
+    rules.load_notes.pending = bounded.snapshot();
     if (auto valid = tactical::validate_economy(rules, start.setup.players); !valid) return Result::failure(valid.error());
     return Result::success(std::move(rules));
 }

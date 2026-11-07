@@ -57,6 +57,7 @@ void test_attack_path_boundary();
 void test_attack_path_refresh();
 void test_launch_state();
 void test_launch();
+void test_large_complement();
 void test_launched_squadron();
 void test_garrison_provenance();
 void test_priority_scan();

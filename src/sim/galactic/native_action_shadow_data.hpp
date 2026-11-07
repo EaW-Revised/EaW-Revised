@@ -8,7 +8,6 @@
 #include <map>
 #include <memory>
 #include <optional>
-#include <variant>
 #include <vector>
 
 namespace eawr::sim::galactic {

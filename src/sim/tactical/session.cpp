@@ -39,6 +39,16 @@
 
 namespace eawr::sim::tactical {
 
+namespace {
+// A dedicated, stateless SplitMix64 rank: this must not advance the battle RNG.
+[[nodiscard]] constexpr std::uint64_t controller_rank(std::uint64_t seed, EntityId id) noexcept {
+    auto value = (seed ^ id ^ 0x636f6e74726f6c73ULL) + 0x9e3779b97f4a7c15ULL;
+    value = (value ^ (value >> 30U)) * 0xbf58476d1ce4e5b9ULL;
+    value = (value ^ (value >> 27U)) * 0x94d049bb133111ebULL;
+    return value ^ (value >> 31U);
+}
+}
+
 core::Result<void> split_initial_controllers(TacticalSetup& setup, const EconomyRules& economy) {
     if (!setup.controllers) return core::Result<void>::success();
     auto prepared = setup;
@@ -70,19 +80,21 @@ core::Result<void> split_initial_controllers(TacticalSetup& setup, const Economy
                 && seat.kind == (faction.mode == FactionController::humans ? SeatKind::human : SeatKind::ai))
                 seats.push_back(seat.seat);
         std::sort(seats.begin(), seats.end());
-        struct Root { UnitState* unit; std::uint32_t population; };
+        struct Root { UnitState* unit; std::uint32_t population; std::uint64_t rank; };
         std::vector<Root> roots;
         for (auto& unit : units) {
             if (unit.owner != faction.player) continue;
             unit.controller_seat = {};
             if (unit.control == UnitControl::shared_structure) continue;
             unit.control = UnitControl::mobile;
-            if (!members.contains(unit.entity_id)) roots.push_back({&unit, population(unit)});
+            if (!members.contains(unit.entity_id)) roots.push_back({&unit, population(unit), controller_rank(prepared.seed, unit.entity_id)});
         }
         if (seats.empty() && !roots.empty()) return core::Result<void>::failure(detail::diagnostic(diagnostic_codes::invalid_setup,
             "initial mobile controller faction has no eligible seat"));
         std::sort(roots.begin(), roots.end(), [](const auto& a, const auto& b) {
-            return a.population != b.population ? a.population > b.population : a.unit->entity_id < b.unit->entity_id;
+            if (a.population != b.population) return a.population > b.population;
+            if (a.rank != b.rank) return a.rank < b.rank;
+            return a.unit->entity_id < b.unit->entity_id;
         });
         for (std::size_t i = 0; i < roots.size(); ++i) roots[i].unit->controller_seat = seats[i % seats.size()];
     }
@@ -231,6 +243,10 @@ core::Result<void> TacticalSession::submit(const PlayerCommand& command) {
 void TacticalSession::set_damage_notifications(const bool enabled) noexcept { impl_->publish_damage_changes = enabled; }
 
 void TacticalSession::set_state_hasher(std::shared_ptr<StateHasher> hasher) noexcept { impl_->hasher = std::move(hasher); }
+
+void TacticalSession::set_state_hash_policy(const StateHashPolicy policy) noexcept { impl_->hash_policy = policy; }
+
+StateHashPolicy TacticalSession::state_hash_policy() const noexcept { return impl_->hash_policy; }
 
 core::Result<void> TacticalSession::submit_reinforcement_search(const PlayerCommand& command,
     const ReinforcementSearch search) {
@@ -454,6 +470,9 @@ std::vector<PlayerCommand> TacticalSession::pending_commands() const {
     return commands;
 }
 std::vector<std::uint8_t> TacticalSession::canonical_state_bytes() const { return impl_->canonical_bytes(); }
+std::vector<std::uint8_t> TacticalSession::canonical_state_bytes(const PartitionExecutor& executor) const {
+    return impl_->canonical_bytes(executor);
+}
 
 std::string TacticalSession::state_sha256() const {
     return sim::sha256_hex(impl_->canonical_bytes());

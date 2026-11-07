@@ -490,6 +490,14 @@ void test_hardpoint_turret() {
     validation.profiles.front().weapons.front().manual_turret_required = false;
     expect(static_cast<bool>(tactical::validate_combat(validation)),
         "inert turret geometry without either mechanical flag is legal");
+    // Retail keeps weapons in a growable list: the old 255-per-type cap is gone (our bound is 65535).
+    validation.profiles.front().weapons.assign(300, gun);
+    expect(static_cast<bool>(tactical::validate_combat(validation)), "a type with 300 weapons is valid");
+    validation.profiles.front().weapons.assign(tactical::max_weapons_per_type, gun);
+    expect(static_cast<bool>(tactical::validate_combat(validation)), "a type at the weapon bound is valid");
+    validation.profiles.front().weapons.assign(tactical::max_weapons_per_type + 1, gun);
+    expect(!tactical::validate_combat(validation), "a type above the weapon bound is refused");
+    validation.profiles.front().weapons = {gun};
     auto inert = table();
     inert.profiles.front().weapons.front().manual_turret = authored;
     auto ordinary = table();

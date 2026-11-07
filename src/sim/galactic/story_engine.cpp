@@ -77,13 +77,14 @@ constexpr std::string_view known_rewards[] = {
     "TUTORIAL_PLAYER", "SET_ADVISOR", "PAUSE_GAME", "PAUSE_GALACTIC", "UNPAUSE_GALACTIC", "PAUSE_GALACTIC_GAME",
     "SWITCH_SIDES", "SWITCH_CONTROL", "TRIGGER_AI", "SET_WEATHER", "INFORMATION", "ENABLE_EVENT", "DISABLE_EVENT"};
 
-enum class Kind : std::uint8_t { trigger, elapsed, flag, tech, tactical, pending };
+enum class Kind : std::uint8_t { trigger, elapsed, flag, tech, click, tactical, pending };
 
 Kind kind_of(std::string_view type) noexcept {
     if (type == "STORY_TRIGGER") return Kind::trigger;
     if (type == "STORY_ELAPSED") return Kind::elapsed;
     if (type == "STORY_FLAG") return Kind::flag;
     if (type == "STORY_TECH_LEVEL") return Kind::tech;
+    if (type == "STORY_CLICK_GUI") return Kind::click; // WST-37
     if (tactical_event_type(type)) return Kind::tactical;
     return Kind::pending;
 }
@@ -153,8 +154,10 @@ struct Engine::Impl {
     std::vector<ScriptCall> script_calls;
     std::vector<Refusal> unavailable, diagnostics;
     int reset_depth{};
+    std::map<std::pair<std::size_t, std::size_t>, EventDef> originals; // WST-56: an edited event as loaded
     mutable std::string digest_cache;
     mutable bool digest_dirty{true};
+    std::uint64_t listener_revision{}; // bumped when an Event_Param edit can change which components the click events name
 
     void diagnose(std::size_t s, std::size_t e, std::string what, std::string reason) {
         diagnostics.push_back({defs[s].owner, defs[s].name, defs[s].events[e].name, std::move(what), std::move(reason)});
@@ -193,12 +196,39 @@ struct Engine::Impl {
         es.start = state.now;
     }
 
+    // Sub-plot switch shared by STORY_ELEMENT and Lua Activate (WST-26): clocks of waiting elapsed events start now.
+    void open_subplot(std::size_t target) {
+        auto& sub = state.subplots[target];
+        if (sub.active) return;
+        sub.active = true; touch();
+        for (std::size_t j = 0; j < sub.events.size(); ++j)
+            if (index[target][j].kind == Kind::elapsed && sub.events[j].active && !sub.events[j].triggered)
+                reset_counters(sub.events[j]);
+    }
+    [[nodiscard]] std::optional<std::size_t> find_subplot(std::string_view name) const {
+        for (std::size_t s = 0; s < defs.size(); ++s) if (defs[s].name == name) return s;
+        return std::nullopt;
+    }
+    EventEdit& edit_row(std::size_t s, std::size_t e) {
+        originals.emplace(std::pair{s, e}, defs[s].events[e]);
+        for (auto& row : state.edits) if (row.subplot == defs[s].name && row.event == defs[s].events[e].name) return row;
+        state.edits.push_back({defs[s].name, defs[s].events[e].name, {}, {}, {}, {}, {}});
+        return state.edits.back();
+    }
+    core::Result<void> apply_edit(const EventEdit& row);
+    void revert_edits() {
+        for (const auto& [key, original] : originals) defs[key.first].events[key.second] = original;
+        originals.clear();
+        state.edits.clear();
+    }
+
     core::Result<void> activate(std::size_t s, std::size_t e, int depth);
     core::Result<void> trigger(std::size_t s, std::size_t e, bool forced, int depth);
     core::Result<void> reward(std::size_t s, std::size_t e, int depth);
     core::Result<void> graph_reward(std::size_t s, std::size_t e, int depth, bool& handled);
     core::Result<void> dispatch_elapsed(Fixed time, bool paused);
     core::Result<void> dispatch_tech(std::optional<Player> player, std::int64_t level);
+    core::Result<void> dispatch_click(std::optional<Player> player, std::string_view component);
     core::Result<void> poll(Fixed time);
 };
 
@@ -254,6 +284,8 @@ core::Result<void> Engine::Impl::reward(std::size_t s, std::size_t e, int depth)
     record.sequence = ++state.sequence;
     record.owner = defs[s].owner; record.subplot = defs[s].name; record.event = def.name;
     record.dialog = def.dialog; record.tag = def.tag; record.variable = def.variable;
+    for (const auto& row : state.edits)
+        if (row.subplot == defs[s].name && row.event == def.name) record.dialog_text = row.dialog_text;
     record.chapter = def.chapter; record.popup = def.popup; record.sound = def.sound;
     record.remove_after_viewed = !def.authored_tag_present.value_or(!def.tag.empty());
     if (rewarded) {
@@ -342,13 +374,7 @@ core::Result<void> Engine::Impl::graph_reward(std::size_t s, std::size_t e, int 
         for (std::size_t other = 0; other < defs.size() && !target; ++other)
             if (defs[other].name == wanted) target = other;
         if (!target) { diagnose(s, e, type, "unknown sub-plot " + wanted); return ok(); }
-        auto& sub = state.subplots[*target];
-        if (!sub.active) {
-            sub.active = true;
-            for (std::size_t j = 0; j < sub.events.size(); ++j) // clocks of waiting elapsed events start now
-                if (index[*target][j].kind == Kind::elapsed && sub.events[j].active && !sub.events[j].triggered)
-                    reset_counters(sub.events[j]);
-        }
+        open_subplot(*target);
         return ok();
     }
     handled = false; // everything else belongs to the owning service (part 2)
@@ -388,6 +414,22 @@ core::Result<void> Engine::Impl::dispatch_tech(std::optional<Player> player, std
                 if (level == es.tech_last) continue;
                 es.tech_last = level; touch();
             } else if (level < wanted) continue;
+            if (auto done = trigger(s, e, false, 0); !done) return done;
+        }
+    }
+    return ok();
+}
+
+// WST-37: a clicked component fires every STORY_CLICK_GUI event of the target player whose Event_Param1 list names it
+// (case-insensitive). Each event follows the ordinary eligibility rules, so a spent one-shot event stays quiet.
+core::Result<void> Engine::Impl::dispatch_click(std::optional<Player> player, std::string_view component) {
+    const auto wanted = upper(std::string(component));
+    for (std::size_t s = 0; s < defs.size(); ++s) {
+        if (!state.subplots[s].active || (player && defs[s].owner != *player)) continue; // WST-14
+        for (std::size_t e = 0; e < defs[s].events.size(); ++e) {
+            if (index[s][e].kind != Kind::click || !eligible(s, e)) continue;
+            const auto& names = defs[s].events[e].params[0];
+            if (std::none_of(names.begin(), names.end(), [&](const std::string& name) { return upper(name) == wanted; })) continue;
             if (auto done = trigger(s, e, false, 0); !done) return done;
         }
     }
@@ -466,7 +508,7 @@ core::Result<Engine> Engine::create(Config config, std::vector<PlotRecord> plots
                 impl->unavailable.push_back({defs[s].owner, defs[s].name, def.name, def.type, std::string(land_battle_refusal)});
             else if (index.kind == Kind::pending)
                 impl->unavailable.push_back({defs[s].owner, defs[s].name, def.name, def.type,
-                    "no evaluator yet (story engine part 1 evaluates STORY_TRIGGER, STORY_ELAPSED, STORY_FLAG and STORY_TECH_LEVEL)"});
+                    "no evaluator yet (the story engine evaluates STORY_TRIGGER, STORY_ELAPSED, STORY_FLAG, STORY_TECH_LEVEL and STORY_CLICK_GUI)"});
             if (tactical_reward_type(def.reward_type))
                 impl->unavailable.push_back({defs[s].owner, defs[s].name, def.name, def.reward_type, std::string(land_battle_refusal)});
             else if (!def.reward_type.empty() && std::find(std::begin(known_rewards), std::end(known_rewards), def.reward_type) == std::end(known_rewards))
@@ -485,6 +527,8 @@ core::Result<void> Engine::notify(std::optional<Player> player, const Payload& p
     if (const auto* elapsed = std::get_if<ElapsedNotice>(&payload)) return service(elapsed->time_seconds, elapsed->paused);
     if (const auto* economy = std::get_if<EconomyNotice>(&payload); economy && economy->kind == Economy::tech_level) // WST-33
         return impl_->dispatch_tech(player, economy->value);
+    if (const auto* text = std::get_if<TextNotice>(&payload); text && text->kind == Text::click_gui) // WST-37
+        return impl_->dispatch_click(player, text->text);
     return ok(); // WST-31..39 evaluators arrive with the next parts; the walk names each seam
 }
 
@@ -495,6 +539,17 @@ core::Result<void> Engine::service(Fixed time, bool paused) {
     return impl.poll(time);
 }
 
+std::uint64_t Engine::click_listener_revision() const noexcept { return impl_->listener_revision; }
+// #5857: every component name a STORY_CLICK_GUI event of any sub-plot, owner or state lists. Definition-wide on purpose:
+// a plot that switches on later must hear the click that comes after it, and the set then changes only by an edit.
+std::vector<std::string> Engine::click_listeners() const {
+    std::set<std::string> names;
+    for (std::size_t s = 0; s < impl_->defs.size(); ++s)
+        for (std::size_t e = 0; e < impl_->defs[s].events.size(); ++e)
+            if (impl_->index[s][e].kind == Kind::click)
+                for (const auto& name : impl_->defs[s].events[e].params[0]) names.insert(upper(name));
+    return {names.begin(), names.end()};
+}
 std::vector<Triggered> Engine::take_triggered() { return std::exchange(impl_->queue, {}); }
 std::vector<ScriptCall> Engine::take_script_calls() { return std::exchange(impl_->script_calls, {}); }
 const State& Engine::state() const noexcept { return impl_->state; }
@@ -504,6 +559,64 @@ std::span<const PlotRecord> Engine::plots() const noexcept { return impl_->plots
 std::span<const SubPlotDef> Engine::definitions() const noexcept { return impl_->defs; }
 std::span<const Refusal> Engine::unavailable() const noexcept { return impl_->unavailable; }
 std::span<const Refusal> Engine::diagnostics() const noexcept { return impl_->diagnostics; }
+
+// Applies one saved edit row over the loaded definition of its event.
+core::Result<void> Engine::Impl::apply_edit(const EventEdit& row) {
+    const auto s = find_subplot(row.subplot);
+    const auto e = s ? find_event(*s, row.event) : std::nullopt;
+    if (!s || !e) return invalid("edit names an event that is not loaded: " + row.subplot + " " + row.event);
+    for (const auto& [slot, tokens] : row.event_params) if (slot >= token_slots_event) return invalid("edit event parameter outside its slots");
+    for (const auto& [slot, tokens] : row.reward_params) if (slot >= token_slots_reward) return invalid("edit reward parameter outside its slots");
+    originals.emplace(std::pair{*s, static_cast<std::size_t>(*e)}, defs[*s].events[*e]);
+    auto& def = defs[*s].events[*e];
+    for (const auto& [slot, tokens] : row.event_params) def.params[slot] = tokens;
+    if (!row.event_params.empty()) ++listener_revision;
+    for (const auto& [slot, tokens] : row.reward_params) def.reward_params[slot] = tokens;
+    if (row.reward_type) def.reward_type = *row.reward_type;
+    if (row.dialog) def.dialog = *row.dialog;
+    touch();
+    return ok();
+}
+
+core::Result<void> Engine::apply(const PlotCommand& command) {
+    auto& impl = *impl_;
+    const auto s = impl.find_subplot(command.subplot);
+    if (!s) return invalid("Lua names a sub-plot that is not loaded: " + command.subplot);
+    using Op = PlotCommand::Op;
+    switch (command.op) {
+    case Op::activate: impl.open_subplot(*s); return ok();
+    case Op::suspend: impl.state.subplots[*s].active = false; impl.touch(); return ok();
+    case Op::reset: // WST-26
+        for (std::size_t e = 0; e < impl.defs[*s].events.size(); ++e) impl.reset_event(*s, e);
+        impl.touch();
+        return ok();
+    default: break;
+    }
+    const auto e = impl.find_event(*s, command.event);
+    if (!e) return invalid("Lua names an event that is not loaded: " + command.subplot + " " + command.event);
+    if (command.op == Op::event_param && command.index >= token_slots_event) return invalid("event parameter index outside Event_Param1..7");
+    if (command.op == Op::reward_param && command.index >= token_slots_reward) return invalid("reward parameter index outside Reward_Param1..14");
+    auto& row = impl.edit_row(*s, *e);
+    auto& def = impl.defs[*s].events[*e];
+    const auto text = command.values.empty() ? std::string{} : command.values.front();
+    switch (command.op) {
+    case Op::event_param: row.event_params[command.index] = command.values; def.params[command.index] = command.values; ++impl.listener_revision; break;
+    case Op::reward_param: row.reward_params[command.index] = command.values; def.reward_params[command.index] = command.values; break;
+    case Op::reward_type: row.reward_type = text; def.reward_type = text; break;
+    case Op::dialog: row.dialog = text; def.dialog = text; break;
+    case Op::add_dialog_text: row.dialog_text.insert(row.dialog_text.end(), command.values.begin(), command.values.end()); break;
+    case Op::clear_dialog_text: row.dialog_text.clear(); break;
+    default: break;
+    }
+    impl.touch();
+    return ok();
+}
+
+bool Engine::has_subplot(std::string_view name) const { return impl_->find_subplot(name).has_value(); }
+bool Engine::has_event(std::string_view subplot, std::string_view event) const {
+    const auto s = impl_->find_subplot(subplot);
+    return s && impl_->find_event(*s, event);
+}
 
 core::Result<void> Engine::restore(State saved) {
     auto& impl = *impl_;
@@ -517,7 +630,25 @@ core::Result<void> Engine::restore(State saved) {
                 return invalid("saved event " + row.events[e].name + " differs from the loaded plots");
     }
     for (const auto& [name, value] : saved.flags) if (name != upper(name)) return invalid("saved flag name is not upper-case");
+    // Lua edits: the loaded definitions first, then the saved rows over them.
+    // Transactional: a failing row puts the definitions, the originals and the edit rows back as they were.
+    auto defs_backup = impl.defs;
+    auto originals_backup = impl.originals;
+    auto edits_backup = impl.state.edits;
+    impl.revert_edits();
+    auto edits = std::move(saved.edits);
+    saved.edits.clear();
+    for (const auto& row : edits) {
+        if (auto applied = impl.apply_edit(row); !applied) {
+            impl.defs = std::move(defs_backup);
+            impl.originals = std::move(originals_backup);
+            impl.state.edits = std::move(edits_backup);
+            impl.touch();
+            return applied;
+        }
+    }
     impl.state = std::move(saved);
+    impl.state.edits = std::move(edits);
     impl.queue.clear(); impl.script_calls.clear(); impl.reset_depth = 0; impl.touch();
     return ok();
 }
@@ -532,6 +663,7 @@ const std::string& Engine::digest() const {
         Writer out;
         constexpr std::string_view domain = "eawr-story-engine-v1";
         out(std::string(domain), kept);
+        if (!kept.edits.empty()) out(kept.edits); // an unedited game keeps its old digest
         impl_->digest_cache = core::sha256_hex(out.bytes);
         impl_->digest_dirty = false;
     }

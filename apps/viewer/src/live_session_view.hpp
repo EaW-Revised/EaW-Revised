@@ -2,6 +2,7 @@
 
 #include "eawr/battle/start.hpp"
 #include "live_session_options.hpp"
+#include "load_job.hpp"
 #include "live_session_slots.hpp"
 #include "live_session_economy_view.hpp"
 #include "live_session_lan.hpp"
@@ -17,7 +18,7 @@
 #include "battle_scene.hpp"
 
 #include "eawr/core/result.hpp"
-#include "eawr/data/xml.hpp"
+#include "eawr/data/xml_fwd.hpp"
 #include "eawr/platform/live_session.hpp"
 #include "eawr/platform/tactical_feed.hpp"
 #include "eawr/presentation/animation/unit_clips.hpp"
@@ -39,12 +40,13 @@
 #include "eawr/sim/tactical/replay.hpp"
 #include "eawr/skirmish/start.hpp"
 #include "eawr/units/unit_tables.hpp"
-#include "eawr/vfs/vfs.hpp"
+#include "eawr/vfs/vfs_fwd.hpp"
 
 #include <array>
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
+#include <future>
 #include <map>
 #include <memory>
 #include <optional>
@@ -59,6 +61,7 @@
 namespace eawr::presentation::godot_backend {
 
 class BattleSource;
+class BattlePreparation;
 
 // `--eawr-live-session m2` on a space map with `--eawr-populate` (#80 part A): the viewer runs
 // the authoritative tactical session of the M2 skirmish (plan/phase-2/m2-skirmish.md) and draws
@@ -209,6 +212,11 @@ public:
     // the placed ships that draw its units. False with `failure` set otherwise.
     [[nodiscard]] bool prepare(const vfs::Vfs& filesystem, const data::Catalog& catalog, std::string_view map_path,
                                std::string& failure);
+    // prepare() as load steps queued on `queue` (the attract load): true when queued; a step that fails calls `fail`
+    // with its text and returns that result. `filesystem` and `catalog` must outlive the steps.
+    [[nodiscard]] bool prepare_in_steps(const vfs::Vfs& filesystem, const data::Catalog& catalog,
+                                        std::string_view map_path, std::string& failure,
+                                        const EnqueueLoadStep& queue, std::function<bool(const std::string&)> fail);
     [[nodiscard]] const std::vector<BattleScene::PlacedUnit>& placed_ships() const noexcept {
         return placed_ships_;
     }
@@ -338,6 +346,11 @@ public:
     [[nodiscard]] const battle::BattleStart* start_data() const noexcept { return start_ ? &*start_ : nullptr; }
     // The tick the last frame drew (fractional between ticks).
     [[nodiscard]] double presented_tick() const noexcept { return presented_tick_; }
+    struct ClockTrace final {
+        double newest{}, before{}, after{}, advance{}, delta{}, rate{}, target_rate{};
+        bool valid{}, running{};
+    };
+    [[nodiscard]] const ClockTrace& clock_trace() const noexcept { return clock_trace_; }
     // The frames shown after the warm-up (scripted f<frame> gestures count these).
     [[nodiscard]] std::uint64_t shown_frames() const noexcept {
         return frames_ > options_.warmup_frames ? frames_ - options_.warmup_frames : 0U;
@@ -365,6 +378,25 @@ public:
     // battle's end goes straight to the owner (no result screen). False when the battle cannot be left
     // yet (still loading).
     [[nodiscard]] bool leave();
+    // #3989: a player's save of this battle (docs/checkpoint-format.md "Skirmish battle saves"). Only a
+    // local single-player space skirmish with the AI host saves: not LAN, not an observed or replayed
+    // battle, not a campaign's or a land battle.
+    [[nodiscard]] bool can_save() const noexcept;
+    // Frame thread: starts a save named `name` in `directory` with the view's `hints` (section 0x8000).
+    // The simulation thread takes the battle between two ticks (also while paused) and hands the bytes
+    // back; service_save() then gives them to a disk worker. False when this battle cannot save or a save
+    // is still running. The outcome is save_status() once the file is written or refused.
+    [[nodiscard]] bool save_game(std::filesystem::path directory, std::string name, bool overwrite,
+                                 std::vector<std::uint8_t> hints);
+    // Frame thread, every frame: moves a running save on. True on the frame a save ended.
+    bool service_save();
+    struct SaveStatus final {
+        bool running{};
+        std::uint64_t written{}, failed{};
+        std::string last_name, last_problem; // the last ended save; the problem is empty when it was written
+        std::uint64_t last_tick{};
+    };
+    [[nodiscard]] const SaveStatus& save_status() const noexcept { return save_status_; }
     // The units the last frame drew for the local player (#82 selection and orders).
     [[nodiscard]] const std::vector<VisibleUnit>& visible_units() const noexcept { return visible_; }
     struct RadarMemory final {
@@ -423,6 +455,9 @@ public:
     // a clone may still have stood; frame() calls it first in case the last frame did not.
     void retire_clones(BattleScene& population, GodotRenderer& renderer,
         const std::function<bool(std::size_t)>& terminal_ready = {});
+    // L1.1: the ships retire_clones() will retire, so the frame's readers that now run before it treat them as
+    // already gone (what retiring first used to make them answer).
+    [[nodiscard]] std::vector<std::size_t> retiring_ships() const;
     // Stops the session, checks its hashes against a headless run of its recording and writes
     // the requested hash and replay files. Idempotent.
     void finish();
@@ -469,6 +504,8 @@ public:
     }
     [[nodiscard]] const RenderClock& render_clock() const noexcept { return render_clock_; }
     [[nodiscard]] std::optional<BattleEffects::UnitFrame> unit_frame(sim::EntityId entity) const;
+    // This frame's unit poses, ascending by entity, for a caller that walks them in step with the ascending instances.
+    [[nodiscard]] const std::map<sim::EntityId, BattleEffects::UnitFrame>& unit_frames() const noexcept { return unit_frames_; }
     [[nodiscard]] std::optional<std::size_t> composed_ship(sim::EntityId entity) const noexcept {
         if (const auto found = ship_of_entity_.find(entity); found != ship_of_entity_.end()) return found->second;
         if (const auto found = launched_ship_of_entity_.find(entity); found != launched_ship_of_entity_.end()) return found->second;
@@ -477,6 +514,10 @@ public:
     // The session's snapshot of `tick` while its history still holds it (#406: the unit emitters
     // place each sample a stalled frame catches up on at that sample's own tick); null otherwise.
     [[nodiscard]] std::shared_ptr<const sim::tactical::TacticalSnapshot> snapshot_at(std::uint64_t tick) const;
+    // L1.2: the history as of now, one lock; empty without a session. Read it with platform::LiveSession::snapshot_in.
+    [[nodiscard]] platform::LiveSession::SnapshotHistory history_copy() const;
+    // Land movement debug overlay: a read-only copy, null in a space battle or while the session is busy.
+    [[nodiscard]] std::shared_ptr<const sim::tactical::LandOverlayData> land_overlay() const;
     // #425: the squadron `craft` flies in (its container and launch roster), or null. #518: a
     // squadron a spawner launches registers when a snapshot first lists it, like the setup's; a
     // craft keeps its squadron for life.
@@ -542,6 +583,10 @@ public:
     // WDF-05: the space map's box whose low corner starts the fighter grids; the world origin without content.
     [[nodiscard]] sim::tactical::MapBox map_box() const noexcept { return content_ ? content_->map_box : sim::tactical::MapBox{}; }
     [[nodiscard]] const sim::tactical::CombatTable* combat() const noexcept { return content_ ? &content_->combat : nullptr; }
+    // The combat rows the presentation resolves weapon looks from: a land battle keeps them in its own content.
+    [[nodiscard]] const sim::tactical::CombatTable* effects_combat() const noexcept {
+        return land_content_ ? &land_content_->combat : combat();
+    }
     [[nodiscard]] const sim::tactical::MotionTable* motion() const noexcept { return content_ ? &content_->motion : nullptr; }
     [[nodiscard]] const sim::tactical::DurabilityTable* durability() const noexcept {
         return content_ ? &content_->durability : nullptr;
@@ -673,6 +718,12 @@ private:
     void write_report_battle_end(std::ostream& output) const;
     void write_report_status(std::ostream& output) const;
 
+    [[nodiscard]] bool prepare_head(const vfs::Vfs& filesystem, std::string_view map_path, std::string& failure,
+                                    const BattleSource*& source);
+    [[nodiscard]] bool prepare_tail(const vfs::Vfs& filesystem, const data::Catalog& catalog, std::string_view map_path,
+                                    std::optional<battle::ArrivalPlan>& selected_arrivals, std::string& failure);
+    void begin_source(BattlePreparation& prepared);
+    void end_source(BattlePreparation& prepared, std::optional<battle::ArrivalPlan>& arrivals);
     [[nodiscard]] bool prepare_source(const BattleSource& source, const vfs::Vfs& filesystem,
         const data::Catalog& catalog, std::string_view map_path, std::optional<battle::ArrivalPlan>& arrivals,
         std::string& failure);
@@ -849,6 +900,17 @@ private:
     std::string finish_status_{"not_finished"};
     std::optional<bool> headless_equal_;
     std::vector<std::string> hashes_;
+    // Skirmish battle saves: the tick a loaded battle started at (0 for a fresh one); the next frame composes
+    // every arrival at once; why --eawr-live-save-at wrote nothing (set on the simulation thread, read after stop()).
+    std::uint64_t loaded_tick_{};
+    bool unbounded_arrivals_{};
+    std::shared_ptr<std::optional<std::string>> save_error_;
+    // #3989: the running player's save. `pending_save_` is shared with the simulation thread's sink (its own
+    // mutex); `save_write_` is the disk worker's result; both are read and reset on the frame thread only.
+    struct PendingSave;
+    std::shared_ptr<PendingSave> pending_save_;
+    std::future<core::Result<void>> save_write_;
+    SaveStatus save_status_;
     std::string failure_;
     // The simulation thread's failure, once it stopped.
     std::string simulation_error_;
@@ -902,7 +964,9 @@ private:
                               std::optional<battle::ArrivalPlan> selected);
     void add_launch_slot(const vfs::Vfs&, const data::Catalog&, const std::string&,
                          const battle::StartUnit&, const std::optional<battle::LobbyColour>&,
-                         sim::tactical::TypeId required_station = 0, bool ability_proxy_owner = false);
+                         sim::tactical::TypeId required_station = 0, bool ability_proxy_owner = false,
+                         std::string_view source = "launch");
+    void note_spawned(sim::tactical::TypeId type) const;
     [[nodiscard]] std::optional<std::size_t> grow_launch_slot(sim::EntityId, sim::tactical::TypeId,
                                                            sim::tactical::PlayerId);
     // A slot whose unit is no longer in the tactical snapshot, and whose death clone (if any) has
@@ -915,6 +979,14 @@ private:
     // first sight); nothing for a unit without a model.
     [[nodiscard]] std::optional<std::size_t> ship_of(sim::EntityId entity, sim::tactical::TypeId type,
                                                   sim::tactical::PlayerId owner);
+    // The types of every launch slot (launch_slots_ only grows, in add_launch_slot) and the (owner, TypeId) of every
+    // `launch` row of the arrival plan (rows change only in prepare_launch_slots). TypeId is the CRC the original any_of
+    // compared, so collisions behave exactly as before.
+    std::set<sim::tactical::TypeId> launch_slot_types_;
+    std::set<std::pair<sim::tactical::PlayerId, sim::tactical::TypeId>> launch_demand_;
+    bool launch_demand_valid_{};
+    [[nodiscard]] bool launch_demanded(sim::tactical::PlayerId owner, sim::tactical::TypeId type);
+    [[nodiscard]] bool container_without_slot(sim::tactical::TypeId type) const;
     std::map<sim::EntityId, DeathClone> death_clones_;
     // #76 AB-31 (UA-06): a SPOILER_LOCK craft's S-foil clip. `alternate` is UNDEPLOY (off) rather
     // than DEPLOY (on); it runs from `start_frame` at the presentation tick `since`. Before the
@@ -941,6 +1013,7 @@ private:
     LaunchSlot& bind_slot_identity(sim::EntityId entity, LaunchSlot& real, sim::tactical::TypeId type, sim::tactical::PlayerId owner);
     std::vector<std::string> retired_clone_rows_;
     bool trace_frames_{};
+    ClockTrace clock_trace_{};
     double bookkeeping_ms_{};
     double pose_ms_{};
     double opacity_ms_{};

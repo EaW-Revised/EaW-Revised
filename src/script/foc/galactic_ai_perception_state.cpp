@@ -295,11 +295,13 @@ std::string GalacticWorld::records_digest(bool cold) const {
 }
 std::size_t GalacticWorld::record_byte_upper_bound() const noexcept {
     const auto lock = query_lock();
+    if (!records_ready_) return 0;
     std::size_t bytes{};
     for (const auto& [who, mine] : shards_) { static_cast<void>(who); bytes += mine.records.byte_size(); }
     return bytes + markup_->record_byte_upper_bound() + 1024;
 }
 core::Result<std::string> GalacticWorld::record_sync_hash(bool cold) const {
+    if (phase_abandoned_) return fail<std::string>("unsettled perception phase");
     if (!available()) return fail<std::string>("perception digest needs a rebound world");
     const auto lock = query_lock();
     if (!records_ready_) { rebuild_records(); records_ready_ = true; }
@@ -337,6 +339,7 @@ core::Result<galactic_ai::NativeState> GalacticWorld::capture() const {
     return core::Result<galactic_ai::NativeState>::success(std::move(out));
 }
 core::Result<void> GalacticWorld::restore(const galactic_ai::NativeState& input) {
+    if (phase_ || phase_abandoned_) return fail<void>("cannot restore an active or unsettled perception phase");
     if (!available() || input.version != galactic_ai::native_state_version) return fail<void>("perception restore needs a rebound world and supported envelope");
     const auto found = input.components.find(component);
     if (found == input.components.end()) return fail<void>("required perception component missing");

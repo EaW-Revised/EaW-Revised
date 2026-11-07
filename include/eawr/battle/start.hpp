@@ -3,6 +3,7 @@
 #include "eawr/battle/arrival_plan.hpp"
 
 #include "eawr/core/result.hpp"
+#include "eawr/core/load_note.hpp"
 #include "eawr/sim/tactical/replay.hpp"
 #include "eawr/sim/tactical/victory.hpp"
 #include "eawr/units/unit_tables.hpp"
@@ -170,6 +171,7 @@ struct BattleStart final {
     sim::tactical::VictoryCondition victory_condition{sim::tactical::VictoryCondition::enemy_starbase_destroyed};
     MatchOptions match{}; // applied flags bind replays; other copied options remain content.
     ArrivalPlan arrivals{}; // presentation capacity only; deliberately outside setup/replay state
+    std::vector<core::LoadNote> load_notes{}; // AG-12: diagnostic sidecar, outside setup/replay bytes
 };
 
 // Type and faction IDs are the CRC-32 of the ASCII-upper-cased name, the hash

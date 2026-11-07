@@ -325,7 +325,7 @@ void CpuSystem::reset(const std::uint32_t seed) {
     dynamic_size_ = dynamic_energy_ = 1.0F;
     origin_ = previous_origin_ = sampled_origin_ = update_origin_start_ = emitter_velocity_ = wind_ = {};
     basis_ = previous_basis_ = sampled_basis_ = update_basis_start_ = {};
-    update_before_ = update_delta_ = inherited_speed_limit_ = 0;
+    update_before_ = update_delta_ = 0;
     phase_ms_ = {}; detail_ = {};
     std::fill(enabled_.begin(), enabled_.end(), std::uint8_t{1});
     std::fill(emitter_start_.begin(), emitter_start_.end(), 0.0F);
@@ -576,7 +576,6 @@ void CpuSystem::initialize_particle(Particle& particle,const EmitterDefinition& 
     // PS-51: total birth motion is available to kites even at zero residual age.
     if(emitter.inherit_emitter_motion&&emitter.parent_emitter==EmitterDefinition::no_parent)
         particle.motion_velocity+=emitter_velocity_*emitter.inherited_velocity_scale;
-    particle.inherited_speed_limit=inherited_speed_limit_;
     particle.previous_position=particle.position;
     const float saved_time=time_;time_=spawn_time;
     update_particle(particle,emitter,0.0F);
@@ -690,7 +689,6 @@ void CpuSystem::move_particle(Particle& particle,const EmitterDefinition& emitte
         if(angle>item.angular_limit)continue;
         particle.motion_velocity+=item.velocity*(item.factor*(1-2*std::abs(fraction-0.5F)));
     }
-    particle.inherited_speed_limit=inherited_speed_limit_;
     particle.position+=particle.motion_velocity*delta;
 }
 
@@ -906,15 +904,22 @@ void CpuSystem::follow(Particle& particle,const EmitterMotion& motion) const{
     particle.position=origin_+transformed(*motion.rotation,particle.position-previous_origin_);
 }
 
-void CpuSystem::follow_emitter(){
+std::size_t CpuSystem::follow_emitter(){
     PhaseTimer timer(measure_phases_ ? &phase_ms_[1] : nullptr);
     const EmitterMotion motion=emitter_motion();
+    std::size_t moved{};
     for(Particle& particle:particles_){
         if(definition_.emitters[particle.emitter_index].translater_id!=26||frozen(particle.emitter_index))continue;
         follow(particle,motion);
+        ++moved;
     }
     previous_origin_=origin_;
     previous_basis_=basis_;
+    return moved;
+}
+
+bool CpuSystem::emitter_followed() const noexcept{
+    return same(origin_,previous_origin_)&&same(basis_,previous_basis_);
 }
 
 void CpuSystem::step_segment(const float delta_seconds,AdvanceStats& stats,const bool prewarming){
@@ -930,8 +935,6 @@ void CpuSystem::step_segment(const float delta_seconds,AdvanceStats& stats,const
     if(delta_seconds>0.0F){
         emitter_velocity_=(origin_-sampled_origin_)*(1.0F/delta_seconds);
         if(!finite(emitter_velocity_))emitter_velocity_={};
-        const float sampled_speed=std::hypot(emitter_velocity_.x,emitter_velocity_.y,emitter_velocity_.z);
-        if(std::isfinite(sampled_speed))inherited_speed_limit_=std::max(inherited_speed_limit_,sampled_speed);
         sampled_origin_=origin_;
     }
     auto& events=events_;

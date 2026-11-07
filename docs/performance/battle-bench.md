@@ -418,21 +418,30 @@ the tick, not rendering. The runs with the fight on screen are the rig's and the
 Ranked fix 4. The battle's particle systems (the unit emitters, the battle effects and the breakoff
 props) advance and present their effects in one batch per 30 Hz sample
 (`EffectRegistry::advance_all`, `present_all`). Each effect steps its CPU system and builds its
-emitter streams as a task on a small pool of its own, in contiguous slices of the batch (at most 64,
-as [EnTT storage decision](../architecture-decisions.md#adr-009-entt-storage-and-stable-simulation-ids)'s partitions); the main thread then uploads the streams to Godot in the batch's order.
+emitter streams as a task on a small pool of its own, in contiguous slices of the batch (at most 256,
+`StepExecutor::max_ordered`; 64 like the simulation's partitions until 2026-11-03, when finer slices cut the pool's idle wait); the main thread then uploads the streams to Godot in the batch's order.
 An effect reads only itself and the shared camera and writes only itself and its own statistics
 slot, so the streams, the statistics and the upload order are the same with any pool size
 (`particle_render_contracts`: the serial run against 1, 4 and 8 threads and a reversed task order).
+The unit emitters' own-sample batch (N1) does not run on the main thread at all: `UnitEmitters::frame`
+starts it with `EffectRegistry::begin_advance_all` on a parked thread that calls the pool as worker 0
+(`StepExecutor::start_async`) and returns; the main thread then does the fog plane, the HUD, the battle audio up to its
+combat sounds and the view's submit, and the view calls `SpaceLiveUpdate::finish`, which joins the batch, commits the
+streams in the batch's order (`finish_advance_all`), takes the statistics and runs the projectile batch, the clone
+retirement, the battle effects, the combat sounds and the breakoff props. Only the pack runs beside main (no engine call);
+every backend commit stays on the main thread after the join, so the streams, the statistics and the upload order are
+the inline frame's (`particle_render_contracts`: `test_async_advance_matches_advance_all`).
 The live battle's registries no longer hash their streams (nothing there reads the hashes; the effect
 and map reports and the tests still do, `set_stream_hashes`). The Godot upload writes the packed
 arrays through their storage instead of one checked `set()` per element, and an emitter that drew
 nothing and draws nothing again is left alone. `RegistryWorkCounts` holds the per-frame work to a
 budget: one step and one stream build per effect and emitter, one upload per drawn stream, no hash
-in the live battle, at most 64 tasks a batch (`test_batch_work_counts`).
+in the live battle, at most 256 tasks a batch (`test_batch_work_counts`).
 
 **Pool size.** `ParticleWorkers::default_count`: a quarter of the hardware threads below eight of
-them (so the main thread alone), half of them from eight up, at least 1 and at most 4, the main
-thread included; hosts under eight threads keep their earlier participant count and were not
+them (so the main thread alone), half of them from eight up, at least 1 and at most 4 (at most 6 from twelve hardware threads up:
+with the particle lane on, pool 6 cut the lane time per stream 12 % on a 28-thread host and 8 was not shown
+better, 2026-11-03; at most 8 from twenty up, 2026-11-04; [measurement](particle-pool-size.md)), the main thread included; hosts under eight threads keep their earlier participant count and were not
 re-measured (`--eawr-live-particle-workers n` sets
 it). The simulation's pool already takes all but two hardware threads
 (`LiveSession::game_worker_count`), so every particle worker shares a core with a simulation worker
@@ -854,6 +863,47 @@ counter. Worker CPU sums overlap executor elapsed and cannot be added to it or t
 owner elapsed. Owner elapsed also includes preparation and lifecycle bookkeeping.
 Without the fine-timing flag, these counters stay zero and do not read the clock,
 even when coarse frame/particle CSV tracing is enabled.
+
+### Dirty-tracked present and the merged-draw census
+
+A present of an effect whose emitter frame, brightness, dynamic settings, mesh frame, detail
+and detach state are unchanged since its last build, under an unchanged camera and culling frame,
+and whose linked particles already stand at that frame, reuses that build, so nothing is built or
+uploaded. The twin test compares the streams against a registry that rebuilds every present, for
+each of those inputs. An advance always builds. A backend that could not restore a resource
+(`incomplete_updates`) makes the next batch build and submit everything once more; one that holds
+an upload back for a retry backoff (`deferred_updates`) gets only that instance again. `--eawr-particle-no-clean-present` (developer switch, same trace) builds every
+present as before, for paired runs in one binary. `RegistryWorkCounts::presents_clean` counts
+the skipped presents; `presents`, `streams_built` and `uploads` count only work done.
+
+D-ss (default on, DEV-2): in a frame that owes two or more ticks, a ship whose predicted screen error of dropping the historical particle pass is under 0.5 px (hysteresis: back at 0.25 px) takes one pass; culled ships always take one. The unit-emitter report carries `catchup_screen_space` (frames, ships kept per-tick / single-pass / culled / unknown, and the error histogram in bins <1/16, <1/8, <1/4, <1/2, <1, <2, <4, <8, >=8 px). There is no switch: the decision is invisible by threshold, not gated.
+
+`--eawr-particle-batch-census` appends nine columns to the perf trace and changes nothing else.
+Per frame, over the nonempty uploads of every particle backend:
+`census_streams` and `census_vertices`; `census_identical_streams` (streams bit-identical to the
+emitter's previous stream); `census_{additive,alpha,other}_streams` by blend class; and
+`census_{additive,alpha,other}_keys`, the distinct (shader, colour texture, normal texture, render
+priority) keys per backend, which is the draw count a design that joins streams sharing a key would
+leave. Nothing is merged.
+
+A present whose only change is the emitter frame runs the follow on its worker; when no particle
+lives in the emitter's frame (no Emitter translater 26 particle), the follow moves nothing, the
+streams of the last build still stand, and nothing is built or uploaded
+(`RegistryWorkCounts::presents_unmoved`). A moved particle builds the stream as before.
+
+`--eawr-particle-merge-additive on|off` (default ON since 2026-10-31, owner approval after the
+eye check, provisional until he has played with it; a bare flag is `on`, `off` restores one
+draw per emitter) draws additive, quad-stream emitters of the battle backends (unit emitters, battle effects, breakoff debris) as one surface per (shader, colour
+texture, render priority) group instead of one mesh instance per emitter. Emitters keep their
+texture and shader references and packed bytes; the group owns the one mesh, material and instance
+and is submitted once per frame by `GodotParticleBackend::flush_merged` after every particle owner
+has run. A culled or empty emitter leaves the group, so a stream the registry did not submit is never
+drawn; an unchanged group submits nothing. Additive blending is order independent, so the pixels
+differ only where the depth-sort position of the group (one union bounding box) changes the order
+against a transparent draw of the same render priority. Opt-in trace columns (with
+`--eawr-particle-batch-census`): `merged_groups`, `merged_streams`, `merged_vertices`,
+`merged_replacements`, `merge_flush_ms`. Other blends, triangle streams, fog-backed backends and
+the render-category diagnostics keep one draw per emitter.
 
 
 ### Debris backend prewarm (legacy EAWR-3193)

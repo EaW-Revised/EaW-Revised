@@ -17,6 +17,8 @@ namespace eawr::assets {
 // deliberately not converted at this asset boundary.
 using SourceVec3 = Vec3f;
 
+[[nodiscard]] std::string describe_source_vec3(const SourceVec3& value);
+
 enum class MapKind : std::uint8_t { land = 1, space = 2 };
 // `absent` means mini 5 is missing or malformed; `nonfinite` means a stored
 // component is NaN or infinite.  Neither is ever presented as an identity or

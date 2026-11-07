@@ -611,8 +611,17 @@ core::Result<void> GalacticSession::Impl::service_movement(std::span<const sessi
     });
     if (!phase) return phase;
     for (const auto& s : staged) if (s.error) return core::Result<void>::failure(*s.error);
-    std::map<PlanetId, Vec3> positions; for (const auto& p : sorted_planets()) positions.emplace(p.id, p.position);
-    const auto route_rows = sorted_routes();
+    // Planet positions and routes are constant, and only a hop install reads them: build them on the first
+    // arrival of the tick instead of on every tick.
+    std::map<PlanetId, Vec3> positions;
+    std::vector<Route> route_rows;
+    bool hop_inputs_ready = false;
+    const auto hop_inputs = [&] {
+        if (hop_inputs_ready) return;
+        for (const auto& p : sorted_planets()) positions.emplace(p.id, p.position);
+        route_rows = sorted_routes();
+        hop_inputs_ready = true;
+    };
     const auto notify = [&](const FleetId id, const FleetTransit& t, GalacticEventKind kind, PlanetId p) {
         events.push_back({tick, kind, t.producer, id, t.sequence, p, GalacticRejectReason::none});
         if (native_movement_listener) native_movement_listener(events.back());
@@ -637,7 +646,7 @@ core::Result<void> GalacticSession::Impl::service_movement(std::span<const sessi
                     t.path = {destination, t.path.at(t.hop)}; t.hop = 0; t.destination_slot.reset(); t.destination_actor = 0;
                     if (f.raid_destination) { f.raid_destination.reset(); dirty[static_cast<std::size_t>(StateSection::fleets)] = true; }
                 } else ++t.hop;
-                install_hop(f.motion, inputs, f.owner, positions, route_rows); continue;
+                hop_inputs(), install_hop(f.motion, inputs, f.owner, positions, route_rows); continue;
             }
             const auto& p = player(inputs, f.owner);
             const auto actors = actor_inputs();
@@ -698,7 +707,7 @@ core::Result<void> GalacticSession::Impl::service_movement(std::span<const sessi
                 invalidate_observer_projection();
                 dirty[static_cast<std::size_t>(StateSection::fleet_control)] = true; continue;
             }
-            if (!final) { ++t.hop; install_hop(f.motion, inputs, f.owner, positions, route_rows); continue; }
+            if (!final) { ++t.hop; hop_inputs(), install_hop(f.motion, inputs, f.owner, positions, route_rows); continue; }
             const auto requested = t.destination_slot;
             const auto completed = t;
             link_movement_orbit(id, destination, tick, events); dirty[static_cast<std::size_t>(StateSection::fleets)] = true;
@@ -728,8 +737,13 @@ core::Result<void> GalacticSession::Impl::service_movement(std::span<const sessi
             }
             // WGM-34: final nonconflicting arrival only; relink/merge has refreshed live containers.
             // Transit was consumed by relink, so failure or actor loss cannot replay the action.
-            if (completed.destination_actor) dispatch_ground_ability(completed.destination_actor, destination,
-                completed.producer, completed.sequence, tick, events);
+            if (completed.destination_actor) {
+                const auto before = events.size();
+                dispatch_ground_ability(completed.destination_actor, destination, completed.producer, completed.sequence, tick, events);
+                // The drop was accepted before travel: a refusal on arrival still answers the seat that issued it.
+                if (events.size() == before) events.push_back({tick, GalacticEventKind::command_rejected, completed.producer,
+                    completed.destination_actor, completed.sequence, 0, GalacticRejectReason::unknown_value});
+            }
             // GGS-06/07: one attempt through the current surface owner, after orbital
             // arrival. Refusal or partial capacity leaves the remainder in orbit.
             if (fleets.contains(id)

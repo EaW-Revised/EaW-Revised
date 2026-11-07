@@ -52,8 +52,8 @@ Every map report has a `perf_overlay` object (`shown: false` while it was never 
 `fps`, `frame_ms`, `frame_ms_avg`, `frame_ms_worst`, `tick_source` (`live_session` or `none`), `ticks`,
 `ticks_per_second`, `clock` (`null` outside the galactic view, else `speed_factor`,
 `nominal_ticks_per_second` and `paused`), `tick_ms`, `tick_ms_avg`, `tick_ms_worst`, `tick_phases`, `draw_calls`, `visible_units`, `toggles`,
-`font`, `font_size`, `rect` and `own_cost_ms` (`samples`, `avg`, `max`).
-`tests/presentation/renderer/test_live_session.py` checks them and the key on a GPU host;
+`font`, `font_size`, `viewer_build` (`release`/`debug`, our library), `engine_build` (`editor, debug-enabled`, `debug template, debug-enabled` or `release template`: the Godot binary hosting it), `engine_version`, `engine_hash`, `rect` and `own_cost_ms` (`samples`, `avg`, `max`).
+`tests/presentation/renderer/test_live_session.py` checks the key and the older fields on a GPU host (not `viewer_build`, `engine_build`, `engine_version` or `engine_hash`, whose text is covered by `ui_build_label_contracts`);
 `tests/ui/perf_stats_tests.cpp` covers the model (`include/eawr/presentation/ui/perf_stats.hpp`).
 `tests/presentation/renderer/test_viewer_galactic_command_bar_runtime.py` runs the live galaxy at 1x and with
 fast forward and prints the measured TICKS/S and tick cost (an observation, not a gate); the gate is the schedule
@@ -84,3 +84,6 @@ While a match runs, godot.log gets one line every 5 s whether or not the overlay
 Map reports carry the latest numbers as a `net_perf` object (the last match's numbers; `null` if no match ran). The model is
 `include/eawr/presentation/ui/net_perf.hpp`, covered by `tests/ui/net_perf_tests.cpp`. Presentation only: it never
 touches lockstep, the simulation or any hash.
+
+The panel shows two rows, "viewer: release" and "engine: 4.7.2 editor, debug-enabled", and a third with the engine signature. The window title says the same, e.g. "EAWR Viewer (viewer: release; engine: Godot 4.7.2 editor, debug-enabled, eawr fad06b579) (DEBUG)". An engine with debug support is slower and says so: the title is written once, at startup, and keeps the engine's own " (DEBUG)" suffix at the end.
+The signature comes from the startup engine guard (`current_engine_signature()`, `docs/engine-guard.md`): "eawr <9-character hash>" for our patched engine, or "UNPATCHED ENGINE (<build>)" / "UNPATCHED ENGINE (unverified)" (red on the overlay, spelled out in the title) when the build or hash does not match the pin or the launcher passed `--eawr-engine-unverified`. The report adds `engine_signature` and `engine_patched`. The viewer only displays this; the rule lives in `include/eawr/presentation/engine_signature.hpp`.

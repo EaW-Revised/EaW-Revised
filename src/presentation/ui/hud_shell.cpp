@@ -137,6 +137,12 @@ constexpr std::string_view hero_bar_evil_stem = "hero_hb_evil";
 
 } // namespace
 
+std::optional<ShellBlend> shell_blend(const std::string_view shader) {
+    if (equal_name(shader, "MeshAdditive.fx")) return ShellBlend::additive;
+    if (equal_name(shader, "MeshAlpha.fx") || equal_name(shader, "MeshAlphaGloss.fx")) return ShellBlend::alpha;
+    return std::nullopt;
+}
+
 std::uint32_t alt_variant(const HudFaction faction) noexcept {
     switch (faction) {
     case HudFaction::empire: return data::ui::alt_variant::empire;
@@ -264,10 +270,9 @@ core::Result<PauseShell> pause_shell(const vfs::Vfs& filesystem, const data::ui:
     }
     out.anchors = data::ui::shell_anchors(model.value(), transforms).shell;
     for (const auto& anchor : out.anchors.anchors()) {
-        const bool additive = equal_name(anchor.shader, "MeshAdditive.fx");
-        if (!anchor.visible || (!additive && !equal_name(anchor.shader, "MeshAlpha.fx"))
-            || anchor.base_texture.empty()) continue;
-        out.meshes.push_back({anchor.name, additive ? ShellBlend::additive : ShellBlend::alpha,
+        const auto blend = shell_blend(anchor.shader);
+        if (!anchor.visible || !blend || anchor.base_texture.empty()) continue;
+        out.meshes.push_back({anchor.name, *blend,
             anchor.base_texture, anchor.z_min, anchor.triangles, std::nullopt});
     }
     std::stable_sort(out.meshes.begin(), out.meshes.end(),
@@ -341,10 +346,16 @@ HudShell hud_shell(const data::ui::ShellAnchors& shell, const data::ui::CommandB
     } else {
         candidates = shell.for_variant(alt_variant(faction));
     }
+    std::vector<std::string> skipped_shaders;
     for (const auto* anchor : candidates) {
-        const bool alpha = equal_name(anchor->shader, "MeshAlpha.fx");
-        const bool additive = equal_name(anchor->shader, "MeshAdditive.fx");
-        if ((!alpha && !additive) || anchor->base_texture.empty() || anchor->triangles.empty()) continue;
+        const auto blend = shell_blend(anchor->shader);
+        if (!blend && anchor->visible && !anchor->base_texture.empty() && !anchor->triangles.empty()
+            && std::find(skipped_shaders.begin(), skipped_shaders.end(), anchor->shader) == skipped_shaders.end()) {
+            // A drawable mesh with a shader this HUD has no blend for: say so once per shader instead of dropping it silently.
+            skipped_shaders.push_back(anchor->shader);
+            missing("mesh " + anchor->name + " with shader " + anchor->shader, "has no HUD blend");
+        }
+        if (!blend || anchor->base_texture.empty() || anchor->triangles.empty()) continue;
         // Decorative art the shell shows by itself; a bound component's mesh is
         // drawn only for the parts this ticket owns (the radar's scan lines).
         // An index-keyed alternate panel stays decorative even when the catalogue lists an empty
@@ -352,7 +363,7 @@ HudShell hud_shell(const data::ui::ShellAnchors& shell, const data::ui::CommandB
         const bool bound = catalog.find(anchor->name) != nullptr && !(keep_alternates && anchor->alt.variant);
         const bool radar = equal_name(anchor->name, radar_name);
         if (bound ? !radar : !anchor->visible) continue;
-        out.meshes.push_back({anchor->name, additive ? ShellBlend::additive : ShellBlend::alpha,
+        out.meshes.push_back({anchor->name, *blend,
                               anchor->base_texture, anchor->z_min, anchor->triangles,
                               keep_alternates ? anchor->alt.variant : std::nullopt});
     }
@@ -568,11 +579,10 @@ HudReinforcePane reinforce_pane(const data::ui::ShellAnchors& shell, const data:
     // PU-67: the pane alternates are row counts; the command bar's faction alternates do not apply.
     for (std::size_t rows = 0; rows < out.meshes.size(); ++rows) {
         for (const auto* anchor : shell.for_variant(static_cast<std::uint32_t>(rows))) {
-            const bool alpha = equal_name(anchor->shader, "MeshAlpha.fx");
-            const bool additive = equal_name(anchor->shader, "MeshAdditive.fx");
-            if ((!alpha && !additive) || anchor->base_texture.empty() || anchor->triangles.empty()) continue;
+            const auto blend = shell_blend(anchor->shader);
+            if (!blend || anchor->base_texture.empty() || anchor->triangles.empty()) continue;
             if (catalog.find(anchor->name) != nullptr || !anchor->visible) continue;
-            out.meshes[rows].push_back({anchor->name, additive ? ShellBlend::additive : ShellBlend::alpha,
+            out.meshes[rows].push_back({anchor->name, *blend,
                                       anchor->base_texture, anchor->z_min, anchor->triangles, std::nullopt});
         }
         std::stable_sort(out.meshes[rows].begin(), out.meshes[rows].end(),
@@ -680,11 +690,10 @@ HudHeroFrame hero_frame(const data::ui::ShellAnchors& shell, const data::ui::Com
     out.meshes.resize(variants);
     for (std::uint32_t variant = 0; variant < variants; ++variant) {
         for (const auto* anchor : shell.for_variant(variant)) {
-            const bool alpha = equal_name(anchor->shader, "MeshAlpha.fx");
-            const bool additive = equal_name(anchor->shader, "MeshAdditive.fx");
-            if ((!alpha && !additive) || anchor->base_texture.empty() || anchor->triangles.empty()) continue;
+            const auto blend = shell_blend(anchor->shader);
+            if (!blend || anchor->base_texture.empty() || anchor->triangles.empty()) continue;
             if (catalog.find(anchor->name) != nullptr || !anchor->visible) continue;
-            out.meshes[variant].push_back({anchor->name, additive ? ShellBlend::additive : ShellBlend::alpha,
+            out.meshes[variant].push_back({anchor->name, *blend,
                                            anchor->base_texture, anchor->z_min, anchor->triangles, std::nullopt});
         }
         std::stable_sort(out.meshes[variant].begin(), out.meshes[variant].end(),

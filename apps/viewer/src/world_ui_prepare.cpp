@@ -1,4 +1,5 @@
 #include "world_ui_view.hpp"
+#include "eawr/vfs/vfs.hpp"
 #include "family_textures.hpp"
 
 #include "ui/theme_builder.hpp"
@@ -355,7 +356,7 @@ void WorldUiView::prepare_waypoints(const vfs::Vfs& filesystem, const std::share
         if (!mesh.visible || lower(submesh.shader) == "meshshadowvolume.fx") continue;
         const scene::AssetAccess effect_access{
             .exists = [&filesystem](const std::string_view path) { return static_cast<bool>(filesystem.stat(path)); },
-        };
+         .model = {}, .sha256 = {}, .particle_system = {}};
         const bool effect_missing = scene::missing_material_effect(effect_access, submesh.shader);
         const auto* selector = scene::material_selector(submesh.shader, effect_missing);
         if (!selector) { unresolved_.push_back("waypoint flag shader: " + submesh.shader); continue; }

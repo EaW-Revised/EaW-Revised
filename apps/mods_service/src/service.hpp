@@ -11,15 +11,17 @@
 
 namespace eawr::mods_service {
 class LoadCheck;
+class Records;
 
 inline constexpr std::size_t kLineLimit = 1024 * 1024;
 inline constexpr int kProtocolMajor = 1;
-inline constexpr int kProtocolMinor = 6;
+inline constexpr int kProtocolMinor = 14;
 
 struct ServiceInfo {
     std::string service_version;
     std::string engine_build;
     std::string game_release;
+    std::string kit_build;
 };
 
 class Service {
@@ -29,6 +31,7 @@ public:
     Service(ServiceInfo info, Log log);
     ~Service();
     LoadCheck& loadcheck();
+    Records& records();
 
     // One complete line without its line end. Appends the lines to write (each without LF) to `out`.
     void handle_line(std::string_view line, std::vector<std::string>& out);
@@ -52,6 +55,7 @@ private:
     bool open_ = false;
     bool finished_ = false;
     std::unique_ptr<LoadCheck> loadcheck_;
+    std::unique_ptr<Records> records_;
 };
 
 // The implemented method names, sorted (the `capabilities` of `hello`).

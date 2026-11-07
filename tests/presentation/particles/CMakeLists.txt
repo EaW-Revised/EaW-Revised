@@ -64,6 +64,8 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
     )
     foreach(target particle_cpu_tests particle_render_tests map_attachment_owner_tests emitter_metadata_tests)
         target_include_directories(${target} PRIVATE "${EAWR_ROOT}/include")
+        # L1.2: the latch, reuse-cache and frame-counter headers of the Godot backend are engine-free.
+        target_include_directories(${target} PRIVATE "${EAWR_ROOT}/src/presentation/godot")
         if(MSVC)
             target_compile_options(${target} PRIVATE /W4 /WX /permissive-)
         else()
@@ -78,9 +80,13 @@ else()
     add_executable(particle_render_tests
         render_main.cpp
         render_batch_tests.cpp
+        render_lane_tests.cpp
         render_proxy_tests.cpp
         render_stream_tests.cpp
-        render_submission_tests.cpp)
+        render_submission_tests.cpp
+        # L1.3: the viewer's engine-free lane parts (the parked thread, its guard window and the exit-code contracts).
+        "${PROJECT_SOURCE_DIR}/apps/viewer/src/particle_lane.cpp"
+        "${PROJECT_SOURCE_DIR}/apps/viewer/src/particle_workers.cpp")
     add_executable(map_attachment_owner_tests map_attachment_owner_main.cpp)
     add_executable(emitter_metadata_tests emitter_metadata_main.cpp)
     foreach(target particle_cpu_tests particle_render_tests map_attachment_owner_tests emitter_metadata_tests)
@@ -91,6 +97,11 @@ else()
     # The batch contracts (#638) run their tasks on std::thread.
     find_package(Threads REQUIRED)
     target_link_libraries(particle_render_tests PRIVATE Threads::Threads)
+    # L1.2: the latch, reuse-cache and frame-counter headers of the Godot backend are engine-free.
+    target_include_directories(particle_render_tests PRIVATE "${PROJECT_SOURCE_DIR}/src/presentation/godot")
+    target_include_directories(particle_render_tests PRIVATE "${PROJECT_SOURCE_DIR}/apps/viewer/src")
+    target_link_libraries(particle_render_tests PRIVATE eawr::platform)
+    target_compile_definitions(particle_render_tests PRIVATE EAWR_LANE_CONTRACTS=1)
 endif()
 
 enable_testing()

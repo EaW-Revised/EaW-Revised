@@ -407,6 +407,119 @@ FreestoreFacts ordinary_freestore_birth(FreestoreFacts row) {
     row.prefer_ground = true;
     return row;
 }
+struct QualifiedFreestore::PhaseSavepoint::Saved {
+    QualifiedFreestore* owner{};
+    std::vector<std::function<void(QualifiedFreestore&)>> undo;
+    bool settled{};
+};
+QualifiedFreestore::QualifiedFreestore(QualifiedFreestore&& other) { *this = std::move(other); }
+QualifiedFreestore::QualifiedFreestore(const QualifiedFreestore& other) {
+    if (other.phase_ || other.phase_abandoned_) throw std::logic_error("cannot copy an active or unsettled freestore phase; use clone for a private view");
+    operations_ = other.operations_; overlay_base_hash_ = other.overlay_base_hash_;
+    track_operations_ = other.track_operations_; intent_sink_ = other.intent_sink_;
+    mutation_depth_ = other.mutation_depth_; records_ = other.records_;
+    records_dirty_ = other.records_dirty_; replacement_ = other.replacement_; store_copies_ = other.store_copies_;
+    facts_ = other.facts_; stores_ = other.stores_; lost_ = other.lost_;
+    changed_ = other.changed_; published_ = other.published_;
+}
+QualifiedFreestore& QualifiedFreestore::operator=(const QualifiedFreestore& other) {
+    if (this == &other) return *this;
+    if (phase_) throw std::logic_error("cannot replace an active freestore phase");
+    QualifiedFreestore copied(other);
+    return *this = std::move(copied);
+}
+QualifiedFreestore& QualifiedFreestore::operator=(QualifiedFreestore&& other) {
+    if (this == &other) return *this;
+    if (phase_ || other.phase_) throw std::logic_error("cannot move an active freestore phase");
+    operations_ = std::move(other.operations_); overlay_base_hash_ = std::move(other.overlay_base_hash_);
+    track_operations_ = other.track_operations_; intent_sink_ = std::move(other.intent_sink_);
+    mutation_depth_ = other.mutation_depth_; records_ = std::move(other.records_);
+    phase_abandoned_ = other.phase_abandoned_; records_dirty_ = other.records_dirty_;
+    replacement_ = std::move(other.replacement_); store_copies_ = other.store_copies_;
+    facts_ = std::move(other.facts_); stores_ = std::move(other.stores_); lost_ = std::move(other.lost_);
+    changed_ = std::move(other.changed_); published_ = std::move(other.published_);
+    return *this;
+}
+QualifiedFreestore::PhaseSavepoint::PhaseSavepoint(std::unique_ptr<Saved> saved) : saved_(std::move(saved)) {}
+QualifiedFreestore::PhaseSavepoint::~PhaseSavepoint() {
+    if (!saved_ || saved_->settled) return;
+    saved_->owner->phase_ = nullptr;
+    saved_->owner->phase_abandoned_ = true;
+    saved_->owner->changed();
+}
+std::size_t QualifiedFreestore::PhaseSavepoint::undo_entries() const noexcept { return saved_ ? saved_->undo.size() : 0; }
+core::Result<void> QualifiedFreestore::PhaseSavepoint::commit() {
+    if (!saved_ || saved_->settled) return unavailable_store<void>("freestore phase already settled");
+    saved_->owner->phase_ = nullptr; saved_->settled = true; saved_->undo.clear();
+    return core::Result<void>::success();
+}
+core::Result<void> QualifiedFreestore::PhaseSavepoint::rollback() {
+    if (!saved_ || saved_->settled) return unavailable_store<void>("freestore phase already settled");
+    auto& owner = *saved_->owner;
+    owner.phase_ = nullptr;
+    try {
+        for (auto at = saved_->undo.rbegin(); at != saved_->undo.rend(); ++at) (*at)(owner);
+        // Derived rebuild and whole-store cache invalidation occur only on fault.
+        owner.records_dirty_ = true; owner.published_.reset();
+        for (auto& [player, store] : owner.stores_) { static_cast<void>(store); owner.write_store(player).published.reset(); }
+        if (owner.changed_) owner.changed_();
+        saved_->settled = true; saved_->undo.clear();
+        return core::Result<void>::success();
+    } catch (const std::exception& exception) {
+        owner.phase_abandoned_ = true;
+        saved_->settled = true;
+        return unavailable_store<void>(exception.what());
+    }
+}
+core::Result<std::unique_ptr<QualifiedFreestore::PhaseSavepoint>> QualifiedFreestore::begin_phase() {
+    if (phase_ || phase_abandoned_ || replacement_ || track_operations_ || mutation_depth_ != 0)
+        return unavailable_store<std::unique_ptr<PhaseSavepoint>>("freestore phase requires its idle serial root");
+    auto saved = std::make_unique<PhaseSavepoint::Saved>(); saved->owner = this;
+    auto phase = std::unique_ptr<PhaseSavepoint>(new PhaseSavepoint(std::move(saved)));
+    phase_ = phase->saved_.get();
+    return core::Result<std::unique_ptr<PhaseSavepoint>>::success(std::move(phase));
+}
+void QualifiedFreestore::retain_fact(sim::EntityId id) {
+    if (auto* delta = replacement_write()) delta->facts.insert(id);
+    if (!phase_) return;
+    const auto at = facts_.find(id);
+    const auto old = at == facts_.end() ? std::optional<FreestoreFacts>{} : std::optional{at->second};
+    phase_->undo.emplace_back([id, old](auto& owner) {
+        if (old) owner.facts_.insert_or_assign(id, *old); else owner.facts_.erase(id);
+    });
+}
+void QualifiedFreestore::retain_member(gc::PlayerId player, sim::EntityId id) {
+    if (!phase_) return;
+    const bool old = stores_.at(player)->members.contains(id);
+    phase_->undo.emplace_back([player, id, old](auto& owner) {
+        auto& rows = owner.write_store(player).members;
+        if (old) rows.insert(id); else rows.erase(id);
+    });
+}
+void QualifiedFreestore::retain_reservation(gc::PlayerId player, sim::EntityId id) {
+    if (!phase_) return;
+    const auto& rows = stores_.at(player)->reservations;
+    const auto at = rows.find(id);
+    const auto old = at == rows.end() ? std::optional<std::uint64_t>{} : std::optional{at->second};
+    phase_->undo.emplace_back([player, id, old](auto& owner) {
+        auto& held = owner.write_store(player).reservations;
+        if (old) held.insert_or_assign(id, *old); else held.erase(id);
+    });
+}
+void QualifiedFreestore::retain_addition_insert(gc::PlayerId player, std::size_t index) {
+    if (!phase_) return;
+    phase_->undo.emplace_back([player, index](auto& owner) {
+        auto& rows = owner.write_store(player).additions;
+        rows.erase(rows.begin() + static_cast<std::ptrdiff_t>(index));
+    });
+}
+void QualifiedFreestore::retain_addition_erase(gc::PlayerId player, std::size_t index, sim::EntityId id) {
+    if (!phase_) return;
+    phase_->undo.emplace_back([player, index, id](auto& owner) {
+        auto& rows = owner.write_store(player).additions;
+        rows.insert(rows.begin() + static_cast<std::ptrdiff_t>(index), id);
+    });
+}
 const FreestoreFacts* QualifiedFreestore::facts(sim::EntityId id) const noexcept {
     const auto found = facts_.find(id); return found == facts_.end() ? nullptr : &found->second;
 }
@@ -486,7 +599,10 @@ core::Result<void> QualifiedFreestore::consume_additions(gc::PlayerId player, st
             const auto found = owner.stores_.find(player);
             if (found == owner.stores_.end()) return unavailable_store<void>("freestore callback owner missing at ordered commit");
             auto& pending = owner.write_store(player).additions;
-            for (const auto id : consumed) if (const auto at = std::find(pending.begin(), pending.end(), id); at != pending.end()) pending.erase(at);
+            for (const auto id : consumed) if (const auto at = std::find(pending.begin(), pending.end(), id); at != pending.end()) {
+                owner.retain_addition_erase(player, static_cast<std::size_t>(at - pending.begin()), id);
+                pending.erase(at);
+            }
             owner.update_store_record(player); if (owner.changed_) owner.changed_();
             return core::Result<void>::success();
         };
@@ -531,13 +647,15 @@ core::Result<void> QualifiedFreestore::update_impl(FreestoreFacts row) {
     const auto old = facts_.find(row.object.id);
     if (old != facts_.end() && old->second.object.owner != row.object.owner)
         return unavailable_store<void>("freestore ownership must use the owner-change operation");
-    if (old == facts_.end() || old->second != row) { facts_[row.object.id] = row; update_fact_record(row.object.id); changed(row.object.owner); }
+    if (old == facts_.end() || old->second != row) { retain_fact(row.object.id); facts_[row.object.id] = row; update_fact_record(row.object.id); changed(row.object.owner); }
     return core::Result<void>::success();
 }
 core::Result<void> QualifiedFreestore::initialize_impl(gc::PlayerId player, std::span<const sim::EntityId> offers) {
     if (!player || stores_.contains(player)) return unavailable_store<void>("freestore initialization requires a fresh player owner");
     // Validate the full ordered offer frontier before any native publication.
     for (const auto id : offers) if (!facts(id)) return unavailable_store<void>("initial freestore offer has no authoritative actor facts");
+    if (auto* delta = replacement_write()) delta->stores.insert(player);
+    if (phase_) phase_->undo.emplace_back([player](auto& owner) { owner.stores_.erase(player); });
     stores_.emplace(player, std::make_shared<Store>()); update_store_record(player); changed(player);
     for (const auto id : offers) { auto added = offer(player, id); if (!added) return core::Result<void>::failure(added.error()); }
     return core::Result<void>::success();
@@ -546,15 +664,25 @@ core::Result<bool> QualifiedFreestore::offer_impl(gc::PlayerId player, sim::Enti
     const auto found = stores_.find(player); const auto* row = facts(id);
     if (found == stores_.end() || !row) return unavailable_store<bool>("freestore offer requires its initialized manager and actor facts");
     if (!freestore_admission(*row, player) || found->second->members.contains(id)) return core::Result<bool>::success(false);
-    auto& store = write_store(player); store.members.insert(id); store.additions.push_back(id); update_store_record(player); changed(player);
+    auto& store = write_store(player);
+    retain_member(player, id); retain_addition_insert(player, store.additions.size());
+    store.members.insert(id); store.additions.push_back(id); update_store_record(player); changed(player);
     return core::Result<bool>::success(true);
 }
 void QualifiedFreestore::remove(gc::PlayerId player, sim::EntityId id) {
     const auto found = stores_.find(player); if (found == stores_.end()) return;
     auto& store = write_store(player);
+    if (store.members.contains(id)) retain_member(player, id);
+    if (store.reservations.contains(id)) retain_reservation(player, id);
     const bool removed = store.members.erase(id) != 0;
     const bool released = store.reservations.erase(id) != 0;
-    const auto old_size = store.additions.size(); std::erase(store.additions, id);
+    const auto old_size = store.additions.size();
+    std::size_t index{};
+    std::erase_if(store.additions, [&](auto row) {
+        const auto at = index++;
+        if (row != id) return false;
+        retain_addition_erase(player, at, row); return true;
+    });
     if (removed || released || old_size != store.additions.size()) { update_store_record(player); changed(player); }
 }
 core::Result<void> QualifiedFreestore::owner_changed_impl(FreestoreFacts row, bool initialized) {
@@ -562,6 +690,7 @@ core::Result<void> QualifiedFreestore::owner_changed_impl(FreestoreFacts row, bo
     if (initialized && !stores_.contains(row.object.owner)) return unavailable_store<void>("freestore new owner manager is absent");
     remove(facts(row.object.id)->object.owner, row.object.id);
     row.object.transit = !row.object.planet || row.enroute || row.tracked_movement;
+    retain_fact(row.object.id);
     records_.erase(facts_.at(row.object.id).object.owner, 1, row.object.id);
     facts_[row.object.id] = row; update_fact_record(row.object.id); changed(row.object.owner);
     if (initialized) { auto added = offer(row.object.owner, row.object.id); if (!added) return core::Result<void>::failure(added.error()); }
@@ -569,6 +698,9 @@ core::Result<void> QualifiedFreestore::owner_changed_impl(FreestoreFacts row, bo
 }
 void QualifiedFreestore::lost_impl(sim::EntityId id) {
     const auto* row = facts(id); if (!row) return;
+    retain_fact(id);
+    if (auto* delta = replacement_write()) delta->lost.insert(id);
+    if (phase_ && !lost_.contains(id)) phase_->undo.emplace_back([id](auto& owner) { owner.lost_.erase(id); });
     const auto player = row->object.owner; remove(player, id); records_.erase(player, 1, id); facts_.erase(id); lost_.insert(id);
     core::RecordDigest::Bytes key; core::RecordDigest::append(key, id); records_.set(0, 3, id, key); changed(player);
 }
@@ -617,13 +749,54 @@ std::uint64_t QualifiedFreestore::object_count(gc::PlayerId player, std::optiona
     return count;
 }
 QualifiedFreestore QualifiedFreestore::clone(Changed changed, bool track_operations) const {
+    if (phase_abandoned_) throw std::logic_error("unsettled freestore phase");
     QualifiedFreestore out; out.facts_ = facts_; out.stores_ = stores_; out.lost_ = lost_;
-    out.published_ = published_; out.records_ = records_; out.changed_ = std::move(changed);
+    out.published_ = published_; out.records_ = records_; out.records_dirty_ = records_dirty_; out.changed_ = std::move(changed);
     out.operations_ = operations_; out.track_operations_ = track_operations || track_operations_;
     if (out.track_operations_) out.overlay_base_hash_ = track_operations_ ? overlay_base_hash_ : record_sync_hash();
+    out.replacement_ = replacement_;
+    if (phase_ && !out.replacement_) {
+        out.replacement_ = std::make_shared<ReplacementDelta>();
+        out.replacement_->base_hash = record_sync_hash();
+    }
     return out;
 }
 void QualifiedFreestore::replace(const QualifiedFreestore& other) {
+    if (phase_) {
+        // Private clones remember only touched fact/store/lost keys,
+        // including native birth callbacks that intentionally suppress intents.
+        // Do not scan the complete facts/membership inventory to discover a diff.
+        if (!other.replacement_ || other.replacement_->base_hash != record_sync_hash())
+            throw std::logic_error("freestore phase replacement requires its unchanged sparse base");
+        const auto& delta = *other.replacement_;
+        for (const auto id : delta.facts) {
+            retain_fact(id);
+            if (const auto at = other.facts_.find(id); at != other.facts_.end()) facts_.insert_or_assign(id, at->second);
+            else facts_.erase(id);
+        }
+        for (const auto player : delta.stores) {
+            const auto at = stores_.find(player);
+            const auto previous = at == stores_.end() ? std::shared_ptr<Store>{} : at->second;
+            phase_->undo.emplace_back([player, previous](auto& owner) {
+                if (previous) owner.stores_.insert_or_assign(player, previous); else owner.stores_.erase(player);
+            });
+            // The clone already detached its changed stores. Retaining the old
+            // pointer before replacing it cannot force another steady-state copy.
+            if (const auto selected = other.stores_.find(player); selected != other.stores_.end())
+                stores_.insert_or_assign(player, selected->second);
+            else stores_.erase(player);
+        }
+        for (const auto id : delta.lost) {
+            const bool old = lost_.contains(id);
+            phase_->undo.emplace_back([id, old](auto& owner) { if (old) owner.lost_.insert(id); else owner.lost_.erase(id); });
+            if (other.lost_.contains(id)) lost_.insert(id); else lost_.erase(id);
+        }
+        records_ = other.records_; records_dirty_ = other.records_dirty_; published_.reset();
+        if (changed_) changed_();
+        return;
+    }
+    if (other.replacement_ && !replacement_)
+        throw std::logic_error("private freestore phase publication outlived its owning phase");
     if (track_operations_) {
         if (!other.track_operations_ || overlay_base_hash_ != other.overlay_base_hash_)
             throw std::logic_error("freestore private replacement requires the same frozen base");
@@ -638,19 +811,24 @@ void QualifiedFreestore::replace(const QualifiedFreestore& other) {
         });
     if (facts_ == other.facts_ && same_stores && lost_ == other.lost_) return;
     facts_ = other.facts_; stores_ = other.stores_; lost_ = other.lost_;
-    published_ = other.published_; records_ = other.records_;
+    published_ = other.published_; records_ = other.records_; records_dirty_ = other.records_dirty_;
+    replacement_ = other.replacement_;
     if (changed_) changed_();
 }
 core::Result<bool> QualifiedFreestore::reserve_impl(gc::PlayerId player, sim::EntityId id, std::uint64_t plan) {
     if (!plan || !contains(player, id)) return unavailable_store<bool>("freestore reservation requires retained membership and a plan identity");
     auto& held = write_store(player).reservations;
     if (held.contains(id)) return core::Result<bool>::success(false);
+    retain_reservation(player, id);
     held.emplace(id, plan); update_store_record(player); changed(player); return core::Result<bool>::success(true);
 }
 void QualifiedFreestore::release_impl(gc::PlayerId player, std::uint64_t plan) {
     const auto found = stores_.find(player); if (found == stores_.end() || !plan) return;
     auto& held = write_store(player).reservations;
-    const auto old = held.size(); std::erase_if(held, [&](const auto& row) { return row.second == plan; });
+    const auto old = held.size(); std::erase_if(held, [&](const auto& row) {
+        if (row.second != plan) return false;
+        retain_reservation(player, row.first); return true;
+    });
     if (old != held.size()) { update_store_record(player); changed(player); }
 }
 void QualifiedFreestore::release_object_impl(gc::PlayerId player, sim::EntityId id, std::uint64_t plan) {
@@ -666,6 +844,7 @@ void QualifiedFreestore::release_object_impl(gc::PlayerId player, sim::EntityId 
     }
     const auto held = store->second->reservations.find(id);
     if (held != store->second->reservations.end() && held->second == plan) {
+        retain_reservation(player, id);
         write_store(player).reservations.erase(id); update_store_record(player); changed(player);
     }
 }
@@ -734,6 +913,8 @@ core::Result<void> QualifiedFreestore::consume_additions_impl(gc::PlayerId playe
     if (found == stores_.end() || count > found->second->additions.size()) return unavailable_store<void>("freestore callback frontier is invalid");
     if (count) {
         auto& additions = write_store(player).additions;
+        if (phase_) for (std::size_t index = 0; index < count; ++index)
+            retain_addition_erase(player, 0, additions[index]);
         additions.erase(additions.begin(), additions.begin() + static_cast<std::ptrdiff_t>(count));
         update_store_record(player);
         // Callback consumption changes native order, not the pool or its safety inputs.
@@ -760,9 +941,15 @@ core::RecordDigest QualifiedFreestore::rebuild_records() const {
     return rebuilt;
 }
 std::string QualifiedFreestore::record_sync_hash(bool cold) const {
+    if (phase_abandoned_) throw std::logic_error("unsettled freestore phase");
+    if (records_dirty_) {
+        auto& self = *const_cast<QualifiedFreestore*>(this);
+        self.records_ = rebuild_records(); self.records_dirty_ = false;
+    }
     return cold ? rebuild_records().digest("qualified-freestore-v3") : records_.digest("qualified-freestore-v3");
 }
 std::vector<std::uint8_t> QualifiedFreestore::encode() const {
+    if (phase_abandoned_) throw std::logic_error("unsettled freestore phase");
     std::vector<std::uint8_t> bytes; store_word(bytes, 3); store_word(bytes, facts_.size());
     for (const auto& [id, row] : facts_) {
         store_word(bytes, id); store_word(bytes, row.object.type); store_word(bytes, row.object.owner); store_word(bytes, row.object.planet);
@@ -783,6 +970,7 @@ std::vector<std::uint8_t> QualifiedFreestore::encode() const {
     return bytes;
 }
 core::Result<void> QualifiedFreestore::restore(std::span<const std::uint8_t> bytes, sim::EntityId next_id, std::span<const gc::GalacticPlayer> players) {
+    if (phase_ || phase_abandoned_ || replacement_) return unavailable_store<void>("cannot restore an active or private freestore phase");
     QualifiedFreestore staged; std::size_t at{}; bool valid = true;
     const auto read = [&]() { std::uint64_t value{}; if (bytes.size() - at < 8) { valid = false; return value; }
         for (unsigned i = 0; i < 8; ++i) { value |= static_cast<std::uint64_t>(bytes[at++]) << (8 * i); }

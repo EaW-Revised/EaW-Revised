@@ -50,6 +50,33 @@ struct SpacePopulation::ComposeContext final {
     const scene::ObjectResolver& resolve;
 };
 
+// Initial-load storage owns everything the reference-bearing context borrows.
+// Arrival composition retains its existing synchronous stack context.
+struct SpacePopulation::ComposeOwner final {
+    FixedCamera camera;
+    std::vector<std::uint32_t> records;
+    scene::VfsAssetCache cache;
+    scene::BuildInput input;
+    scene::ObjectResolver resolve;
+    ComposeContext context;
+
+    ComposeOwner(GodotRenderer& renderer, const assets::Map& map, const vfs::Vfs& filesystem,
+                 const FixedCamera& view, std::span<const std::uint32_t> environment_records,
+                 const data::Catalog& catalog, const std::string& map_hash)
+        : camera(view), records(environment_records.begin(), environment_records.end()), cache(filesystem),
+          resolve([types = &catalog](const std::string_view id, const data::Category category)
+              -> std::optional<data::EffectiveObject> {
+              auto resolved = types->resolve(id, category);
+              if (!resolved) return std::nullopt;
+              return std::move(resolved.value());
+          }), context{renderer, map, filesystem, camera, records, cache, input, resolve} {
+        input.map = &map;
+        input.map_sha256 = map_hash;
+        input.catalog = &catalog;
+        input.access = cache.access();
+    }
+};
+
 // Shared by the initial debug ship and every prepared or appended live slot.
 [[nodiscard]] inline scene::SpacePlacementDecision classify_composed_unit(const scene::Placement& placement,
     const data::EffectiveObject& object, const scene::ObjectResolver& resolve, const bool ability_proxy_owner = false) {

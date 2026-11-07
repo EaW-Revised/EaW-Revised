@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <charconv>
 #include <array>
+#include <set>
 #include <windows.h>
 
 namespace eawr::mods_service {
@@ -436,6 +437,92 @@ Reply LoadCheck::result(const J& params) {
     return Reply::ok("{\"report\":" + encode(*report) + ",\"next_cursor\":" + next
         + ",\"status\":\"current\",\"chain_fingerprint\":" + json_quote(key) + '}');
 }
+
+Reply method_loadnotes_read(Service& service, const J& params) {
+    Reply error;
+    std::string key;
+    std::string identity;
+    std::optional<Input> prepared;
+    const auto* chain = params.string_member("chain_fingerprint");
+    if (params.member("profile") && params.member("chain_fingerprint"))
+        return Reply::fail(kInvalidParams, "choose profile or chain_fingerprint");
+    if (params.member("chain_fingerprint")) {
+        if (!chain || chain->size() != 64 || chain->find_first_not_of("0123456789abcdef") != std::string::npos)
+            return Reply::fail(kInvalidParams, "invalid chain fingerprint");
+        key = *chain;
+        identity = "chain:" + key;
+    } else {
+        prepared = input(service, params, error);
+        if (!prepared) return error;
+        key = mods::loadcheck_chain_fingerprint(prepared->profile, service.model.game_root, service.info().engine_build);
+        identity = prepared->profile.id;
+    }
+    const auto cache = prepared ? prepared->cache : safe_folder(service.model.user_data, {"mods", "cache", "loadcheck"});
+    const auto digest = core::sha256_hex(std::span(reinterpret_cast<const std::uint8_t*>(identity.data()), identity.size()));
+    const auto folder = cache / ("last-" + digest);
+    const auto file = folder / "load-notes.json";
+    std::error_code ec;
+    for (const auto& path : {folder, file}) {
+        const auto status = fs::symlink_status(path, ec);
+        if (ec == std::errc::no_such_file_or_directory || status.type() == fs::file_type::not_found)
+            return Reply::ok("{\"report\":null,\"current_chain_fingerprint\":" + json_quote(key) + '}');
+        if (ec || fs::is_symlink(status) || fs::weakly_canonical(path, ec) != path || ec)
+            return Reply::fail(kInvalidParams, "unsafe load notes path");
+    }
+    std::ifstream stream(file, std::ios::binary | std::ios::ate);
+    if (!stream || stream.tellg() < 0 || stream.tellg() > 512 * 1024)
+        return Reply::fail(kInvalidLoadNotes, "invalid load notes");
+    stream.seekg(0);
+    std::string text((std::istreambuf_iterator<char>(stream)), {});
+    auto doc = mods::steam::parse_json(text);
+    const auto bad = [] { return Reply::fail(kInvalidLoadNotes, "invalid load notes"); };
+    const auto unique_keys = [](const auto& self, const J& v) -> bool {
+        if (v.kind == J::Kind::object) {
+            std::set<std::string> keys;
+            for (std::size_t i = 0; i < v.keys.size(); ++i)
+                if (!keys.insert(v.keys[i]).second || !self(self, v.values[i])) return false;
+        } else if (v.kind == J::Kind::array) {
+            for (const auto& item : v.array) if (!self(self, item)) return false;
+        }
+        return true;
+    };
+    if (!doc || !unique_keys(unique_keys, *doc) || doc->kind != J::Kind::object || json_count(doc->member("schema_version")) != 1
+        || !doc->string_member("chain_fingerprint") || !doc->string_member("game_version")
+        || !doc->string_member("written_at")) return bad();
+    const auto* profile_id = doc->member("profile_id");
+    if (!profile_id || (prepared ? (profile_id->kind != J::Kind::string || profile_id->string != identity)
+                                : (profile_id->kind != J::Kind::null || *doc->string_member("chain_fingerprint") != key))) return bad();
+    const auto* groups = doc->member("groups");
+    const auto* truncated = doc->member("truncated");
+    const auto* totals = doc->member("totals");
+    auto valid_totals = [](const J* v) { return v && v->kind == J::Kind::object && json_count(v->member("A")) && json_count(v->member("B")) && json_count(v->member("C")); };
+    auto valid_layer = [](const J* v) { return v && v->kind == J::Kind::object && v->string_member("mod_id") && v->member("chain_position") && (v->member("chain_position")->kind == J::Kind::null || json_count(v->member("chain_position"))); };
+    if (!groups || groups->kind != J::Kind::array || !truncated || truncated->kind != J::Kind::boolean || !valid_totals(totals)) return bad();
+    for (const auto& group : groups->array) {
+        const auto* notes = group.member("notes");
+        const auto* gt = group.member("truncated");
+        if (group.kind != J::Kind::object || !valid_layer(group.member("layer")) || !group.string_member("file")
+            || !valid_totals(group.member("totals")) || !gt || gt->kind != J::Kind::boolean || !notes || notes->kind != J::Kind::array) return bad();
+        for (const auto& row : notes->array) {
+            if (row.kind != J::Kind::object || !valid_layer(row.member("layer"))) return bad();
+            for (const auto* field : {"code", "class", "file", "object", "tag", "authored_value", "action", "effective_value", "retail", "phase", "diagnostic_code", "message"})
+                if (!row.string_member(field)) return bad();
+            const auto& category = *row.string_member("class");
+            const auto& action = *row.string_member("action");
+            const auto& phase = *row.string_member("phase");
+            if ((category != "A" && category != "B" && category != "C")
+                || (action != "refused" && action != "accepted" && action != "default_used" && action != "clamped"
+                    && action != "skipped_object" && action != "skipped_placement" && action != "runtime_degraded")
+                || (phase != "load" && phase != "runtime")) return bad();
+            const auto* line = row.member("line");
+            if (!line || (line->kind != J::Kind::null && !json_count(line))) return bad();
+        }
+    }
+    const auto report = encode(*doc);
+    if (report.size() > kLineLimit - kReportEnvelopeBytes) return bad();
+    return Reply::ok("{\"report\":" + report + ",\"current_chain_fingerprint\":" + json_quote(key) + '}');
+}
+
 Reply method_loadcheck_start(Service&, const J&) { return Reply::fail(kInternalError, "start dispatch unavailable"); }
 Reply method_loadcheck_cancel(Service& s, const J& p) { return s.loadcheck().cancel(p); }
 Reply method_loadcheck_result(Service& s, const J& p) { return s.loadcheck().result(p); }

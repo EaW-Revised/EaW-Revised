@@ -1,4 +1,5 @@
 #include "corpus_validation_support.hpp"
+#include "eawr/vfs/vfs.hpp"
 
 namespace eawr_validation {
 namespace {

@@ -1,6 +1,7 @@
 #include "methods.hpp"
 #include "model_methods.hpp"
 #include "loadcheck.hpp"
+#include "records.hpp"
 #include "file_methods.hpp"
 
 #include "eawr/mods/steam/text_formats.hpp"
@@ -40,7 +41,8 @@ std::string hello_members(const ServiceInfo& info) {
     return "{\"protocol\":{\"major\":" + std::to_string(kProtocolMajor) + ",\"minor\":" + std::to_string(kProtocolMinor)
          + "},\"service_version\":" + core::json_quote(info.service_version)
          + ",\"engine_build\":" + core::json_quote(info.engine_build)
-         + ",\"game_release\":" + core::json_quote(info.game_release) + ",\"capabilities\":" + capabilities_json() + '}';
+         + ",\"game_release\":" + core::json_quote(info.game_release)
+         + ",\"kit_build\":" + core::json_quote(info.kit_build) + ",\"capabilities\":" + capabilities_json() + '}';
 }
 
 Reply method_hello(Service& service, const JsonValue& params) {
@@ -86,12 +88,18 @@ constexpr std::array kMethods{
     MethodEntry{"loadcheck.cancel", &method_loadcheck_cancel, false},
     MethodEntry{"loadcheck.result", &method_loadcheck_result, false},
     MethodEntry{"loadcheck.start", &method_loadcheck_start, false},
+    MethodEntry{"loadnotes.read", &method_loadnotes_read, false},
     MethodEntry{"mods.changes", &method_mods_changes, false},
     MethodEntry{"mods.discover", &method_mods_discover, false},
     MethodEntry{"profile.delete", &method_profile_delete, false},
     MethodEntry{"profile.list", &method_profile_list, false},
     MethodEntry{"profile.load", &method_profile_load, false},
+    MethodEntry{"profile.locks", &method_profile_locks, false},
     MethodEntry{"profile.save", &method_profile_save, false},
+    MethodEntry{"records.cancel", &method_records_cancel, false},
+    MethodEntry{"records.get", &method_records_get, false},
+    MethodEntry{"records.index", &method_records_index, false},
+    MethodEntry{"settings.set_builtin_layer", &method_settings_set_builtin_layer, false},
     MethodEntry{"shutdown", &method_shutdown, false},
 };
 

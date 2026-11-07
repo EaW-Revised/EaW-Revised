@@ -28,6 +28,10 @@ void append_u64(std::vector<std::uint8_t>& bytes, std::uint64_t value) {
     for (unsigned shift = 0; shift < 64; shift += 8)
         bytes.push_back(static_cast<std::uint8_t>(value >> shift));
 }
+void append_u32(std::vector<std::uint8_t>& bytes, std::uint32_t value) {
+    for (unsigned shift = 0; shift < 32; shift += 8)
+        bytes.push_back(static_cast<std::uint8_t>(value >> shift));
+}
 void append_hash(std::vector<std::uint8_t>& bytes, const std::string& value) {
     bytes.insert(bytes.end(), value.begin(), value.end());
 }
@@ -39,6 +43,13 @@ struct Reader {
         value = 0;
         for (unsigned shift = 0; shift < 64; shift += 8)
             value |= static_cast<std::uint64_t>(bytes[offset++]) << shift;
+        return true;
+    }
+    bool u32(std::uint32_t& value) {
+        if (bytes.size() - offset < 4) return false;
+        value = 0;
+        for (unsigned shift = 0; shift < 32; shift += 8)
+            value |= static_cast<std::uint32_t>(bytes[offset++]) << shift;
         return true;
     }
     bool hash(std::string& value) {
@@ -59,6 +70,7 @@ DesyncMonitor::DesyncMonitor(MessageTransport& transport, DesyncOptions options)
         && options_.max_retained_bytes > 0 && options_.max_retained_bytes <= 256 * 1024 * 1024
         && transport_.peer_count() >= 2 && transport_.peer_count() <= max_match_seats
         && transport_.self() < transport_.peer_count();
+    next_first_ = options_.initial_tick;
     const auto limit = options_.max_retained_bytes;
     if (options_.match_setup.size() > limit || options_.match_identity.size() > limit
         || options_.build_identity.size() > limit) valid_ = false;
@@ -72,7 +84,7 @@ DesyncMonitor::DesyncMonitor(MessageTransport& transport, DesyncOptions options)
 }
 
 bool DesyncMonitor::needs_encoding(std::uint64_t tick, bool match_end) const noexcept {
-    return valid_ && (tick == 0 || tick % options_.exchange_every == 0 || match_end);
+    return valid_ && (tick == options_.initial_tick || tick % options_.exchange_every == 0 || match_end);
 }
 
 core::Result<void> DesyncMonitor::fail(std::string message) {
@@ -106,8 +118,8 @@ core::Result<void> DesyncMonitor::record(std::uint64_t tick, std::string_view ha
     // This peer has left hash agreement; that final hook call is a harmless tail.
     if (!active_peers_[transport_.self()]) return core::Result<void>::success();
     if (failed_ || frozen_ || ended_ || waiting_) return fail("cannot record while the monitor gates advancement");
-    if ((!started_ && tick != 0) || (started_ && (completed_ == std::numeric_limits<std::uint64_t>::max()
-        || tick != completed_ + 1))) return fail("completed ticks must start at zero and be contiguous");
+    if ((!started_ && tick != options_.initial_tick) || (started_ && (completed_ == std::numeric_limits<std::uint64_t>::max()
+        || tick != completed_ + 1))) return fail("completed ticks must start at the agreed boundary and be contiguous");
     if (!valid_hash(hash)) return fail("state hash must be a canonical SHA-256 hex digest");
     // Input payloads are bounded as well as checkpoint encodings. Refuse a window
     // that exceeds the configured diagnostic budget rather than grow without bound.
@@ -154,6 +166,28 @@ core::Result<void> DesyncMonitor::on_resync(std::uint64_t tick, std::string_view
     auto reset = on_reconnect(tick, hash, {});
     ended_ = end;
     return reset;
+}
+
+std::optional<PeerIndex> DesyncMonitor::checkpoint_recovery_source() const {
+    if (!ready_for_resync()) return {};
+    const auto count = static_cast<std::size_t>(std::count(active_peers_.begin(), active_peers_.end(), true));
+    if (count < 3) return {};
+    const auto choose = [&](const Summary& local, const auto& summaries) -> std::optional<PeerIndex> {
+        std::map<std::string, std::vector<PeerIndex>> votes;
+        votes[local.hash].push_back(transport_.self());
+        std::size_t seen = 1;
+        for (const auto& [peer, summary] : summaries) {
+            if (peer >= active_peers_.size() || !active_peers_[peer]) continue;
+            if (summary.first != local.first || summary.last != local.last) return {};
+            votes[summary.hash].push_back(peer); ++seen;
+        }
+        if (seen != count) return {};
+        for (const auto& [hash, peers] : votes)
+            if (peers.size() > count / 2 && hash != local.hash) return *std::min_element(peers.begin(), peers.end());
+        return {};
+    };
+    if (previous_frozen_ && previous_) return choose(previous_->local, previous_->summaries);
+    return local_summary_ ? choose(*local_summary_, summaries_) : std::nullopt;
 }
 
 core::Result<void> DesyncMonitor::on_reconnect(std::uint64_t tick, std::string_view hash,
@@ -295,18 +329,19 @@ core::Result<void> DesyncMonitor::receive(std::uint32_t from, std::span<const st
     if (!valid_ || failed_) return fail("inactive desync monitor");
     if (from >= transport_.peer_count() || from == transport_.self() || frame.empty())
         return fail("invalid desync sender or empty frame");
+    if (frame[0] == desync_evidence_kind) return receive_evidence(from, frame);
     if (frame[0] != desync_combined_kind && frame[0] != desync_rows_kind) return fail("unknown desync message kind");
     Reader reader{frame, 1};
     Summary summary;
     if (!reader.u64(summary.first) || !reader.u64(summary.last) || summary.last < summary.first
         || summary.last - summary.first >= options_.exchange_every
-        || (summary.first == 0 && summary.last != 0)) return fail("malformed desync window");
+        || (summary.first == options_.initial_tick && summary.last != options_.initial_tick)) return fail("malformed desync window");
     std::vector<Row> decoded;
     if (frame[0] == desync_combined_kind) {
         if (!reader.hash(summary.hash) || reader.offset + 1 != frame.size() || frame[reader.offset] > 1)
             return fail("malformed combined hash");
         summary.end = frame[reader.offset] != 0;
-        if (!summary.end && summary.last != 0 && summary.last % options_.exchange_every != 0)
+        if (!summary.end && summary.last != options_.initial_tick && summary.last % options_.exchange_every != 0)
             return fail("unexpected desync exchange point");
     } else {
         const auto count = summary.last - summary.first + 1;
@@ -421,7 +456,7 @@ core::Result<void> DesyncMonitor::evaluate() {
         // retained agreed window rather than holding an unnecessary row gate.
         frozen_ = previous_frozen_;
         if (frozen_) return core::Result<void>::success();
-        if (completed_ == 0) setup_agreed_ = true;
+        if (completed_ == options_.initial_tick) setup_agreed_ = true;
         next_first_ = completed_ + 1;
         retired_summaries_.clear();
         if (repair_enabled_ && previous_) retired_summaries_ = std::move(previous_->summaries);
@@ -512,11 +547,96 @@ void DesyncMonitor::diagnose(const std::vector<Row>& rows, const std::map<std::u
             report.channel = world ? "world/script" : "canonical input";
             for (PeerIndex departed = 0; departed < departure_ticks_.size(); ++departed)
                 if (departure_ticks_[departed]) report.departures.push_back({departed, *departure_ticks_[departed]});
+            const bool active_report = !report.diagnostic_only;
             report_ = std::move(report);
+            if (active_report && options_.share_evidence) send_evidence(rows, remotes);
             build_bundle();
             return;
         }
     }
+}
+
+void DesyncMonitor::send_evidence(const std::vector<Row>& rows, const std::map<std::uint32_t, std::vector<Row>>& remotes) {
+    if (evidence_sent_ || rows.empty()) return;
+    evidence_sent_ = true;
+    // The ticks any active peer disagrees on, earliest first, within the frame budget.
+    std::vector<std::uint8_t> entries;
+    std::uint32_t count = 0;
+    for (std::size_t i = 0; i < rows.size(); ++i) {
+        bool differs = false;
+        for (const auto& [peer, remote] : remotes)
+            differs = differs || (active_peers_[peer] && i < remote.size() && remote[i].input != rows[i].input);
+        const auto batch = inputs_.find(rows[i].tick);
+        if (!differs || batch == inputs_.end()) continue;
+        if (entries.size() + 12U + batch->second.size() > options_.max_evidence_bytes) {
+            evidence_notes_ += "tick " + std::to_string(rows[i].tick) + ": input batch of " + std::to_string(batch->second.size())
+                + " bytes not shipped, over the " + std::to_string(options_.max_evidence_bytes) + " byte evidence budget\n";
+            continue;
+        }
+        append_u64(entries, rows[i].tick);
+        append_u32(entries, static_cast<std::uint32_t>(batch->second.size()));
+        entries.insert(entries.end(), batch->second.begin(), batch->second.end());
+        ++count;
+    }
+    std::vector<std::uint8_t> frame{desync_evidence_kind};
+    append_u64(frame, rows.front().tick);
+    append_u64(frame, rows.back().tick);
+    append_u32(frame, count);
+    frame.insert(frame.end(), entries.begin(), entries.end());
+    // A peer whose link is already gone cannot take part; the bundle simply lacks its evidence.
+    for (std::uint32_t peer = 0; peer < transport_.peer_count(); ++peer)
+        if (peer != transport_.self() && active_peers_[peer]) {
+            if (auto sent = transport_.send(peer, frame); !sent)
+                evidence_notes_ += "evidence for peer " + std::to_string(peer) + " (" + std::to_string(frame.size())
+                    + " bytes) was not sent: " + sent.error().code + " " + sent.error().message + "\n";
+        }
+}
+
+core::Result<void> DesyncMonitor::receive_evidence(std::uint32_t from, std::span<const std::uint8_t> frame) {
+    Reader reader{frame, 1};
+    std::uint64_t first{}, last{};
+    std::uint32_t count{};
+    if (!reader.u64(first) || !reader.u64(last) || !reader.u32(count) || last < first
+        || last - first >= options_.exchange_every || count > last - first + 1)
+        return fail("malformed desync evidence");
+    if (!active_peers_[from] || !active_peers_[transport_.self()]) return core::Result<void>::success();
+    // The window the evidence belongs to: the current one, else the retired one an incident can still name.
+    const std::vector<Row>* remote_rows = nullptr;
+    if (local_summary_ && first == local_summary_->first) {
+        if (const auto found = remote_rows_.find(from); found != remote_rows_.end()) remote_rows = &found->second;
+    } else if (previous_ && first == previous_->local.first) {
+        if (const auto found = previous_->remote.find(from); found != previous_->remote.end()) remote_rows = &found->second;
+    }
+    // Rows always precede evidence on the sender's ordered stream; anything else is a stale tail. Note it, so an
+    // ordering change shows up in the bundle instead of silently dropping the evidence.
+    if (!remote_rows || remote_rows->empty() || remote_rows->front().tick != first || remote_rows->back().tick != last) {
+        evidence_notes_ += "evidence from peer " + std::to_string(from) + " for window " + std::to_string(first) + ".."
+            + std::to_string(last) + " arrived without its rows and was ignored\n";
+        return core::Result<void>::success();
+    }
+    if (evidence_received_.contains(from)) return fail("duplicate desync evidence");
+    std::map<std::uint64_t, std::vector<std::uint8_t>> accepted;
+    std::uint64_t previous_tick = 0;
+    bool any = false;
+    for (std::uint32_t entry = 0; entry < count; ++entry) {
+        std::uint64_t tick{};
+        std::uint32_t length{};
+        if (!reader.u64(tick) || !reader.u32(length) || tick < first || tick > last || (any && tick <= previous_tick)
+            || length > options_.max_evidence_bytes || frame.size() - reader.offset < length)
+            return fail("malformed desync evidence entry");
+        any = true;
+        previous_tick = tick;
+        const std::span<const std::uint8_t> batch = frame.subspan(reader.offset, length);
+        reader.offset += length;
+        if (core::sha256_hex(batch) != (*remote_rows)[static_cast<std::size_t>(tick - first)].input)
+            return fail("desync evidence does not match the peer's authenticated input hash");
+        accepted.emplace(tick, std::vector<std::uint8_t>(batch.begin(), batch.end()));
+    }
+    if (reader.offset != frame.size()) return fail("malformed desync evidence length");
+    remote_inputs_[from] = std::move(accepted);
+    evidence_received_.insert(from);
+    if (report_ && !report_->diagnostic_only) build_bundle();
+    return core::Result<void>::success();
 }
 
 void DesyncMonitor::build_bundle() {
@@ -589,6 +709,34 @@ void DesyncMonitor::build_bundle() {
         input_bytes.insert(input_bytes.end(), bytes.begin(), bytes.end());
     }
     binary("inputs.bin", input_bytes);
+    std::string diff;
+    for (const auto& [peer, batches] : remote_inputs_) {
+        std::vector<std::uint8_t> remote_bytes(magic.begin(), magic.end());
+        for (const auto& [tick, bytes] : batches) {
+            append_u64(remote_bytes, tick);
+            append_u64(remote_bytes, bytes.size());
+            remote_bytes.insert(remote_bytes.end(), bytes.begin(), bytes.end());
+            const auto local = inputs_.find(tick);
+            diff += "tick " + std::to_string(tick) + " peer " + std::to_string(peer) + " remote_bytes=" + std::to_string(bytes.size())
+                + " remote_sha256=" + core::sha256_hex(bytes);
+            if (local == inputs_.end()) { diff += " local=not retained\n"; continue; }
+            std::size_t at = 0;
+            while (at < bytes.size() && at < local->second.size() && bytes[at] == local->second[at]) ++at;
+            diff += " local_bytes=" + std::to_string(local->second.size()) + " local_sha256=" + core::sha256_hex(local->second)
+                + " first_differing_offset=" + std::to_string(at) + "\n";
+        }
+        binary(("remote-peer-" + std::to_string(peer) + "-inputs.bin").c_str(), remote_bytes);
+    }
+    if (!diff.empty()) text_file("input-diff.txt", diff);
+    if (!evidence_notes_.empty()) text_file("evidence-notes.txt", evidence_notes_);
+    if (options_.replay_journal) {
+        if (!journal_cache_) journal_cache_ = options_.replay_journal();
+        const auto& journal = *journal_cache_;
+        if (!journal.empty() && journal.size() <= options_.max_journal_bytes) binary("session-journal.bin", journal);
+        else text_file("session-journal.txt", journal.empty() ? std::string("no replay journal available\n")
+            : "replay journal of " + std::to_string(journal.size()) + " bytes exceeds the "
+                + std::to_string(options_.max_journal_bytes) + " byte budget\n");
+    }
     binary("setup.bin", options_.match_setup);
     text_file("identity.txt", "match=" + options_.match_identity + "\nbuild=" + options_.build_identity + "\n");
     std::string csv = "peer,completed_tick,state_hash,input_hash\n";
@@ -602,6 +750,10 @@ void DesyncMonitor::build_bundle() {
         "report.txt names the first divergent completed tick (zero means setup).\n"
         "hashes.csv contains authenticated local and remote rows since the last agreed exchange.\n"
         "session.bin is this peer's nearest retained canonical session encoding; encoding.txt gives its tick.\n"
+        "session.bin is the hashing encoding of the world, not a restorable save; it cannot be replayed on its own.\n"
+        "session-journal.bin (when present) is the replayable record: setup, sealed seat inputs and the per-tick world hash.\n"
+        "remote-peer-N-inputs.bin (when present) holds peer N's differing canonical input batches, each authenticated\n"
+        "against that peer's exchanged input hash; input-diff.txt lists the first differing byte offset per tick.\n"
         "inputs.bin contains canonical batches framed by LE u64 completed tick and LE u64 byte count, after its magic line.\n"
         "setup.bin and identity.txt contain the supplied setup, match and build identities.\n"
         "departures.csv records agreed input cutoffs; later departed-peer rows do not qualify the search.\n"

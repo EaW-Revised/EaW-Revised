@@ -8,6 +8,8 @@
 #include <optional>
 #include <span>
 #include <vector>
+#include <string_view>
+#include "eawr/presentation/render_categories.hpp"
 
 namespace eawr::presentation {
 
@@ -25,6 +27,7 @@ struct ModelView final {
         bool visible{};
         std::int32_t bone{};
         std::span<const assets::Submesh> submeshes;
+        std::string_view diagnostic_name{};
     };
 
     const assets::Model& original;
@@ -36,11 +39,13 @@ struct ModelView final {
         if (surface) {
             const auto& mesh = model.meshes.at(surface->mesh);
             meshes.push_back({mesh.visible || surface->force_visible, mesh.bone,
-                std::span<const assets::Submesh>(mesh.submeshes).subspan(surface->submesh, 1)});
+                std::span<const assets::Submesh>(mesh.submeshes).subspan(surface->submesh, 1),
+                render_categories::ablation != "off" ? std::string_view(mesh.name) : std::string_view{}});
         } else {
             meshes.reserve(model.meshes.size());
             for (const auto& mesh : model.meshes)
-                meshes.push_back({mesh.visible, mesh.bone, mesh.submeshes});
+                meshes.push_back({mesh.visible, mesh.bone, mesh.submeshes,
+                    render_categories::ablation != "off" ? std::string_view(mesh.name) : std::string_view{}});
         }
     }
 };

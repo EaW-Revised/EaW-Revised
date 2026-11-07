@@ -56,6 +56,24 @@ PixelRect safe_area(const ReferenceSpace& space) noexcept {
                      static_cast<double>(space.viewport.height)};
 }
 
+PixelRect fit_16x9(const Viewport viewport) noexcept {
+    if (viewport.width == 0U || viewport.height == 0U) return {};
+    const auto wide = static_cast<std::uint64_t>(viewport.width);
+    const auto high = static_cast<std::uint64_t>(viewport.height);
+    const double width = viewport.width;
+    const double height = viewport.height;
+    // Exact 16:9 tests in integers.
+    if (wide * safe_area_aspect_height == high * safe_area_aspect_width) return PixelRect{0.0, 0.0, width, height};
+    if (wide * safe_area_aspect_height > high * safe_area_aspect_width) {
+        const double box = std::floor(height * safe_area_aspect_width / safe_area_aspect_height);
+        if (box < 1.0) return {};
+        return PixelRect{std::floor((width - box) / 2.0), 0.0, box, height};
+    }
+    const double box = std::floor(width * safe_area_aspect_height / safe_area_aspect_width);
+    if (box < 1.0) return {};
+    return PixelRect{0.0, std::floor((height - box) / 2.0), width, box};
+}
+
 ReferencePoint snap_shell_offset(const ReferencePoint offset) noexcept {
     return {std::round(offset.x), std::round(offset.y)};
 }

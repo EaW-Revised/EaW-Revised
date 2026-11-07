@@ -35,6 +35,9 @@
 
 namespace eawr::sim::tactical {
 
+struct CraftState;
+struct SquadronState;
+
 // ADR-020: one load-time deal of final deployed roots, after entry ID remapping.
 // Existing shared_structure classifications are retained; reserves are not setup units.
 [[nodiscard]] core::Result<void> split_initial_controllers(TacticalSetup& setup, const EconomyRules& economy);
@@ -175,6 +178,13 @@ public:
     // the digest the synchronous path returns in state_sha256. Null (the default) hashes on the
     // stepping thread. The hasher is not state: it never changes a hash or a replay.
     void set_state_hasher(std::shared_ptr<StateHasher> hasher) noexcept;
+    // Whether step() encodes and hashes each completed tick (default always). With on_demand a
+    // step skips both and the tick's state_sha256 / state_hash stay empty; state_sha256() and
+    // canonical_state_bytes() still give the current state's hash on request. Applies from the
+    // next step; call it between steps (the live session does, under its session lock). Not
+    // state: it never changes a hash that is computed, a snapshot or a replay.
+    void set_state_hash_policy(StateHashPolicy policy) noexcept;
+    [[nodiscard]] StateHashPolicy state_hash_policy() const noexcept;
     // Diagnostic publication only; changing it leaves canonical state/checkpoints identical.
     void set_damage_notifications(bool enabled) noexcept;
     // #3644: installs (or, with null, removes) the object-turn provider. Not state: a session with none
@@ -307,6 +317,9 @@ public:
     // this copy to verify that the owner's command log contains the exact pending queue.
     [[nodiscard]] std::vector<PlayerCommand> pending_commands() const;
     [[nodiscard]] std::vector<std::uint8_t> canonical_state_bytes() const;
+    // The same bytes through the parallel record phase the tick's own hash uses (#5519), with the serial encoder as the
+    // fallback. For the lockstep exchange of a galactic session that holds a child battle.
+    [[nodiscard]] std::vector<std::uint8_t> canonical_state_bytes(const PartitionExecutor& executor) const;
     [[nodiscard]] std::string state_sha256() const;
     [[nodiscard]] std::shared_ptr<const TacticalSnapshot> snapshot() const noexcept;
 

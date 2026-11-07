@@ -1,4 +1,5 @@
 #include "eawr/presentation/space/fog_field.hpp"
+#include "eawr/data/xml.hpp"
 #include "eawr/core/text.hpp"
 #include "eawr/data/tag_trace.hpp"
 
@@ -280,11 +281,15 @@ void FogField::present() {
         // it is blocked: blocked becomes fully fogged, the rest fully clear.
         for (std::uint32_t row = 0; row < tall; ++row) {
             for (std::uint32_t column = 0; column < wide; ++column) {
-                std::uint8_t& intensity = next_intensities_[static_cast<std::size_t>(row) * wide + column];
+                const std::size_t index = static_cast<std::size_t>(row) * wide + column;
+                std::uint8_t& intensity = next_intensities_[index];
                 if (intensity <= 64U) continue;
-                const double x = layout_.left + (column + 0.5) * layout_.cell;
-                const double y = layout_.top - (row + 0.5) * layout_.cell;
-                intensity = blocked_(x, y) ? std::uint8_t{0} : std::uint8_t{255};
+                if (blocked_mask_[index] == 0U) {
+                    const double x = layout_.left + (column + 0.5) * layout_.cell;
+                    const double y = layout_.top - (row + 0.5) * layout_.cell;
+                    blocked_mask_[index] = blocked_(x, y) ? std::uint8_t{2} : std::uint8_t{1};
+                }
+                intensity = blocked_mask_[index] == 2U ? std::uint8_t{0} : std::uint8_t{255};
             }
         }
     }
@@ -338,6 +343,7 @@ void FogField::present() {
 void FogField::set_deployment_overlay(const bool on, FogBlockedPoint blocked) {
     overlay_ = on;
     blocked_ = std::move(blocked);
+    blocked_mask_.assign(values_.size(), 0U);
     force_present_ = true;
     present();
     changed_ = true;

@@ -20,9 +20,9 @@ template<class Rows, class Value, class Key> void put(Rows& rows, Value value, K
     else rows.insert(at, std::move(value));
 }
 }
-bool ground_ability_enabled(const GalacticAbilityProfile& p, const AbilityActorState& s, AbilityKind kind) {
+bool ground_ability_enabled(const GalacticAbilityProfile& p, const AbilityActorState& s, AbilityKind kind, bool listed_implicitly) {
     if (p.lifecycle_only || p.type != s.type
-        || std::find(p.ground_activated.begin(), p.ground_activated.end(), kind) == p.ground_activated.end()) return false;
+        || (!listed_implicitly && std::find(p.ground_activated.begin(), p.ground_activated.end(), kind) == p.ground_activated.end())) return false;
     switch (kind) {
     case AbilityKind::system_spy: return p.spy && s.spy_enabled && !s.spy_cancelled;
     case AbilityKind::black_market: return p.has_market && s.enabled && !s.cancelled;
@@ -61,8 +61,15 @@ void GalacticSession::Impl::dispatch_ground_ability(EntityId supplied, PlanetId 
         const auto* service = find(ability_host->actors, id, [](const auto& r) { return r.actor; });
         if (!profile || !service) continue;
         bool qualified = false;
-        for (const auto kind : profile->ground_activated) {
-            if (!ground_ability_enabled(*profile, *service, kind)) continue;
+        // WGA-234/WGCH-32: an AI seat's hostile landing hands the slicer bearer its deploy callback. Since WGCH-187
+        // the live setup lists every slicer for every seat, so this only still widens a hand-built profile.
+        auto kinds = profile->ground_activated;
+        const auto* ai_purchaser = economy_corruption ? find(economy_corruption->players, at->second.owner, [](const auto& row) { return row.player; }) : nullptr;
+        const bool ai_slicer = ai_purchaser && !ai_purchaser->human && profile->theft
+            && std::find(kinds.begin(), kinds.end(), AbilityKind::technology_theft) == kinds.end();
+        if (ai_slicer) kinds.push_back(AbilityKind::technology_theft);
+        for (const auto kind : kinds) {
+            if (!ground_ability_enabled(*profile, *service, kind, ai_slicer && kind == AbilityKind::technology_theft)) continue;
             if (kind == AbilityKind::technology_theft || kind == AbilityKind::system_spy) {
                 const auto* planet = control ? find(control->planets, target, [](const auto& row) { return row.planet; }) : nullptr;
                 if (!planet) continue;
@@ -236,7 +243,7 @@ core::Result<void> validate_ability_host(const GalacticSetup& setup) {
     }
     previous = 0;
     for (const auto& t : host.neutralization_targets) {
-        if (!t.type || t.type <= previous || t.cost.raw() < 0) return bad();
+        if (!t.type || t.type <= previous) return bad();
         previous = t.type;
     }
     for (const auto& p : host.profiles) {
@@ -249,7 +256,7 @@ core::Result<void> validate_ability_host(const GalacticSetup& setup) {
                 || n.minor_modifier.raw() < 0 || n.major_modifier.raw() < 0) return bad();
             for (const auto* curve : {&n.base_curve, &n.history_curve, &n.corruption_curve}) {
                 if (curve->size() > galactic_max_objects) return bad();
-                for (std::size_t i = 1; i < curve->size(); ++i) if ((*curve)[i - 1].x >= (*curve)[i].x) return bad();
+                for (std::size_t i = 1; i < curve->size(); ++i) if ((*curve)[i - 1].x > (*curve)[i].x) return bad();
             }
         }
     }
@@ -386,7 +393,11 @@ std::optional<HeroDefeat> GalacticSession::Impl::prepare_ability_defeat(const Ce
         if (parent == actor_records.end()) return {};
         const auto* census_type = find(setup.census->types, parent->second.original_type, [](const auto& p) { return p.type; });
         const auto* movement_type = find(movement_inputs->types, parent->second.current_type, [](const auto& p) { return p.type; });
-        if (census_type && census_type->company) defeat.parent = HeroParent::team;
+        if (census_type && census_type->company) {
+            defeat.parent = HeroParent::team;
+            // A team member has no placeable dummy of its own: the return recreates the authored team company.
+            defeat.respawn_type = parent->second.original_type;
+        }
         else if (movement_type && movement_type->squadron) defeat.parent = HeroParent::nested_squadron;
         else if (movement_type && movement_type->transport) defeat.parent = HeroParent::transport;
         else return {}; // named parent classification seam

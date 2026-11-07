@@ -7,6 +7,7 @@ Source contracts always run. The two GPU cases need the viewer lane and the inst
 from the front end, and a custom campaign started from the front end.
 """
 
+import itertools
 import json
 import os
 import pathlib
@@ -275,6 +276,273 @@ class InGameMenuGpu(unittest.TestCase):
                                              "quit_confirm", "quit_declined", "quit_accepted", "main_menu"], data)
             self.assertIn("EAWR campaign left for the main menu", result.stdout)
             self.assertIn("EAWR front end returned to the main menu", result.stdout)
+
+
+CENTRE_DRIVER = r"""extends SceneTree
+var instance
+var elapsed = 0.0
+var beat = 0.0
+var phase = 0
+var pre_resized = false
+var chosen_text = ""
+var network_target = Vector2i()
+var rows = []
+func _initialize():
+    instance = load(ProjectSettings.get_setting("application/run/main_scene")).instantiate()
+    root.add_child(instance)
+    current_scene = instance
+func key(code):
+    for down in [true, false]:
+        var event = InputEventKey.new()
+        event.keycode = code
+        event.pressed = down
+        Input.parse_input_event(event)
+func menu():
+    var node = instance.find_child("IDD_GAME_OPTIONS_DIALOG", true, false)
+    return node if node != null and node.is_visible_in_tree() else null
+func control(name):
+    var node = instance.find_child(name, true, false)
+    return node if node != null and node.is_visible_in_tree() else null
+func click(node):
+    var point = node.get_global_rect().get_center()
+    for down in [true, false]:
+        var event = InputEventMouseButton.new()
+        event.position = point
+        event.global_position = point
+        event.button_index = MOUSE_BUTTON_LEFT
+        event.pressed = down
+        Input.parse_input_event(event)
+func record(label):
+    var rect = menu().get_global_rect()
+    var view = root.get_visible_rect().size
+    var window = DisplayServer.window_get_size()
+    rows.append({"stage": label, "centre_x": rect.get_center().x, "viewport_x": view.x, "window_x": window.x, "window_y": window.y})
+    root.get_texture().get_image().save_png(CAPTURE_DIR + "/" + label + ".png")
+func finish(message):
+    var file = FileAccess.open(TRACE, FileAccess.WRITE)
+    file.store_string(JSON.stringify({"error": message, "phase": phase, "rows": rows}))
+    quit(0 if message == "" else 1)
+func _process(delta):
+    elapsed += delta
+    beat += delta
+    if elapsed > 900: finish("timeout"); return false
+    if beat < 0.5: return false
+    beat = 0.0
+    match phase:
+        0:
+            if PREOPEN and not pre_resized:
+                if elapsed < 10.0: return false
+                DisplayServer.window_set_size(Vector2i(1280, 720)); pre_resized = true; return false
+            if BATTLE and instance.find_child("CampaignSpaceBattleReady", true, false) == null: return false
+            if menu() == null: key(KEY_ESCAPE)
+            elif PREOPEN: record("first_open_after_resize"); finish("")
+            else: record("launch"); key(KEY_ESCAPE); phase = 1
+        1:
+            if menu() == null:
+                DisplayServer.window_set_size(Vector2i(1280, 720)); phase = 2
+        2:
+            key(KEY_ESCAPE); phase = 3
+        3:
+            if menu() != null:
+                record("closed_resize"); DisplayServer.window_set_size(Vector2i(1024, 768)); phase = 4
+        4:
+            if menu() != null:
+                record("open_resize")
+                var options = control("IDC_INGAME_OPTIONS")
+                if options == null: finish("no options button"); return false
+                click(options); phase = 5
+        5:
+            var video = control("IDC_IN_GAME_OPTIONS_VIDEO")
+            if video != null: click(video); phase = 6
+        6:
+            var list = control("IDC_RESOLUTION_LIST")
+            var windowed = control("IDC_WINDOWED_MODE")
+            if list != null and windowed != null:
+                if not windowed.button_pressed: click(windowed)
+                var current = DisplayServer.window_get_size()
+                var current_text = str(current.x) + " x " + str(current.y)
+                var chosen = -1
+                for i in range(list.item_count):
+                    if list.get_item_text(i) != current_text and list.get_item_text(i) != "1152 x 864": chosen = i; break
+                if chosen < 0: finish("no alternate resolution"); return false
+                chosen_text = list.get_item_text(chosen)
+                list.select(chosen)
+                list.emit_signal("item_selected", chosen)
+                DisplayServer.window_set_size(Vector2i(1152, 864))
+                phase = 7
+        7:
+            var apply = control("IDC_APPLY")
+            var list = control("IDC_RESOLUTION_LIST")
+            if apply != null and list != null and DisplayServer.window_get_size() == Vector2i(1152, 864):
+                var selected = list.get_selected_items()
+                if apply.disabled or selected.size() != 1 or list.get_item_text(selected[0]) != chosen_text:
+                    finish("video draft lost during resize"); return false
+                click(apply); phase = 8
+        8:
+            key(KEY_ESCAPE); phase = 9
+        9:
+            if control("IDC_IN_GAME_OPTIONS_VIDEO") != null: key(KEY_ESCAPE); phase = 10
+        10:
+            if menu() != null:
+                record("video_apply_back")
+                click(control("IDC_INGAME_OPTIONS")); phase = 11
+        11:
+            var network = control("IDC_IN_GAME_OPTIONS_NETWORK")
+            if network != null: click(network); phase = 12
+        12:
+            var host = control("IDC_ONLINE_SERVICE_HOST")
+            var port = control("IDC_ONLINE_SERVICE_PORT")
+            if host != null and port != null:
+                host.text = "draft-resize.example"
+                port.text = "invalid-port"
+                network_target = Vector2i(1280, 720) if DisplayServer.window_get_size() != Vector2i(1280, 720) else Vector2i(1024, 768)
+                DisplayServer.window_set_size(network_target); phase = 13
+        13:
+            if DisplayServer.window_get_size() != network_target: return false
+            var host = control("IDC_ONLINE_SERVICE_HOST")
+            var port = control("IDC_ONLINE_SERVICE_PORT")
+            if host != null and port != null:
+                if host.text != "draft-resize.example" or port.text != "invalid-port":
+                    finish("network draft lost during resize"); return false
+                finish("")
+    return false
+"""
+
+SKIRMISH_CENTRE_DRIVER = r"""extends SceneTree
+var instance
+var elapsed = 0.0
+var beat = 0.0
+var phase = 0
+var rows = []
+func _initialize():
+    instance = load(ProjectSettings.get_setting("application/run/main_scene")).instantiate()
+    root.add_child(instance)
+    current_scene = instance
+func node(name):
+    var found = instance.find_child(name, true, false)
+    return found if found != null and found.is_visible_in_tree() else null
+func key(code):
+    for down in [true, false]:
+        var event = InputEventKey.new()
+        event.keycode = code
+        event.pressed = down
+        Input.parse_input_event(event)
+func click(control):
+    var point = control.get_global_rect().get_center()
+    for down in [true, false]:
+        var event = InputEventMouseButton.new()
+        event.position = point
+        event.global_position = point
+        event.button_index = MOUSE_BUTTON_LEFT
+        event.pressed = down
+        Input.parse_input_event(event)
+func record(label):
+    var menu = node("IDD_GAME_OPTIONS_DIALOG")
+    var window = DisplayServer.window_get_size()
+    rows.append({"stage": label, "centre_x": menu.get_global_rect().get_center().x,
+                 "viewport_x": root.get_visible_rect().size.x, "window_x": window.x})
+    root.get_texture().get_image().save_png(CAPTURE_DIR + "/" + label + ".png")
+func finish(message):
+    var file = FileAccess.open(TRACE, FileAccess.WRITE)
+    file.store_string(JSON.stringify({"error": message, "phase": phase, "rows": rows}))
+    quit(0 if message == "" else 1)
+func _process(delta):
+    elapsed += delta
+    beat += delta
+    if elapsed > 900: finish("timeout"); return false
+    if beat < 0.5: return false
+    beat = 0.0
+    match phase:
+        0:
+            if node("EawrTacticalHud") == null: return false
+            if node("IDD_GAME_OPTIONS_DIALOG") == null: key(KEY_ESCAPE)
+            else: record("skirmish_launch"); click(node("IDC_GAME_OPTIONS_QUIT")); phase = 1
+        1:
+            if node("IDC_DIALOG_BOX_BUTTON_RIGHT") != null:
+                DisplayServer.window_set_size(Vector2i(1024, 768)); phase = 2
+        2:
+            if DisplayServer.window_get_size() != Vector2i(1024, 768): return false
+            var no = node("IDC_DIALOG_BOX_BUTTON_RIGHT")
+            if no == null: finish("quit confirmation disappeared on resize"); return false
+            record("skirmish_open_resize")
+            click(no); phase = 3
+        3:
+            if node("IDC_DIALOG_BOX_BUTTON_RIGHT") == null and node("IDD_GAME_OPTIONS_DIALOG") != null:
+                finish("")
+    return false
+"""
+
+@unittest.skipUnless(os.environ.get("EAWR_GODOT_VIEWER_RUNTIME_TEST") and os.environ.get("EAWR_EAW_GAME_ROOT"), "requires rig")
+class MenuCentreRig(unittest.TestCase):
+    def test_campaign_and_space_battle(self):
+        game = os.environ["EAWR_EAW_GAME_ROOT"]
+        tmp = tempfile.mkdtemp(prefix="menu-centre-")
+        base = pathlib.Path(tmp)
+        font = base / "fonts"
+        extracted = subprocess.run([sys.executable, str(ROOT / "tools/fonts/extract_eaw_fonts.py"),
+            "--game-root", game, "--out", str(font), "--allow-unknown-build", "--json"],
+            capture_output=True, text=True, timeout=120)
+        self.assertEqual(extracted.returncode, 0, extracted.stdout + extracted.stderr)
+        for battle, resolution, preopen in [(b, r, False) for b, r in itertools.product((False, True), ("1680x720", "1600x450"))] + [(b, "1920x1080", True) for b in (False, True)]:
+            with self.subTest(battle=battle, resolution=resolution, preopen=preopen):
+                case = base / (("battle-" if battle else "galaxy-") + resolution + ("-preopen" if preopen else ""))
+                case.mkdir()
+                trace = case / "trace.json"
+                script = case / "driver.gd"
+                source = CENTRE_DRIVER
+                source = source.replace("CAPTURE_DIR", json.dumps(case.as_posix())).replace("TRACE", json.dumps(trace.as_posix())).replace("BATTLE", "true" if battle else "false").replace("PREOPEN", "true" if preopen else "false")
+                script.write_text(source, encoding="utf-8")
+                scenario = (["tech:Sandbox_Gateways_Rebel", "--eawr-galactic-paused", "no", "--eawr-galactic-ai", "off", "--eawr-galactic-space-proof", "save"] if battle else ["start"])
+                cmd = [os.environ["EAWR_GODOT_EXECUTABLE"], "--render-thread", "separate", "--resolution", resolution,
+                       "--path", str(ROOT / "apps/viewer/project"), "--script", str(script), "--", "--eawr-front-end",
+                       "--eawr-front-end-test", "--eawr-front-end-test-campaign", *scenario, "--eawr-game-root", game,
+                       "--eawr-font-cache", str(font), "--eawr-audio", "off", "--eawr-attract", "off",
+                       "--eawr-lighting", "sh", "--eawr-save-dir", str(case / "saves")]
+                result = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True, timeout=960)
+                (case / "viewer.log").write_text(result.stdout + result.stderr, encoding="utf-8")
+                self.assertTrue(trace.is_file(), (result.stdout + result.stderr)[-6000:])
+                data = json.loads(trace.read_text(encoding="utf-8"))
+                self.assertEqual(result.returncode, 0, data)
+                self.assertEqual(data["error"], "", data)
+                self.assertEqual(len(data["rows"]), 1 if preopen else 4, data)
+                if preopen:
+                    self.assertEqual(data["rows"][0]["window_x"], 1280, data)
+                    self.assertEqual(data["rows"][0]["window_y"], 720, data)
+                else:
+                    widths = [row["window_x"] for row in data["rows"]]
+                    self.assertEqual(widths[:3], [int(resolution.split("x")[0]), 1280, 1024], data)
+                    self.assertEqual(data["rows"][0]["window_y"], int(resolution.split("x")[1]), data)
+                    self.assertNotEqual((widths[3], data["rows"][3]["window_y"]), (widths[2], data["rows"][2]["window_y"]), data)
+                for row in data["rows"]:
+                    self.assertTrue((case / (row["stage"] + ".png")).is_file(), row)
+                    self.assertAlmostEqual(row["centre_x"], row["window_x"] / 2, delta=1.0, msg=str(row))
+                    self.assertAlmostEqual(row["viewport_x"], row["window_x"], delta=1.0, msg=str(row))
+
+
+    def test_skirmish_open_resize_keeps_quit_confirmation(self):
+        game = os.environ["EAWR_EAW_GAME_ROOT"]
+        case = pathlib.Path(tempfile.mkdtemp(prefix="skirmish-centre-"))
+        trace = case / "trace.json"
+        script = case / "driver.gd"
+        script.write_text(SKIRMISH_CENTRE_DRIVER.replace("CAPTURE_DIR", json.dumps(case.as_posix()))
+                          .replace("TRACE", json.dumps(trace.as_posix())), encoding="utf-8")
+        cmd = [os.environ["EAWR_GODOT_EXECUTABLE"], "--render-thread", "separate", "--resolution", "1280x720",
+               "--path", str(ROOT / "apps/viewer/project"), "--script", str(script), "--", "--eawr-front-end",
+               "--eawr-front-end-test", "--eawr-front-end-test-battle", "--eawr-game-root", game,
+               "--eawr-live-step", "1", "--eawr-live-ticks", "6000", "--eawr-live-ai", "off",
+               "--eawr-audio", "off", "--eawr-attract", "off", "--eawr-lighting", "sh",
+               "--eawr-live-input", "f5:click:hud=begin"]
+        result = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True, timeout=960)
+        (case / "viewer.log").write_text(result.stdout + result.stderr, encoding="utf-8")
+        self.assertTrue(trace.is_file(), (result.stdout + result.stderr)[-6000:])
+        data = json.loads(trace.read_text(encoding="utf-8"))
+        self.assertEqual(result.returncode, 0, data)
+        self.assertEqual(data["error"], "", data)
+        self.assertEqual([row["window_x"] for row in data["rows"]], [1280, 1024], data)
+        for row in data["rows"]:
+            self.assertTrue((case / (row["stage"] + ".png")).is_file(), row)
+            self.assertAlmostEqual(row["centre_x"], row["window_x"] / 2, delta=1.0, msg=str(row))
+            self.assertAlmostEqual(row["viewport_x"], row["window_x"], delta=1.0, msg=str(row))
 
 
 if __name__ == "__main__":

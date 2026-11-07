@@ -136,7 +136,8 @@ core::Result<void> validate_combat(const CombatTable& table) {
             return invalid(name + "attack distance out of range");
         }
         if (profile.weapons.size() > max_weapons_per_type) {
-            return invalid(name + "too many weapons");
+            return invalid(name + "too many weapons (" + std::to_string(profile.weapons.size()) + ", at most "
+                + std::to_string(max_weapons_per_type) + ")");
         }
         if (profile.planetary_weapon && (!profile.special_weapon || profile.star_base
             || profile.planetary_weapon->index >= 2 || profile.planetary_weapon->target_action >= 2

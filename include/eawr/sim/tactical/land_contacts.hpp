@@ -4,6 +4,8 @@
 
 namespace eawr::sim::tactical {
 
+inline constexpr std::uint8_t land_contact_retry_visits = 30; // WLPA-92
+
 enum class LandContactKind : std::uint8_t { terrain, stopped_stopped, moving_stopped, moving_moving };
 // LR3-08 / WLPA-56: state dispatch is retained independently of geometry and path outcomes.
 enum class LandContactState : std::uint8_t {
@@ -18,6 +20,9 @@ struct LandContactSettings {
     std::uint64_t complexity_quota{};
     std::uint32_t reset_interval{};
     math::Fixed prediction_seconds{}, minimum_prediction_distance{};
+    // WLPA-95: two idle bodies overlap when their oriented boxes intersect by more than this coefficient. The debug
+    // build's constant is 0.15; like the other contact settings it is an unverified default until the adapter reads the authored value.
+    math::Fixed stopped_overlap{math::Fixed::from_raw(15 * math::Fixed::scale / 100)};
     friend bool operator==(const LandContactSettings&, const LandContactSettings&) = default;
 };
 
@@ -32,6 +37,7 @@ struct LandContact {
     math::Vec2 terrain_target{};
     std::optional<math::Fixed> first_speed_limit, second_speed_limit;
     std::uint8_t deadlock_remaining{30}, search_passes{};
+    std::uint8_t retry_remaining{land_contact_retry_visits};
     std::uint64_t first_progress{}, second_progress{}, charged_nodes{};
     bool first_stopped{}, second_stopped{}, search_succeeded{}, installed{}, motion_observed{};
     bool escape_retry_pending{}; // first escape is ordinary service; failed retries rejoin quota admission

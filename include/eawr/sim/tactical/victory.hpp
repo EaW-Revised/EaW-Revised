@@ -26,6 +26,9 @@ enum class VictoryCondition : std::uint8_t {
     enemies_retreated = 4, // WR-47: runtime campaign condition, never a lobby selection
     enemy_leader_destroyed = 5, // WGT-29: campaign-only outcome
     campaign_station_destroyed = 6, // WGM-51: optional attacker condition
+    enemy_base_components_destroyed = 7, // LC-70
+    enemy_hq_destroyed = 8, // LC-71
+    control_point_domination = 9, // LC-71
 };
 
 // The retail pending-victory countdown (VT-11): the battle ends 210 frames (7 s) after the
@@ -99,6 +102,7 @@ struct OwnerUnitCount {
 
 // The two evidenced space conditions; other shared lobby branches remain unsupported (WBF-36).
 [[nodiscard]] core::Result<VictoryCondition> parse_victory_condition(std::string_view value);
+[[nodiscard]] core::Result<VictoryCondition> parse_land_victory_condition(std::string_view value);
 
 [[nodiscard]] std::string_view to_string(VictoryCondition condition) noexcept;
 

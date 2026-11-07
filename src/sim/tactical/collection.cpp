@@ -380,6 +380,47 @@ void CollectionTrees::update(const std::vector<Member>& members, const std::uint
     }
 }
 
+CollectionTrees::Change CollectionTrees::classify(const Member& member) const {
+    const auto owner = owners_->find(member.id);
+    if (owner == owners_->end() || owner->second != member.owner) return Change::enter;
+    return *trees_.at(member.owner)->bounds(member.id) != member.bounds ? Change::moved : Change::none;
+}
+
+void CollectionTrees::update(const std::vector<Member>& members, const std::span<const Change> changes,
+    const std::uint64_t frame) {
+    // A list that does not pair up with the members is never trusted: the serial update classifies them itself.
+    if (changes.size() != members.size()) return update(members, frame);
+    // Units gone, or now owned by another player, leave their tree first, in ascending ID.
+    std::vector<EntityId> gone;
+    auto next = members.begin();
+    for (const auto& [id, owner] : *owners_) {
+        while (next != members.end() && next->id < id) ++next;
+        if (next == members.end() || next->id != id || next->owner != owner) gone.push_back(id);
+    }
+    const auto edit_owners = [&]() -> std::map<EntityId, PlayerId>& {
+        if (owners_.use_count() != 1) owners_ = std::make_shared<std::map<EntityId, PlayerId>>(*owners_);
+        return *owners_;
+    };
+    for (const auto id : gone) {
+        const auto owner = owners_->at(id);
+        edit(owner).remove(id);
+        edit_owners().erase(id);
+    }
+    for (std::size_t index = 0; index < members.size(); ++index) {
+        const auto& member = members[index];
+        if (changes[index] == Change::enter) {
+            edit_owners().emplace(member.id, member.owner);
+            edit(member.owner).add(member.id, member.bounds);
+        } else if (changes[index] == Change::moved) {
+            edit(member.owner).moved(member.id, member.bounds);
+        }
+    }
+    for (auto& [owner, tree] : trees_) {
+        static_cast<void>(owner);
+        if (tree->service_due(frame)) edit(owner).service(frame);
+    }
+}
+
 std::vector<EntityId> CollectionTrees::collect(const PlayerId owner, const CullBox& query) const {
     const auto found = trees_.find(owner);
     return found != trees_.end() ? found->second->collect(query) : std::vector<EntityId>{};

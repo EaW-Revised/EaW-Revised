@@ -1,3 +1,5 @@
+#include "eawr/units/content_selection.hpp"
+#include "eawr/vfs/vfs.hpp"
 #include "eawr/skirmish/start.hpp"
 #include "eawr/core/text.hpp"
 
@@ -169,25 +171,17 @@ using sim::tactical::PlayerId;
     return Out::success(Vec3{x, y, offset.z});
 }
 
-[[nodiscard]] std::optional<Fixed> times(const Fixed value, const std::int32_t count) {
-    auto factor = Fixed::from_integer(count);
-    if (!factor) return std::nullopt;
-    auto product = sim::math::multiply(value, factor.value());
-    if (!product) return std::nullopt;
-    return product.value();
-}
-
-// AI_Combat_Power; a squadron has none of its own and counts as the sum of its craft (SK-24).
-[[nodiscard]] std::optional<Fixed> combat_power(const units::UnitTables& tables, const units::UnitType& type) {
+// AI_Combat_Power; a squadron counts as the sum of its craft (SK-24, AG-12).
+[[nodiscard]] std::optional<Fixed> combat_power(const units::ContentTypeSelection& selection,
+    const units::UnitType& type, core::LoadNoteBuffer& notes) {
     if (type.kind != units::UnitKind::squadron) return type.ai_combat_power;
     if (type.members.empty()) return std::nullopt;
     Fixed total{};
     for (const auto& member : type.members) {
-        const auto* craft = tables.find(member.craft);
+        const auto* craft = selection.find(member.craft);
         if (craft == nullptr || !craft->ai_combat_power) return std::nullopt;
-        const auto next = sum(total, *craft->ai_combat_power);
-        if (!next) return std::nullopt;
-        total = *next;
+        total = units::add_power(total, *craft->ai_combat_power, type.id,
+            type.id + " squadron combat rating: ", diagnostic_codes::input, &notes);
     }
     return total;
 }
@@ -238,6 +232,8 @@ public:
 
     Result run() {
         if (inputs_.tables == nullptr) return Result::failure(detail::error(diagnostic_codes::input, "no unit tables"));
+        type_selection_.emplace(*inputs_.tables);
+        type_selection_->emit_notes(*inputs_.tables, diagnostic_codes::input, &power_notes_);
         if (inputs_.map != fixture_.map || inputs_.map_sha256 != fixture_.map_sha256) {
             return Result::failure(fixture_error("map " + inputs_.map + " (SHA-256 " + inputs_.map_sha256
                 + ") is not the fixture map " + fixture_.map + " (SHA-256 " + fixture_.map_sha256 + ")"));
@@ -263,12 +259,19 @@ public:
             // the loaded content's Build_Tab_Space_Units set, so the session reads no content tags.
             sim::tactical::AttractPoolReturn pool;
             for (const auto& type : inputs_.tables->units) {
+                if (!type_selection_->keeps(type)) continue;
                 if (type.build_tab_space_units) pool.types.push_back(type_id(type.id));
             }
             std::sort(pool.types.begin(), pool.types.end());
             pool.types.erase(std::unique(pool.types.begin(), pool.types.end()), pool.types.end());
             start_.setup.attract_pool = std::move(pool);
         } else {
+            if (!selected_ && !inputs_.new_markers) {
+                std::vector<std::string> names;
+                for (const auto& faction : inputs_.factions) names.push_back(faction.name);
+                if (auto valid = detail::validate_legacy_setup(fixture_.slots, names, inputs_.map); !valid)
+                    return Result::failure(valid.error());
+            }
             for (std::size_t index = 0; index < fixture_.slots.size(); ++index) {
                 if (auto added = add_lobby_player(index); !added) return Result::failure(added.error());
             }
@@ -332,6 +335,9 @@ public:
         }
         std::sort(start_.markers.begin(), start_.markers.end(),
             [](const StartMarker& left, const StartMarker& right) { return left.record < right.record; });
+        core::LoadNoteCollector collected_notes;
+        collected_notes.merge(power_notes_);
+        start_.load_notes = collected_notes.snapshot();
         return Result::success(std::move(start_));
     }
 
@@ -346,7 +352,7 @@ private:
         }
         std::uint32_t within_team = 0;
         for (std::size_t other = 0; other < index; ++other) {
-            if (!selected_ && fixture_.slots[other].team == slot.team
+            if (!selected_ && inputs_.new_markers && fixture_.slots[other].team == slot.team
                 && !detail::iequals(fixture_.slots[other].faction, slot.faction)) {
                 return Void::failure(fixture_error("Players sharing a team must choose the same faction."));
             }
@@ -379,6 +385,8 @@ private:
             return Void::failure(fixture_error("no MP_Color_* constant for lobby slot " + std::to_string(slot.slot)));
         }
         player.colour = inputs_.lobby_colours[colour];
+
+        if (!inputs_.new_markers) return add_legacy_player(std::move(player), index);
 
         const auto stations = markers_named(inputs_, prefix + "Space_Station");
         const auto bases = markers_named(inputs_, prefix + "Base_Position_Marker");
@@ -461,11 +469,71 @@ private:
             [&](const auto& row) { return detail::iequals(row.owner, name) && row.field == "Max_Squad_Size"; });
     }
 
+    // WSS-19/50/54: legacy starts are faction-based, independently of lobby team labels.
+    core::Result<void> add_legacy_player(StartPlayer player, const std::size_t index) {
+        using Void = core::Result<void>;
+        const auto& slot = fixture_.slots[index];
+        const auto faction = std::find_if(inputs_.factions.begin(), inputs_.factions.end(),
+            [&](const auto& value) { return detail::iequals(value.name, slot.faction); });
+        if (faction == inputs_.factions.end()) {
+            auto diagnostic = fixture_error("Legacy player faction is absent from the authored faction order: " + slot.faction);
+            diagnostic.logical_path = inputs_.map;
+            return Void::failure(std::move(diagnostic));
+        }
+        player.player.team_id = static_cast<std::uint32_t>(faction - inputs_.factions.begin());
+        player.start_side = slot.faction;
+        std::size_t within_faction{};
+        for (std::size_t other = 0; other < index; ++other)
+            if (detail::iequals(fixture_.slots[other].faction, slot.faction)) ++within_faction;
+        const auto name = "PLAYER_" + std::to_string(within_faction) + "_SPAWN_POINT_MARKER";
+        auto spawns = markers_named(inputs_, name);
+        std::erase_if(spawns, [&](const auto* placement) {
+            return !placement->owner_index || *placement->owner_index < 0
+                || static_cast<std::size_t>(*placement->owner_index) >= inputs_.factions.size()
+                || !detail::iequals(inputs_.factions[static_cast<std::size_t>(*placement->owner_index)].name, slot.faction);
+        });
+        if (spawns.empty()) {
+            // Project refusal: keep unsupported authored starts located, rather than inventing a spawn.
+            auto diagnostic = fixture_error("Legacy slot " + std::to_string(slot.slot) + " has no " + name
+                + " owned by faction " + slot.faction);
+            diagnostic.logical_path = inputs_.map;
+            return Void::failure(std::move(diagnostic));
+        }
+        for (const auto* spawn : spawns) {
+            auto where = pose(*spawn);
+            if (!where) return Void::failure(where.error());
+            start_.markers.push_back({spawn->record, spawn->type, slot.slot,
+                spawn == spawns.front() ? MarkerUse::spawn : MarkerUse::spawn_unused,
+                where.value().first, where.value().second});
+        }
+        std::vector<std::pair<std::string, UnitRole>> companies;
+        if (start_.match.free_starting_units) {
+            const auto forces = std::find_if(inputs_.faction_forces.begin(), inputs_.faction_forces.end(),
+                [&](const auto& value) { return detail::iequals(value.faction, slot.faction); });
+            if (forces == inputs_.faction_forces.end()) {
+                auto diagnostic = fixture_error("no starting forces were read for faction " + slot.faction);
+                diagnostic.logical_path = inputs_.map;
+                return Void::failure(std::move(diagnostic));
+            }
+            for (const auto& type : forces->space_skirmish_default_forces) companies.emplace_back(type, UnitRole::free_unit);
+        }
+        for (const auto& type : slot.fleet) companies.emplace_back(type, UnitRole::fleet);
+        std::size_t selected_spawn{};
+        for (const auto& [type, role] : companies) {
+            if (roster_disabled_types().contains(type_id(type)) || invalid_squadron(type)) continue;
+            if (auto added = add_unit(slot.slot, type, role, *spawns[selected_spawn]); !added) return added;
+            selected_spawn = (selected_spawn + 1) % spawns.size();
+        }
+        start_.players.push_back(std::move(player));
+        return Void::success();
+    }
+
     core::Result<void> add_unit(const PlayerId owner, const std::string& type_name, const UnitRole role, const MapPlacement& marker) {
         using Void = core::Result<void>;
         if (invalid_squadron(type_name)) return Void::success();
-        const auto* type = inputs_.tables->find(type_name);
+        const auto* type = type_selection_->find(type_name);
         if (type == nullptr) return Void::failure(fixture_error("unit type " + type_name + " is not in the unit tables"));
+        if (invalid_squadron(type->id)) return Void::success();
         auto where = pose(marker);
         if (!where) return Void::failure(where.error());
         // SK-20: a station replaces its marker with the marker's whole facing, as the
@@ -489,7 +557,7 @@ private:
         unit.record = marker.record;
         unit.yaw_degrees = where.value().second;
         if (tilted(marker) && !whole_facing) unit.dropped_orientation_degrees = marker.orientation_degrees;
-        unit.combat_power = combat_power(*inputs_.tables, *type);
+        unit.combat_power = combat_power(*type_selection_, *type, power_notes_);
         unit.reveal_range = units::sensor_range(*type);
         unit.victory_relevant = type->victory_relevant;
         unit.hull = type->hull;
@@ -506,7 +574,7 @@ private:
     core::Result<void> place_tactical_super_weapons() {
         using Void = core::Result<void>;
         for (auto& unit : start_.units) {
-            const auto* type = inputs_.tables->find(unit.type);
+            const auto* type = type_selection_->find(unit.type);
             if (type == nullptr || !type->tactical_super_weapon) continue;
             // Enemy-owned only: a target owned by the object's own faction is skipped. Skirmish has no defender (both
             // sides arrive the same way), so every start uses the start distance.
@@ -556,7 +624,7 @@ private:
             std::set<std::uint32_t> registered;
             for (const auto& name : faction->standalone_special_weapons) {
                 if (name.empty()) continue;
-                const auto* type = inputs_.tables->find(name);
+                const auto* type = type_selection_->find(name);
                 if (!type || !type->planetary_weapon || type->planetary_weapon->index >= 2
                     || !registered.insert(type->planetary_weapon->index).second)
                     return Void::failure(fixture_error("unsupported standalone special weapon mapping: " + name));
@@ -642,10 +710,12 @@ private:
                     owner = neutral_player;
                 }
             }
-            if (!owner && map_first_ && (faction.playable || map_filter_)) {
+            if (!owner && (map_first_ || (!selected_ && !inputs_.new_markers)) && (faction.playable || map_filter_)) {
                 const auto installed = std::find_if(start_.players.begin(), start_.players.end(), [&](const auto& p) { return detail::iequals(p.faction, faction.name); });
                 if (installed != start_.players.end()) owner = installed->player.player_id;
             }
+            if (!owner && !selected_ && !inputs_.new_markers && placement.decoration && !placement.discardable)
+                owner = neutral_player;
             if (!owner) {
                 start_.removed.push_back({placement.record, placement.type, faction.name,
                     faction.playable ? Removal::playable_faction : Removal::no_player});
@@ -654,6 +724,14 @@ private:
             if (map_filter_ && !map_filter_(placement, faction, *owner)) {
                 start_.removed.push_back({placement.record, placement.type, faction.name, Removal::campaign_branch});
                 continue;
+            }
+            if (!selected_ && !inputs_.new_markers) {
+                if (const auto* type = type_selection_->find(placement.type)) {
+                    // WSS-50: retain the authored force as a live unit of its mapped faction.
+                    const auto role = type->kind == units::UnitKind::station ? UnitRole::station : UnitRole::placed;
+                    if (auto added = add_unit(*owner, placement.type, role, placement); !added) return added;
+                    continue;
+                }
             }
             auto where = pose(placement);
             if (!where) return Void::failure(where.error());
@@ -759,9 +837,10 @@ private:
             if (tilted(placement)) unit.dropped_orientation_degrees = placement.orientation_degrees;
             unit.victory_relevant = placement.victory_relevant;
             unit.hull = placement.hull;
-            if (const auto* type = inputs_.tables->find(placement.type)) {
+            if (const auto* type = type_selection_->find(placement.type)) {
+                unit.type = type->id;
                 unit.role = UnitRole::placed;
-                unit.combat_power = combat_power(*inputs_.tables, *type);
+                unit.combat_power = combat_power(*type_selection_, *type, power_notes_);
                 unit.reveal_range = units::sensor_range(*type);
                 unit.victory_relevant = type->victory_relevant;
                 unit.hull = type->hull;
@@ -785,12 +864,12 @@ private:
         for (std::size_t index = 0; index < companies; ++index) {
             const StartUnit company = start_.units[index];
             if (company.role == UnitRole::map_object) continue;
-            const auto* type = inputs_.tables->find(company.type);
+            const auto* type = type_selection_->find(company.type);
             if (type == nullptr || type->kind != units::UnitKind::squadron || type->members.empty()) continue;
             sim::tactical::Squadron squadron;
             squadron.container = company.state.entity_id;
             for (const auto& member : type->members) {
-                const auto* craft = inputs_.tables->find(member.craft);
+                const auto* craft = type_selection_->find(member.craft);
                 if (craft == nullptr) return Void::failure(fixture_error("craft type " + member.craft + " is not in the unit tables"));
                 // SK-05: the craft is created at its company's point raised by its own height;
                 // place_companies() then moves it to its free point at that height. A demo map's
@@ -882,12 +961,12 @@ private:
                     [&](const units::ObstacleType& entry) { return detail::iequals(entry.id, unit.type); });
                 if (obstacle != obstacles.end() && !detail::iequals(obstacle->space_layer, "SuperCapital")) {
                     if (auto added = block(placement_box(*obstacle), unit); !added) return added;
-                } else if (const auto* type = inputs_.tables->find(unit.type)) {
+                } else if (const auto* type = type_selection_->find(unit.type)) {
                     // WBP-01: a promoted live pad keeps blocking initial fleet placement (PL-02).
                     if (auto added = block(box_of(*type), unit); !added) return added;
                 }
             } else if (unit.role == UnitRole::station) {
-                const auto* type = inputs_.tables->find(unit.type);
+                const auto* type = type_selection_->find(unit.type);
                 if (type != nullptr) {
                     if (auto added = block(box_of(*type), unit); !added) return added;
                 }
@@ -896,7 +975,7 @@ private:
         // SK-05: FoC creates each object at the point placement found, raised by its type's
         // Layer_Z_Adjust (space-movement LZ-01); `centre` is the marker on its own plane.
         const auto place = [&](StartUnit& unit, const Vec3 centre) -> Void {
-            const auto* type = inputs_.tables->find(unit.type);
+            const auto* type = type_selection_->find(unit.type);
             const auto box = type == nullptr ? std::nullopt : box_of(*type);
             const auto height = type == nullptr ? std::optional<Fixed>{} : type->movement.layer_z_adjust;
             const auto raise = [&](const Vec3 at) -> Void {
@@ -926,7 +1005,7 @@ private:
             // The company was created raised by its own height (add_unit); the search runs on the
             // marker's plane.
             Vec3 marker = company.state.position;
-            if (const auto* type = inputs_.tables->find(company.type); type != nullptr && own_height(*type)) {
+            if (const auto* type = type_selection_->find(company.type); type != nullptr && own_height(*type)) {
                 if (!sim::math::try_subtract(marker.z, *own_height(*type), marker.z)) {
                     return Void::failure(fixture_error(company.type + " marker height overflows"));
                 }
@@ -980,7 +1059,7 @@ private:
 
     void add_launches() {
         for (const auto& unit : start_.units) {
-            const auto* type = unit.role == UnitRole::map_object ? nullptr : inputs_.tables->find(unit.type);
+            const auto* type = unit.role == UnitRole::map_object ? nullptr : type_selection_->find(unit.type);
             if (type == nullptr || !type->spawner || !unit.state.garrison_enabled) continue;
             for (const auto& entry : type->spawner->starting) {
                 Launch launch;
@@ -990,21 +1069,26 @@ private:
                 launch.squadron = entry.squadron;
                 launch.count = entry.count;
                 launch.delay_seconds = type->spawner->delay_seconds;
-                const auto* squadron = inputs_.tables->find(entry.squadron);
-                const auto power = squadron == nullptr ? std::nullopt : combat_power(*inputs_.tables, *squadron);
-                launch.combat_power = power ? times(*power, entry.count).value_or(Fixed{}) : Fixed{};
+                const auto* squadron = type_selection_->find(entry.squadron);
+                const auto power = squadron == nullptr ? std::nullopt : combat_power(*type_selection_, *squadron, power_notes_);
+                launch.combat_power = power ? units::multiply_power(*power, entry.count, unit.type,
+                    unit.type + " launch combat power: ", diagnostic_codes::input, &power_notes_) : Fixed{};
                 start_.launches.push_back(std::move(launch));
             }
         }
         for (auto& player : start_.players) {
             for (const auto& unit : start_.units) {
                 if (unit.state.owner == player.player.player_id && unit.combat_power && unit.role != UnitRole::map_object) {
-                    player.combat_power_tick_zero = sum(player.combat_power_tick_zero, *unit.combat_power).value_or(Fixed{});
+                    player.combat_power_tick_zero = units::add_power(player.combat_power_tick_zero, *unit.combat_power,
+                        "player " + std::to_string(player.player.player_id), "starting combat power: ",
+                        diagnostic_codes::input, &power_notes_);
                 }
             }
             for (const auto& launch : start_.launches) {
                 if (launch.owner == player.player.player_id) {
-                    player.combat_power_launches = sum(player.combat_power_launches, launch.combat_power).value_or(Fixed{});
+                    player.combat_power_launches = units::add_power(player.combat_power_launches, launch.combat_power,
+                        "player " + std::to_string(player.player.player_id), "launch combat power: ",
+                        diagnostic_codes::input, &power_notes_);
                 }
             }
         }
@@ -1016,6 +1100,8 @@ private:
     bool map_first_{};
     MapObjectFilter map_filter_{};
     SkirmishStart start_;
+    std::optional<units::ContentTypeSelection> type_selection_;
+    core::LoadNoteBuffer power_notes_;
 };
 
 } // namespace
@@ -1065,8 +1151,10 @@ std::map<sim::tactical::TypeId, std::string> map_object_type_names(const std::ve
 
 std::vector<sim::tactical::SensorProfile> sensor_table(const units::UnitTables& tables, core::LoadNoteBuffer* load_notes) {
     (void)load_notes;
+    const units::ContentTypeSelection type_selection(tables);
     std::map<sim::tactical::TypeId, sim::tactical::SensorProfile> profiles;
     for (const auto& type : tables.units) {
+        if (!type_selection.keeps(type)) continue;
         const auto range = units::sensor_range(type);
         if (!range && !type.multisample_fow) continue;
         sim::tactical::SensorProfile profile;

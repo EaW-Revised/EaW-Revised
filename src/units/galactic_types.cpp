@@ -1,4 +1,5 @@
 #include "eawr/units/galactic_types.hpp"
+#include "eawr/data/xml.hpp"
 #include "eawr/core/text.hpp"
 
 #include "eawr/core/sha256.hpp"

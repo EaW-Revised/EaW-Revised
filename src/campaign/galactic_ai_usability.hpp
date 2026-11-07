@@ -35,6 +35,25 @@ struct GalacticAiIslandMemo {
 class GalacticAiUsabilityProvider final : public script::foc::galactic_ai::TrackedStateContributor {
     struct Cache;
 public:
+    class PhaseSavepoint {
+    public:
+        ~PhaseSavepoint();
+        PhaseSavepoint(const PhaseSavepoint&) = delete;
+        PhaseSavepoint& operator=(const PhaseSavepoint&) = delete;
+        [[nodiscard]] std::size_t retained_rows() const noexcept;
+        [[nodiscard]] core::Result<void> commit();
+        [[nodiscard]] core::Result<void> rollback();
+    private:
+        struct Saved;
+        explicit PhaseSavepoint(std::unique_ptr<Saved>);
+        std::unique_ptr<Saved> saved_;
+        friend class GalacticAiUsabilityProvider;
+    };
+    // Bounded player headers and moved/copy-shared changed Reach rows only.
+    // Provider outlives token; begin/settle occur outside worker frontiers.
+    [[nodiscard]] core::Result<std::unique_ptr<PhaseSavepoint>> begin_phase();
+    // Fault-only derived rehydration, enlisted inside the NEXT attempt before ordinary preparation.
+    [[nodiscard]] core::Result<void> rebuild_phase_inputs(const script::foc::ai::Engine&, const sim::PartitionExecutor&);
     using World = script::foc::ai::GalacticWorld;
     using Engine = script::foc::ai::Engine;
     using MovementInput = script::foc::galactic_ai::NativeActions::MovementInput;
@@ -154,6 +173,11 @@ private:
         bool operator==(const PreparedInput&) const = default;
     };
     std::map<sim::galactic::PlayerId, PreparedInput> prepared_through_;
+    // After a fault, a missing derived cache must not change the archived
+    // pending flags before the retry actually consumes that player's inputs.
+    std::map<sim::galactic::PlayerId, PreparedInput> restored_prepared_;
+    std::uint64_t restored_observer_{}, restored_access_{}, restored_perception_{};
+    [[nodiscard]] PreparedInput effective_prepared(sim::galactic::PlayerId, PreparedInput) const;
     ConnectivityPublication published_{std::make_shared<const script::foc::ai::GalacticConnectivity>()};
     struct Reach {
         std::array<script::foc::ai::SharedPlanetList, 6> sites;
@@ -162,6 +186,9 @@ private:
         bool operator==(const Reach&) const = default;
     };
     std::map<std::pair<sim::galactic::PlayerId, sim::galactic::PlanetId>, Reach> retained_;
+    PhaseSavepoint::Saved* phase_{};
+    bool phase_abandoned_{}, fault_rebuild_{};
+    void retain_phase_reach(const std::pair<sim::galactic::PlayerId, sim::galactic::PlanetId>&, const Reach*);
     [[nodiscard]] std::vector<std::uint8_t> reach_record(const std::pair<sim::galactic::PlayerId, sim::galactic::PlanetId>&, const Reach&) const;
     void update_reach_records(const decltype(retained_)&);
     [[nodiscard]] core::RecordDigest rebuild_records() const;

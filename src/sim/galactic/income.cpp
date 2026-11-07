@@ -15,7 +15,7 @@
 
 namespace eawr::sim::galactic {
 
-core::Result<std::vector<IncomeCurvePoint>> parse_income_curve(std::string_view text) {
+core::Result<std::vector<IncomeCurvePoint>> parse_income_curve(std::string_view text, bool allow_duplicate_x) {
     std::vector<math::Fixed> values;
     while (!text.empty()) {
         const auto first = text.find_first_not_of(" ,\t\r\n");
@@ -34,9 +34,8 @@ core::Result<std::vector<IncomeCurvePoint>> parse_income_curve(std::string_view 
         detail::diagnostic(diagnostic_codes::invalid_setup, "income curve needs x/y pairs"));
     std::vector<IncomeCurvePoint> points;
     for (std::size_t i = 0; i < values.size(); i += 2) points.push_back({values[i], values[i + 1]});
-    std::sort(points.begin(), points.end(), [](const auto& a, const auto& b) { return a.x < b.x; });
-    // WGEP-63/U-03: duplicate-x semantics remain unqualified; reject, never guess.
-    if (std::adjacent_find(points.begin(), points.end(), [](const auto& a, const auto& b) { return a.x == b.x; }) != points.end())
+    std::stable_sort(points.begin(), points.end(), [](const auto& a, const auto& b) { return a.x < b.x; });
+    if (!allow_duplicate_x && std::adjacent_find(points.begin(), points.end(), [](const auto& a, const auto& b) { return a.x == b.x; }) != points.end())
         return core::Result<std::vector<IncomeCurvePoint>>::failure(
             detail::diagnostic(diagnostic_codes::invalid_setup, "duplicate income curve x is unqualified (WGEP-63/U-03)"));
     return core::Result<std::vector<IncomeCurvePoint>>::success(std::move(points));

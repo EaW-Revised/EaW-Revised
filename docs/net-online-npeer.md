@@ -616,7 +616,7 @@ qualification still needs the deployed-service cases in the test plan; loopback 
 | Per-edge queues | `queue_bytes` 8 MiB, `queue_frames` 4,096 (shared TCP defaults) | worst case 64 MiB inbound across 8 edges |
 | GNS send buffer | `SendBufferSize` = `queue_bytes` per connection today | 8 x 8 MiB = 64 MiB worst case; the slice sets it per connection to 2 MiB (still above the 1 MiB default frame), 16 MiB total |
 | Poll work | 64 data calls + 32 signalling receives per poll, total | rotated across links |
-| Desync monitor | `max_retained_bytes` 16 MiB, hash exchange every 30 ticks to 8 peers | unchanged |
+| Desync monitor | `max_retained_bytes` 64 MiB, hash exchange every 30 ticks to 8 peers | unchanged |
 
 ### Service
 

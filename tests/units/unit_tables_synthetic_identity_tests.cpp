@@ -81,10 +81,10 @@ void content_identity() {
         expect(loaded.tables.has_value(), "PL-20: later-file duplicate fixture loads");
         if (loaded.tables) {
             const auto* duplicate = loaded.tables->find("Test_Frigate");
-            // The squadron follows the original frigate, but precedes its later-file duplicate.
+            // #3741: the first registration answers lookups, so the frigate keeps its place before the squadron.
             const auto* earlier = loaded.tables->find("Test_Squadron");
-            expect(duplicate && earlier && duplicate->table_order > earlier->table_order,
-                "PL-20: duplicate names retain the later catalog winner's position pending the retail seam");
+            expect(duplicate && earlier && duplicate->table_order < earlier->table_order,
+                "PL-20: duplicate names answer with the first registration, which precedes the squadron (PL-20)");
             expect(std::count_if(loaded.tables->units.begin(), loaded.tables->units.end(),
                 [](const auto& unit) { return unit.id == "Test_Frigate"; }) == 1,
                 "PL-20: duplicate fixture exposes the existing single-winner catalog seam");

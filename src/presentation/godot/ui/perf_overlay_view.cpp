@@ -1,4 +1,6 @@
 #include "perf_overlay_view.hpp"
+#include "build_label.hpp"
+#include "eawr/core/json_text.hpp"
 #include "eawr/presentation/render_categories.hpp"
 
 #include <godot_cpp/classes/rendering_server.hpp>
@@ -170,7 +172,7 @@ void EawrPerfOverlay::draw_overlay() {
     const float gap = unit * 0.5F;
     const float big_row = font->get_height(big) * 1.05F;
     const float small_row = font->get_height(small) * 1.05F;
-    const float height = pad * 2.0F + (big_row + small_row + graph_height + gap) * 2.0F + small_row + small_row
+    const float height = pad * 2.0F + (big_row + small_row + graph_height + gap) * 2.0F + small_row + small_row + small_row + small_row + small_row
         + (tick_source_ ? small_row : 0.0F) + big_row
         + (network_ ? small_row * static_cast<float>(3 + network_->peers.size()) + gap : 0.0F)
         + (render_categories::enabled ? small_row * 5.0F : 0.0F);
@@ -311,6 +313,13 @@ void EawrPerfOverlay::draw_overlay() {
             y += small_row;
         }
     }
+    text(String(model::overlay_viewer_row(viewer_build_type()).c_str()), small, dim_colour, HORIZONTAL_ALIGNMENT_LEFT);
+    y += small_row;
+    text(String(model::overlay_engine_row(engine_summary()).c_str()), small, dim_colour, HORIZONTAL_ALIGNMENT_LEFT);
+    y += small_row;
+    text(String(model::overlay_signature_row(engine_signature()).c_str()), small, engine_is_patched() ? dim_colour : bad_colour,
+         HORIZONTAL_ALIGNMENT_LEFT);
+    y += small_row;
     text(format("overlay %.3f ms", average), small, Color(1.0F, 1.0F, 1.0F, 0.5F), HORIZONTAL_ALIGNMENT_LEFT);
     text(format("%s hides", key_name), small, Color(1.0F, 1.0F, 1.0F, 0.5F), HORIZONTAL_ALIGNMENT_RIGHT);
 }
@@ -321,6 +330,10 @@ std::string EawrPerfOverlay::report_json() const {
     output << std::fixed << std::setprecision(3);
     output << "{\"key\": \"" << key_name << "\", \"shown\": " << (shown_ ? "true" : "false")
            << ", \"toggles\": " << toggles_ << ", \"font\": \"" << face_ << "\", \"font_size\": " << font_size_
+           << ", \"viewer_build\": " << core::json_quote(viewer_build_type()) << ", \"engine_build\": " << core::json_quote(engine_build_type())
+           << ", \"engine_version\": " << core::json_quote(engine_version()) << ", \"engine_hash\": " << core::json_quote(engine_hash())
+           << ", \"engine_signature\": " << core::json_quote(engine_signature())
+           << ", \"engine_patched\": " << (engine_is_patched() ? "true" : "false")
            << ", \"frames\": " << summary.frames
            << ", \"fps\": " << summary.fps << ", \"frame_ms\": " << summary.frame_ms
            << ", \"frame_ms_avg\": " << summary.frame_avg_ms << ", \"frame_ms_worst\": " << summary.frame_worst_ms

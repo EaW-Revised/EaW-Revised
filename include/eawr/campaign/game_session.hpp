@@ -243,6 +243,11 @@ public:
     // Resolvers rebuild pinned content/scripts without embedding content tables in replay state.
     [[nodiscard]] static core::Result<GameSession> from_recording(const GameRecording& recording,
         ContentResolver content, ScriptFactory scripts = {}, ScriptRequirement requirement = ScriptRequirement::required);
+    // Same, then lets the caller register further layers (land) through install_conflict_layer before the first step.
+    // The content/scripts above stay the space layer's; a recorded land child needs its own provider installed here.
+    using LayerInstaller = std::function<core::Result<void>(GameSession&)>;
+    [[nodiscard]] static core::Result<GameSession> from_recording(const GameRecording& recording,
+        ContentResolver content, ScriptFactory scripts, ScriptRequirement requirement, LayerInstaller install_layers);
     [[nodiscard]] core::Result<std::vector<std::uint8_t>> save_checkpoint_state() const;
     [[nodiscard]] core::Result<void> load_checkpoint_state(std::span<const std::uint8_t>);
     using AutoResolveStateWriter = std::function<core::Result<std::vector<std::uint8_t>>()>;
@@ -349,6 +354,13 @@ public:
     [[nodiscard]] core::Result<void> install_story(sim::galactic::story::Config, std::vector<sim::galactic::story::PlotRecord>,
         std::vector<sim::galactic::story::SubPlotDef>, std::vector<std::string> notes = {});
     [[nodiscard]] const sim::galactic::story::Engine* story_engine() const noexcept;
+    // WST-56: a Lua plot request (AI intervention plans) applied to the installed plot engine. It is observable
+    // output of the AI service phase: once applied the phase can no longer be rolled back and rerun.
+    [[nodiscard]] core::Result<void> apply_story_plot(const sim::galactic::story::PlotCommand&);
+    // The same request as a callable bound to the session's heap state rather than to this handle, so it stays valid
+    // when the GameSession object is moved; it is valid only while the session lives (the AI runtime that holds it is
+    // owned by the session).
+    [[nodiscard]] std::function<core::Result<void>(const sim::galactic::story::PlotCommand&)> story_plot_applier();
     // WST-58: a plot owner's holocron goals; null before the owner's first story dialog. Checkpointed, not hashed.
     [[nodiscard]] const sim::galactic::story::GoalsState* story_goals(sim::galactic::story::Player) const noexcept;
     void set_feedback_notice_handler(sim::galactic::GalacticSession::FeedbackNoticeHandler);
@@ -471,6 +483,10 @@ public:
     // #4058 bounded history. A save/load moves the base at the START of the next step, so a capture or recapture
     // right after either still sees the window it was taken with. The frontier is what a save taken now seals.
     [[nodiscard]] const HistoryBase& history_base() const noexcept;
+    [[nodiscard]] std::map<sim::SeatId, std::uint64_t> producer_sequences() const;
+    [[nodiscard]] std::span<const std::uint8_t> network_resume_state() const noexcept;
+    [[nodiscard]] core::Result<void> retain_network_resume_state(std::span<const std::uint8_t>);
+    [[nodiscard]] core::Result<void> retain_network_producer_sequences(const std::map<sim::SeatId, std::uint64_t>&);
     [[nodiscard]] core::Result<HistoryBoundary> history_frontier() const;
     void schedule_history_rebase(HistoryBoundary boundary);
     // Replay-oracle seam: continue a session restored at a save with the next save's window (the commands, conflicts,

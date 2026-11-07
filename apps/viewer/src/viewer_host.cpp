@@ -2,6 +2,7 @@
 #include "eawr/core/text.hpp"
 #include "audio_output.hpp"
 #include "startup_trace.hpp"
+#include "viewer_mounted_mods.hpp"
 #include "gpu_memory_trace.hpp"
 #include <godot_cpp/classes/rendering_server.hpp>
 
@@ -36,7 +37,10 @@ namespace {
 } // namespace
 
 ViewerHost::ViewerHost() = default;
-ViewerHost::~ViewerHost() { shutdown_trace::mark("viewer host freed (members follow)"); }
+ViewerHost::~ViewerHost() {
+    shutdown_mounted_mods();
+    shutdown_trace::mark("viewer host freed (members follow)");
+}
 
 void ViewerHost::_bind_methods() {}
 
@@ -60,6 +64,7 @@ void ViewerHost::on_setup_frame_drawn() {
 
 
 void ViewerHost::stop(const int exit_code) {
+    if (auto* input = Input::get_singleton()) input->set_mouse_mode(Input::MOUSE_MODE_VISIBLE);
     completed_ = true;
     const int result = front_end_ && !front_end_->close() ? 2 : exit_code;
     if (get_tree()) get_tree()->quit(result);

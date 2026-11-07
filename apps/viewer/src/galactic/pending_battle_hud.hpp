@@ -3,7 +3,7 @@
 #include "ui/font_provider.hpp"
 #include "eawr/data/ui/command_bar.hpp"
 #include "eawr/presentation/ui/hud_shell.hpp"
-#include "eawr/vfs/vfs.hpp"
+#include "eawr/vfs/vfs_fwd.hpp"
 
 namespace eawr::presentation::godot_backend {
 class EawrTacticalHud;

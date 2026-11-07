@@ -48,6 +48,9 @@ public:
                 (seen.insert(value.data()).second ? value.capacity() + 1 : 0);
         } else if constexpr (requires { value.definitions(); }) {
             return bytes(value.definitions());
+        } else if constexpr (requires { V::shares_rows; value.rows(); }) {
+            // Copy-on-write row tables count their shared storage once.
+            return bytes(value.rows());
         } else if constexpr (requires { value.has_value(); *value; }) {
             return value.has_value() ? bytes(*value) : 0;
         } else if constexpr (requires { value.get(); *value; bool(value); }) {

@@ -347,6 +347,7 @@ The UI foundation work was split from the UI design task. The critical path from
 
 ## Fidelity list
 
+- General translated-effect cleanup with no geometry and interpass state carry are **unverified**; the [S-20 metadata plan](../../docs/behaviour/shader-translation.md#translation-wide-rules) retains an explicit qualification prerequisite before renderer admission.
 - Galactic space entry selects population buckets by ascending campaign type ID (WGT-08 project choice), rather than FoC's internal type hash-table order; see [galactic space entry](../../docs/behaviour/galactic-space-entry.md).
 - Interdictor deployments (legacy EAWR-2190): generator-loss deactivation of INTERDICT and facing lock for INTERDICT/MISSILE_SHIELD are **inferred**, unverified defaults; WIN-02/04 establish activation and movement lock, not these choices. WMS-U1 projectile limits and WMS-02 deployable-type deployment remain unimplemented or unverified; stock Interdictor has no deployment tags.
 - Team Buzz Droids events admitted at t apply from the t+1 targeting turn (FSC-33); the direct handler remains immediate. The remake cancels a special request on accepted ordinary replacement orders (face preserves it), and drops a failed retry when its approach completes, is interrupted or replaced, or loses its formation or holder targeting state, without recharge or a swarm. This approach cancellation is an inferred project choice pending original-game evidence (WAB-70, UFS-21), rather than a sourced exception to FS-23/FC-51.

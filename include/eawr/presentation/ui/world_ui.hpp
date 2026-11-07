@@ -3,7 +3,7 @@
 #include "eawr/sim/commands.hpp"
 #include "eawr/sim/tactical/snapshot.hpp"
 #include "eawr/presentation/ui/ability_buttons.hpp"
-#include "eawr/vfs/vfs.hpp"
+#include "eawr/vfs/vfs_fwd.hpp"
 
 #include <array>
 #include <cstddef>

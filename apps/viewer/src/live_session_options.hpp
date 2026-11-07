@@ -82,6 +82,7 @@ struct Options final {
     sim::SeatId controller_seat{};
     std::vector<std::pair<sim::SeatId, std::string>> controller_names;
     std::filesystem::path land_bindings;
+    bool land_vehicles_only{}; // --eawr-land-vehicles-only: human land slots start with stock vehicle companies
     // #5130: names belong to the observer, outside deterministic battle content.
     std::vector<std::pair<sim::tactical::PlayerId, std::string>> observer_names;
     std::shared_ptr<const PreparedBattle> borrowed_battle;
@@ -93,6 +94,17 @@ struct Options final {
     // forces are its placed objects and `attract_ai` names the AI player type each editor
     // player index runs (MAT-09). There is no lobby, no victory condition and no local player.
     std::vector<std::pair<std::uint32_t, std::string>> attract_ai;
+    // The attract load's unit models are decoded ahead on reader threads (scene::ModelPrefetch); `model_volumes` are the
+    // roots whose disk kind sets the reader count.
+    // The initial compose decodes the drawn ships' hull base textures ahead on reader threads (scene::TexturePrefetch).
+    // Set on the Separate render thread only, for every live session (configure_ready_options); temporary A/B switch
+    // `--eawr-texture-prefetch off|on` (default on there). `texture_prefetch_readers` nonzero fixes the reader count.
+    bool texture_prefetch{};
+    unsigned texture_prefetch_readers{};
+    std::vector<std::filesystem::path> model_volumes;
+    // The attract load's first three stages (fixture + unit tables, start inputs, start + content) run back to back on one
+    // worker thread while the main thread polls (OffloadedStages). Set on the Separate render thread (Safe stays inline).
+    bool load_offload{};
     std::filesystem::path replay_input;                   // --eawr-live-replay <file> (replay)
     // #601: --eawr-live-melee s|m|l and --eawr-live-melee-seed <n> (melee, skirmish/melee.hpp).
     std::optional<skirmish::MeleeSize> melee_size;
@@ -155,6 +167,13 @@ struct Options final {
     bool speed_step_given{};
     std::filesystem::path hashes_path;                    // --eawr-live-hashes <csv>
     std::filesystem::path replay_path;                    // --eawr-live-replay-out <file>
+    // Skirmish battle saves (docs/checkpoint-format.md "Skirmish battle saves"), solo local battles with the AI:
+    // --eawr-live-save-at <tick>:<file> writes the battle once that tick has completed and keeps running;
+    // --eawr-live-load <file> starts the prepared battle from such a save, at its tick (the same scene
+    // arguments must prepare the same battle). After a load --eawr-live-ticks counts from the saved tick.
+    std::optional<std::uint64_t> save_tick;
+    std::filesystem::path save_path;
+    std::filesystem::path load_path;
     // --eawr-live-fault-tick: a test hook that throws on the simulation thread right
     // before this tick runs (#316 review 2).
     std::optional<std::uint64_t> fault_tick;

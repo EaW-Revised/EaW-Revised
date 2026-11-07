@@ -9,7 +9,7 @@
 #include "eawr/core/result.hpp"
 #include "eawr/data/ui/dialog_script.hpp"
 #include "eawr/data/ui/text_database.hpp"
-#include "eawr/vfs/vfs.hpp"
+#include "eawr/vfs/vfs_fwd.hpp"
 
 #include <cstddef>
 #include <cstdint>

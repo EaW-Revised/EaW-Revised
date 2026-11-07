@@ -6,9 +6,9 @@
 // row and the record keeps the value FoC's parse would keep; only an unreadable registry fails.
 
 #include "eawr/core/result.hpp"
-#include "eawr/data/xml.hpp"
+#include "eawr/data/xml_fwd.hpp"
 #include "eawr/sim/math/fixed.hpp"
-#include "eawr/vfs/vfs.hpp"
+#include "eawr/vfs/vfs_fwd.hpp"
 
 #include <array>
 #include <cstdint>
@@ -170,7 +170,10 @@ struct Planet {
     std::string galactic_model_name;
     // Presentation metadata; excluded from simulation identity (GHUD-S95).
     std::string planet_ability_name{}, planet_ability_description{}, planet_ability_icon{};
+    std::string planet_weather_icon{}, planet_weather_name{}, planet_weather_info{}; // Encyclopedia_Weather_*
     std::string describe_advantage{};
+    // The Planet Info dialog texts (Describe_*; text keys, presentation only).
+    std::string describe_tactical{}, describe_history{}, describe_weather{}, describe_terrain{}, describe_population{};
     std::vector<std::string> encyclopedia_text{};
     std::string destroyed_galactic_model_name;
     std::optional<Fixed> scale_factor; // WGM-128: effective model/world bounds scale

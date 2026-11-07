@@ -31,6 +31,7 @@ class Writer {
 public:
     static constexpr bool reading = false;
     bool fire_range_bonuses = false;
+    bool script_invulnerable = false; // TL-03: domains 11 and 12
     std::vector<std::uint8_t> bytes;
     template <class... T> void operator()(const T&... values) { (value(values), ...); }
     template <std::integral T> void value(T input) {
@@ -68,6 +69,7 @@ class Reader {
 public:
     static constexpr bool reading = true;
     bool fire_range_bonuses = false;
+    bool script_invulnerable = false; // TL-03: domains 11 and 12
     explicit Reader(std::span<const std::uint8_t> bytes) : bytes_(bytes) { if (bytes.size() > byte_limit) throw Invalid("state exceeds byte budget"); }
     template <class... T> void operator()(T&... values) { (value(values), ...); }
     [[nodiscard]] std::size_t remaining() const { return bytes_.size() - cursor_; }

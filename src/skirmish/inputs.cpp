@@ -1,9 +1,11 @@
 #include "eawr/skirmish/start.hpp"
+#include "eawr/vfs/vfs.hpp"
 #include "eawr/skirmish/ai.hpp"
 #include "eawr/skirmish/setup.hpp"
 #include "eawr/skirmish/roster_gate.hpp"
 
 #include "eawr/assets/map.hpp"
+#include "eawr/units/content_selection.hpp"
 #include "eawr/core/sha256.hpp"
 #include "eawr/data/tag_trace.hpp"
 #include "eawr/scene/scene.hpp"
@@ -76,7 +78,18 @@ static core::Result<DataIdentity> read_data_identity_impl(const vfs::Vfs& filesy
     });
     std::vector<std::uint8_t> listing;
     for (const auto& record : xml.value()) {
-        auto source = filesystem.open(record.canonical_path);
+        auto selected = record;
+        if (record.layer_id == vfs::revised_layer_id && std::find(vfs::revised_presentation_xml.begin(),
+            vfs::revised_presentation_xml.end(), record.canonical_path) != vfs::revised_presentation_xml.end()) {
+            auto candidates = filesystem.candidates(record.canonical_path);
+            if (!candidates) return Result::failure(candidates.error());
+            const auto lower = std::find_if(candidates.value().begin(), candidates.value().end(), [](const auto& candidate) {
+                return candidate.layer_id != vfs::revised_layer_id;
+            });
+            if (lower == candidates.value().end()) continue;
+            selected = *lower;
+        }
+        auto source = filesystem.open(selected);
         if (!source) return Result::failure(source.error());
         if (!hash_content) continue;
         const auto size = static_cast<std::uint32_t>(record.canonical_path.size());
@@ -99,17 +112,13 @@ namespace {
 constexpr std::string_view constants_path = "data/xml/gameconstants.xml";
 constexpr std::string_view colour_prefix = "MP_Color_";
 
-// The last active definition of a faction, as scene::faction_order and the
+// The first active definition of a faction, as scene::faction_order and the
 // team-colour table read it (a faction id may also name a game object).
 [[nodiscard]] const data::Definition* faction_definition(const data::Catalog& catalog, const std::string_view id) {
     const data::Definition* source = nullptr;
     for (const data::Definition* definition : catalog.find_all(id)) {
         if (definition->category != data::Category::faction || !definition->active) continue;
-        if (source == nullptr || definition->registry_order > source->registry_order
-            || (definition->registry_order == source->registry_order
-                && definition->definition_order > source->definition_order)) {
-            source = definition;
-        }
+        if (source == nullptr) source = definition; // find_all lists the strongest layer's first registration first
     }
     if (source != nullptr) data::tag_trace::object(source->root, source->id);
     return source;
@@ -118,6 +127,54 @@ constexpr std::string_view colour_prefix = "MP_Color_";
 [[nodiscard]] std::string text_of(const data::EffectiveObject& object, const std::string_view tag) {
     const auto* value = object.value(tag);
     return value == nullptr ? std::string{} : detail::trim(value->value.raw_text);
+}
+
+// A nonrepresentable position cannot safely participate in fixed-point geometry.
+// Preserve the diagnostic and omit only this authored placement (class C).
+[[nodiscard]] bool skip_bad_position(const assets::Placement& source, const std::string& path,
+    std::vector<core::LoadNote>* notes) {
+    if (!source.position) return false;
+    if (scene::fixed_from_binary32(source.position->x) && scene::fixed_from_binary32(source.position->y)
+        && scene::fixed_from_binary32(source.position->z)) return false;
+    if (notes) {
+        core::LoadNote note;
+        note.code = "EAWR-LOAD-0452";
+        note.file = path;
+        note.layer.mod_id = source.key.map.layer_id;
+        note.object = "TED record " + std::to_string(source.key.record_ordinal);
+        note.tag = "position";
+        note.authored_value = assets::describe_source_vec3(*source.position);
+        note.action = core::LoadAction::skipped_placement;
+        note.effective_value = "omitted";
+        note.diagnostic_code = std::string(diagnostic_codes::input);
+        note.message = note.object + " position does not convert to Q24";
+        notes->push_back(std::move(note));
+    }
+    return true;
+}
+
+[[nodiscard]] bool skip_bad_orientation(const assets::Placement& source, const std::string& path,
+    std::vector<core::LoadNote>* notes) {
+    if (!source.orientation_degrees || (source.orientation_status != assets::OrientationStatus::yaw_only
+            && source.orientation_status != assets::OrientationStatus::three_axis)) return false;
+    const auto& value = *source.orientation_degrees;
+    if (scene::fixed_from_binary32(value.x) && scene::fixed_from_binary32(value.y)
+        && scene::fixed_from_binary32(value.z)) return false;
+    if (notes) {
+        core::LoadNote note;
+        note.code = "EAWR-LOAD-0453";
+        note.file = path;
+        note.layer.mod_id = source.key.map.layer_id;
+        note.object = "TED record " + std::to_string(source.key.record_ordinal);
+        note.tag = "orientation";
+        note.authored_value = assets::describe_source_vec3(value);
+        note.action = core::LoadAction::skipped_placement;
+        note.effective_value = "omitted";
+        note.diagnostic_code = std::string(diagnostic_codes::input);
+        note.message = note.object + " orientation does not convert to Q24";
+        notes->push_back(std::move(note));
+    }
+    return true;
 }
 
 [[nodiscard]] core::Result<MapPlacement> placement_facts(
@@ -164,7 +221,7 @@ constexpr std::string_view colour_prefix = "MP_Color_";
         }
         placement.orientation_degrees = Vec3{roll.value(), pitch.value(), yaw.value()};
     }
-    if (source.type_resolution != assets::TypeResolution::unique || source.type_candidates.empty()) {
+    if (source.type_candidates.empty()) {
         return core::Result<MapPlacement>::success(std::move(placement));
     }
     placement.type = source.type_candidates.front().logical_name;
@@ -285,7 +342,7 @@ void catalog_type_names(StartInputs& inputs, const data::Catalog& catalog) {
 void purchase_policy_facts(StartInputs& inputs, const data::Catalog& catalog) {
     // WSS-29/30: resolved flags include inheritance; listing and AI use the same menu.
     for (const auto& definition : catalog.definitions()) {
-        if (!definition.winner || definition.category != data::Category::game_object) continue;
+        if (!definition.namespace_winner || definition.category != data::Category::game_object) continue;
         // SG-CLS-01: a mod's own element name takes the class its chain or tags give it, so it is resolved first.
         const bool own_label = !data::is_foc_object_class(definition.type_name);
         const auto class_is = [&](const std::string_view type_name, const auto&... names) {
@@ -405,6 +462,7 @@ core::Result<void> validate_fixture_lobby(const std::string& map_path,
         return Result::failure(detail::error(diagnostic_codes::fixture,
             "space skirmish requires two to nine players within the authored map capacity"));
     }
+    const auto playable_factions = setup_factions(catalog);
     for (const auto& slot : slots) {
         if (slot.slot == 0 || slot.slot > sim::tactical::max_players || slot.team >= sim::tactical::max_players) {
             return Result::failure(detail::error(diagnostic_codes::fixture, "skirmish slot or team is out of range"));
@@ -412,13 +470,9 @@ core::Result<void> validate_fixture_lobby(const std::string& map_path,
         const auto* faction = faction_definition(catalog, slot.faction);
         if (!faction) return Result::failure(detail::error(diagnostic_codes::fixture,
             "skirmish faction is not defined: " + slot.faction));
-        bool playable = false;
-        for (const auto& child : faction->root.children) {
-            if (detail::iequals(child.name, "Is_Playable")) {
-                data::tag_trace::used(child);
-                playable = detail::retail_flag(child.raw_text, playable);
-            }
-        }
+        const bool playable = std::any_of(playable_factions.begin(), playable_factions.end(), [&](const auto& entry) {
+            return detail::iequals(entry.name, slot.faction);
+        });
         if (!playable) return Result::failure(detail::error(diagnostic_codes::fixture,
             "skirmish slot faction must be playable: " + slot.faction));
     }
@@ -427,6 +481,7 @@ core::Result<void> validate_fixture_lobby(const std::string& map_path,
 
 core::Result<void> read_start_factions(StartInputs& inputs, const data::Catalog& catalog) {
     using Result = core::Result<void>;
+    const auto playable_factions = setup_factions(catalog);
     for (const std::string& name : scene::faction_order(catalog)) {
         StartFaction faction;
         faction.name = name;
@@ -440,7 +495,9 @@ core::Result<void> read_start_factions(StartInputs& inputs, const data::Catalog&
                 }
                 return value;
             };
-            faction.playable = flag("Is_Playable");
+            faction.playable = std::any_of(playable_factions.begin(), playable_factions.end(), [&](const auto& entry) {
+                return detail::iequals(entry.name, name);
+            });
             faction.multiplayer_player = flag("Create_Player_In_Multiplayer_Games");
             faction.neutral = flag("Is_Neutral");
             faction.can_control_planets = flag("Can_Control_Planets");
@@ -535,6 +592,14 @@ core::Result<void> read_start_rules(StartInputs& inputs, const std::span<const L
     catalog_type_names(inputs, catalog);
     purchase_policy_facts(inputs, catalog);
     for (const auto& child : constants.value().root.children) {
+        if (detail::iequals(child.name, "MP_Default_Land_Tactical_Win_Condition")) {
+            if (inputs.tables && inputs.tables->domain == sim::tactical::BattleDomain::land) {
+                data::tag_trace::used(child);
+                const auto selected = sim::tactical::parse_land_victory_condition(detail::trim(child.raw_text));
+                if (selected) inputs.land_victory_condition = selected.value();
+            }
+            continue;
+        }
         // WBF-08: the authored space default selects the installed condition.
         if (detail::iequals(child.name, "MP_Default_Space_Tactical_Win_Condition")) {
             data::tag_trace::used(child);
@@ -593,7 +658,9 @@ core::Result<std::vector<MapPlacement>> detail::inspect_setup_placements(const a
     // The picker consumes marker facts, never owner-faction or combat state.
     const std::vector<StartFaction> factions;
     for (const auto& source : map.placements) {
+        if (skip_bad_position(source, path, nullptr) || skip_bad_orientation(source, path, nullptr)) continue;
         auto placement = placement_facts(source, catalog, factions);
+        if (!placement && placement.error().code == data::diagnostic_codes::variant_missing_base) continue;
         if (!placement) return Result::failure(placement.error());
         placements.push_back(std::move(placement).value());
     }
@@ -638,6 +705,10 @@ core::Result<Fixture> fixture_from_options(
         "skirmish map must be a space map"));
     if (auto valid = validate_setup_slots(fixture.slots, map.value().lobby, false); !valid)
         return Result::failure(valid.error());
+    if (map.value().lobby.new_markers != true) {
+        if (auto valid = detail::validate_legacy_setup(fixture.slots, scene::faction_order(catalog), fixture.map); !valid)
+            return Result::failure(valid.error());
+    }
     const auto hash = core::sha256_hex(std::span<const std::uint8_t>(
         reinterpret_cast<const std::uint8_t*>(bytes.value().data()), bytes.value().size()));
     if (fixture.map == m2_fixture().map && hash != m2_fixture().map_sha256) {
@@ -725,18 +796,53 @@ core::Result<StartInputs> read_start_inputs(
     auto map = assets::load_map(bytes.value(), assets::source_from(record.value()), assets::object_type_catalog(catalog));
     if (!map) return Result::failure(map.error());
     inputs.map_extents = declared_extent_bits(octets, map.value());
+    inputs.new_markers = map.value().lobby.new_markers == true;
 
     if (auto factions = read_start_factions(inputs, catalog); !factions)
         return Result::failure(factions.error());
+    const units::FootprintTypeSelection selection(tables);
     for (const auto& source : map.value().placements) {
+        if (skip_bad_position(source, fixture.map, &inputs.placement_load_notes)
+            || skip_bad_orientation(source, fixture.map, &inputs.placement_load_notes)) continue;
+        if (source.type_resolution == assets::TypeResolution::collision && !source.type_candidates.empty()) {
+            core::LoadNote note;
+            note.code = "EAWR-LOAD-0455";
+            note.file = fixture.map;
+            note.layer.mod_id = source.key.map.layer_id;
+            note.object = "TED record " + std::to_string(source.key.record_ordinal);
+            note.tag = "type_crc";
+            note.authored_value = std::to_string(*source.type_crc);
+            note.action = core::LoadAction::accepted;
+            note.effective_value = source.type_candidates.front().logical_name;
+            note.diagnostic_code = std::string(diagnostic_codes::input);
+            note.message = "colliding placement type CRC uses the first catalog definition";
+            inputs.placement_load_notes.push_back(std::move(note));
+        }
         auto placement = placement_facts(source, catalog, inputs.factions);
+        if (!placement && placement.error().code == data::diagnostic_codes::variant_missing_base) {
+            core::LoadNote note;
+            note.code = placement.error().code;
+            note.file = placement.error().logical_path.value_or(fixture.map);
+            note.line = placement.error().line;
+            note.object = source.type_candidates.front().logical_name;
+            if (const auto* definition = catalog.find(note.object, data::Category::game_object))
+                note.layer.mod_id = definition->root.source.layer_id;
+            note.tag = "Variant_Of_Existing_Type";
+            note.authored_value = note.object;
+            note.action = core::LoadAction::skipped_placement;
+            note.effective_value = "left out";
+            note.diagnostic_code = placement.error().code;
+            note.message = placement.error().message;
+            inputs.placement_load_notes.push_back(std::move(note));
+            continue;
+        }
         if (!placement) return Result::failure(placement.error());
-        const auto obstacle = std::find_if(tables.obstacles.begin(), tables.obstacles.end(), [&](const auto& type) {
-            return detail::iequals(type.id, placement.value().type);
-        });
-        if (obstacle != tables.obstacles.end()) {
-            const auto& hazard = obstacle->footprint.hazard;
-            placement.value().space_hazard = obstacle->footprint.space_obstacle && !obstacle->space_layer.empty()
+        const auto* winner = selection.find(placement.value().type);
+        if (winner && winner->obstacle) {
+            const auto& footprint = winner->obstacle->footprint;
+            const auto& layer = winner->obstacle->space_layer;
+            const auto& hazard = footprint.hazard;
+            placement.value().space_hazard = footprint.space_obstacle && !layer.empty()
                 && (hazard.asteroid_field || hazard.ion_storm || hazard.nebula || hazard.impassable_asteroid);
         }
         inputs.placements.push_back(std::move(placement).value());
@@ -754,6 +860,8 @@ std::set<std::string> missing_start_types(const Fixture& fixture, const StartInp
         // RG-04: skip gated starting types before their unsupported data is loaded.
         if (!roster_disabled_types().contains(type_id(type)) && !tables.find(type)) missing.insert(type);
     };
+    // WSS-50: authored legacy forces need the same dependency closure as selected fleets.
+    if (!inputs.new_markers) for (const auto& type : placed_force_types(inputs.placements)) need(type);
     for (const auto& slot : fixture.slots) {
         for (const auto& type : slot.fleet) need(type);
         for (const auto& forces : inputs.faction_forces) {

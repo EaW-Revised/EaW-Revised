@@ -438,7 +438,7 @@ func _process(delta):
     def test_action_modals_and_pending_choices_keep_both_directions(self):
         # The pending choice owns its own prompt; the galaxy outside remains
         # usable. Hero/weapon/corruption/market surfaces are actual action modals.
-        for fixture, target in (("theft", "bm_0000"), ("hack", "hack_hack"),
+        for fixture, target in (("theft", "h_0000"), ("hack", "hack_hack"),
                                 ("corruption", "corrupt_button_icon_a"),
                                 ("market", "market_00"), ("battle-choice", "choice_button_left")):
             for focused in (False, True):

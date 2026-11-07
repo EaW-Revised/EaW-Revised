@@ -1,8 +1,11 @@
 #include "unit_emitters.hpp"
 #include "presentation_constants.hpp"
 #include "frame_timer.hpp"
+#include "eawr/presentation/render_categories.hpp"
+#include <godot_cpp/classes/engine.hpp>
 
 #include "eawr/presentation/animation/animation.hpp"
+#include "eawr/presentation/particles/catchup_screen_space.hpp"
 #include "eawr/presentation/particles/map_attachment_owner.hpp"
 #include "eawr/presentation/particles/map_effect_plan.hpp"
 #include "eawr/presentation/particles/prewarmed_capacity.hpp"
@@ -135,8 +138,11 @@ void UnitEmitters::update(Ship& ship, const SpacePopulation::LiveShipEmitterView
         auto definition = *system.system;
         // BP-70/PS-28: object scale transforms emission positions; billboard
         // size stays authored and has its separate dynamic-size multiplier.
+        if (render_categories::fighter_experiment()) backend_->set_spawn_context(wanted.effect, tick,
+            render_categories::fighter_entities.contains(view.entity));
         auto handle = wanted.mesh ? registry_->spawn(std::move(definition), wanted.seed, wanted.capacity, *wanted.mesh)
                                   : registry_->spawn(std::move(definition), wanted.seed, wanted.capacity);
+        if (render_categories::fighter_experiment()) backend_->set_spawn_context({}, 0);
         if (!handle) {
             wanted.failed = true;
             ++start_failed_[wanted.effect + ": " + core::format_diagnostic(handle.error())];
@@ -302,7 +308,7 @@ void UnitEmitters::rebuild_busy() {
     }
 }
 
-bool UnitEmitters::advance_sample() {
+bool UnitEmitters::advance_sample(const bool async_final) {
     // #421: a clone's proxies that outlived it stop emitting and drain where they last stood.
     for (CloneProxy& proxy : clone_orphans_) {
         static_cast<void>(step_clone_proxy(proxy, false, *proxy.last, proxy.last_mesh ? &*proxy.last_mesh : nullptr,
@@ -366,17 +372,47 @@ bool UnitEmitters::advance_sample() {
     clone_max_live_ = std::max(clone_max_live_, clone_live);
     clone_max_particles_ = std::max(clone_max_particles_, clone_particles_now_);
     clone_particles_now_ = 0;
+    if (async_final) {
+        // N1: the frame's own sample steps, builds and packs on the workers while the caller does other work;
+        // finish_frame joins, commits in the same order and takes the statistics.
+        collect_running(sample_seconds_, false);
+        auto begun = registry_->begin_advance_all(batch_handles_, batch_deltas_, camera_frame_, batch_stats_);
+        if (!begun) {
+            failure_ = "unit emitter: " + core::format_diagnostic(begun.error());
+            return false;
+        }
+        if (begun.value()) {
+            final_pending_ = true;
+            return true;
+        }
+        if (auto advanced = registry_->advance_all(batch_handles_, batch_deltas_, camera_frame_, batch_stats_); !advanced) {
+            failure_ = "unit emitter: " + core::format_diagnostic(advanced.error());
+            return false;
+        }
+        finish_running(false);
+        return true;
+    }
     return advance_running(sample_seconds_, false);
 }
 
 bool UnitEmitters::advance_running(const float delta_seconds, const bool projectiles) {
-    std::uint64_t particles_now = projectiles ? sampled_particles_ : 0;
+    collect_running(delta_seconds, projectiles);
+    if (auto advanced = registry_->advance_all(batch_handles_, batch_deltas_, camera_frame_, batch_stats_); !advanced) {
+        failure_ = "unit emitter: " + core::format_diagnostic(advanced.error());
+        return false;
+    }
+    finish_running(projectiles);
+    return true;
+}
+
+void UnitEmitters::collect_running(const float delta_seconds, const bool projectiles) {
     // #638: every running emitter steps in one batch on the particle workers; the results are
     // then taken in the running order, as one advance after another gave them.
     batch_handles_.clear();
     batch_deltas_.clear();
     for (const std::size_t slot : busy_) {
         const Ship& ship = ships_[slot];
+        if (historical_pass_ && !projectiles && ship.skip_historical) continue;  // D-ss: steps once, in the final pass
         for (const Running& running : ship.running) {
             if (running.elapsed_clock != projectiles) continue;
             batch_handles_.push_back(running.handle);
@@ -386,13 +422,14 @@ bool UnitEmitters::advance_running(const float delta_seconds, const bool project
             batch_deltas_.push_back(std::max(0.0F, delta_seconds + age));
         }
     }
-    if (auto advanced = registry_->advance_all(batch_handles_, batch_deltas_, camera_frame_, batch_stats_); !advanced) {
-        failure_ = "unit emitter: " + core::format_diagnostic(advanced.error());
-        return false;
-    }
+}
+
+void UnitEmitters::finish_running(const bool projectiles) {
+    std::uint64_t particles_now = projectiles ? sampled_particles_ : 0;
     std::size_t next = 0;
     for (const std::size_t slot : busy_) {
         Ship& ship = ships_[slot];
+        if (historical_pass_ && !projectiles && ship.skip_historical) continue;
         for (auto running = ship.running.begin(); running != ship.running.end();) {
             if (running->elapsed_clock != projectiles) { ++running; continue; }
             running->catchup_seconds = 0.0F;
@@ -440,7 +477,6 @@ bool UnitEmitters::advance_running(const float delta_seconds, const bool project
     if (!projectiles) sampled_particles_ = particles_now;
     max_particles_ = std::max(max_particles_, particles_now);
     particles_ = particles_now;
-    return true;
 }
 
 bool UnitEmitters::advance_projectiles(const double presented_tick) {
@@ -495,6 +531,62 @@ bool UnitEmitters::present_running() {
     return true;
 }
 
+bool UnitEmitters::decide_single_pass(const SpacePopulation& population, const tactical::TacticalSnapshot& previous,
+                                      const tactical::TacticalSnapshot& latest, const FixedCamera& camera,
+                                      const std::uint64_t owed) {
+    const auto instance_of = [](const tactical::TacticalSnapshot& snapshot, const sim::EntityId entity)
+        -> const tactical::TacticalInstance* {
+        const auto instances = snapshot.instances();
+        const auto found = std::lower_bound(instances.begin(), instances.end(), entity,
+            [](const tactical::TacticalInstance& instance, const sim::EntityId id) { return instance.entity_id < id; });
+        return found != instances.end() && found->entity_id == entity ? &*found : nullptr;
+    };
+    const auto view = particles::catchup_view(camera_frame_, camera.vertical_fov_degrees, camera.width, camera.height,
+                                                 camera.near_plane);
+    bool needs_units = false;
+    ++ss_.frames;
+    for (std::size_t index = 0; index < ships_.size(); ++index) {
+        Ship& ship = ships_[index];
+        const auto emitter_view = population.live_ship_emitter_view(index);
+        // Death clones and model projectiles keep their own historical path; a ship that is not shown stops there.
+        if (!emitter_view || emitter_view->death_clone || emitter_view->projectile || emitter_view->placement == nullptr) continue;
+        if (!emitter_view->model_to_world) { needs_units = true; continue; }
+        const auto box = population.live_ship_box(index);
+        const auto* before = instance_of(previous, emitter_view->entity);
+        const auto* after = instance_of(latest, emitter_view->entity);
+        if (!box || !before || !after) { ++ss_.unknown; needs_units = true; continue; }
+        const auto origin = particles::source_emitter_frame(*emitter_view->model_to_world).origin;
+        // Every emitter of the ship lies within the model bounds: a sphere around the origin that holds the box.
+        double reach = 0.0;
+        for (std::size_t axis = 0; axis < 3; ++axis) {
+            const double extent = std::max(std::fabs(static_cast<double>(box->low[axis])), std::fabs(static_cast<double>(box->high[axis])));
+            reach += extent * extent;
+        }
+        // Uniform scale is assumed (every placed ship has one): the first column's length is the scale.
+        double scale = 0.0;
+        for (std::size_t row = 0; row < 3; ++row) {
+            const double component = to_double(box->model_to_world.rows[row][0]);
+            scale += component * component;
+        }
+        const float lever = static_cast<float>(std::sqrt(reach) * std::sqrt(scale));
+        double step = 0.0;
+        for (std::size_t axis = 0; axis < 3; ++axis) {
+            const double delta = to_double(after->fixed_transform.rows[axis][3]) - to_double(before->fixed_transform.rows[axis][3]);
+            step += delta * delta;
+        }
+        const particles::CatchupShip candidate{origin, lever, static_cast<float>(std::sqrt(step)),
+            particles::catchup_turn_radians(before->fixed_transform, after->fixed_transform), ship.per_tick_sampling};
+        const auto decision = particles::decide_catchup_ship(view, candidate, owed);
+        ss_.record(decision);
+        const bool keep = decision.keep;
+        ship.per_tick_sampling = keep;  // a culled ship returns to "one pass"
+        if (keep) { needs_units = true; continue; }
+        ship.skip_historical = true;
+        skipped_.push_back(index);
+    }
+    return needs_units;
+}
+
 bool UnitEmitters::frame(const SpacePopulation& population, const std::span<const platform::LiveTickEvents> reached,
                          const SnapshotAt& snapshot_at, const sim::tactical::PlayerId viewer,
                          const sim::tactical::TacticalSnapshot& previous, const sim::tactical::TacticalSnapshot& latest,
@@ -504,6 +596,9 @@ bool UnitEmitters::frame(const SpacePopulation& population, const std::span<cons
                          const ProjectileOpacity& projectile_opacity, const BirthAt& clone_birth_at,
                          const ProjectileBirthAt& projectile_birth_at) {
     if (released_) return true;
+    // A frame whose caller never finished the last one (a failed view step): complete it first, as the owner of the order.
+    if (final_pending_ && !finish_frame(population)) return false;
+    if (render_categories::fighter_experiment()) render_categories::begin_fighter_frame(static_cast<std::uint64_t>(godot::Engine::get_singleton()->get_process_frames()));
     FrameTimer owner_setup(measure_owner_ ? &owner_timings_[0] : nullptr);
     const auto instance_of = [](const sim::tactical::TacticalSnapshot& snapshot, const sim::EntityId entity)
         -> const sim::tactical::TacticalInstance* {
@@ -513,6 +608,8 @@ bool UnitEmitters::frame(const SpacePopulation& population, const std::span<cons
         return found != instances.end() && found->entity_id == entity ? &*found : nullptr;
     };
     ++frames_count_;
+    for (const std::size_t slot : skipped_) if (slot < ships_.size()) ships_[slot].skip_historical = false;
+    skipped_.clear();
     // #406: the clock starts at the first frame, or earlier at the birth of the oldest tick that
     // frame reaches, as the battle effects' and the breakoff props' do.
     if (!clock_start_) {
@@ -555,10 +652,14 @@ bool UnitEmitters::frame(const SpacePopulation& population, const std::span<cons
     FrameTimer owner_catchup(measure_owner_ ? &owner_timings_[2] : nullptr);
     sample_seconds_ = presentation_constants::logical_frame_seconds;
     const bool folded = particles::EffectRegistry::catchup_folding_default() && due > samples_ && due - samples_ > 2;
-    // No deferred scope or registry scan on the ordinary one/two-sample path.
-    const auto frame_uploads = registry_->defer_uploads(folded);
+    // No deferred scope or registry scan on the ordinary one-sample path; two or more samples upload only the last pass.
+    const auto frame_uploads = registry_->defer_uploads(particles::EffectRegistry::defers_catchup_uploads(due, samples_));
     const auto folded_start = samples_;
     const auto historical_end = folded ? samples_ + 1U : due;
+    bool any_per_tick = true;
+    if (samples_ + 1U < due)
+        any_per_tick = decide_single_pass(population, previous, latest, camera, due - samples_);
+    historical_pass_ = true;
     for (; samples_ + 1U < due && samples_ < historical_end; ++samples_) {
         ++caught_up_;
         const double tick = *clock_start_ + static_cast<double>(samples_) + 1.0;
@@ -566,7 +667,7 @@ bool UnitEmitters::frame(const SpacePopulation& population, const std::span<cons
         const auto before = snapshot_at(base);
         const auto after = snapshot_at(base + 1U);
         std::vector<live::LiveUnitPose> units;
-        if (before && after) {
+        if (before && after && any_per_tick) {
             const double share = std::max(0.0, tick - static_cast<double>(base));
             units = live::interpolate_units(*before, *after, share, viewer, reveal, fading_emitters);
             // #447: a craft spinning away keeps running its model's emitters on its spin pose.
@@ -581,6 +682,7 @@ bool UnitEmitters::frame(const SpacePopulation& population, const std::span<cons
         }
         for (std::size_t index = 0; index < ships_.size(); ++index) {
             Ship& ship = ships_[index];
+            if (ship.skip_historical) continue;  // D-ss: one pass at the drawn pose (decide_single_pass)
             const auto view = population.live_ship_emitter_view(index);
             // #421: a death clone runs its own proxies on its clip pose at this sample's tick.
             if (view && view->death_clone && view->placement != nullptr) {
@@ -675,6 +777,14 @@ bool UnitEmitters::frame(const SpacePopulation& population, const std::span<cons
         rebuild_busy();
         if (!advance_projectiles(tick) || !advance_sample()) return false;
     }
+    historical_pass_ = false;
+    // D-ss: a ship that skipped the historical samples steps their time in its final pass.
+    if (!skipped_.empty() && samples_ > folded_start) {
+        const float skipped_seconds = static_cast<float>(samples_ - folded_start) * presentation_constants::logical_frame_seconds;
+        for (const std::size_t slot : skipped_) {
+            for (Running& running : ships_[slot].running) if (!running.elapsed_clock) running.catchup_seconds += skipped_seconds;
+        }
+    }
     owner_catchup.finish();
     // At most one historical pose plus the drawn pose. Only state transitions
     // for newly visible streams are inspected inside the skipped interval.
@@ -754,7 +864,7 @@ bool UnitEmitters::frame(const SpacePopulation& population, const std::span<cons
         // Folded-interval births use the endpoint pose: during stalls / raised
         // sim speed this can displace the historical origin (~100 world units
         // in the moving-ship fixture). Exact birth poses are follow-up #5308.
-        if (folded && !view->projectile) {
+        if ((folded || ship.skip_historical) && !view->projectile) {
             std::vector<Running*> fresh;
             for (auto& running : ship.running) if (running.born == samples_ && !running.draining) fresh.push_back(&running);
             if (!fresh.empty()) {
@@ -889,11 +999,41 @@ bool UnitEmitters::frame(const SpacePopulation& population, const std::span<cons
     // built again for this frame's camera and brightness, without advancing the clock.
     if (samples_ >= due && !present_running()) return false;
     if (samples_ < due) {
-        if (!advance_sample()) return false;
+        // N1: the experiments below read the registry's work while it runs, so they keep the batch on the caller.
+        if (!advance_sample(async_final_ && !render_categories::fighter_experiment())) return false;
         samples_ = due;
+    }
+    if (final_pending_) {
+        // The own sample's batch runs without the caller; finish_frame does the rest of this frame.
+        final_presented_tick_ = presented_tick;
+        owner_registry.finish();
+        return true;
     }
     if (!advance_projectiles(presented_tick)) return false;
     owner_registry.finish();
+    return finish_tail(population);
+}
+
+bool UnitEmitters::finish_frame(const SpacePopulation& population) {
+    if (!final_pending_) return true;
+    final_pending_ = false;
+    FrameTimer owner_registry(measure_owner_ ? &owner_timings_[6] : nullptr, true);
+    if (auto finished = registry_->finish_advance_all(); !finished) {
+        failure_ = "unit emitter: " + core::format_diagnostic(finished.error());
+        return false;
+    }
+    finish_running(false);
+    if (!advance_projectiles(final_presented_tick_)) return false;
+    owner_registry.finish();
+    return finish_tail(population);
+}
+
+bool UnitEmitters::finish_tail(const SpacePopulation& population) {
+    if (render_categories::fighter_experiment()) {
+        render_categories::fighter_work.unit_emitters = 0;
+        for (const std::size_t slot : busy_)
+            if (population.diagnostic_fighter(slot)) render_categories::fighter_work.unit_emitters += ships_[slot].running.size();
+    }
     FrameTimer owner_finish(measure_owner_ ? &owner_timings_[7] : nullptr);
     // What this frame draws: each new emitter's age now is the one it is first seen at.
     for (const std::size_t slot : busy_) {

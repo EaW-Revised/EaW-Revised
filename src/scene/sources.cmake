@@ -3,9 +3,11 @@
 
 set(EAWR_SCENE_SOURCES
     "${CMAKE_CURRENT_LIST_DIR}/idle_tags.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/model_prefetch.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/scene.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/scene_assets.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/scene_build.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/scene_evidence.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/space_population.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/texture_prefetch.cpp"
 )

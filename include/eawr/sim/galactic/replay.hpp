@@ -10,14 +10,14 @@
 #include <string_view>
 #include <vector>
 
-// The galactic replay, EAWRGCR v3 (docs/galactic-replay-format.md): the tick-zero galaxy with its
+// The galactic replay, EAWRGCR v11 (docs/galactic-replay-format.md): the tick-zero galaxy with its
 // identities, seed, players, seats and options, every executed GameCommand in canonical
 // (tick, seat, sequence) order, and the final tick. A recorded live run replays itself headless
 // with identical per-tick hashes.
 namespace eawr::sim::galactic {
 
-inline constexpr std::uint16_t galactic_replay_format_version = 10;
-inline constexpr std::uint32_t galactic_rules_version = 6;
+inline constexpr std::uint16_t galactic_replay_format_version = 12;
+inline constexpr std::uint32_t galactic_rules_version = 7;
 inline constexpr std::size_t galactic_replay_max_bytes = 256U * 1024U * 1024U;
 inline constexpr std::size_t galactic_replay_max_payload = 64U * 1024U;
 

@@ -3,6 +3,7 @@
 
 #include <limits>
 #include <set>
+#include <stdexcept>
 #include <tuple>
 
 namespace eawr::script::foc::galactic_ai {
@@ -150,6 +151,60 @@ core::Result<std::string> ExecutionStateContributor::state_hash() const {
     if (!captured) return core::Result<std::string>::failure(captured.error());
     return core::Result<std::string>::success(core::sha256_hex(captured.value().components.at(std::string(component))));
 }
+struct LiveExecutionStateContributor::PhaseSavepoint::Saved {
+    LiveExecutionStateContributor* owner{};
+    std::optional<ExecutionRetainedState> retained;
+    std::map<gc::PlayerId, std::optional<ExecutionRoutes>> routes;
+    std::shared_ptr<const FreestorePool> pool;
+    bool settled{};
+};
+LiveExecutionStateContributor::PhaseSavepoint::PhaseSavepoint(std::unique_ptr<Saved> saved) : saved_(std::move(saved)) {}
+LiveExecutionStateContributor::PhaseSavepoint::~PhaseSavepoint() {
+    if (!saved_ || saved_->settled) return;
+    saved_->owner->phase_ = nullptr; saved_->owner->phase_abandoned_ = true;
+    saved_->owner->mark_state_changed();
+}
+LiveExecutionStateContributor::PhaseSavepoint::Work LiveExecutionStateContributor::PhaseSavepoint::work() const noexcept {
+    return saved_ ? Work{saved_->retained ? 1U : 0U, saved_->routes.size()} : Work{};
+}
+core::Result<void> LiveExecutionStateContributor::PhaseSavepoint::commit() {
+    if (!saved_ || saved_->settled) return core::Result<void>::failure(invalid("execution phase already settled"));
+    saved_->owner->phase_ = nullptr; saved_->settled = true;
+    saved_->retained.reset(); saved_->routes.clear(); saved_->pool.reset();
+    return core::Result<void>::success();
+}
+core::Result<void> LiveExecutionStateContributor::PhaseSavepoint::rollback() {
+    if (!saved_ || saved_->settled) return core::Result<void>::failure(invalid("execution phase already settled"));
+    auto& owner = *saved_->owner;
+    try {
+        if (saved_->retained) owner.retained_ = std::move(*saved_->retained);
+        for (auto& [player, old] : saved_->routes) {
+            if (old) owner.routes_.insert_or_assign(player, std::move(*old)); else owner.routes_.erase(player);
+        }
+        owner.pool_->pool = saved_->pool;
+        owner.records_dirty_ = true; owner.mark_state_changed();
+        owner.phase_ = nullptr; saved_->settled = true;
+        saved_->retained.reset(); saved_->routes.clear(); saved_->pool.reset();
+        return core::Result<void>::success();
+    } catch (const std::exception& exception) { return core::Result<void>::failure(invalid(exception.what())); }
+}
+core::Result<std::unique_ptr<LiveExecutionStateContributor::PhaseSavepoint>> LiveExecutionStateContributor::begin_phase() {
+    if (phase_ || phase_abandoned_ || !tracked_ || !pool_)
+        return core::Result<std::unique_ptr<PhaseSavepoint>>::failure(invalid("execution phase requires its tracked idle runtime"));
+    auto saved = std::make_unique<PhaseSavepoint::Saved>(); saved->owner = this; saved->pool = pool_->pool;
+    auto phase = std::unique_ptr<PhaseSavepoint>(new PhaseSavepoint(std::move(saved)));
+    phase_ = phase->saved_.get();
+    return core::Result<std::unique_ptr<PhaseSavepoint>>::success(std::move(phase));
+}
+void LiveExecutionStateContributor::replace_route(gc::PlayerId player, ExecutionRoutes next) {
+    if (phase_abandoned_) throw std::logic_error("unsettled execution phase");
+    if (phase_ && !phase_->routes.contains(player)) {
+        auto [saved, inserted] = phase_->routes.try_emplace(player);
+        static_cast<void>(inserted);
+        if (auto old = routes_.find(player); old != routes_.end()) saved->second.emplace(std::move(old->second));
+    }
+    routes_.insert_or_assign(player, std::move(next));
+}
 core::Result<NativeState> LiveExecutionStateContributor::capture() const {
     if (auto verified = verify_record_sync_hash(); !verified) return core::Result<NativeState>::failure(verified.error());
     ExecutionStateContributor codec(validator_);
@@ -157,9 +212,13 @@ core::Result<NativeState> LiveExecutionStateContributor::capture() const {
     return codec.capture();
 }
 core::Result<void> LiveExecutionStateContributor::replace_retained(ExecutionRetainedState state) {
+    if (phase_abandoned_) return core::Result<void>::failure(invalid("unsettled execution phase"));
     ExecutionStateContributor codec(validator_);
     if (auto valid = codec.replace(std::move(state)); !valid) return valid;
-    mark_state_changed(); update_records(records_, retained_, codec.state()); retained_ = codec.state();
+    auto next = codec.state();
+    mark_state_changed(); update_records(records_, retained_, next);
+    if (phase_ && !phase_->retained) phase_->retained.emplace(std::move(retained_));
+    retained_ = std::move(next);
     return core::Result<void>::success();
 }
 core::Result<std::string> LiveExecutionStateContributor::state_hash() const {
@@ -168,6 +227,7 @@ core::Result<std::string> LiveExecutionStateContributor::state_hash() const {
     return core::Result<std::string>::success(core::sha256_hex(captured.value().components.at(std::string(ExecutionStateContributor::component))));
 }
 core::Result<void> LiveExecutionStateContributor::restore(const NativeState& input) {
+    if (phase_ || phase_abandoned_) return core::Result<void>::failure(invalid("cannot restore an active or unsettled execution phase"));
     if (!pool_ || !pool_->pool || !inputs_) return core::Result<void>::failure(invalid("live restore requires rebuilt pool and route inputs"));
     ExecutionStateContributor codec(validator_);
     if (auto restored = codec.restore(input); !restored) return restored;
@@ -213,6 +273,11 @@ void LiveExecutionStateContributor::enable_revision_tracking() {
     mark_state_changed(); records_ = execution_records(retained_); tracked_ = true;
 }
 core::Result<std::string> LiveExecutionStateContributor::record_sync_hash(bool cold) const {
+    if (phase_abandoned_) return core::Result<std::string>::failure(invalid("unsettled execution phase"));
+    if (records_dirty_) {
+        auto& self = *const_cast<LiveExecutionStateContributor*>(this);
+        self.records_ = execution_records(retained_); self.records_dirty_ = false;
+    }
     return core::Result<std::string>::success(cold || !tracked_ ? execution_records(retained_).digest(ExecutionStateContributor::component)
         : records_.digest(ExecutionStateContributor::component));
 }

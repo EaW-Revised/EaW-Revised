@@ -43,7 +43,8 @@
 #include "eawr/presentation/ui/world_ui.hpp"
 #include "eawr/presentation/ui/retreat_button.hpp"
 #include "eawr/presentation/ui/special_weapon.hpp"
-#include "eawr/vfs/vfs.hpp"
+#include "eawr/vfs/vfs_fwd.hpp"
+#include "bink_movie.hpp"
 
 #include <godot_cpp/classes/control.hpp>
 #include <godot_cpp/classes/material.hpp>
@@ -187,7 +188,8 @@ public:
     [[nodiscard]] const std::string& failure() const noexcept;
     [[nodiscard]] int options_presses() const noexcept;
     [[nodiscard]] EawrTacticalHud* hud() const noexcept;
-    void prepare_command_bar_movie(const vfs::Vfs&, std::string_view movie);
+    void prepare_command_bar_movie(const vfs::Vfs&, std::string_view movie, BinkSourceFactory decoder_factory,
+        std::function<void(std::string, std::string, std::string)> failure_sink);
     [[nodiscard]] bool play_command_bar_movie(std::string_view speech);
     void service_command_bar_movie(bool speech_present, bool paused);
     [[nodiscard]] bool command_bar_movie_playing() const;
@@ -217,6 +219,7 @@ public:
     // #454 (docs/behaviour/foc-ability-buttons.md): the ability buttons and the cards' ability marks;
     // null before build() or when the shell has no ability buttons.
     [[nodiscard]] EawrAbilityButtons* ability_buttons() const noexcept;
+    [[nodiscard]] const std::string& ability_button_icon(const std::string& type, std::uint32_t ability);
     void set_ability_bar(const presentation::ui::AbilityBar& bar);
     [[nodiscard]] bool team_dock_hovered() const;
     void set_team_dock(const presentation::ui::TeamResearchView& view,
@@ -266,6 +269,8 @@ public:
     void set_options_handler(std::function<void()> handler);
     void set_gift_handler(std::function<void(sim::SeatId)> handler);
     void set_gift(bool policy, bool enabled, const std::vector<presentation::ui::ObserverOwner>& recipients);
+    // Re-docks the Gift control when the hero tray, the production pane or the order row moved under it.
+    void refresh_gift_layout();
     void set_beacon_handler(std::function<void()> handler);
     void set_beacon(bool enabled, bool targeting);
     void set_movie_mode(bool on);

@@ -139,6 +139,7 @@ int main() {
     test_attack_path_boundary();
     test_attack_path_refresh();
     test_launch();
+    test_large_complement();
     test_launched_squadron();
     test_garrison_provenance();
     test_priority_scan();

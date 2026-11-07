@@ -1,0 +1,10 @@
+<Eawr_Hud>
+  <Control Name="gift">
+    <Enabled>true</Enabled><Size>96 30</Size><Recipient_Size>180 30</Recipient_Size>
+    <Caption>TEXT_EAWR_GIFT_UNITS</Caption><Tooltip>TEXT_EAWR_GIFT_UNITS</Tooltip>
+    <Normal_Texture>synthetic_normal.tga</Normal_Texture><Hover_Texture>synthetic_hover.tga</Hover_Texture>
+    <Pressed_Texture>synthetic_pressed.tga</Pressed_Texture><Disabled_Texture>synthetic_disabled.tga</Disabled_Texture>
+    <Candidate><Anchor>viewport</Anchor><Side>inside_top_left</Side><Offset>40 120</Offset></Candidate>
+    <Candidate><Anchor>viewport</Anchor><Side>inside_bottom_right</Side><Offset>-100 -10</Offset></Candidate>
+  </Control>
+</Eawr_Hud>

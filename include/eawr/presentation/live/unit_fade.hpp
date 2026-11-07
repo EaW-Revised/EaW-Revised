@@ -67,9 +67,21 @@ public:
     // The opacity of a drawn entity (0 hidden, 1 fully shown); nullopt for one this call does not
     // draw at all (never yet seen, or faded fully out).
     [[nodiscard]] std::optional<float> opacity(sim::EntityId entity) const noexcept;
+    // opacity() for a caller that asks about ascending entities in one pass: `cursor` remembers the position in
+    // the ascending entries, so the pass walks the entries once instead of searching for every entity. Any
+    // order of calls gives the same answers as opacity(); a descending call only repositions the cursor.
+    [[nodiscard]] std::optional<float> opacity_walk(sim::EntityId entity, std::size_t& cursor) const noexcept;
     // Entities the last advance() draws: fully shown ones and those still easing out (FW-18),
     // ascending.
     [[nodiscard]] std::vector<sim::EntityId> drawn() const;
+    // The tracked entities with their stored ease state, ascending: for tests and diagnostics.
+    struct Row final {
+        sim::EntityId entity{};
+        double value{};
+        double velocity{};
+        bool target_visible{};
+    };
+    [[nodiscard]] std::vector<Row> rows() const;
 
 private:
     struct State {
@@ -78,9 +90,17 @@ private:
         bool target_visible{true};
     };
 
+    struct Entry {
+        sim::EntityId entity{};
+        State state{};
+    };
+
     UnitFadeLooks looks_;
-    std::map<sim::EntityId, State> fading_;
+    std::vector<Entry> fading_; // ascending by entity
+    std::vector<Entry> next_;   // advance() builds the next generation here, then swaps (no allocation in steady state)
     std::vector<sim::EntityId> ever_seen_; // ascending; every entity `alive` has ever held
+    std::vector<sim::EntityId> first_sight_;
+    std::vector<sim::EntityId> sorted_visible_, sorted_alive_, sorted_immediate_; // contract-violation fallback copies
 };
 
 // FW-25..28: one observer's memory, independent of simulation lifetime and

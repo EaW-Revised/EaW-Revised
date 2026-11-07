@@ -184,6 +184,7 @@ void test_driven_matches_headless(const std::filesystem::path& fixtures) {
         if (!live) continue;
         auto& session = *live.value();
         expect(session.completed_tick() == 0 && session.frame().latest != nullptr, label + "tick zero is published");
+        LiveSession::SnapshotHistory early_history;
         {
             const Reader reader(session);
             // A scheduled simulation thread does not imply the presentation thread ran.
@@ -194,6 +195,7 @@ void test_driven_matches_headless(const std::filesystem::path& fixtures) {
                 session.advance_to(tick);
                 expect(session.wait_for(tick, std::chrono::seconds(60)), label + "a driven slice completes");
                 expect(reader.wait_for(tick), label + "the reader observes the driven slice");
+                if (tick == 7) early_history = session.history_copy();
             }
             session.advance_to(replay.final_tick_count);
             expect(session.wait_for(replay.final_tick_count, std::chrono::seconds(60)), label + "the run completes");
@@ -204,6 +206,20 @@ void test_driven_matches_headless(const std::filesystem::path& fixtures) {
         const auto kept = session.snapshot_at(replay.final_tick_count - 1);
         expect(kept && kept->completed_tick() == replay.final_tick_count - 1, label + "recent snapshots are kept");
         expect(session.snapshot_at(1) == nullptr, label + "old snapshots leave the history");
+        {
+            // L1.2: the lane reads the history as of the kick. A copy answers like the live session for every tick, kept or not.
+            const auto copy = session.history_copy();
+            expect(!copy.empty() && copy.size() <= 8, label + "the history copy holds the kept snapshots");
+            bool same = true;
+            for (std::uint64_t tick = 0; tick <= replay.final_tick_count + 1; ++tick) {
+                same = same && LiveSession::snapshot_in(copy, tick) == session.snapshot_at(tick);
+            }
+            expect(same, label + "snapshot_in over a copy equals snapshot_at for every tick");
+            // A copy is a point in time: tick 7 left the live history long ago, the early copy still holds it.
+            expect(session.snapshot_at(7) == nullptr && early_history.size() > 1, label + "tick 7 is gone from the live history");
+            const auto stale = LiveSession::snapshot_in(early_history, 7);
+            expect(stale && stale->completed_tick() == 7, label + "an earlier copy keeps the snapshot the live history evicted");
+        }
         session.stop();
         expect(!session.failure(), label + "no step failed");
         expect(session.rejected_orders().empty(), label + "every fixture order is accepted");
@@ -221,11 +237,15 @@ void test_phase_timings_preserve_hashes(const std::filesystem::path& fixtures) {
     const auto golden = read_hashes(fixtures / "tactical-motion.hashes.csv");
     constexpr std::uint64_t ticks = 12;
     for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
-        for (const bool measure : {false, true}) {
+        for (const unsigned mode : {0U, 1U, 2U, 3U}) {
+            const bool measure = mode == 1 || mode == 2;
+            const bool profile = mode == 2;
             LiveSession::Options options;
             options.workers = workers;
             options.pacing = LiveSession::Pacing::driven;
             options.measure_phases = measure;
+            options.detailed_profile = profile;
+            options.cadence_profile = mode == 3;
             auto live = LiveSession::start(parsed.value().setup, {}, {}, motion_table(), {}, options);
             expect(static_cast<bool>(live), "phase timing session starts");
             if (!live) continue;
@@ -238,14 +258,29 @@ void test_phase_timings_preserve_hashes(const std::filesystem::path& fixtures) {
                 "phase timing never changes tick hashes on 1/2/4/8 workers");
             const auto costs = live.value()->tick_costs_after(0);
             expect(costs.size() == ticks, "phase timing retains one cost per tick");
+            double previous_completed_ms = 0.0;
             for (const auto& cost : costs) {
                 double partitions = 0.0, total = 0.0, serial = 0.0, fog = 0.0, named_serial = 0.0;
                 double callback_maxima = 0.0;
                 bool detailed = false;
                 bool serial_detailed = false;
                 bool partition_detailed = false;
+                bool callback_timeline = false;
+                bool typed_jobs = false;
+                unsigned cadence_samples = 0;
                 for (const auto& phase : cost.phases) {
+                    if (phase.name.starts_with("cadence.")) ++cadence_samples;
+                    if (phase.name == "cadence.completed-steady-ms") {
+                        expect(phase.ms > previous_completed_ms, "cadence completions use a monotonic simulation clock");
+                        previous_completed_ms = phase.ms;
+                    }
+                    if (phase.name == "cadence.total-ms")
+                        expect(phase.ms == cost.total_ms, "cadence cost samples retain each tick's total");
+                    if (phase.name == "cadence.clock-reset")
+                        expect(phase.ms == 0.0, "driven ticks cannot reset the real-time clock");
                     expect(phase.ms >= 0.0, "diagnostic elapsed times are nonnegative");
+                    if (phase.name.starts_with("profile.callback.")) callback_timeline = true;
+                    if (phase.name.starts_with("profile.job.movement.movement.")) typed_jobs = true;
                     if (phase.name.starts_with("worker.")) { detailed = true; partitions += phase.ms; }
                     if (phase.name.starts_with("serial.")) { serial_detailed = true; named_serial += phase.ms; }
                     if (phase.name.starts_with("partition-max.")) { partition_detailed = true; callback_maxima += phase.ms; }
@@ -253,6 +288,9 @@ void test_phase_timings_preserve_hashes(const std::filesystem::path& fixtures) {
                     if (phase.name == "serial-remainder") serial = phase.ms;
                     if (phase.name == "fog") fog = phase.ms;
                 }
+                expect(callback_timeline == profile, "callback timeline requires explicit detailed profiling");
+                expect(typed_jobs == profile, "typed movement jobs require explicit detailed profiling");
+                expect(cadence_samples == (mode == 3 ? 3U : 0U), "cheap cadence samples require explicit opt-in");
                 expect(detailed == measure, "named barrier costs are opt-in");
                 expect(serial_detailed == measure, "serial stage costs are opt-in");
                 expect(partition_detailed == measure, "partition callback costs are opt-in");
@@ -1424,6 +1462,146 @@ void test_scripted_recovery_keeps_sealed_publication_input() {
     }
 }
 
+// sim::StateHashPolicy::on_demand: a step skips the canonical encode and the hash, and nothing else
+// changes. The current state's hash is still available on request and equals the golden hash, the
+// policy can be switched back between steps, and the live session keeps every hash that lockstep needs.
+void test_on_demand_state_hash_policy(const std::filesystem::path& fixtures) {
+    const auto parsed = tactical::parse_replay(read_bytes(fixtures / "tactical-motion.eawr-replay"), "tactical-motion");
+    expect(static_cast<bool>(parsed), "the on-demand fixture parses");
+    if (!parsed) return;
+    const auto& replay = parsed.value();
+    const auto golden = read_hashes(fixtures / "tactical-motion.hashes.csv");
+    expect(golden.size() == replay.final_tick_count && golden.size() > 12, "the on-demand fixture has golden hashes");
+    if (golden.size() != replay.final_tick_count || golden.size() <= 12) return;
+
+    {
+        // The session alone: skipped ticks carry no hash, the state on request is the golden one.
+        auto session = tactical::TacticalSession::from_replay(replay, {}, {}, motion_table());
+        expect(static_cast<bool>(session), "the on-demand session builds");
+        if (!session) return;
+        auto& world = session.value();
+        expect(world.state_hash_policy() == eawr::sim::StateHashPolicy::always, "hashing every tick is the default");
+        const eawr::sim::InlineExecutor executor;
+        world.set_state_hash_policy(eawr::sim::StateHashPolicy::on_demand);
+        bool empty = true;
+        bool matches = true;
+        while (world.completed_tick() < 8) {
+            auto tick = world.step(executor);
+            if (!tick) break;
+            empty = empty && tick.value().state_sha256.empty() && tick.value().state_hash.get().empty();
+            matches = matches && world.state_sha256() == golden[world.completed_tick() - 1];
+        }
+        expect(empty, "an on-demand step leaves the tick hash empty");
+        expect(matches, "the on-demand current-state hash equals the golden hash of that tick");
+        world.set_state_hash_policy(eawr::sim::StateHashPolicy::always);
+        bool resumed = true;
+        while (world.completed_tick() < replay.final_tick_count) {
+            auto tick = world.step(executor);
+            if (!tick) break;
+            resumed = resumed && tick.value().state_sha256 == golden[world.completed_tick() - 1]
+                && tick.value().state_hash.get() == tick.value().state_sha256;
+        }
+        expect(resumed && world.completed_tick() == replay.final_tick_count,
+               "switching back to always gives the golden hash of every later tick, after skipped ticks");
+    }
+
+    for (const std::size_t workers : eawr::platform::determinism_worker_counts()) {
+        const std::string label = "on demand, " + std::to_string(workers) + " workers: ";
+        LiveSession::Options options{.workers = workers, .pacing = LiveSession::Pacing::driven, .history = 8,
+                                     .state_hash_policy = eawr::sim::StateHashPolicy::on_demand};
+        auto live = LiveSession::start(replay.setup, {}, {}, motion_table(), {}, options);
+        expect(static_cast<bool>(live), label + "the live session starts");
+        if (!live) continue;
+        auto& session = *live.value();
+        for (const auto& command : replay.commands) session.submit(order_of(command, true));
+        session.advance_to(10);
+        expect(session.wait_for(10, std::chrono::seconds(60)), label + "the first slice completes");
+        session.require_tick_hashes();
+        session.advance_to(replay.final_tick_count);
+        expect(session.wait_for(replay.final_tick_count, std::chrono::seconds(60)), label + "the run completes");
+        session.stop();
+        expect(!session.failure(), label + "no step failed");
+        const auto hashes = session.tick_hashes();
+        bool skipped = hashes.size() == golden.size();
+        for (std::size_t tick = 0; skipped && tick < 10; ++tick) skipped = hashes[tick].empty();
+        expect(skipped, label + "the ticks before the request have no hash");
+        expect(hashes.size() == golden.size() && std::equal(hashes.begin() + 10, hashes.end(), golden.begin() + 10),
+               label + "the ticks after require_tick_hashes() have the golden hashes");
+        const auto recorded = tactical::write_replay(session.record());
+        const auto encoded = tactical::write_replay(replay);
+        expect(recorded && encoded && recorded.value() == encoded.value(), label + "the replay is the fixture");
+    }
+
+    {
+        // Never asked: every tick skips, the last one is hashed from the final state.
+        LiveSession::Options options{.workers = 2, .pacing = LiveSession::Pacing::driven, .history = 8,
+                                     .state_hash_policy = eawr::sim::StateHashPolicy::on_demand};
+        auto live = LiveSession::start(replay.setup, {}, {}, motion_table(), {}, options);
+        expect(static_cast<bool>(live), "the never-asked live session starts");
+        if (!live) return;
+        auto& session = *live.value();
+        for (const auto& command : replay.commands) session.submit(order_of(command, true));
+        session.advance_to(replay.final_tick_count);
+        expect(session.wait_for(replay.final_tick_count, std::chrono::seconds(60)), "the never-asked run completes");
+        session.stop();
+        const auto hashes = session.tick_hashes();
+        bool skipped = hashes.size() == golden.size();
+        for (std::size_t tick = 0; skipped && tick + 1 < hashes.size(); ++tick) skipped = hashes[tick].empty();
+        expect(skipped && hashes.back() == golden.back(), "only the final tick is hashed, from the final state");
+    }
+
+    {
+        // A lockstep driver reads every tick's hash: on_demand is overridden there.
+        LiveSession::Options options{.workers = 2, .pacing = LiveSession::Pacing::driven,
+                                     .state_hash_policy = eawr::sim::StateHashPolicy::on_demand};
+        options.step_driver = [](eawr::platform::LiveStepContext& context, std::span<const tactical::PlayerCommand>,
+                                 std::uint64_t) {
+            using Result = eawr::core::Result<bool>;
+            auto stepped = context.step();
+            return stepped ? Result::success(true) : Result::failure(stepped.error());
+        };
+        auto live = LiveSession::start(replay.setup, {}, {}, motion_table(), {}, options);
+        expect(static_cast<bool>(live), "the driven-by-lockstep session starts");
+        if (!live) return;
+        auto& session = *live.value();
+        session.advance_to(6);
+        expect(session.wait_for(6, std::chrono::seconds(60)), "the step-driver run completes");
+        session.stop();
+        const auto hashes = session.tick_hashes();
+        const auto expected = eawr::platform::headless_tick_hashes(session.record(), {}, {}, motion_table(), {});
+        expect(expected && hashes.size() == 6 && hashes == expected.value(),
+               "a step driver gets every tick's hash whatever the options ask");
+    }
+}
+
+// The scripted session keeps its world hashing unless the authoritative hash is off, as the live session sets it.
+void test_scripted_on_demand_state_hash_policy() {
+    namespace auth = eawr::script::authoritative;
+    tactical::TacticalSetup setup;
+    setup.players = {{1, 0, 1, tactical::player_flag_commandable}};
+    auto scripts = std::make_shared<eawr::platform::LiveScripts>();
+    scripts->wrap = [](tactical::TacticalSession world) {
+        auth::SessionConfig config; config.seed = 42; config.tick_duration = {1, 30};
+        auto scheduler = auth::ScriptScheduler::create(config, {});
+        if (!scheduler) return eawr::core::Result<auth::ScriptedTacticalSession>::failure(scheduler.error());
+        return auth::ScriptedTacticalSession::create(std::move(world), std::move(scheduler).value());
+    };
+    LiveSession::Options options; options.workers = 2; options.pacing = LiveSession::Pacing::driven; options.scripts = scripts;
+    options.state_hash_policy = eawr::sim::StateHashPolicy::on_demand;
+    auto live = LiveSession::start(setup, {}, {}, {}, {}, options);
+    expect(static_cast<bool>(live), "the scripted on-demand session starts");
+    if (!live) return;
+    live.value()->advance_to(5);
+    expect(live.value()->wait_for(5, std::chrono::seconds(10)), "the scripted on-demand run completes");
+    live.value()->stop();
+    const auto expected = eawr::platform::headless_tick_hashes(live.value()->record(), {}, {}, {}, {});
+    const auto hashes = live.value()->tick_hashes();
+    bool skipped = hashes.size() == 5;
+    for (std::size_t tick = 0; skipped && tick + 1 < hashes.size(); ++tick) skipped = hashes[tick].empty();
+    expect(expected && skipped && hashes.back() == expected.value().back(),
+           "the scripted on-demand run skips the hashes but its final state is the headless one");
+}
+
 void test_admission_driver_holds_and_publishes_once() {
     tactical::TacticalSetup setup;
     setup.players = {{1, 0, 1, tactical::player_flag_commandable}};
@@ -1514,6 +1692,8 @@ int main(const int argc, const char* const argv[]) {
     }
     test_start_rejects_worker_counts();
     test_driver_digest_reuses_completed_world();
+    test_on_demand_state_hash_policy(argv[1]);
+    test_scripted_on_demand_state_hash_policy();
     test_admission_driver_holds_and_publishes_once();
     test_recovery_staging_and_publication();
     test_recovery_refuses_concurrent_orders_on_both_peers();

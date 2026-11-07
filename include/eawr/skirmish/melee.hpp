@@ -23,7 +23,7 @@ namespace eawr::skirmish {
 // Size S is the largest real FoC space skirmish: each side at its highest population cap (about
 // 42 Rebel and 37 Empire population: Rebel 11 ships + 10 squadrons, Empire 11 + 10). M doubles
 // every count and L quadruples it, past the cap.
-enum class MeleeSize : std::uint8_t { s, m, l };
+enum class MeleeSize : std::uint8_t { s, m, l, xl };
 [[nodiscard]] std::optional<MeleeSize> melee_size(std::string_view name) noexcept;
 [[nodiscard]] std::string_view to_string(MeleeSize size) noexcept;
 

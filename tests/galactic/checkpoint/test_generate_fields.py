@@ -14,9 +14,12 @@ class FieldCompletenessTests(unittest.TestCase):
     def test_generic_team_runtime_fields_require_serialization(self):
         path = "src/sim/tactical/land_checkpoint_fields_internal.hpp"
         wire = source_text(path)
-        for owner, field in (("LandMovingMember", "next_node"), ("LandMovingMember", "temporary_next"), ("LandMovingMember", "detour_path"),
-                             ("LandMovingMember", "detour_next"),
-                             ("LandMovingSquad", "generic_team")):
+        for owner, field in (("LandMovingMember", "next_node"), ("LandMovingMember", "temporary_next"),
+                             ("LandMovingSquad", "collision_class"), ("LandMovingSquad", "jiggle"),
+                             ("LandMovingSquad", "generic_team"),
+                             ("LandMovingSquad", "straggler_wait_remaining"),
+                             ("LandMovingMember", "straggler_best_lag"),
+                             ("LandContact", "retry_remaining")):
             with self.subTest(owner=owner, field=field):
                 block = re.search(r"template <> struct Fields<" + owner + r"> \{.*?\n\};", wire, re.S).group()
                 changed = block.replace("v." + field, "")
@@ -80,6 +83,29 @@ class FieldCompletenessTests(unittest.TestCase):
         repeated = wire.replace("a(v.upgrade_bonuses[6]);", "a(v.upgrade_bonuses[6]); a(v.upgrade_bonuses[6]);", 1)
         errors, _ = generate_fields.check({path: repeated})
         self.assertTrue(any("LiveUnit:" in error and "duplicate=True" in error for error in errors), errors)
+
+    def test_indexed_arrays_require_complete_coverage(self):
+        path = "src/sim/tactical/checkpoint_fields_internal.hpp"
+        wire = source_text(path)
+        loop = "for (std::size_t slot = 0; slot < 6; ++slot) a(v.upgrade_bonuses[slot]);"
+        for changed in (wire.replace(loop, ""), wire.replace("slot < 6", "slot < 5"),
+                        wire.replace("if (a.fire_range_bonuses) a(v.upgrade_bonuses[6]);", "")):
+            self.assertNotEqual(changed, wire)
+            errors, _ = generate_fields.check({path: changed})
+            self.assertTrue(any("upgrade_bonuses lacks full-array coverage" in error for error in errors), errors)
+
+    def test_gc_and_owner_indexed_writes_need_a_coverage_contract(self):
+        for path, field in (("src/sim/galactic/checkpoint_fields_internal.hpp", "next_request"),
+                            ("src/campaign/checkpoint_fields_internal.hpp", "withdraw_admitted"),
+                            ("src/sim/galactic/session.cpp", "native_sequence"),
+                            ("src/campaign/game_session_lifecycle.cpp", "withdrawing_player")):
+            with self.subTest(path=path):
+                wire = source_text(path)
+                changed = wire.replace("v." + field, "v." + field + "[0]", 1)
+                self.assertNotEqual(changed, wire)
+                errors, _ = generate_fields.check({path: changed})
+                self.assertTrue(any("indexed field " + field + " lacks full-array coverage" in error
+                                    for error in errors), errors)
 
     def test_omitted_cloak_deadline_fails(self):
         root = Path(__file__).resolve().parents[3]

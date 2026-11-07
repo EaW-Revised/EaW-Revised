@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <deque>
 #include <map>
+#include <utility>
 
 namespace eawr::net {
 
@@ -73,6 +74,7 @@ public:
         const auto ticks = ready > tick ? ready - tick : 0;
         return (ticks + sim::galactic::galactic_frames_per_second - 1) / sim::galactic::galactic_frames_per_second;
     }
+    void restore(History history, Toggles toggles) { history_ = std::move(history); toggles_ = std::move(toggles); }
     [[nodiscard]] GalacticClockPolicy policy() const noexcept { return policy_; }
     [[nodiscard]] const History& history() const noexcept { return history_; }
     [[nodiscard]] const Toggles& toggles() const noexcept { return toggles_; }

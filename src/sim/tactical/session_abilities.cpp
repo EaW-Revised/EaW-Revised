@@ -273,7 +273,8 @@ const SpecialAbilityProfile* TacticalSession::Impl::beam_profile(const LiveUnit&
     const auto slot = profile ? ability_slot(*profile, kind) : std::nullopt;
     if (!slot) return nullptr;
     const auto expected = kind == AbilityKind::energy_weapon ? SpecialAbilityKind::energy_weapon
-        : kind == AbilityKind::leech_shields ? SpecialAbilityKind::leech_shields : SpecialAbilityKind::tractor_beam;
+        : kind == AbilityKind::leech_shields ? SpecialAbilityKind::leech_shields
+        : kind == AbilityKind::super_laser ? SpecialAbilityKind::super_laser : SpecialAbilityKind::tractor_beam;
     const auto& name = profile->abilities[*slot].gui_activated_ability_name;
     const auto found = std::find_if(profile->special.begin(), profile->special.end(), [&](const auto& nested) {
         return nested.kind == expected && nested.name == name;
@@ -351,6 +352,11 @@ AbilitySwitch TacticalSession::Impl::lock_beam(LiveUnit& source, const EntityId 
     special.enabled = true;
     special.targets = {target};
     special.next_service_frame = tick + nested->service_interval;
+    if (kind == AbilityKind::super_laser) {
+        // WSPL-03/04: the beam fires, and its expiry timer starts, Fire_Delay after the lock.
+        special.next_service_frame = tick + nested->fire_delay_frames;
+        if (state.expires_tick != 0) state.expires_tick += nested->fire_delay_frames;
+    }
     source.formation.reset();
     return switched;
 }
@@ -387,6 +393,11 @@ void TacticalSession::Impl::release_beam(LiveUnit& unit, const AbilityKind kind,
     unit.abilities->replan_due = unit.abilities->replan_due || switched.speed;
     if (switched.changed && kind == AbilityKind::tractor_beam)
         state.ready_tick = tick + profile.abilities[slot].recharge_frames; // U-09 conservative full recharge
+    if (switched.changed && kind == AbilityKind::super_laser) {
+        // WSPL-05: the recharge starts only when a beam existed, and then in full.
+        const bool fired = tick >= state.started_tick + nested->fire_delay_frames;
+        state.ready_tick = fired ? tick + profile.abilities[slot].recharge_frames : tick;
+    }
     state.target = invalid_entity_id;
     state.target_hardpoint = no_hardpoint;
     auto& special = unit.abilities->special.slots[static_cast<std::size_t>(nested - profile.special.data())];
@@ -423,7 +434,7 @@ core::Result<void> TacticalSession::Impl::service_beams(std::vector<LiveUnit>& u
     const std::uint64_t tick, const PartitionExecutor& executor) {
     const bool present = std::any_of(abilities.profiles.begin(), abilities.profiles.end(), [](const auto& profile) {
         return ability_slot(profile, AbilityKind::energy_weapon) || ability_slot(profile, AbilityKind::tractor_beam)
-            || ability_slot(profile, AbilityKind::leech_shields);
+            || ability_slot(profile, AbilityKind::leech_shields) || ability_slot(profile, AbilityKind::super_laser);
     });
     if (!present) return core::Result<void>::success();
     std::array<std::vector<ConcentrateEffect>, tick_partition_count> effects;
@@ -434,7 +445,8 @@ core::Result<void> TacticalSession::Impl::service_beams(std::vector<LiveUnit>& u
         for (auto i = range.begin; i < range.end; ++i) {
             auto& source = units[i];
             if (!source.abilities) continue;
-            for (const auto kind : {AbilityKind::energy_weapon, AbilityKind::tractor_beam, AbilityKind::leech_shields}) {
+            for (const auto kind : {AbilityKind::energy_weapon, AbilityKind::tractor_beam, AbilityKind::leech_shields,
+                AbilityKind::super_laser}) {
                 const auto* nested = beam_profile(source, kind);
                 if (!nested) continue;
                 const auto& profile = *abilities.find(source.state.type_id);
@@ -1325,7 +1337,8 @@ std::vector<AbilityStatus> TacticalSession::Impl::ability_statuses(const LiveUni
                 status.blast_charged_presentation = unit.abilities->charged_blast->charged_presentation;
             }
             if (slot.active && (ability.kind == AbilityKind::energy_weapon || ability.kind == AbilityKind::tractor_beam
-                || ability.kind == AbilityKind::leech_shields || ability.kind == AbilityKind::concentrate_fire)) {
+                || ability.kind == AbilityKind::leech_shields || ability.kind == AbilityKind::concentrate_fire
+                || ability.kind == AbilityKind::super_laser)) {
                 status.target = slot.target;
                 status.target_hardpoint = slot.target_hardpoint;
             }

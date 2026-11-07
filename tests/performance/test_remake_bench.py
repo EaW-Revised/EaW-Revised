@@ -242,6 +242,10 @@ class RemakeBenchTests(unittest.TestCase):
             (root / "exit-codes.txt").write_text("stock-bespin 0\n")
             (root / "stock-bespin.csv").write_text("tick,wall_frame_ms,projectiles\n600,20,1\n2300,30,1\n")
             receipt = root / "rig.json"
+            # The engine guard needs the run's pins: the shipped patched engine (tools/engine_pins.json default).
+            (root / "engine-pins.json").write_text(json.dumps({"label": "eawr-fad06b579-ltofull", "files": {
+                "Godot_v4.7.2-stable_win64.exe": "453b4ad56a8f5c64b39c1d75e77468c5227475b2483922dee44ade51cff43442",
+                "Godot_v4.7.2-stable_win64_console.exe": "194a5bbf60f76a3717aca706fb715ac6645655b3eca8e0f959b277ac1fe3cd61"}}))
             receipt.write_text('{"machine":"fixture", "privateDesktop":false, "timedOut":false}')
             self.assertFalse(bench.analyse(root, {}))
             self.assertIn("private desktop", json.loads((root / "results.json").read_text())["protocol_errors"][0])
@@ -272,6 +276,8 @@ class RemakeBenchTests(unittest.TestCase):
             path = Path(tmp) / "spec.json"
             bench.write_spec(path, ["remake-dev4"], "free", mod_root="fixture", prepare=True)
             run = json.loads(path.read_text())["runs"][0]
+            self.assertEqual((Path(tmp) / "settings/uncapped.txt").read_text(),
+                             "eawr-settings 1\nvideo.vsync=0\nvideo.frame_rate_limit=0\n")
             self.assertEqual(run["engineArgs"][-2:], ["--render-thread", "separate"])
             self.assertEqual(run["benchmark"]["render_thread"], "separate")
             with self.assertRaisesRegex(ValueError, "owner census engagement"):
@@ -316,11 +322,15 @@ class RemakeBenchTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "spec.json"
             bench.write_spec(path, ["stock-bespin"], "free", preparations={"stock-bespin": native})
-            run = json.loads(path.read_text())["runs"][0]
+            spec = json.loads(path.read_text())
+            run = spec["runs"][0]
             args = run["args"]
             self.assertEqual(args[args.index("--eawr-diagnostic-vsync") + 1], "0")
             self.assertEqual(args[args.index("--eawr-diagnostic-max-fps") + 1], "0")
-            self.assertNotIn("--eawr-live-audio-pace", args)
+            self.assertEqual(args[args.index("--eawr-live-audio-pace") + 1], "off")
+            self.assertEqual(args[args.index("--eawr-settings-file") + 1], "{in}/settings/uncapped.txt")
+            self.assertEqual((Path(spec["inputs"]["settings"]) / "uncapped.txt").read_text(),
+                             "eawr-settings 1\nvideo.vsync=0\nvideo.frame_rate_limit=0\n")
             self.assertEqual(run["engineArgs"], ["--max-fps", "0", "--render-thread", "separate", "--script", "{in}/observer/menu-observer.gd"])
             self.assertEqual(run["benchmark"]["observer"], "buffered-post-draw-v2")
             observer = (Path(tmp) / "observer/menu-observer.gd").read_text()
@@ -352,8 +362,13 @@ class RemakeBenchTests(unittest.TestCase):
             observer.write_text("frame,engine_max_fps,vsync_mode\n0,0,0\n1,60,0\n2,0,0\n")
             self.assertIn("uncapped", bench.analyse_scene(root, "stock-bespin", bench.SCENES["stock-bespin"])["measurement_error"])
             observer.write_text("frame,engine_max_fps,vsync_mode\n0,0,0\n1,0,0\n2,0,0\n")
-            # Native process-scope counter precedes the existing pre-draw override.
-            trace.write_text(header + "600,20,1,120,0\n700,20,1,120,0\n2300,30,1,120,0\n")
+            # Native clocks must qualify independently of clean post-draw clocks,
+            # including a single bad or missing sample outside the tick window.
+            for fps, vsync in [(120, 0), (0, 1), ("", 0)]:
+                with self.subTest(fps=fps, vsync=vsync):
+                    trace.write_text(header + f"0,20,1,{fps},{vsync}\n600,20,1,0,0\n700,20,1,0,0\n2300,30,1,0,0\n")
+                    self.assertIn("native CSV", bench.analyse_scene(root, "stock-bespin", bench.SCENES["stock-bespin"])["measurement_error"])
+            trace.write_text(header + "600,20,1,0,0\n700,20,1,0,0\n2300,30,1,0,0\n")
             self.assertNotIn("measurement_error", bench.analyse_scene(root, "stock-bespin", bench.SCENES["stock-bespin"]))
             native["live_session"]["start_fleet"][0]["entity"] = 92
             (root / "stock-bespin.json").write_text(json.dumps(native))
@@ -363,7 +378,7 @@ class RemakeBenchTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             (root / "exit-codes.txt").write_text("stock-bespin 0\n")
-            (root / "stock-bespin.csv").write_text("tick,wall_frame_ms,projectiles\n600,20,1\n700,20,1\n2300,30,1\n")
+            (root / "stock-bespin.csv").write_text("tick,wall_frame_ms,projectiles,engine_max_fps,vsync_mode\n600,20,1,0,0\n700,20,1,0,0\n2300,30,1,0,0\n")
             (root / "stock-bespin.observer.csv").write_text("frame,engine_max_fps,vsync_mode\n0,0,0\n1,0,0\n2,0,0\n")
             spec = root / "_spec.json"
             definition = dict(phase="measure", pacing="free")
@@ -391,6 +406,146 @@ class RemakeBenchTests(unittest.TestCase):
             self.assertIn("NUL control", bench.analyse_scene(root, "stock-bespin", bench.SCENES["stock-bespin"])["measurement_error"])
             (root / "stock-bespin.log").unlink()
             self.assertNotIn("measurement_error", bench.analyse_scene(root, "stock-bespin", bench.SCENES["stock-bespin"]))
+
+    def test_save_at_pairs_a_saving_and_a_loading_run_per_worker_count(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "spec.json"
+            bench.write_spec(path, ["stock-bespin"], "free", preparations={"stock-bespin": self.native_start()})
+            with self.assertRaisesRegex(ValueError, "inside its"):
+                bench.save_load_spec(path, 2000, 600)
+            bench.save_load_spec(path, 1500, 600)
+            runs = {run["name"]: run for run in json.loads(path.read_text())["runs"]}
+            self.assertEqual(sorted(runs), ["stock-bespin-w1-loaded", "stock-bespin-w1-saved",
+                                            "stock-bespin-w8-loaded", "stock-bespin-w8-saved"])
+
+            def value(run, flag):
+                return run["args"][run["args"].index(flag) + 1]
+            saved, loaded = runs["stock-bespin-w8-saved"], runs["stock-bespin-w8-loaded"]
+            for run in (saved, loaded):
+                self.assertEqual(value(run, "--eawr-live-workers"), "8")
+                self.assertEqual(value(run, "--eawr-live-hashes"), "{out}/" + run["name"] + ".hashes.csv")
+                self.assertEqual(value(run, "--eawr-perf-trace"), "{out}/" + run["name"] + ".csv")
+                self.assertIn("--bench-label=" + run["name"], run["args"])
+                self.assertEqual(value(run, "--eawr-map-camera-config"), "{in}/engagement/stock-bespin.xml")
+            self.assertEqual(value(saved, "--eawr-live-save-at"), "1500:{out}/stock-bespin-w8.eawr-ckp")
+            self.assertEqual(value(saved, "--eawr-live-ticks"), "2100")
+            self.assertEqual(value(loaded, "--eawr-live-load"), "{out}/stock-bespin-w8.eawr-ckp")
+            self.assertEqual(value(loaded, "--eawr-live-ticks"), "600")
+            self.assertEqual(value(loaded, "--eawr-live-capture-ticks"), "1530")
+            self.assertEqual(value(runs["stock-bespin-w1-saved"], "--eawr-live-workers"), "1")
+
+            # The analysis: identical continuation and a first loaded frame in the battle with units.
+            root = Path(tmp) / "rig"
+            root.mkdir()
+            (root / "_spec.json").write_text(path.read_text())
+            (root / "exit-codes.txt").write_text("".join(f"{name} 0\n" for name in runs))
+            for workers in ("1", "8"):
+                (root / f"stock-bespin-w{workers}.eawr-ckp").write_bytes(b"x")
+                hashes = {tick: f"h{tick}" for tick in range(1, 2101)}
+                (root / f"stock-bespin-w{workers}-saved.hashes.csv").write_text(
+                    "tick,sha256\n" + "".join(f"{t},{h}\n" for t, h in hashes.items()))
+                (root / f"stock-bespin-w{workers}-loaded.hashes.csv").write_text(
+                    "tick,sha256\n" + "".join(f"{t},{h if t > 1500 else ''}\n" for t, h in hashes.items()))
+                for phase in ("saved", "loaded"):
+                    (root / f"stock-bespin-w{workers}-{phase}.csv").write_text(
+                        "tick,wall_frame_ms,units\n1501,12,40\n1800,10,38\n")
+            self.assertTrue(bench.analyse_save_load(root, {}))
+            result = json.loads((root / "save-load.json").read_text())
+            self.assertEqual(result["pairs"][0]["loaded_first_frame"], dict(tick=1501, units=40, wall_frame_ms=12.0))
+            self.assertEqual(result["pairs"][0]["hashes_compared"], 600)
+            (root / "stock-bespin-w8-loaded.hashes.csv").write_text("tick,sha256\n2000,other\n")
+            self.assertFalse(bench.analyse_save_load(root, {}))
+            pair = json.loads((root / "save-load.json").read_text())["pairs"][1]
+            self.assertEqual((pair["workers"], pair["hashes_equal"], pair["first_difference"]), (8, False, 1501))
+
+    def test_from_save_reuses_a_cached_save_per_build_and_recipe(self):
+        self.assertEqual(bench.from_save_tick("remake-korriban", None),
+                         bench.SCENES["remake-korriban"]["window"][0] - bench.FROM_SAVE_LEAD)
+        self.assertEqual(bench.from_save_tick("raw-late-fleet60", None), 1080)
+        tick = bench.from_save_tick("stock-bespin", None)
+        with self.assertRaisesRegex(ValueError, "inside its"):
+            bench.from_save_tick("stock-bespin", 2400)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            artifact = root / "viewer-artifact.json"
+            artifact.write_text(json.dumps(dict(sha256="d" * 64)))
+            args = argparse.Namespace(viewer_artifact=str(artifact), plan_only=False, from_save=None,
+                                      save_cache=str(root / "cache"), mod_root=None, raw_mod_root=None)
+            preparations = {"stock-bespin": self.native_start()}
+            out = root / "run"
+            spec = out / "spec.json"
+            bench.write_spec(spec, ["stock-bespin"], "free", preparations=preparations)
+
+            # The recipe the cache is keyed by: the saving run of this build.
+            bench.write_spec(root / "probe" / "save-spec.json", ["stock-bespin"], "free", preparations=preparations)
+            bench.saving_spec(root / "probe" / "save-spec.json", {"stock-bespin": tick})
+            saving = json.loads((root / "probe" / "save-spec.json").read_text())["runs"][0]
+            args_of = saving["args"]
+            self.assertEqual(args_of[args_of.index("--eawr-live-save-at") + 1], f"{tick}:{{out}}/stock-bespin.eawr-ckp")
+            self.assertEqual(args_of[args_of.index("--eawr-live-ticks") + 1], str(tick + bench.FROM_SAVE_MARGIN))
+            self.assertNotIn("--eawr-live-capture-ticks", args_of)
+            self.assertFalse(saving["capture"])
+            recipe = bench.save_recipe("stock-bespin", tick, saving, "d" * 64)
+            self.assertNotEqual(recipe["key"], bench.save_recipe("stock-bespin", tick, saving, "e" * 64)["key"])
+            self.assertNotEqual(recipe["key"], bench.save_recipe("stock-bespin", tick + 1, saving, "d" * 64)["key"])
+            cached = root / "cache" / recipe["key"][:24] / "stock-bespin.eawr-ckp"
+            cached.parent.mkdir(parents=True)
+            cached.write_bytes(b"save")
+
+            # A cache hit: no rig run, the measured run loads the staged save and keeps its window.
+            def no_rig(*_):
+                raise AssertionError("a cached save must not start a rig run")
+            original = bench.invoke_rig
+            bench.invoke_rig = no_rig
+            try:
+                self.assertEqual(bench.prepare_saves(args, ["stock-bespin"], preparations, spec, out), 0)
+            finally:
+                bench.invoke_rig = original
+            measured = json.loads(spec.read_text())
+            run = measured["runs"][0]
+            values = run["args"]
+            self.assertEqual(values[values.index("--eawr-live-load") + 1], "{in}/saves/stock-bespin.eawr-ckp")
+            self.assertEqual(values[values.index("--eawr-live-ticks") + 1], str(bench.SCENES["stock-bespin"]["ticks"] - tick))
+            self.assertEqual(values[values.index("--eawr-live-capture-ticks") + 1], str(bench.SCENES["stock-bespin"]["ticks"]))
+            self.assertEqual(Path(measured["inputs"]["saves"]), (out / "saves").resolve())
+            self.assertEqual((out / "saves" / "stock-bespin.eawr-ckp").read_bytes(), b"save")
+            self.assertEqual(run["benchmark"]["from_save"], tick)
+            self.assertEqual(run["benchmark"]["save_key"], recipe["key"])
+
+            # Another build misses the cache and makes its save on the rig first.
+            artifact.write_text(json.dumps(dict(sha256="e" * 64)))
+            bench.write_spec(spec, ["stock-bespin"], "free", preparations=preparations)
+            calls = []
+
+            def saving_rig(_args, save_spec, output):
+                calls.append(json.loads(Path(save_spec).read_text())["runs"][0]["name"])
+                directory = output / "run1"
+                directory.mkdir(parents=True)
+                (directory / "stock-bespin.eawr-ckp").write_bytes(b"fresh")
+                return 0, directory
+            bench.invoke_rig = saving_rig
+            try:
+                self.assertEqual(bench.prepare_saves(args, ["stock-bespin"], preparations, spec, out), 0)
+            finally:
+                bench.invoke_rig = original
+            self.assertEqual(calls, ["stock-bespin"])
+            self.assertEqual((out / "saves" / "stock-bespin.eawr-ckp").read_bytes(), b"fresh")
+            made = list((root / "cache").glob("*/recipe.json"))
+            self.assertEqual(len(made), 1, "only the new build's recipe is written")
+            self.assertEqual(json.loads(made[0].read_text())["viewer_sha256"], "e" * 64)
+
+    def test_a_loaded_run_keeps_the_full_runs_window(self):
+        # Saved at 560: the first loaded frame (561) already has projectiles. A full run's contact rule
+        # would start the window at 621; a loaded run keeps the scene's window start.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "stock-bespin.csv").write_text("tick,wall_frame_ms,projectiles\n561,10,5\n600,10,5\n2300,10,5\n")
+            for saved, low in ((None, 621), (560, 600)):
+                benchmark = dict(window=[600, 2300]) if saved is None else dict(window=[600, 2300], from_save=saved)
+                (root / "_spec.json").write_text(json.dumps(dict(runs=[dict(name="stock-bespin", benchmark=benchmark)])))
+                row = bench.analyse_scene(root, "stock-bespin", bench.SCENES["stock-bespin"])
+                self.assertEqual(row["first_projectile_tick"], 561)
+                self.assertEqual(row["window_ticks"], [low, 2300])
 
 
 if __name__ == "__main__":

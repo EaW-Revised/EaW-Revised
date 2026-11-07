@@ -1205,6 +1205,8 @@ types, and leave all authored objects in place. `src/campaign/setup.cpp` placeme
 change: start-force placement already precedes any story service. This research
 changes no runtime code.
 
+**Update:** the story host now binds `Find_Object_Type`, `Spawn_Unit` and `Prevent_AI_Usage` (`src/campaign/galactic_story_scripts.cpp`, creation in the ordered native shadow). Creation reuses the journaled native creation of forced production, so the returned object is the first object of the requested type. Deviation: a creation the stock builder refuses (for example a land type on a planet without surface access) surfaces as a script error rather than a popup plus null table; a null creation warns and returns nothing. `Prevent_AI_Usage` for an owner without an initialized AI pool warns and the script goes on.
+
 ## Duplicate game-object definitions (same file and across files)
 
 This read-only walk answers what the original does when two game-object

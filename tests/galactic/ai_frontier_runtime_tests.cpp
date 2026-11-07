@@ -11,6 +11,7 @@
 #include <string_view>
 #include <vector>
 #include "../support/check.hpp"
+#include "eawr/vfs/vfs.hpp"
 #include "../support/env.hpp"
 #include "../support/result.hpp"
 // Same seeded stock campaign, with full preparation as the independent oracle.

@@ -174,6 +174,23 @@ void scene_contracts() {
     input.catalog = &catalog;
     input.access = assets.access();
     {
+        const auto collision_bytes = ted({Record{"SYNTH_OIVRHNPFF4K4", std::array<float, 3>{0, 0, 0}}});
+        auto collision_source = source;
+        collision_source.stored_size = collision_bytes.size();
+        auto collision_map = eawr::assets::load_map(collision_bytes, collision_source, types);
+        expect(collision_map && collision_map.value().placements.front().type_resolution
+            == eawr::assets::TypeResolution::collision, "colliding authored TED retains the asset diagnostic");
+        if (collision_map) {
+            auto collision_input = input;
+            collision_input.map = &collision_map.value();
+            const auto collision_scene = eawr::scene::build(collision_input);
+            expect(!collision_scene.placements.empty() && collision_scene.placements.front().object_id == "SYNTH_QLU1MOI5PTT3"
+                && has(collision_scene.placements.front(), Cause::crc_collision)
+                && collision_scene.placements.front().drawable(),
+                "scene binds and draws the first catalog candidate while retaining the collision");
+        }
+    }
+    {
         // BP-70: an invented root particle projectile follows the effect-only route.
         const std::vector<Record> rounds{
             {"EAWR_SCENE_PARTICLE_ROUND", std::array<float, 3>{11, 22, 33}},

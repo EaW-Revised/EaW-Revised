@@ -1,5 +1,7 @@
 add_executable(vfs_tests main.cpp)
-target_link_libraries(vfs_tests PRIVATE eawr::vfs)
+# The worker-thread read contract (L1.2) runs on std::thread.
+find_package(Threads REQUIRED)
+target_link_libraries(vfs_tests PRIVATE eawr::vfs Threads::Threads)
 target_compile_features(vfs_tests PRIVATE cxx_std_20)
 eawr_target_project_warnings(vfs_tests)
 

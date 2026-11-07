@@ -123,6 +123,158 @@ func _process(delta):
 '''
 
 
+STOCK_STEAL_DRIVER = '''extends SceneTree
+var frame = 0
+var elapsed = 0.0
+var viewport: SubViewport
+var planet = ""
+var badge = ""
+var slot_name = ""
+var from = Vector2.ZERO
+var slot_seen = false
+var release_frame = 0
+var modal_frames = 0
+var directory = %(directory)s
+func _initialize():
+    var instance = load(ProjectSettings.get_setting("application/run/main_scene")).instantiate()
+    viewport = SubViewport.new()
+    viewport.size = Vector2i(1280,720)
+    viewport.handle_input_locally = true
+    viewport.render_target_update_mode = SubViewport.UPDATE_ALWAYS
+    root.add_child(viewport)
+    viewport.add_child(instance)
+    viewport.notify_mouse_entered()
+    current_scene = viewport
+func motion(point, held):
+    var event = InputEventMouseMotion.new()
+    event.position = point
+    event.global_position = point
+    event.button_mask = MOUSE_BUTTON_MASK_LEFT if held else 0
+    event.relative = Vector2(24,0)
+    viewport.push_input(event,true)
+func mouse(point, down):
+    var event = InputEventMouseButton.new()
+    event.button_index = MOUSE_BUTTON_LEFT
+    event.pressed = down
+    event.position = point
+    event.global_position = point
+    viewport.push_input(event,true)
+func centre(name):
+    var node = viewport.find_child(name,true,false)
+    if node == null or not node.is_visible_in_tree():
+        return null
+    var rect = node.get_global_rect()
+    return rect.position + rect.size / 2.0
+func shot(label):
+    viewport.get_texture().get_image().save_png(directory + "/" + label + ".png")
+func finish(why):
+    print("STEAL_END=", why, " planet=", planet, " slot=", slot_seen, " modal_frames=", modal_frames, " dragging=", viewport.gui_is_dragging())
+    shot("end")
+    current_scene.propagate_notification(Node.NOTIFICATION_WM_CLOSE_REQUEST)
+    quit()
+func _process(delta):
+    elapsed += delta
+    if elapsed > 300.0:
+        finish("timeout")
+        return false
+    if planet == "":
+        if not Engine.has_meta("eawr_steal_stage"): return false
+        var stage = str(Engine.get_meta("eawr_steal_stage")).split(" ")
+        planet = stage[0]
+        badge = stage[1]
+        slot_name = "galaxy_ability_slot_" + planet
+        print("STEAL_STAGE=", planet, " ", badge, " elapsed=", elapsed)
+        shot("orbit")
+    frame += 1
+    if frame == 10:
+        from = centre(badge)
+        if from == null:
+            finish("no-fleet-icon")
+            return false
+        print("STEAL_DRAG_FROM=", from)
+        motion(from,false)
+        mouse(from,true)
+    if frame == 12: motion(from + Vector2(24,0),true)
+    if frame == 14: motion(from + Vector2(48,0),true)
+    if frame >= 20 and not slot_seen:
+        var point = centre(slot_name)
+        if point != null:
+            slot_seen = true
+            release_frame = frame + 6
+            var slot = viewport.find_child(slot_name,true,false)
+            for child in slot.get_children():
+                if child is Label: print("STEAL_CAPTION=", child.text.to_upper())
+            print("STEAL_SLOT_RECT=", JSON.stringify([slot.global_position.x, slot.global_position.y, slot.size.x, slot.size.y]))
+            # Hold beside the tile so the capture shows it unobscured.
+            motion(point + Vector2(slot.size.x,0),true)
+        elif frame == 300:
+            finish("no-steal-tile")
+            return false
+    if slot_seen and frame == release_frame - 2: shot("tile")
+    if slot_seen and frame == release_frame:
+        motion(centre(slot_name),true)
+        mouse(centre(slot_name),false)
+        print("STEAL_RELEASED frame=", frame)
+    if release_frame != 0 and frame > release_frame:
+        var modal = viewport.find_child("hero_action_modal",true,false)
+        if modal != null and modal.is_visible_in_tree():
+            modal_frames += 1
+            if modal_frames == 30:
+                print("STEAL_MODAL=true")
+                shot("menu")
+                finish("menu-open")
+                return false
+        elif frame == release_frame + 300:
+            finish("no-menu")
+    return false
+'''
+
+
+@unittest.skipUnless(support.RUNTIME and support.GAME_ROOT, "requires GPU viewer and installed FoC")
+class GalacticStockStealRuntime(unittest.TestCase):
+    """The owner's steps on stock data: a release on the STEAL tile of the planet the droid team orbits opens the menu.
+
+    The steal-stock fixture only stands in for the player's ordinary move to the Underworld planet; the campaign, the
+    ability data, the drag, the drop and the menu are the shipped ones.
+    """
+
+    def run_steal(self, campaign):
+        directory = pathlib.Path(tempfile.mkdtemp(prefix="eawr-gc-steal-" + campaign + "-"))
+        report, driver = directory / "report.json", directory / "driver.gd"
+        driver.write_text(STOCK_STEAL_DRIVER % {"directory": json.dumps(directory.as_posix())}, encoding="utf-8")
+        result = subprocess.run([os.environ["EAWR_GODOT_EXECUTABLE"], "--resolution", "1280x720",
+            "--path", str(support.ROOT / "apps/viewer/project"), "--script", str(driver), "--",
+            "--eawr-galactic", campaign, "--eawr-galactic-hud-fixture", "steal-stock", "--eawr-galactic-paused", "no",
+            "--eawr-game-root", support.GAME_ROOT, "--eawr-environment", "map", "--eawr-lighting", "sh", "--eawr-shadows", "on",
+            "--eawr-report", str(report)], cwd=support.ROOT, capture_output=True, text=True, timeout=420, check=False)
+        (directory / "viewer.log").write_text(result.stdout + result.stderr, encoding="utf-8")
+        print("STEAL-DIRECTORY", directory)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("STEAL_STAGE=", result.stdout, "the droid team must reach the Underworld planet's orbit")
+        self.assertIn("STEAL_CAPTION=STEAL", result.stdout, "the tile the owner released on")
+        self.assertIn("STEAL_MODAL=true", result.stdout, "the release must open the theft menu")
+        data = json.loads(report.read_text(encoding="utf-8"))
+        menu = data["hero_action_hud"]
+        self.assertEqual(menu["source"], "campaign-snapshot")
+        self.assertTrue(menu["active"] and menu["theft"], menu)
+        self.assertGreater(menu["offered"], 0)
+        self.assertEqual(len(menu["options"]), menu["offered"], "every offered technology is in the menu")
+        labels = {row["name"]: row["text"] for row in menu["labels"]}
+        self.assertTrue(labels.get("h_title"), labels)
+        for index in range(menu["offered"]):
+            self.assertTrue(labels.get("h_name_%02d" % index), labels)
+            self.assertTrue(labels.get("h_price_%02d" % index, "").startswith("$ "), labels)
+        self.assertEqual(data["destruction_hud"]["hero_drops"], 1)
+        self.assertEqual(data["fleet_hud"]["drag"]["orders"], 0, "the release is not an ordinary fleet order")
+        print("STEAL-OFFERED", campaign, menu["offered"])
+
+    def test_clusters_rebel_tech_2_opens_the_steal_menu_from_orbit(self):
+        self.run_steal("Sandbox_Clusters_Rebel")
+
+    def test_heart_of_the_maw_rebel_tech_3_opens_the_steal_menu_from_orbit(self):
+        self.run_steal("Sandbox_Heart_Of_The_Maw_Rebel")
+
+
 @unittest.skipUnless(support.RUNTIME and support.GAME_ROOT, "requires GPU viewer and installed FoC")
 class GalacticHeroAbilityEntryRuntime(unittest.TestCase):
     def run_entry(self, fixture, action="h_0000"):

@@ -440,7 +440,7 @@ GalacticWorld::PlayerFrontier::~PlayerFrontier() {
 core::Result<void> GalacticWorld::prepare_player_frontiers(const sim::PartitionExecutor& executor,
     std::span<const tactical::PlayerId> players) {
     const auto reads = owner_reads();
-    if (frontier_world_ == this || !bound_state_.snapshot_ || !std::is_sorted(players.begin(), players.end())
+    if (phase_ || phase_abandoned_ || frontier_world_ == this || !bound_state_.snapshot_ || !std::is_sorted(players.begin(), players.end())
         || std::adjacent_find(players.begin(), players.end()) != players.end()
         || std::any_of(players.begin(), players.end(), [&](auto who) { return !who || !player(who); }))
         return core::Result<void>::failure(detail::make_error(authoritative::codes::invalid_request,
@@ -522,6 +522,7 @@ GalacticWorld::GalacticWorld(GalacticPerceptionSetup setup) : setup_(std::move(s
     for (const auto& row : setup_.force_types)
         type_traits_.push_back({row.type, row.object_traits.has_value(), row.object_traits && row.object_traits->hero,
             row.object_traits && row.object_traits->named_hero});
+    type_names_ = GalacticTypeNames(setup_.types); // after the type sort and duplicate check above
     for (const auto& row : setup_.players) teams_.push_back({row.player, row.team});
     for (const auto& row : setup_.players) players_.push_back({row.player, row.team, 0, 0});
     std::set<tactical::PlayerId> ids, ai_ids;
@@ -550,7 +551,7 @@ core::Result<void> GalacticWorld::bind_native_frontier(tactical::PlayerId player
     ++bound().native_frontier_work_.requests;
     // Native layers cache their immutable publication until another real write.
     // The player key also keeps independent player frontiers distinct.
-    if (bound().native_frontier_player_ == player && bound().snapshot_ == snapshot && bound().next_id_ == next_entity_id)
+    if (!needs_observation_refresh(snapshot->completed_tick()) && bound().native_frontier_player_ == player && bound().snapshot_ == snapshot && bound().next_id_ == next_entity_id)
         return core::Result<void>::success();
     std::set<sim::EntityId> stealth;
     for (const auto& fleet : snapshot->fleets()) {
@@ -590,6 +591,9 @@ core::Result<void> GalacticWorld::bind_publication_impl(std::shared_ptr<const ga
     if (!publication) return core::Result<void>::failure(detail::make_error(
         authoritative::codes::invalid_request, "galactic perception needs an immutable connectivity publication"));
     const auto& connectivity = *publication;
+    // Same-frame load callbacks may bind repeatedly while validating recapture.
+    // Only a later ordinary frame admits the archived visibility transition.
+    const bool refresh_observations = needs_observation_refresh(synchronized_frame);
     gc_profile::Scope profile_scope(gc_profile::Phase::world_bind);
     if (!snapshot || !next_entity_id) return core::Result<void>::failure(detail::make_error(
         authoritative::codes::invalid_request, "galactic perception needs a completed snapshot and identity frontier"));
@@ -694,7 +698,7 @@ core::Result<void> GalacticWorld::bind_publication_impl(std::shared_ptr<const ga
                 });
     }
     compare_scope.reset();
-    if (!perception_due && bound().bound_source_ && generation && (same_projection || (generation == bound().bound_source_->economy_input_generation()
+    if (!refresh_observations && !perception_due && bound().bound_source_ && generation && (same_projection || (generation == bound().bound_source_->economy_input_generation()
         && snapshot->observer_input_generation() != 0
         && snapshot->observer_input_generation() == bound().bound_source_->observer_input_generation()))
         && next_entity_id == bound().next_id_ && connectivity.stealth_fleets == bound().connectivity_->stealth_fleets) {
@@ -1080,8 +1084,8 @@ core::Result<void> GalacticWorld::bind_publication_impl(std::shared_ptr<const ga
         prepared_offers->unique_jobs = std::adjacent_find(prepared_offers->jobs.begin(), prepared_offers->jobs.end(),
             [](const auto& a, const auto& b) { return a.player == b.player && a.planet == b.planet; }) == prepared_offers->jobs.end();
     }
-    const bool observer_changed = !bound().snapshot_ || bound().snapshot_->observer_input_generation() != snapshot->observer_input_generation();
-    markup_->retain_planets(snapshot->planets());
+    const bool observer_changed = refresh_observations || !bound().snapshot_ || bound().snapshot_->observer_input_generation() != snapshot->observer_input_generation();
+    if (!phase_rebuilding_) markup_->retain_planets(snapshot->planets());
     if (sparse_planets) {
         for (std::size_t slot = 0; slot < sparse_planets->size(); ++slot)
             bound().planets_[(*sparse_planets)[slot]] = std::move(rows[slot]);
@@ -1115,7 +1119,7 @@ core::Result<void> GalacticWorld::bind_publication_impl(std::shared_ptr<const ga
     // WGA-258/65: each fogged unit has its own qualified visibility category.
     // A unchanged bind does not refresh caches or reset observation ages.
     full_scope.emplace(gc_profile::Phase::world_observed);
-    if (observer_changed && bound().snapshot_->observer()) for (const auto& known : bound().snapshot_->observations()) {
+    if (!phase_rebuilding_ && observer_changed && bound().snapshot_->observer()) for (const auto& known : bound().snapshot_->observations()) {
         const std::array values{
             std::pair{galactic::bit(galactic::Intelligence::ownership), known.knowledge.ownership},
             std::pair{galactic::bit(galactic::Intelligence::fleet_presence), known.knowledge.fleet_presence},
@@ -1131,6 +1135,7 @@ core::Result<void> GalacticWorld::bind_publication_impl(std::shared_ptr<const ga
             if (changed) visibility_changed(known.player, known.planet, value, mask);
         }
     }
+    if (refresh_observations) bound().observations_restored_at_.reset();
     full_scope.reset();
     for (std::size_t slot = 0; slot < (sparse_planets ? sparse_planets->size() : bound().planets_.size()); ++slot) {
         const auto& row = bound().planets_[sparse_planets ? (*sparse_planets)[slot] : slot];
@@ -1183,7 +1188,7 @@ core::Result<void> GalacticWorld::bind_publication_impl(std::shared_ptr<const ga
 }
 
 void GalacticWorld::bind_connectivity(std::shared_ptr<const GalacticConnectivity> connectivity) {
-    if (connectivity->revision != bound().connectivity_->revision) {
+    if (!phase_rebuilding_ && connectivity->revision != bound().connectivity_->revision) {
         const auto lock = query_lock();
         mark_state_changed();
         for (auto& [who, mine] : shards_) {
@@ -1196,6 +1201,7 @@ void GalacticWorld::bind_connectivity(std::shared_ptr<const GalacticConnectivity
             std::size_t kept = mine.first_connected;
             mine.force_rows.erase(std::lower_bound(mine.force_rows.begin(), mine.force_rows.end(), kept), mine.force_rows.end());
             for (std::size_t index = mine.first_connected; index < mine.cache.size(); ++index) {
+                retain_phase_row(who, 1, index);
                 auto& row = mine.cache[index];
                 const auto& tokens = token_of(mine, row.key.token).tokens;
                 if (galactic_connectivity_token(tokens)) {
@@ -1203,6 +1209,7 @@ void GalacticWorld::bind_connectivity(std::shared_ptr<const GalacticConnectivity
                     continue;
                 }
                 if (index != kept) {
+                    retain_phase_row(who, 1, kept);
                     if (records_ready_) mine.records.relocate(row.key.player, 1, index, kept);
                     mine.cache[kept] = std::move(row);
                 }

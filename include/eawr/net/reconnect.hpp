@@ -173,7 +173,8 @@ struct ReconnectOptions {
     std::uint64_t hello_retry_ms{1000};
     std::size_t max_hello_attempts{8};
     std::size_t max_log_bytes{64U * 1024U * 1024U};
-    // A fresh tick-zero adapter, rebuilt from this same locally verified setup,
+    // A private adapter at SessionOptions::initial_tick, restored from the same
+    // locally verified checkpoint (or rebuilt at zero for a new game),
     // can enter as a returning seat. Source is an existing surviving peer.
     std::optional<PeerIndex> rejoin_source;
     std::uint64_t rejoin_epoch{};

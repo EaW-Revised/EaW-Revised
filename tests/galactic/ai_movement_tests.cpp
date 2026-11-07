@@ -1,4 +1,5 @@
 #include "../support/self_test.hpp"
+#include "eawr/vfs/vfs.hpp"
 #include "../support/env.hpp"
 #include "../support/result.hpp"
 #include "galactic_support.hpp"
@@ -19,6 +20,7 @@
 #include <exception>
 #include <filesystem>
 #include <iostream>
+#include <set>
 #include <map>
 #include <memory>
 #include <optional>
@@ -790,6 +792,71 @@ void changed_path() {
     expect(result.finished && result.actor == 10 && world.snapshot()->fleets().front().orbit == 2 && searches == 2,
         "changed live path facts terminate at intermediate system rather than traverse cached predecessors or invent success");
 }
+// #5489: the population projection memo must be invisible: fleet-only movement ticks with hash verification on
+// (which recomputes the projection on every memo hit and throws on a difference) match a run with the memo off.
+// The fixture plus the economy/production/census services that make refresh_population run (it returns early without a census).
+gc::GalacticSetup census_fixture() {
+    auto s = fixture();
+    s.player_economy.emplace(); s.fiscal.emplace(); s.production.emplace(); s.census.emplace();
+    s.production->maximum_human_queue = 1;
+    s.fleet_control->types.push_back({100}); s.census->types = {{1, f(1)}, {2, f(1)}, {100, {}}};
+    for (const auto& player : s.players) {
+        gc::GalacticPlayerEconomy economy; economy.player = player.player_id;
+        s.player_economy->players.push_back(economy);
+        s.fiscal->players.push_back({player.player_id, false, f(1)});
+        s.production->players.push_back({player.player_id, false, true, false, {}, {}, {}, {}, {}});
+        // Player 1's units on planet 3 do not count: the fleet's arrival there changes the projection, so a key that
+        // misses the fleet's orbit reuses a stale result and the verifier throws.
+        s.census->players.push_back({player.player_id, 100, true, player.player_id == 1 ? std::vector<gc::PlanetId>{3} : std::vector<gc::PlanetId>{}});
+    }
+    const auto actor = [&](eawr::sim::EntityId id, gc::TypeId type, gc::PlayerId owner, gc::PlanetId planet, eawr::sim::EntityId parent, gc::ActorCombatRole role) {
+        gc::CensusObject row{id, type, owner, planet, parent, false, false, type};
+        row.combat_role = role; row.abilities.present = role == gc::ActorCombatRole::ordinary; row.garrison = false;
+        s.census->objects.push_back(row);
+    };
+    for (const auto& planet : s.planets) {
+        s.fiscal->planets.push_back({planet.id, {}});
+        gc::PlanetProduction row; row.planet = planet.id; s.production->planets.push_back(row);
+        actor(planet.id, 100, planet.owner, planet.id, 0, gc::ActorCombatRole::ordinary);
+    }
+    for (const auto& fleet : s.fleets) {
+        // Container 0: a census container of the orbit planet would pin the fleet to that planet for the whole run.
+        actor(fleet.id, 100, fleet.owner, fleet.orbit, 0, gc::ActorCombatRole::fleet);
+        for (const auto& member : fleet.members) actor(member.id, member.type, fleet.owner, fleet.orbit, fleet.id, gc::ActorCombatRole::ordinary);
+    }
+    std::sort(s.census->objects.begin(), s.census->objects.end(), [](const auto& x, const auto& y) { return x.id < y.id; });
+    return s;
+}
+void population_memo_equality() {
+    eawr::sim::InlineExecutor executor;
+    // Runs: 0 memo on, 1 memo off, 2 negative control (memo on with the fleet orbit dropped from its key, verifier off).
+    std::array<std::string, 3> traces, population;
+    std::array<std::set<std::int64_t>, 3> used;
+    for (std::size_t run = 0; run < 3; ++run) {
+        auto world = take(gc::GalacticSession::create(census_fixture()));
+        world.set_hash_verification(run != 2); world.set_population_memo(run != 1); world.set_population_memo_drop_orbit(run == 2);
+        auto funding = std::make_shared<ai::GalacticFunding>(); ga::NativeActions actions(world, funding, {}, {});
+        bool pending{}; std::uint64_t searches{}; bind(actions, world, pending, searches);
+        ga::ActionRequest request; request.kind = ga::ActionKind::move; request.player = 1; request.object = 10; request.target = 3;
+        const auto accepted = take(actions.admit(request));
+        std::ostringstream trace, values; std::uint64_t steps{};
+        while (!take(actions.poll_movement(accepted.request)).finished && steps < 120) {
+            (void)take(world.step(executor)); ++steps; trace << world.cached_state_hash().get();
+            if (const auto& production = world.snapshot()->production()) for (const auto& player : production->players) if (player.player == 1) {
+                values << player.population_used.raw() << ','; used[run].insert(player.population_used.raw());
+            }
+        }
+        expect(steps > 2 && world.snapshot()->fleets().front().orbit == 3, "population memo case moves the fleet across ordinary hops");
+        trace << world.state_sha256(); traces[run] = trace.str(); population[run] = values.str();
+    }
+    std::cout << "population memo case: distinct used values on=" << used[0].size() << " off=" << used[1].size() << " negative-control=" << used[2].size()
+        << " series on=" << population[0] << " control=" << population[2] << std::endl;
+    expect(used[1].size() > 1, "the fleet's arrival changes the projected population, so the memo key is exercised");
+    expect(population[0] == population[1] && traces[0] == traces[1],
+        "population projection memo on equals memo off per tick and state under hash verification");
+    expect(population[2] != population[1],
+        "negative control: a memo key without the fleet orbit reuses a stale projection and the comparison detects it");
+}
 // Known deviation (#3981): without an AI bribe owner a corruption-benefiting move ends before an occupied intermediate hop.
 void bribed_traversal_without_owner() {
     auto world = take(gc::GalacticSession::create(fixture()));
@@ -961,7 +1028,7 @@ int case_galactic_ai_movement_tests(int argc, char** argv) {
     }
     try {
         if (argc == 2 && std::string_view(argv[1]) == "--installed") installed();
-        else { shared_movement_block(); movement_associations(); taskforce_containment(); invasion_queue_disk(); invasion_retention(); equal_owner_invasion_block(); summary_hold_survives_undefended_resume(); native_journal_disk(); contracts(); changed_path(); bribed_traversal_without_owner(); skipped_arrival_polls(); arrival_then_conflict_before_poll(); packed_remnant_hash(); native_management_gate(); }
+        else { shared_movement_block(); movement_associations(); taskforce_containment(); invasion_queue_disk(); invasion_retention(); equal_owner_invasion_block(); summary_hold_survives_undefended_resume(); native_journal_disk(); contracts(); changed_path(); bribed_traversal_without_owner(); skipped_arrival_polls(); arrival_then_conflict_before_poll(); packed_remnant_hash(); native_management_gate(); population_memo_equality(); }
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
     return galactic_test::failures ? 1 : 0;
 }

@@ -4,6 +4,21 @@ target_compile_features(scene_tests PRIVATE cxx_std_20)
 eawr_target_project_warnings(scene_tests)
 add_test(NAME scene_contracts COMMAND scene_tests)
 
+add_executable(model_cache_budget_tests model_cache_budget_tests.cpp)
+target_include_directories(model_cache_budget_tests PRIVATE "${PROJECT_SOURCE_DIR}/apps/viewer/src")
+target_compile_features(model_cache_budget_tests PRIVATE cxx_std_20)
+eawr_target_project_warnings(model_cache_budget_tests)
+add_test(NAME model_cache_budget_contracts COMMAND model_cache_budget_tests)
+
+add_executable(compose_texture_cache_tests compose_texture_cache_tests.cpp)
+target_link_libraries(compose_texture_cache_tests PRIVATE eawr::scene)
+target_include_directories(compose_texture_cache_tests PRIVATE
+    "${PROJECT_SOURCE_DIR}/apps/viewer/src"
+    "${PROJECT_SOURCE_DIR}/src/presentation/godot")
+target_compile_features(compose_texture_cache_tests PRIVATE cxx_std_20)
+eawr_target_project_warnings(compose_texture_cache_tests)
+add_test(NAME compose_texture_cache_contracts COMMAND compose_texture_cache_tests)
+
 add_executable(space_population_tests space_population_tests.cpp)
 target_link_libraries(space_population_tests PRIVATE eawr::scene)
 target_compile_features(space_population_tests PRIVATE cxx_std_20)
@@ -56,3 +71,15 @@ set_tests_properties(scene_evidence_comparator_contracts PROPERTIES WORKING_DIRE
 
 # Tier labels (cmake/EawrTestTiers.cmake).
 eawr_label_tests()
+
+add_executable(model_sha_reuse_tests model_sha_reuse_tests.cpp)
+target_link_libraries(model_sha_reuse_tests PRIVATE eawr::scene)
+target_compile_features(model_sha_reuse_tests PRIVATE cxx_std_20)
+eawr_target_project_warnings(model_sha_reuse_tests)
+add_test(NAME model_sha_reuse_contracts COMMAND model_sha_reuse_tests)
+
+add_executable(texture_prefetch_tests texture_prefetch_tests.cpp)
+target_link_libraries(texture_prefetch_tests PRIVATE eawr::scene)
+target_compile_features(texture_prefetch_tests PRIVATE cxx_std_20)
+eawr_target_project_warnings(texture_prefetch_tests)
+add_test(NAME texture_prefetch_contracts COMMAND texture_prefetch_tests)

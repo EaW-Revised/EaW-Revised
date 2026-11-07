@@ -24,9 +24,9 @@ gh pr diff 1234 --name-only | python tools/ci/validation_tier.py --stdin
 | --- | --- | --- | --- |
 | `docs` | Markdown (`*.md`) anywhere, walks included | the reader reruns: cleanroom check, doc references, tag registry check, `unit_census.py --check`, the whole Python suite (`tools/ci/python_suite.py`) and every CTest with game data | - |
 | `tooling` | Python files anywhere outside the viewer areas and build steps (tools, tests, test helpers such as `tests/ui/sfnt_fixture.py`), `tools/`, `tests/ci/`, `.github/`, `config/` (except the compiler cache pin); tool data: every non-Markdown file under `docs/`, `plan/` and `analysis/` that no build step reads | cleanroom check, doc references, tag registry check, the whole Python suite and the whole Windows CTest with game data (it holds every CTest that runs Python); with tool data, also `unit_census.py --check` | Linux |
-| `data` | `data/`, test fixtures, pinned replays and hashes | game-data CTest (unit census included) with one compiler, `windows-msvc-ninja` on the host with the verified FoC data copy, and the whole Python suite | the other compilers |
-| `sim` | gameplay and sim C++ (`src/`, `include/`, `apps/` except the viewer, C++ tests) | MSVC with game-data CTest (it runs the 1/2/4/8 worker hash tests) and Linux GCC | clang-cl, Clang |
-| `viewer` | `apps/viewer/`, the presentation library, GPU suite tests | the viewer build and the affected GPU suites; the presentation library also builds and tests in the root MSVC tree | the root presets, Linux |
+| `data` | `data/`, test fixtures, pinned replays and hashes | game-data CTest (unit census included) with one compiler, `windows-clang-ninja` on the host with the verified FoC data copy, and the whole Python suite | the other compilers |
+| `sim` | gameplay and sim C++ (`src/`, `include/`, `apps/` except the viewer, C++ tests) | the configured Windows default with game-data CTest (it runs the 1/2/4/8 worker hash tests) and Linux GCC | the other Windows compiler, Clang |
+| `viewer` | `apps/viewer/`, the presentation library, GPU suite tests | the viewer build and the affected GPU suites; the presentation library also builds and tests in the configured Windows root tree | the other root presets, Linux |
 | `full` | the build system (every `CMakeLists.txt`, `*.cmake`, `CMakePresets*.json` and toolchain file anywhere in the tree, `cmake/`), compiler, toolchain and dependency pins (`tools/shaders/toolchain.json`, `config/compiler-cache.json`, the Godot and godot-cpp pins in `dependencies.json`, `requirements-dev.txt`, any `*toolchain*` data file), platform and foundation code (`core`, `platform`, `vfs`, `third_party`), headers with 50 or more direct includers, unknown paths | both presets per platform, the viewer, game-data CTest, the whole Python suite | - |
 
 Only Markdown is prose. Any other file wherever it lives can feed a build:
@@ -107,7 +107,7 @@ which tests read the moved files:
   `unit_census.py --check` (with `EAWR_EAW_GAME_ROOT`, on the local lane);
 - the whole Python suite, `python tools/ci/python_suite.py`;
 - every CTest on the host with the verified FoC data copy (`windows_build.py --preset
-  windows-msvc-ninja --host laptop`), which also runs the script-style tests and the C++ tests
+  windows-clang-ninja --host laptop`), which also runs the script-style tests and the C++ tests
   that read Markdown.
 
 Record their results with the line.
@@ -118,13 +118,40 @@ The nightly runs the four x64 compilers (MSVC, clang-cl, GCC 14, Clang 18) with 
 warnings probe. It also runs the determinism comparators, the Linux software-render viewer, and
 the Windows viewer extension (built in the MSVC job of every full run). Everything runs on the
 self-hosted guests; GitHub-hosted minutes stay at zero, and ARM64 runs only when a dispatch asks
-for it. The CI guests have no FoC game data, so the game-data CTest stays in the per-PR gate of
+for it. The build jobs run CTest without FoC game data, so the game-data CTest stays in the per-PR gate of
 the `data`, `sim` and `full` tiers and of every change to Markdown, tool data or Python.
 
 The `nightly-alert` job runs after every scheduled run on the Linux support runner. A red
 nightly opens one issue labelled `ci-nightly`, or comments on the one that is already open. The
 next green nightly comments and closes it. A nightly that skipped because `main` has not
 changed since the last green one leaves the issue as it is.
+
+### Full galactic set
+
+The nightly also runs every `galactic_*` and `net_galactic_*` test except the serial release gate
+`galactic_ai_campaign_release_stock`, with the installed game data, as the job `galactic-full` on the Windows
+guest (CTest regex from the batch runners; the `galactic` area label is wider and does not select the same set).
+It is nightly-only (a manual dispatch needs `galactic: true`) and obeys the same "main unchanged" skip. The job
+waits for the build jobs, pauses the build pool on its guest with `pool.disabled` while it runs, builds its own
+MSVC tree (the build jobs delete theirs), reads the pool's verified game data mirror in place, and runs CTest two at
+a time with a stop time of 3 h 45 min. It needs about 4 to 5 hours.
+
+The job starts after the Windows build jobs (about 04:10 local). With about 40 minutes of build and up to 3 h 45 min of
+tests it ends around 08:30 to 09:00, so build host stays out of the pool into the morning. Its first step prints the
+runner account and checks that it can read the game mirror and write the pool base `build host`
+(an explicit path, never derived from `USERPROFILE`); without both it fails before the build with "runner account has
+no access: owner/admin ACL decision". The pause file's first line is `galactic nightly run <id> started <UTC time>`;
+a galactic pause older than 7 hours is stale (the job runs at most 6 hours) and the job `galactic-pause-sweep` removes
+it on the next nightly, even when the gate skips the galactic job. A person's own pause is never touched.
+A pool client refusing a host whose `pool.disabled` exists (legacy EAWR-5824) only works for clients at or after
+`b2d9a720`; jobs from older branches still build next to the tests.
+
+`tools/ci/galactic_summary.py` writes the run-page summary (counts, every red marked allowed or NEW, a full
+per-test table) and the `galactic-<date>` artifact. A red, a skipped test or a test that never ran is allowed only
+when it is listed in `tools/ci/galactic_known_reds.txt`; any other is NEW and fails the job. The job
+`nightly-alert-galactic` keeps its own issue labelled `ci-nightly-galactic`: it opens or updates on a NEW red (or when
+the job produced no result) and names the tests, and closes on the next run without one. Known reds alone do not
+alert. The list also records the last commit verified green; update both by hand after a verified run.
 
 ## Installed replay batch group
 
@@ -138,7 +165,7 @@ python tools/replay/compare_installed.py --group synthetic --program <sim_headle
 ```
 
 Fetch the executable for these comparisons with
-`python tools/offload/windows_build.py --ref <head> --preset windows-msvc-ninja --no-test --no-werror-probe --fetch-sim-headless out/replay-bin`.
+`python tools/offload/windows_build.py --ref <head> --no-test --no-werror-probe --fetch-sim-headless out/replay-bin`.
 Pass `out/replay-bin/sim_headless.exe` as `--program` and retain its adjacent
 `provenance.json` with the comparison receipts. The same executable can run the
 19-fixture comparison on 1/2/4/8 workers (76 runs); no private slot-copy wrapper is

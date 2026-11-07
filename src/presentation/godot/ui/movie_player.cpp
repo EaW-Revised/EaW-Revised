@@ -1,4 +1,5 @@
 #include "gpu_debug_labels.hpp"
+#include "eawr/vfs/vfs.hpp"
 #include "movie_player.hpp"
 
 #include <godot_cpp/classes/file_access.hpp>
@@ -8,6 +9,8 @@
 #include <godot_cpp/classes/video_stream_theora.hpp>
 #include <godot_cpp/classes/os.hpp>
 #include <godot_cpp/classes/engine.hpp>
+#include <godot_cpp/classes/image.hpp>
+#include <godot_cpp/classes/texture_rect.hpp>
 #include <godot_cpp/variant/utility_functions.hpp>
 #include <godot_cpp/core/object.hpp>
 #include "eawr/core/json_text.hpp"
@@ -17,6 +20,7 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#include <cstring>
 
 using namespace godot;
 
@@ -105,6 +109,26 @@ VideoStreamPlayer* movie_player(const std::int64_t id) {
         ? Object::cast_to<VideoStreamPlayer>(ObjectDB::get_instance(static_cast<uint64_t>(id))) : nullptr;
 }
 
+TextureRect* bink_node(const std::int64_t id) {
+    return id && UtilityFunctions::is_instance_id_valid(id)
+        ? Object::cast_to<TextureRect>(ObjectDB::get_instance(static_cast<uint64_t>(id))) : nullptr;
+}
+
+void prepare_bink_frame(BinkFrame& frame) {
+    auto bytes = std::make_shared<PackedByteArray>();
+    bytes->resize(static_cast<int64_t>(frame.rgba.size()));
+    std::memcpy(bytes->ptrw(), frame.rgba.data(), frame.rgba.size());
+    frame.presentation_data = std::move(bytes);
+    frame.rgba.clear();
+}
+
+Ref<Image> bink_image(const BinkFrame& frame) {
+    const auto bytes = std::static_pointer_cast<PackedByteArray>(frame.presentation_data);
+    if (!bytes || !frame.width || !frame.height || static_cast<std::uint64_t>(bytes->size()) !=
+        static_cast<std::uint64_t>(frame.width) * frame.height * 4) return {};
+    return Image::create_from_data(static_cast<int32_t>(frame.width), static_cast<int32_t>(frame.height), false, Image::FORMAT_RGBA8, *bytes);
+}
+
 } // namespace
 
 core::Result<VideoStreamPlayer*> attach_hud_movie(Control& parent, const data::ui::HudMovie& movie,
@@ -135,25 +159,50 @@ void CommandBarMovie::release_prepared() {
     // Prepared players are not in a scene tree; this owner releases them directly.
     if (auto* prepared = movie_player(prepared_player_id_)) memdelete(prepared);
     prepared_player_id_ = 0;
+    if (auto* node = bink_node(bink_node_id_); node && !bink_active_) {
+        if (node->get_parent()) node->get_parent()->remove_child(node);
+        memdelete(node);
+    }
+    if (!bink_active_) { bink_node_id_ = 0; bink_.reset(); bink_texture_.unref(); bink_ready_ = false; }
     warming_ = false;
 }
 
 void CommandBarMovie::stop() {
     if (auto* current = player()) { current->stop(); current->hide(); current->queue_free(); }
     player_id_ = 0;
+    if (bink_active_) {
+        if (auto* node = bink_node(bink_node_id_)) { node->hide(); node->queue_free(); }
+        bink_node_id_ = 0; bink_active_ = bink_ready_ = false;
+        bink_.reset(); bink_texture_.unref();
+    }
     speech_.clear();
 }
 
 void CommandBarMovie::prepare(const vfs::Vfs& filesystem, const std::string_view movie,
-    const presentation::ui::ReferencePoint bone, Control& parent) {
+    const presentation::ui::ReferencePoint bone, Control& parent, BinkSourceFactory decoder_factory,
+    std::function<void(std::string, std::string, std::string)> failure_sink) {
     stop(); release_prepared(); movie_.reset(); problem_.clear(); decoded_ = false; bone_ = bone; requested_movie_ = movie; requested_speech_.clear();
+    failure_sink_ = std::move(failure_sink); failure_noted_ = false;
     if (movie.empty()) return;
     // Prepared behind the loading screen: no XML/source hashing on the battle frame.
     auto resolved = data::ui::resolve_speech_movie(filesystem, {{}, std::string(movie)});
-    if (!resolved) { problem_ = core::format_diagnostic(resolved.error()); return; }
+    if (!resolved) { problem_ = core::format_diagnostic(resolved.error()); note_failure(); return; }
     movie_ = std::move(resolved.value().movie);
     style_ = data::ui::command_bar_movie_style(filesystem);
+    bink_parent_id_ = static_cast<std::int64_t>(parent.get_instance_id());
+    auto source = filesystem.open(movie_->source);
+    if (source && decoder_factory) {
+        try {
+            bink_ = std::make_unique<BinkWorker>([factory = std::move(decoder_factory), bytes = std::move(source).value()](std::shared_ptr<std::atomic_bool> cancelled) mutable {
+                return factory(std::move(bytes), std::move(cancelled));
+            }, prepare_bink_frame);
+        } catch (...) {
+            // Thread creation is optional: continue with the cached player.
+            bink_.reset();
+        }
+    }
     auto* os = OS::get_singleton();
+    bink_trace_ = os->get_environment("EAWR_BINK_TRACE") == "1";
     cache_ = os->get_environment("EAWR_MOVIE_CACHE");
     if (cache_.is_empty()) cache_ = "user://hud-movies";
     const auto arguments = os->get_cmdline_user_args();
@@ -161,7 +210,7 @@ void CommandBarMovie::prepare(const vfs::Vfs& filesystem, const std::string_view
         if (arguments[i] == "--eawr-movie-cache") cache_ = arguments[++i];
     // Opening the stream and creating its shader/material belong to HUD loading.
     auto prepared = prepare_hud_movie(*movie_, cache_, Rect2(0, 0, 1, 1), true);
-    if (!prepared) { problem_ = core::format_diagnostic(prepared.error()); return; }
+    if (!prepared) { problem_ = core::format_diagnostic(prepared.error()); serviced_at_ = {}; return; }
     prepared_player_id_ = static_cast<int64_t>(prepared.value()->get_instance_id());
     // A visible, in-viewport draw warms the real material/texture pipeline.
     // Hidden/offscreen nodes are culled and would defer that work to battle.
@@ -177,8 +226,59 @@ void CommandBarMovie::prepare(const vfs::Vfs& filesystem, const std::string_view
 }
 
 bool CommandBarMovie::warmup() {
+    if (bink_) {
+        if (serviced_at_ == std::chrono::steady_clock::time_point{}) serviced_at_ = std::chrono::steady_clock::now();
+        if (!bink_node_id_) {
+            BinkFrame frame;
+            if (bink_->take(frame)) {
+                const Ref<Image> image = bink_image(frame);
+                auto* parent = Object::cast_to<Control>(ObjectDB::get_instance(static_cast<uint64_t>(bink_parent_id_)));
+                if (image.is_valid() && parent && frame.rate_numerator && frame.rate_denominator) {
+                    bink_frame_seconds_ = static_cast<double>(frame.rate_denominator) / frame.rate_numerator;
+                    bink_texture_ = ImageTexture::create_from_image(image);
+                    auto* node = memnew(TextureRect);
+                    node->set_name("EAWR_HUD_MOVIE_WARMUP");
+                    node->set_texture(bink_texture_);
+                    if (bink_trace_) node->set_meta("eawr_movie_selected_frame", static_cast<int64_t>(frame.selected_frame));
+                    if (bink_trace_) node->set_meta("eawr_movie_total_frames", static_cast<int64_t>(frame.total_frames));
+                    node->set_expand_mode(TextureRect::EXPAND_IGNORE_SIZE);
+                    node->set_stretch_mode(TextureRect::STRETCH_SCALE);
+                    node->set_mouse_filter(Control::MOUSE_FILTER_IGNORE);
+                    node->set_modulate(Color(style_.colour[0], style_.colour[1], style_.colour[2], 1.0F / 64.0F));
+                    node->set_size(Vector2(2, 2));
+                    parent->add_child(node);
+                    bink_node_id_ = static_cast<std::int64_t>(node->get_instance_id());
+                    warmup_first_draw_ = 0;
+                } else bink_.reset();
+            }
+        }
+        if (auto* node = bink_node(bink_node_id_)) {
+            const auto drawn = static_cast<std::uint64_t>(Engine::get_singleton()->get_frames_drawn());
+            if (!warmup_first_draw_) warmup_first_draw_ = drawn;
+            if (drawn >= warmup_first_draw_ + 2) {
+                node->set_meta("eawr_movie_warmup_frames", static_cast<int64_t>(drawn - warmup_first_draw_));
+                node->hide(); node->get_parent()->remove_child(node);
+                node->set_name(godot_string(movie_->name));
+                node->set_modulate(Color(style_.colour[0], style_.colour[1], style_.colour[2], style_.colour[3]));
+                if (auto* cached = movie_player(prepared_player_id_)) {
+                    cached->stop();
+                    if (cached->get_parent()) cached->get_parent()->remove_child(cached);
+                    cached->hide();
+                }
+                warming_ = false; bink_ready_ = true; problem_.clear();
+                return true;
+            }
+            if (std::chrono::duration<double>(std::chrono::steady_clock::now() - serviced_at_).count() < 4.0) return false;
+            if (node->get_parent()) node->get_parent()->remove_child(node);
+            memdelete(node);
+            bink_node_id_ = 0;
+        }
+        if (bink_ && !bink_->failed()
+            && std::chrono::duration<double>(std::chrono::steady_clock::now() - serviced_at_).count() < 4.0) return false;
+        bink_.reset(); serviced_at_ = {}; warmup_first_draw_ = 0;
+    }
     auto* prepared = movie_player(prepared_player_id_);
-    if (!warming_ || !prepared) return true;
+    if (!warming_ || !prepared) { if (!problem_.empty()) note_failure(); return true; }
     if (serviced_at_ == std::chrono::steady_clock::time_point{}) serviced_at_ = std::chrono::steady_clock::now();
     const Ref<Texture2D> texture = prepared->get_video_texture();
     if (texture.is_valid() && texture->get_width() > 0 && texture->get_height() > 0) {
@@ -199,6 +299,7 @@ bool CommandBarMovie::warmup() {
     const auto valid = validate_hud_movie(*prepared, *movie_);
     problem_ = core::format_diagnostic(!valid ? valid.error() : diagnostic(codes::movie_undecodable,
         "movie did not complete its loading draw warm-up", *movie_));
+    note_failure();
     release_prepared();
     return true;
 }
@@ -206,6 +307,13 @@ bool CommandBarMovie::warmup() {
 bool CommandBarMovie::start(Control& parent, const std::string_view speech) {
     stop(); decode_seconds_ = 0; decoded_ = false; requested_speech_ = speech;
     serviced_at_ = std::chrono::steady_clock::now();
+    if (bink_ready_ && bink_) {
+        if (auto* node = bink_node(bink_node_id_)) {
+            speech_ = core::to_upper(speech); bink_active_ = true; bink_elapsed_ = 0;
+            parent.add_child(node); node->show(); decoded_ = true;
+            return true;
+        }
+    }
     auto* prepared = movie_player(prepared_player_id_);
     // G12/SND-69: failed movie start leaves speech queued and the slot empty.
     if (!prepared || warming_) return false;
@@ -220,6 +328,43 @@ bool CommandBarMovie::start(Control& parent, const std::string_view speech) {
 
 void CommandBarMovie::service(const bool speech_present, const bool paused,
     const presentation::ui::ShellPlacement& placement) {
+    if (bink_active_) {
+        auto* node = bink_node(bink_node_id_);
+        if (!node || !speech_present) { stop(); return; }
+        if (!bink_ || bink_->failed()) {
+            auto* parent = Object::cast_to<Control>(node->get_parent());
+            const auto speech = speech_;
+            stop();
+            if (parent && prepared_player_id_ && start(*parent, speech)) return;
+            problem_ = "EAWR-LOAD-1237: direct movie playback failed and no usable cache is available";
+            note_failure();
+            return;
+        }
+        const auto now = std::chrono::steady_clock::now();
+        if (!paused) {
+            bink_elapsed_ += std::chrono::duration<double>(now - serviced_at_).count();
+            BinkFrame frame;
+            if (bink_->take(frame)) {
+                const auto image = bink_image(frame);
+                if (image.is_valid()) {
+                    bink_texture_->update(image);
+                    if (bink_trace_) {
+                        node->set_meta("eawr_movie_selected_frame", static_cast<int64_t>(frame.selected_frame));
+                        for (int i = 0; i < 3; ++i)
+                            node->set_meta(String("eawr_movie_first_") + String::num_int64(i + 1), static_cast<int64_t>(frame.trace_first[i]));
+                        node->set_meta("eawr_movie_last", static_cast<int64_t>(frame.trace_last));
+                    }
+                }
+            }
+            if (bink_elapsed_ >= bink_frame_seconds_) { bink_elapsed_ = 0; bink_->request(); }
+        }
+        serviced_at_ = now;
+        node->set_position(Vector2(static_cast<float>(placement.left + (bone_.x + style_.offset_x + movie_->offset_x) * placement.scale),
+            static_cast<float>(placement.bottom - (bone_.y + style_.offset_y + movie_->offset_y) * placement.scale)));
+        node->set_size(Vector2(static_cast<float>(bink_texture_->get_width() * placement.scale),
+            static_cast<float>(bink_texture_->get_height() * placement.scale)));
+        return;
+    }
     auto* current = player();
     if (!current) return;
     if (!speech_present) { stop(); return; }
@@ -241,11 +386,21 @@ void CommandBarMovie::service(const bool speech_present, const bool paused,
         // A bounded decode probe is viewer policy; it never aborts the mode/audio.
         const auto valid = validate_hud_movie(*current, *movie_);
         if (!valid) problem_ = core::format_diagnostic(valid.error());
+        note_failure();
         stop();
     }
 }
 
-bool CommandBarMovie::playing() const { const auto* current = player(); return decoded_ && current && current->is_playing(); }
+bool CommandBarMovie::playing() const { const auto* current = player(); return bink_active_ || (decoded_ && current && current->is_playing()); }
+
+void CommandBarMovie::note_failure() {
+    if (failure_noted_) return;
+    failure_noted_ = true;
+    try {
+        if (failure_sink_) failure_sink_(movie_ ? movie_->source.canonical_path : std::string{},
+            movie_ ? movie_->source.layer_id : std::string{}, requested_movie_);
+    } catch (...) { /* A note must never interrupt the battle. */ }
+}
 
 void CommandBarMovie::write_report(std::ostream& output) const {
     const auto* current = player();

@@ -6,7 +6,7 @@
 
 #include "eawr/presentation/camera/controller.hpp"
 #include "eawr/presentation/space/fog_field.hpp"
-#include "eawr/vfs/vfs.hpp"
+#include "eawr/vfs/vfs_fwd.hpp"
 
 #include <godot_cpp/classes/image_texture.hpp>
 #include <godot_cpp/classes/node3d.hpp>
@@ -77,6 +77,7 @@ private:
     bool force_deploy_overlay_{};
     std::shared_ptr<const sim::tactical::TacticalSnapshot> overlay_snapshot_;
     std::shared_ptr<const platform::LiveFog> overlay_fog_;
+    std::vector<sim::tactical::DenseFogCircle> overlay_circles_;
     std::size_t prevention_circles_{};
     std::size_t blocked_points_{};
     std::vector<std::string> overlay_samples_;

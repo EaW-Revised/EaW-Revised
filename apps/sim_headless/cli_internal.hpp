@@ -18,12 +18,10 @@
 
 #include "scenario.hpp"
 
-#include <algorithm>
 #include <array>
 #include <charconv>
 #include <cstdint>
 #include <filesystem>
-#include <fstream>
 #include <iostream>
 #include <iterator>
 #include <memory>
@@ -33,7 +31,6 @@
 #include <string_view>
 #include <system_error>
 #include <utility>
-#include <variant>
 #include <vector>
 
 namespace sim_headless::cli {
@@ -52,9 +49,21 @@ struct Options {
     std::filesystem::path mod_root;
     bool report_mod_mounts{}; // opt-in CLI contract diagnostic; emitted after the VFS mount succeeds
     std::string map_path; // --map: a logical space-map path for a mod start (#4589); empty = the pinned M2 map
+    std::string seat1_faction, seat2_faction;
+    std::optional<std::uint32_t> seat1_team, seat2_team;
+    bool both_ai{};
+    // --slot <player>:<FACTION>:<team>:<human|ai>[:<difficulty>] (repeatable): a skirmish start with more than two
+    // lobby slots, e.g. the co-op start of a LAN incident. --seed overrides the start's seed.
+    std::vector<eawr::skirmish::LobbySlot> slots;
+    std::optional<std::uint64_t> seed;
+    std::string commands_path; // --commands-out: every routed AI/script command per tick (csv)
+    std::string setup_inventory_path;
     std::string replay_out_path;
     std::uint64_t ticks{};
     std::string ai_report_path; // opt-in completed battle and counted Lua diagnostics
+    // --probe-carrier <type> (repeatable, #5559): add one carrier of this type for seat 1 to an AI battle run and
+    // log the units that appear beside it (a launch diagnostic; seat 1 is the human seat, so no AI orders it).
+    std::vector<std::string> probe_carriers;
     std::string ai_trace_path;  // --ai-trace-out (#1702): proposal reasons, pad ownership, construction, credits
     std::string tag_trace_path; // --tag-trace-out (#628)
     // --scenario mode

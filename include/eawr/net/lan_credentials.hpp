@@ -17,12 +17,15 @@ public:
     // enabling the offer's separate returning-seat/rebuild recovery policy.
     // Binds the actual frozen offer; delivery and ACK are unchanged.
     [[nodiscard]] core::Result<ReconnectTokens> provide_mesh_repair(const SetupOffer&, MessageTransport&);
+    // GC recovery binds the frozen campaign offer for two or more saved seats;
+    // it does not enable tactical grace or alter the ordinary mesh provider.
+    [[nodiscard]] core::Result<ReconnectTokens> provide_galactic_recovery(const SetupOffer&, MessageTransport&, std::span<const PeerIndex> native_peers = {});
     // Consumes and erases credential frames before setup/monitor/replay see them.
     [[nodiscard]] core::Result<bool> receive(Received&, MessageTransport&);
     void clear() noexcept;
     [[nodiscard]] bool delivered() const noexcept;
 private:
-    [[nodiscard]] core::Result<ReconnectTokens> provide_for_offer(const SetupOffer&, MessageTransport&);
+    [[nodiscard]] core::Result<ReconnectTokens> provide_for_offer(const SetupOffer&, MessageTransport&, std::span<const PeerIndex> native_peers = {});
     ReconnectTokens tokens_;
     std::array<std::uint8_t, 32> identity_{};
     PeerIndex destination_{};

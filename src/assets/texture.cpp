@@ -1,9 +1,12 @@
 #include "eawr/core/load_profile.hpp"
+#include "eawr/vfs/vfs.hpp"
 #include "asset_internal.hpp"
 
 #include <algorithm>
 #include <array>
 #include <memory>
+#include <optional>
+#include <vector>
 
 #include <stb_image.h>
 
@@ -192,6 +195,27 @@ core::Result<Texture> load_texture(const std::span<const std::byte> bytes, Sourc
     return fail<Texture>(source, "texture bytes are not supported BMP, DDS, TGA, PNG or JPEG (extension "
         + extension(source.logical_path) + ")", 0, diagnostic_codes::texture_format);
 }
-core::Result<Texture> load_texture(const vfs::Vfs& filesystem,const std::string_view path){
-    core::load_profile::Scope load_scope(core::load_profile::Phase::texture);auto record=filesystem.stat(path);if(!record)return core::Result<Texture>::failure(record.error());auto bytes=filesystem.open(path);if(!bytes)return core::Result<Texture>::failure(bytes.error());return load_texture(bytes.value(),source_from(record.value()));}
+core::Result<Texture> load_texture(const vfs::Vfs& filesystem, const std::string_view path) {
+    core::load_profile::Scope load_scope(core::load_profile::Phase::texture);
+    // The same stat, open and decode as before, with the file read and the decode of the bytes timed apart.
+    std::optional<core::Result<std::vector<std::byte>>> bytes;
+    std::optional<core::Result<vfs::AssetRecord>> record;
+    {
+        core::load_profile::Scope read_scope(core::load_profile::Phase::texture_read);
+        std::uint64_t io_bytes = 0;
+        {
+            const core::load_profile::IoScope io_scope(core::load_profile::Phase::texture_read, &io_bytes);
+            record.emplace(filesystem.stat(path));
+            if (*record) bytes.emplace(filesystem.open(path));
+        }
+        if (bytes.has_value() && *bytes) {
+            core::load_profile::count(core::load_profile::Counter::texture_read_bytes, bytes->value().size());
+            core::load_profile::count(core::load_profile::Counter::texture_files);
+        }
+    }
+    if (!*record) return core::Result<Texture>::failure(record->error());
+    if (!*bytes) return core::Result<Texture>::failure(bytes->error());
+    core::load_profile::Scope parse_scope(core::load_profile::Phase::texture_parse);
+    return load_texture(bytes->value(), source_from(record->value()));
+}
 } // namespace eawr::assets

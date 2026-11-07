@@ -1,6 +1,10 @@
+#include "revised_layer.hpp"
+#include "eawr/vfs/vfs.hpp"
 #include "viewer_profile_arguments.hpp"
 #include "frame_timer.hpp"
 #include "startup_trace.hpp"
+#include "texture_census_journal.hpp"
+#include "texture_prefetch_policy.hpp"
 #include "battle_content.hpp"
 #include "map_mode.hpp"
 #include "map_mode_internal.hpp"
@@ -9,17 +13,40 @@
 #include "settings_store.hpp"
 #include "viewer_path.hpp"
 #include "viewer_load_notes.hpp"
+#include "load_job.hpp"
+#include "menu_timeline.hpp"
+#include "model_cache_budget.hpp"
 
 #include <godot_cpp/classes/project_settings.hpp>
 
+#include <algorithm>
 #include <cctype>
 #include <cmath>
 #include <cstdlib>
+#include <string>
+#include <vector>
+#if !defined(_WIN32)
+#include <unistd.h>
+#endif
 
 #include "map_mode_ready_internal.hpp"
 
 namespace eawr::presentation::godot_backend {
 
+namespace {
+// Installed physical RAM in bytes; 0 when the platform does not say.
+std::uint64_t total_physical_memory_bytes() {
+#if defined(_WIN32)
+    MEMORYSTATUSEX status{};
+    status.dwLength = sizeof(status);
+    return GlobalMemoryStatusEx(&status) ? static_cast<std::uint64_t>(status.ullTotalPhys) : 0ULL;
+#else
+    const long pages = sysconf(_SC_PHYS_PAGES);
+    const long page_size = sysconf(_SC_PAGE_SIZE);
+    return pages > 0 && page_size > 0 ? static_cast<std::uint64_t>(pages) * static_cast<std::uint64_t>(page_size) : 0ULL;
+#endif
+}
+} // namespace
 
 bool MapMode::State::fail_ready(std::string message) {
     State& state = *this;
@@ -55,6 +82,12 @@ void MapMode::State::parse_ready_arguments(std::string& lighting_argument, std::
                     if (value_used) ++index;
                     continue;
                 }
+            }
+            if (argument == String("--eawr-save-dir") || argument == String("--eawr-galactic-save-dir")) {
+                // #3989: the folder the in-game menu's Save writes, as the front end's Load list reads it.
+                if (!has_value) fog_argument_error = "missing value for " + std::string(argument.utf8().get_data());
+                else state.save_directory = ViewerPath{std::string(String(arguments[++index]).utf8().get_data())}.native();
+                continue;
             }
             if (argument == String("--eawr-audio")) {
                 if (!has_value) fog_argument_error = "missing value for --eawr-audio";
@@ -306,6 +339,18 @@ void MapMode::State::parse_ready_arguments(std::string& lighting_argument, std::
                 }
                 continue;
             }
+            if (argument == String("--eawr-model-cache-load-budget")) {
+                if (!has_value) {
+                    fog_argument_error = "missing value for --eawr-model-cache-load-budget";
+                } else {
+                    state.model_cache_load_budget_override = eawr::viewer::parse_model_cache_load_budget(
+                        std::string_view(String(arguments[++index]).utf8().get_data()));
+                    if (!state.model_cache_load_budget_override) {
+                        fog_argument_error = "--eawr-model-cache-load-budget expects <MiB|off>";
+                    }
+                }
+                continue;
+            }
             if (argument == String("--eawr-fog-paint")) state.fog_paint_requested = true;
             if (argument == String("--eawr-fog-inject-input")) state.fog_inject_input = true;
             if (argument == String("--eawr-space-populate-reject-upload-test"))
@@ -374,10 +419,31 @@ void MapMode::State::parse_ready_arguments(std::string& lighting_argument, std::
 bool MapMode::State::configure_ready_options(std::string& lighting_argument, std::string& shadows_argument, std::string& environment_argument, std::string& bloom_argument, std::string& fog_argument_error) {
     State& state = *this;
     if (state.options.populate) state.populate = *state.options.populate;
+    // The Separate render thread: the engine flag `--render-thread safe|separate` wins, else the project's thread model
+    // (2 = Separate). The attract load worker (stages 1-3 off the main thread) and the texture read-ahead of the initial
+    // compose run there only; Safe keeps the inline path.
+    bool separate = static_cast<int>(ProjectSettings::get_singleton()->get_setting(String("rendering/driver/threads/thread_model"), 2)) == 2;
+    {
+        const auto engine_args = OS::get_singleton()->get_cmdline_args();
+        for (int i = 0; i + 1 < engine_args.size(); ++i) {
+            if (engine_args[i] == String("--render-thread")) separate = engine_args[i + 1] == String("separate");
+        }
+        // The texture read-ahead of the initial compose of every live session (a skirmish, a replay, an attract demo),
+        // which also builds the mip chains of #5989 on its reader threads.
+        const auto user_args = OS::get_singleton()->get_cmdline_user_args();
+        std::vector<std::string> prefetch_args;
+        for (int i = 0; i < user_args.size(); ++i) prefetch_args.emplace_back(user_args[i].utf8().get_data());
+        const TexturePrefetchChoice prefetch = choose_texture_prefetch(separate, prefetch_args);
+        state.live_options.texture_prefetch = prefetch.enabled;
+        state.live_options.texture_prefetch_readers = prefetch.readers;
+    }
     if (state.options.attract) {
         // MAT-08, MAT-09: a demo map starts at once, spectated, with every unit drawn.
         state.live_options.fixture = "attract";
         state.live_options.attract_ai = state.options.attract->ai;
+        state.live_options.load_offload = separate;
+        state.live_options.model_volumes = {state.options.game_root};
+        if (!state.options.mod_root.empty()) state.live_options.model_volumes.push_back(state.options.mod_root);
         state.live_options.begin_barrier = false;
         state.live_options.reveal = true;
         state.live_options.verify = false;
@@ -449,8 +515,16 @@ bool MapMode::State::configure_ready_options(std::string& lighting_argument, std
         && (state.live_options.player || !state.live_options.orders.empty() || !state.live_options.capture_ticks.empty()
             || !state.live_options.follow_groups.empty()
             || state.live_options.end_tick || state.live_options.workers || !state.live_options.hashes_path.empty()
-            || !state.live_options.replay_path.empty())) {
+            || !state.live_options.replay_path.empty() || state.live_options.save_tick
+            || !state.live_options.load_path.empty())) {
         return state.fail_ready("--eawr-live-* options require --eawr-live-session");
+    }
+    // Resolve saved choices on the main thread before the battle preparation is queued.
+    if (const auto* saved = ActiveSettings::get()) {
+        state.live_options.workers = presentation::ui::resolve_thread_override(
+            state.live_options.workers, saved->video.simulation_threads);
+        state.live_options.particle_workers = presentation::ui::resolve_thread_override(
+            state.live_options.particle_workers, saved->video.particle_threads);
     }
     if (state.benchmark) {
         // The recorded frame time is not capped by the display refresh.
@@ -630,6 +704,7 @@ bool MapMode::State::mount_ready_content(assets::ObjectTypeCatalog& placement_ca
             roots.emplace_back("base", base);
         }
         std::vector<vfs::MountSpec> specs;
+        mount_revised_layer(roots);
         auto chain = vfs::resolve_manifest_chain(roots);
         if (!chain) return state.fail_ready(core::format_diagnostic(chain.error()));
         for (auto& manifest : chain.value()) {
@@ -827,251 +902,367 @@ bool MapMode::State::prepare_ready_particles(Node3D& host, const assets::Map& ma
     return true;
 }
 
-bool MapMode::ready(Node3D& host) {
-    core::load_profile::Scope ready_scope(core::load_profile::Phase::scene);
-    State& state = *state_;
-    startup_trace.report_path(state.options.report_path);
-    std::string lighting_argument = state.options.lighting;
-    std::string shadows_argument = state.options.shadows;
-    std::string environment_argument = state.options.environment;
-    std::string bloom_argument;
-    std::string fog_argument_error;
-    state.parse_ready_arguments(lighting_argument, shadows_argument, environment_argument, bloom_argument, fog_argument_error);
-    if (!state.configure_ready_options(lighting_argument, shadows_argument, environment_argument, bloom_argument, fog_argument_error)) return false;
-    assets::ObjectTypeCatalog catalog;
-    std::string catalog_failure;
-    if (!state.mount_ready_content(catalog, catalog_failure)) return false;
-    auto map_bytes = state.filesystem->open(state.options.map_path);
-    if (!map_bytes) return state.fail_ready(core::format_diagnostic(map_bytes.error()));
-    state.map_hash = hash_bytes(map_bytes.value());
-    auto loaded_map = assets::load_map(*state.filesystem, state.options.map_path, catalog);
-    if (!loaded_map) return state.fail_ready(core::format_diagnostic(loaded_map.error()));
-    const assets::Map& map = loaded_map.value();
-    state.semantic_complete = map.semantic_complete;
-    state.map_kind = !map.kind ? "unknown"
-        : (*map.kind == assets::MapKind::land ? "land" : "space");
-    state.environment_records = map.environments.size();
-    if (state.environment_record_argument) {
-        if (*state.environment_record_argument >= map.environments.size()) {
-            return state.fail_ready("--eawr-environment-record " + std::to_string(*state.environment_record_argument)
-                + ": the map declares " + std::to_string(map.environments.size()) + " environment records");
-        }
-        // The space view composes its sky, light and backdrop from record 0.
-        if (map.kind == assets::MapKind::space && *state.environment_record_argument != 0) {
-            return state.fail_ready("--eawr-environment-record applies to land maps; the space view shows environment 0");
-        }
-        state.environment_record = *state.environment_record_argument;
-    }
-    if (state.environment_record < map.environments.size()) {
-        state.environment_record_name = map.environments[state.environment_record].name.value_or("");
-    }
-    state.water_records = map.water_records.size();
-    // #201: retail land and space battles bloom with the current environment's
-    // parameters; the viewer's current environment is the selected record
-    // (--eawr-environment-record, default 0).
-    if (state.bloom) {
-        state.scene_bloom = map.environments.empty()
-            ? lighting::bloom::SceneBloom{} : lighting::bloom::environment_bloom(map.environments[state.environment_record]);
-    }
+struct MapMode::State::ReadyLoad final {
+    // This context is shared by the ordered callbacks, never by gameplay frames.
+    // Keep the model-load scope before the map so it outlives all parsed inputs.
+    struct ReadyContext final {
+        MapMode& mode;
+        Node3D& host;
+        State& state;
+        std::string lighting_argument;
+        std::string shadows_argument;
+        std::string environment_argument;
+        std::string bloom_argument;
+        std::string fog_argument_error;
+        assets::ObjectTypeCatalog catalog;
+        std::string catalog_failure;
+        std::unique_ptr<scene::VfsAssetCache::ModelLoadScope> model_load;
+        std::vector<std::byte> map_bytes;
+        std::optional<assets::Map> map;
+        EnqueueLoadStep enqueue;
 
-    // Water is composed with the terrain below (land_look::compose_water): an
-    // approximate plane and river ribbons, never a TerrainWater technique.
-    state.water_status = "absent";
-    state.water_cause = "water is composed only for a land map";
-    state.nebula_status = state.map_kind == "space"
-        ? "classified_not_rendered" : "not_applicable";
-
-    // A kind-2 map has no terrain, and terrain::build rightly rejects it, so
-    // composition branches on the validated kind instead: only the land path
-    // below builds terrain, and a land map without terrain still fails there.
-    if (map.kind == assets::MapKind::space) {
-        return state.ready_space(host, map, catalog, catalog_failure);
-    }
-    if (!state.space_camera.empty() || !state.space_control.empty()) {
-        return state.fail_ready("--eawr-space-camera and --eawr-space-control apply only to a kind-2 (space) map");
-    }
-    if (state.space_place_object || !state.space_hardpoint_states.empty())
-        return state.fail_ready("--eawr-space-place-object applies only to a kind-2 (space) map");
-    if (!state.space_place_at.empty()) return state.fail_ready("--eawr-space-place-at applies only to a kind-2 (space) map");
-    if (state.idle_offset && !state.populate) return state.fail_ready("--eawr-map-idle-offset requires --eawr-populate");
-    if (!state.space_fog_admit.empty()) {
-        return state.fail_ready("--eawr-space-fog-admit applies only to a kind-2 (space) map");
-    }
-    if (state.map_camera_terminal_release_test) {
-        return state.fail_ready("--eawr-map-camera-terminal-release-test applies only to a space map");
-    }
-    if (state.map_camera_terminal_baseline_test) {
-        return state.fail_ready("--eawr-map-camera-terminal-baseline-test applies only to a space map");
-    }
-
-    auto built = terrain::build(map);
-    if (!built) return state.fail_ready(core::format_diagnostic(built.error()));
-    const terrain::Mesh& mesh = built.value();
-    state.chunk_count = static_cast<std::uint32_t>(mesh.chunks.size());
-    state.vertex_count = mesh.vertex_count;
-    state.triangle_count = mesh.triangle_count;
-
-    state.renderer = std::make_unique<GodotRenderer>(host, state.options.shaders);
-    state.renderer->set_texture_loader([filesystem = state.filesystem](const assets::Source& source) -> std::optional<assets::Texture> {
-        auto loaded = assets::load_texture(*filesystem, source.logical_path);
-        if (!loaded) return std::nullopt;
-        return std::move(loaded.value());
-    });
-    state.renderer->set_model_loader([filesystem = state.filesystem](const assets::Source& source) -> std::optional<assets::Model> {
-        auto loaded = assets::load_model(*filesystem, source.logical_path);
-        if (!loaded) return std::nullopt;
-        return std::move(loaded.value());
-    });
-    startup_trace.renderer_probe(state.renderer->recipe_memory_probe());
-    state.renderer->set_scene_bloom(state.scene_bloom);
-    state.scene_bloom_applied = state.renderer->scene_bloom_active();
-    if (state.fog) {
-        // Land units use every accepted legacy family, so each gets a derived
-        // fog stage (#28); the BatchMesh passes keep their fixed variants.
-        const auto enabled = state.renderer->enable_fog({
-            .selection = {state.fog->stream(), state.fog->team()}, .derive_legacy_stages = true});
-        if (!enabled) return state.fail_ready(core::format_diagnostic(enabled.error()));
-        state.fog_renderer_stream = state.fog->stream();
-        host.set_process_input(true);
-        host.set_process_unhandled_input(true);
-    }
-
-    if (state.environment_choice == "map") {
-        if (map.environments.empty()) return state.fail_ready("--eawr-environment map: the map declares no environment record");
-        const assets::EnvironmentDescriptor& record = map.environments[state.environment_record];
-        std::vector<lighting::RawField> fields;
-        for (const auto& field : record.fields) fields.push_back({field.id, field.bytes});
-        auto candidate = lighting::candidate_environment(fields);
-        if (!candidate) {
-            return state.fail_ready("--eawr-environment map: environment " + std::to_string(state.environment_record)
-                + " does not decode under the candidate mapping");
-        }
-        state.environment = *candidate;
-        state.wind = lighting::wind::environment_wind(record);
-    }
-    if (state.policy != lighting::Policy::off) {
-        // Set before any upload so legacy materials compile in the
-        // shadow-receiving variant; the shadow distance is refined once the
-        // capture camera is known.
-        const lighting::Policy other = state.policy == lighting::Policy::sh
-            ? lighting::Policy::hemisphere : lighting::Policy::sh;
-        state.configured_lighting = state.lighting_state(state.policy, 4096.0F);
-        state.other_lighting = state.lighting_state(other, 4096.0F);
-        state.renderer->set_lighting(state.configured_lighting);
-    }
-
-    state.record_terrain_slots(mesh);
-    const land_look::TextureLookup lookup_texture = [&state](const std::string_view declared)
-        -> std::optional<assets::Texture> {
-        const auto resolved = probe_reference(*state.filesystem, "data/art/textures/", declared, texture_suffixes);
-        if (!resolved) return std::nullopt;
-        auto decoded = assets::load_texture(*state.filesystem, *resolved);
-        if (!decoded) return std::nullopt;
-        // RGBA rows top-left where the decoder kept BGRA or bottom-left rows.
-        if (auto normal = space::normalize_texture(decoded.value())) return std::move(normal.value());
-        return std::move(decoded.value());
+        ReadyContext(MapMode& owner, Node3D& node, State& value, EnqueueLoadStep queue)
+            : mode(owner), host(node), state(value), lighting_argument(value.options.lighting),
+              shadows_argument(value.options.shadows), environment_argument(value.options.environment), enqueue(std::move(queue)) {}
     };
-    auto blend = terrain::blend_map(map);
-    if (!blend) return state.fail_ready(core::format_diagnostic(blend.error()));
-    auto blend_bindings = land_look::register_terrain_blend(*state.renderer, blend.value(),
-        map.terrain->materials, lookup_texture, state.terrain_blend);
-    if (!blend_bindings) return state.fail_ready(core::format_diagnostic(blend_bindings.error()));
+    using Job = LoadJob<ReadyContext>;
+    Job job;
+    ReadyLoad(MapMode& owner, Node3D& node, State& value)
+        : job(std::make_unique<ReadyContext>(owner, node, value, [this](LoadStep step) {
+              job.append([step = std::move(step)](ReadyContext&) { return step(); });
+          }), {
+        [](ReadyContext& context) {
+            auto& state = context.state;
+            TextureCensusJournal::snapshot("battle_load_start");
+            startup_trace.report_path(state.options.report_path);
+            state.parse_ready_arguments(context.lighting_argument, context.shadows_argument,
+                context.environment_argument, context.bloom_argument, context.fog_argument_error);
+            const bool ready = state.configure_ready_options(context.lighting_argument, context.shadows_argument,
+                context.environment_argument, context.bloom_argument, context.fog_argument_error);
+            if (ready && state.options.attract) MenuTimeline::mark("attract_load_options");
+            return ready;
+        },
+        [](ReadyContext& context) {
+            auto& state = context.state;
+            if (!state.mount_ready_content(context.catalog, context.catalog_failure)) return false;
+            context.model_load = std::make_unique<scene::VfsAssetCache::ModelLoadScope>(*state.filesystem);
+            // Bound the strong cache from the first decode instead of only at the end of load. A galactic battle load
+            // keeps the cache unbounded: the call is ignored while the load scope above is open.
+            scene::VfsAssetCache(*state.filesystem).begin_model_load(state.model_cache_load_budget_override.value_or(
+                eawr::viewer::model_cache_load_budget(total_physical_memory_bytes())));
+            if (state.options.attract) MenuTimeline::mark("attract_load_content");
+            return true;
+        },
+        [](ReadyContext& context) {
+            auto& state = context.state;
+            auto map_bytes = state.filesystem->open(state.options.map_path);
+            if (!map_bytes) return state.fail_ready(core::format_diagnostic(map_bytes.error()));
+            context.map_bytes = std::move(map_bytes.value());
+            state.map_hash = hash_bytes(context.map_bytes);
+            auto loaded_map = assets::load_map(*state.filesystem, state.options.map_path, context.catalog);
+            if (!loaded_map) return state.fail_ready(core::format_diagnostic(loaded_map.error()));
+            context.map.emplace(std::move(loaded_map.value()));
+            if (state.options.attract) MenuTimeline::mark("attract_load_map");
+            return true;
+        },
+        [](ReadyContext& context) {
+            auto& state = context.state;
+            const auto& map = *context.map;
+            state.semantic_complete = map.semantic_complete;
+            state.map_kind = !map.kind ? "unknown"
+                : (*map.kind == assets::MapKind::land ? "land" : "space");
+            state.environment_records = map.environments.size();
+            if (state.environment_record_argument) {
+                if (*state.environment_record_argument >= map.environments.size()) {
+                    return state.fail_ready("--eawr-environment-record " + std::to_string(*state.environment_record_argument)
+                        + ": the map declares " + std::to_string(map.environments.size()) + " environment records");
+                }
+                // The space view composes its sky, light and backdrop from record 0.
+                if (map.kind == assets::MapKind::space && *state.environment_record_argument != 0) {
+                    return state.fail_ready("--eawr-environment-record applies to land maps; the space view shows environment 0");
+                }
+                state.environment_record = *state.environment_record_argument;
+            }
+            if (state.environment_record < map.environments.size()) {
+                state.environment_record_name = map.environments[state.environment_record].name.value_or("");
+            }
+            state.water_records = map.water_records.size();
+            // #201: retail land and space battles bloom with the current environment's
+            // parameters; the viewer's current environment is the selected record
+            // (--eawr-environment-record, default 0).
+            if (state.bloom) {
+                state.scene_bloom = map.environments.empty()
+                    ? lighting::bloom::SceneBloom{} : lighting::bloom::environment_bloom(map.environments[state.environment_record]);
+            }
 
-    std::vector<sim::RenderInstance> instances;
-    sim::AssetId next_asset = 1;
-    sim::EntityId next_entity = 1;
-    const MaterialDescription terrain_material{
-        .schema_version = MaterialDescription::current_schema_version,
-        .route = MaterialRoute::modern_spatial,
-        .pass = RenderPass::opaque,
-        .program = state.terrain_material_program(),
-        .technique = {},
-        .pass_name = {},
-        .bindings = std::move(blend_bindings.value()),
-    };
-    // Every surface draws the same blended material; its own texture is unused.
-    const assets::Texture unused_texture = placeholder_texture();
-    if (!state.upload_terrain_surfaces(mesh, terrain_material, unused_texture, instances, next_asset, next_entity)) return false;
+            // Water is composed with the terrain below (land_look::compose_water): an
+            // approximate plane and river ribbons, never a TerrainWater technique.
+            state.water_status = "absent";
+            state.water_cause = "water is composed only for a land map";
+            state.nebula_status = state.map_kind == "space"
+                ? "classified_not_rendered" : "not_applicable";
+            if (state.options.attract) MenuTimeline::mark("attract_load_environment");
+            return true;
+        },
+        [](ReadyContext& context) {
+            auto& state = context.state;
+            auto& host = context.host;
+            const auto& map = *context.map;
+            const auto& catalog = context.catalog;
+            const auto& catalog_failure = context.catalog_failure;
+            // A kind-2 map has no terrain, and terrain::build rightly rejects it, so
+            // composition branches on the validated kind instead: only the land path
+            // below builds terrain, and a land map without terrain still fails there.
+            if (map.kind == assets::MapKind::space) {
+                const bool ready = state.ready_space(host, map, catalog, catalog_failure,
+                    state.options.attract ? context.enqueue : EnqueueLoadStep{});
+                return ready;
+            }
+            if (!state.space_camera.empty() || !state.space_control.empty()) {
+                return state.fail_ready("--eawr-space-camera and --eawr-space-control apply only to a kind-2 (space) map");
+            }
+            if (state.space_place_object || !state.space_hardpoint_states.empty())
+                return state.fail_ready("--eawr-space-place-object applies only to a kind-2 (space) map");
+            if (!state.space_place_at.empty()) return state.fail_ready("--eawr-space-place-at applies only to a kind-2 (space) map");
+            if (state.idle_offset && !state.populate) return state.fail_ready("--eawr-map-idle-offset requires --eawr-populate");
+            if (!state.space_fog_admit.empty()) {
+                return state.fail_ready("--eawr-space-fog-admit applies only to a kind-2 (space) map");
+            }
+            if (state.map_camera_terminal_release_test) {
+                return state.fail_ready("--eawr-map-camera-terminal-release-test applies only to a space map");
+            }
+            if (state.map_camera_terminal_baseline_test) {
+                return state.fail_ready("--eawr-map-camera-terminal-baseline-test applies only to a space map");
+            }
 
-    // Approximate water: the header's plane and every authored river.
-    if (auto water = land_look::compose_water(*state.renderer, map, mesh, lookup_texture,
-            next_asset, next_entity, instances, state.water_capture_time, state.options.interactive,
-            state.fog.has_value())) {
-        state.water = std::move(water.value());
-        state.water_status = state.water.status;
-        state.water_cause = state.water.cause;
-    } else {
-        return state.fail_ready("water: " + core::format_diagnostic(water.error()));
-    }
+            auto built = terrain::build(map);
+            if (!built) return state.fail_ready(core::format_diagnostic(built.error()));
+            const terrain::Mesh& mesh = built.value();
+            state.chunk_count = static_cast<std::uint32_t>(mesh.chunks.size());
+            state.vertex_count = mesh.vertex_count;
+            state.triangle_count = mesh.triangle_count;
 
-    state.compose_skydome(map, catalog, catalog_failure, lookup_texture, next_asset, next_entity, instances);
+            state.renderer = std::make_unique<GodotRenderer>(host, state.options.shaders);
+            state.renderer->set_texture_loader([filesystem = state.filesystem](const assets::Source& source) -> std::optional<assets::Texture> {
+                auto loaded = assets::load_texture(*filesystem, source.logical_path);
+                if (!loaded) return std::nullopt;
+                return std::move(loaded.value());
+            });
+            state.renderer->set_model_loader([filesystem = state.filesystem](const assets::Source& source) -> std::optional<assets::Model> {
+                auto loaded = assets::load_model(*filesystem, source.logical_path);
+                if (!loaded) return std::nullopt;
+                return std::move(loaded.value());
+            });
+            startup_trace.renderer_probe(state.renderer->recipe_memory_probe());
+            startup_trace.texture_census_probe(state.renderer->texture_census_probe());
+            state.renderer->set_scene_bloom(state.scene_bloom);
+            state.scene_bloom_applied = state.renderer->scene_bloom_active();
+            if (state.fog) {
+                // Land units use every accepted legacy family, so each gets a derived
+                // fog stage (#28); the BatchMesh passes keep their fixed variants.
+                const auto enabled = state.renderer->enable_fog({
+                    .selection = {state.fog->stream(), state.fog->team()}, .derive_legacy_stages = true});
+                if (!enabled) return state.fail_ready(core::format_diagnostic(enabled.error()));
+                state.fog_renderer_stream = state.fog->stream();
+                host.set_process_input(true);
+                host.set_process_unhandled_input(true);
+            }
 
-    if (!state.ready_land_population(map, instances, next_asset, next_entity)) return false;
+            if (state.environment_choice == "map") {
+                if (map.environments.empty()) return state.fail_ready("--eawr-environment map: the map declares no environment record");
+                const assets::EnvironmentDescriptor& record = map.environments[state.environment_record];
+                std::vector<lighting::RawField> fields;
+                for (const auto& field : record.fields) fields.push_back({field.id, field.bytes});
+                auto candidate = lighting::candidate_environment(fields);
+                if (!candidate) {
+                    return state.fail_ready("--eawr-environment map: environment " + std::to_string(state.environment_record)
+                        + " does not decode under the candidate mapping");
+                }
+                state.environment = *candidate;
+                state.wind = lighting::wind::environment_wind(record);
+            }
+            if (state.policy != lighting::Policy::off) {
+                // Set before any upload so legacy materials compile in the
+                // shadow-receiving variant; the shadow distance is refined once the
+                // capture camera is known.
+                const lighting::Policy other = state.policy == lighting::Policy::sh
+                    ? lighting::Policy::hemisphere : lighting::Policy::sh;
+                state.configured_lighting = state.lighting_state(state.policy, 4096.0F);
+                state.other_lighting = state.lighting_state(other, 4096.0F);
+                state.renderer->set_lighting(state.configured_lighting);
+            }
 
-    // A top-down camera makes the terrain footprint a known central rectangle,
-    // so the evidence check tests where terrain drew rather than only that
-    // something drew.
-    const assets::Vec3f minimum = terrain::asset_to_render(mesh.bounds_min);
-    const assets::Vec3f maximum = terrain::asset_to_render(mesh.bounds_max);
-    if (!state.configure_ready_camera(host, map, mesh, minimum, maximum)) return false;
-    if (!state.prepare_ready_particles(host, map)) return false;
-    if (!state.live_options.fixture.empty() && !state.ready_land_live(host, map, instances, next_asset, next_entity)) return false;
-    if (state.policy != lighting::Policy::off) {
-        // The shadow range covers the farthest terrain corner seen by the
-        // capture camera. Cascades split by view depth: the tactical and live
-        // cameras keep the land splits, while a top-down overview sees the
-        // whole map at nearly one depth and gets one orthogonal map instead.
-        const bool live_camera = state.map_camera && !state.map_camera->controller().capture_locked();
-        if (state.camera_view != "tactical" && !live_camera) {
-            state.configured_lighting.shadow_layout = GodotRenderer::ShadowLayout::orthogonal;
-            state.other_lighting.shadow_layout = GodotRenderer::ShadowLayout::orthogonal;
-        }
-        float farthest = 0.0F;
-        for (const float x : {minimum.x, maximum.x}) {
-            for (const float y : {minimum.y, maximum.y}) {
-                for (const float z : {minimum.z, maximum.z}) {
-                    const float dx = x - state.camera.eye[0];
-                    const float dy = y - state.camera.eye[1];
-                    const float dz = z - state.camera.eye[2];
-                    farthest = std::max(farthest, std::sqrt(dx * dx + dy * dy + dz * dz));
+            state.record_terrain_slots(mesh);
+            const land_look::TextureLookup lookup_texture = [&state](const std::string_view declared)
+                -> std::optional<assets::Texture> {
+                const auto resolved = probe_reference(*state.filesystem, "data/art/textures/", declared, texture_suffixes);
+                if (!resolved) return std::nullopt;
+                auto decoded = assets::load_texture(*state.filesystem, *resolved);
+                if (!decoded) return std::nullopt;
+                // RGBA rows top-left where the decoder kept BGRA or bottom-left rows.
+                if (auto normal = space::normalize_texture(decoded.value())) return std::move(normal.value());
+                return std::move(decoded.value());
+            };
+            auto blend = terrain::blend_map(map);
+            if (!blend) return state.fail_ready(core::format_diagnostic(blend.error()));
+            auto blend_bindings = land_look::register_terrain_blend(*state.renderer, blend.value(),
+                map.terrain->materials, lookup_texture, state.terrain_blend);
+            if (!blend_bindings) return state.fail_ready(core::format_diagnostic(blend_bindings.error()));
+
+            std::vector<sim::RenderInstance> instances;
+            sim::AssetId next_asset = 1;
+            sim::EntityId next_entity = 1;
+            const MaterialDescription terrain_material{
+                .schema_version = MaterialDescription::current_schema_version,
+                .route = MaterialRoute::modern_spatial,
+                .pass = RenderPass::opaque,
+                .program = state.terrain_material_program(),
+                .technique = {},
+                .pass_name = {},
+                .bindings = std::move(blend_bindings.value()),
+            };
+            // Every surface draws the same blended material; its own texture is unused.
+            const assets::Texture unused_texture = placeholder_texture();
+            if (!state.upload_terrain_surfaces(mesh, terrain_material, unused_texture, instances, next_asset, next_entity)) return false;
+
+            // Approximate water: the header's plane and every authored river.
+            if (auto water = land_look::compose_water(*state.renderer, map, mesh, lookup_texture,
+                    next_asset, next_entity, instances, state.water_capture_time, state.options.interactive,
+                    state.fog.has_value())) {
+                state.water = std::move(water.value());
+                state.water_status = state.water.status;
+                state.water_cause = state.water.cause;
+            } else {
+                return state.fail_ready("water: " + core::format_diagnostic(water.error()));
+            }
+
+            state.compose_skydome(map, catalog, catalog_failure, lookup_texture, next_asset, next_entity, instances);
+
+            if (!state.ready_land_population(map, instances, next_asset, next_entity)) return false;
+
+            // A top-down camera makes the terrain footprint a known central rectangle,
+            // so the evidence check tests where terrain drew rather than only that
+            // something drew.
+            const assets::Vec3f minimum = terrain::asset_to_render(mesh.bounds_min);
+            const assets::Vec3f maximum = terrain::asset_to_render(mesh.bounds_max);
+            if (!state.configure_ready_camera(host, map, mesh, minimum, maximum)) return false;
+            if (!state.prepare_ready_particles(host, map)) return false;
+            if (!state.live_options.fixture.empty() && !state.ready_land_live(host, map, instances, next_asset, next_entity)) return false;
+            if (state.policy != lighting::Policy::off) {
+                // The shadow range covers the farthest terrain corner seen by the
+                // capture camera. Cascades split by view depth: the tactical and live
+                // cameras keep the land splits, while a top-down overview sees the
+                // whole map at nearly one depth and gets one orthogonal map instead.
+                const bool live_camera = state.map_camera && !state.map_camera->controller().capture_locked();
+                if (state.camera_view != "tactical" && !live_camera) {
+                    state.configured_lighting.shadow_layout = GodotRenderer::ShadowLayout::orthogonal;
+                    state.other_lighting.shadow_layout = GodotRenderer::ShadowLayout::orthogonal;
+                }
+                float farthest = 0.0F;
+                for (const float x : {minimum.x, maximum.x}) {
+                    for (const float y : {minimum.y, maximum.y}) {
+                        for (const float z : {minimum.z, maximum.z}) {
+                            const float dx = x - state.camera.eye[0];
+                            const float dy = y - state.camera.eye[1];
+                            const float dz = z - state.camera.eye[2];
+                            farthest = std::max(farthest, std::sqrt(dx * dx + dy * dy + dz * dz));
+                        }
+                    }
+                }
+                // Only the overview fits the scene. Tactical views keep a fixed reach
+                // across pan/orbit, so Godot's snapped sphere has an invariant radius.
+                const float shadow_reach = state.configured_lighting.shadow_layout == GodotRenderer::ShadowLayout::orthogonal
+                    ? farthest * 1.1F : shadow_settings(active_render_profile(), false).max_distance;
+                state.configured_lighting.shadow_max_distance = shadow_reach;
+                state.other_lighting.shadow_max_distance = shadow_reach;
+                state.renderer->set_lighting(state.configured_lighting);
+            }
+
+            if (state.fog && !state.fog_unsupported.empty()) {
+                return state.fail_ready("fog-enabled populated capture has unsupported required consumer: "
+                    + state.fog_unsupported.front());
+            }
+            state.snapshot = state.fog ? state.fog->snapshot(std::move(instances))
+                : std::make_shared<const sim::RenderSnapshot>(0, std::move(instances));
+            if (state.fog && state.terrain_snapshot) {
+                std::vector<sim::RenderInstance> terrain(
+                    state.terrain_snapshot->instances().begin(), state.terrain_snapshot->instances().end());
+                state.terrain_snapshot = state.fog->snapshot(std::move(terrain));
+            }
+            if (state.fog_inject_input) {
+                // Deterministic synthetic input enters through the same map event
+                // handler as keyboard events, before the first submitted frame.
+                for (const Key code : {KEY_F, KEY_P, KEY_T}) {
+                    Ref<InputEventKey> event;
+                    event.instantiate();
+                    event->set_physical_keycode(code);
+                    event->set_pressed(true);
+                    context.mode.input(event);
                 }
             }
-        }
-        // Only the overview fits the scene. Tactical views keep a fixed reach
-        // across pan/orbit, so Godot's snapped sphere has an invariant radius.
-        const float shadow_reach = state.configured_lighting.shadow_layout == GodotRenderer::ShadowLayout::orthogonal
-            ? farthest * 1.1F : shadow_settings(active_render_profile(), false).max_distance;
-        state.configured_lighting.shadow_max_distance = shadow_reach;
-        state.other_lighting.shadow_max_distance = shadow_reach;
-        state.renderer->set_lighting(state.configured_lighting);
-    }
+            if (!state.live_session && !state.build_hud(host, map.context_name)) return state.fail_ready(state.failure);
+            // This bounds cache ownership; renderer and simulation owners remain valid.
+            scene::VfsAssetCache(*state.filesystem).end_model_load(scene::default_model_cache_budget_bytes);
+            if (state.options.attract) MenuTimeline::mark("attract_load_composition");
+            return true;
+        },
+    }) {}
+};
 
-    if (state.fog && !state.fog_unsupported.empty()) {
-        return state.fail_ready("fog-enabled populated capture has unsupported required consumer: "
-            + state.fog_unsupported.front());
+bool MapMode::ready(Node3D& node) {
+    core::load_profile::Scope ready_scope(core::load_profile::Phase::scene);
+    auto& state = *state_;
+    state.pointer_host = &node;
+    state.ready_load = std::make_shared<State::ReadyLoad>(*this, node, state);
+    state.live_population_prepared = false;
+    const bool ready = state.ready_load->job.run_to_completion();
+    if (!ready && state.failure.empty()) {
+        std::string failure = state.space_population ? state.space_population->failure() : std::string{};
+        if (failure.empty() && state.space) failure = state.space->failure();
+        static_cast<void>(state.fail_ready(failure.empty() ? "map loading failed" : std::move(failure)));
     }
-    state.snapshot = state.fog ? state.fog->snapshot(std::move(instances))
-        : std::make_shared<const sim::RenderSnapshot>(0, std::move(instances));
-    if (state.fog && state.terrain_snapshot) {
-        std::vector<sim::RenderInstance> terrain(
-            state.terrain_snapshot->instances().begin(), state.terrain_snapshot->instances().end());
-        state.terrain_snapshot = state.fog->snapshot(std::move(terrain));
+    state.ready_status = ready ? ReadyStatus::complete : ReadyStatus::failed;
+    state.ready_load.reset();
+    if (MemoryAttribution::enabled() && state.filesystem) {
+        // The ready job's ModelLoadScope ended with the reset: the budget is back to the gameplay value and trimmed.
+        const auto stats = scene::VfsAssetCache(*state.filesystem).model_stats();
+        MemoryAttribution::load_mark("battle.scope_exit", stats.cache_retained_bytes, stats.capacity.total_bytes());
     }
-    if (state.fog_inject_input) {
-        // Deterministic synthetic input enters through the same map event
-        // handler as keyboard events, before the first submitted frame.
-        for (const Key code : {KEY_F, KEY_P, KEY_T}) {
-            Ref<InputEventKey> event;
-            event.instantiate();
-            event->set_physical_keycode(code);
-            event->set_pressed(true);
-            input(event);
-        }
+    return ready;
+}
+
+void MapMode::begin_ready(Node3D& node) {
+    auto& state = *state_;
+    state.pointer_host = &node;
+    state.ready_load = std::make_shared<State::ReadyLoad>(*this, node, state);
+    if (MenuTimeline::enabled() && state.options.attract) {
+        state.ready_load->job.observe_steps([](const std::size_t ordinal, const std::chrono::steady_clock::duration took) {
+            MenuTimeline::step(ordinal, std::chrono::duration<double, std::milli>(took).count());
+        });
     }
-    if (!state.live_session && !state.build_hud(host, map.context_name)) return state.fail_ready(state.failure);
-    // This bounds cache ownership; renderer and simulation owners remain valid.
-    scene::VfsAssetCache(*state.filesystem).set_model_cache_budget(128ULL * 1024 * 1024);
-    return true;
+    state.ready_status = ReadyStatus::pending;
+}
+
+MapMode::ReadyStatus MapMode::advance_ready(const bool input_pending) {
+    auto& state = *state_;
+    if (!state.ready_load) return state.ready_status;
+    core::load_profile::Scope ready_scope(core::load_profile::Phase::scene);
+    using Job = State::ReadyLoad::Job;
+    const auto status = state.ready_load->job.run_for(std::chrono::milliseconds(8), input_pending);
+    if (status == Job::Status::pending) return ReadyStatus::pending;
+    if (status == Job::Status::failed && state.failure.empty()) {
+        std::string failure = state.space_population ? state.space_population->failure() : std::string{};
+        if (failure.empty() && state.space) failure = state.space->failure();
+        static_cast<void>(state.fail_ready(failure.empty() ? "map loading failed" : std::move(failure)));
+    }
+    state.ready_status = status == Job::Status::complete ? ReadyStatus::complete : ReadyStatus::failed;
+    state.ready_load.reset();
+    if (MemoryAttribution::enabled() && state.filesystem) {
+        // The ready job's ModelLoadScope ended with the reset: the budget is back to the gameplay value and trimmed.
+        const auto stats = scene::VfsAssetCache(*state.filesystem).model_stats();
+        MemoryAttribution::load_mark("battle.scope_exit", stats.cache_retained_bytes, stats.capacity.total_bytes());
+    }
+    return state.ready_status;
 }
 
 } // namespace eawr::presentation::godot_backend

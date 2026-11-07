@@ -8,6 +8,18 @@ void add(Groups& groups, std::string code, std::string example, core::Severity s
     group.severity = std::max(group.severity, severity);
     if (group.examples.size() < 3) group.examples.push_back(std::move(example));
 }
+void add(Groups& groups, const core::Diagnostic& diagnostic) {
+    auto example = diagnostic.message;
+    if (diagnostic.logical_path && !diagnostic.logical_path->empty()) {
+        example += " (file " + *diagnostic.logical_path;
+        if (diagnostic.line) {
+            example += ':' + std::to_string(*diagnostic.line);
+            if (diagnostic.column) example += ':' + std::to_string(*diagnostic.column);
+        }
+        example += ')';
+    }
+    add(groups, diagnostic.code, std::move(example), diagnostic.severity);
+}
 std::size_t count(const Groups& groups, core::Severity severity) {
     std::size_t total{};
     for (const auto& [code, group] : groups) if (group.severity == severity) total += group.count;

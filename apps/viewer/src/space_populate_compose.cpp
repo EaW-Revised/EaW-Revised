@@ -31,7 +31,8 @@ namespace eawr::presentation::godot_backend {
 
 bool SpacePopulation::compose(GodotRenderer& renderer, const assets::Map& map, const vfs::Vfs& filesystem,
                               const FixedCamera& camera, const std::span<const std::uint32_t> environment_records,
-                              const sim::AssetId first_asset_id, const sim::EntityId first_entity_id) {
+                              const sim::AssetId first_asset_id, const sim::EntityId first_entity_id,
+                              const EnqueueLoadStep& enqueue) {
     core::load_profile::Scope scope(core::load_profile::Phase::scene_population);
     if (options_.catalog == nullptr) {
         failure_ = "populate requires the XML catalog, which did not load";
@@ -40,18 +41,11 @@ bool SpacePopulation::compose(GodotRenderer& renderer, const assets::Map& map, c
     const data::Catalog& catalog = *options_.catalog;
     map_placements_ = map.placements.size();
     composed_ = false;
-    scene::VfsAssetCache cache(filesystem);
-    scene::BuildInput input;
-    input.map = &map;
-    input.map_sha256 = options_.map_sha256;
-    input.catalog = &catalog;
-    input.access = cache.access();
+    auto owner = std::make_shared<ComposeOwner>(renderer, map, filesystem, camera,
+        environment_records, catalog, options_.map_sha256);
+    auto& input = owner->input;
+    const auto& resolve = owner->resolve;
     scene_ = scene::build(input);
-    const scene::ObjectResolver resolve = [&](const std::string_view id, const data::Category category) -> std::optional<data::EffectiveObject> {
-        auto resolved = catalog.resolve(id, category);
-        if (!resolved) return std::nullopt;
-        return std::move(resolved.value());
-    };
     decisions_ = scene::classify_space_placements(
         *scene_, [&](const std::string_view object_id) -> std::optional<scene::SpaceObjectTags> {
             auto resolved = resolve(object_id, data::Category::game_object);
@@ -117,7 +111,7 @@ bool SpacePopulation::compose(GodotRenderer& renderer, const assets::Map& map, c
         source.key = {map.source, ship.spawn_record};
         source.type_crc = 0U;  // A synthetic placement; the XML identity is explicit.
         source.type_resolution = assets::TypeResolution::unique;
-        source.type_candidates.push_back({.logical_name = definition->id, .source = definition->root.source});
+        source.type_candidates.push_back({.logical_name = definition->id, .source = definition->root.source, .model_name = {}, .land_model_name = {}, .space_model_name = {}});
         source.position = marker->position;
         source.orientation_degrees = marker->orientation_degrees;
         source.orientation_status = marker->orientation_status;
@@ -146,7 +140,7 @@ bool SpacePopulation::compose(GodotRenderer& renderer, const assets::Map& map, c
     }
     compose_source_ = map.source;
     compose_camera_ = camera;
-    ComposeContext context{renderer, map, filesystem, camera, environment_records, cache, input, resolve};
-    return compose_range(context, 0, 0, first_asset_id, first_entity_id);
+    if (enqueue) return enqueue_compose_range(std::move(owner), first_asset_id, first_entity_id, enqueue);
+    return compose_range(owner->context, 0, 0, first_asset_id, first_entity_id);
 }
 } // namespace eawr::presentation::godot_backend

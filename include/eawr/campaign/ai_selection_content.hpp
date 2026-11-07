@@ -1,6 +1,8 @@
 #pragma once
 
 #include "eawr/campaign/setup_plan.hpp"
+#include <memory>
+#include "eawr/data/xml.hpp"
 
 namespace eawr::script::foc::ai { struct GalacticSelectionContent; }
 namespace eawr::script::foc::galactic_ai { struct FreestoreFacts; struct FreestoreObject; }

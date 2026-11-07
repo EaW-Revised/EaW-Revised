@@ -83,6 +83,20 @@ constexpr auto semantics = std::to_array<Semantic>({
     {"WIND_GRASS_PARAMS", EngineInput::wind_grass, UpdateDomain::scene, 1U, 4U, 1U},
 });
 
+bool material_semantic(std::string_view semantic) {
+    return core::iequals(semantic, "MaterialDiffuse") || core::iequals(semantic, "MaterialSpecular") || core::iequals(semantic, "Power");
+}
+std::optional<Semantic> numeric_semantic(const assets::EffectType& parameter_type, const NumericShape& numeric_shape) {
+    if (parameter_type.semantic.empty() || material_semantic(parameter_type.semantic)) return {};
+    const auto found = std::find_if(semantics.begin(), semantics.end(), [&](const Semantic& item) {
+        return core::iequals(item.name, parameter_type.semantic);
+    });
+    if (found == semantics.end()) fail(diagnostic_codes::unsupported, "used engine semantic is unsupported");
+    if (numeric_shape.kind != EffectValueKind::floating || numeric_shape.rows != found->rows
+        || numeric_shape.columns != found->columns || numeric_shape.elements != found->elements)
+        fail(diagnostic_codes::descriptor, "engine semantic has an incompatible numeric shape");
+    return *found;
+}
 std::uint32_t word(std::span<const std::byte> bytes, std::size_t at) {
     if (at > bytes.size() || bytes.size() - at < 4U)
         fail(diagnostic_codes::descriptor, "numeric default is shorter than its shape");
@@ -344,20 +358,12 @@ class Planner final {
                     || std::max(1U, parameter_type.array_count) != binding.shape.elements
                     || parameter_type.value_class > EffectValueCategory::column_matrix)
                     fail(diagnostic_codes::descriptor, "parameter numeric shape disagrees with its constant");
-                const bool material_semantic = core::iequals(parameter_type.semantic, "MaterialDiffuse")
-                    || core::iequals(parameter_type.semantic, "MaterialSpecular") || core::iequals(parameter_type.semantic, "Power");
-                if (!parameter_type.semantic.empty() && !material_semantic) {
+                if (!parameter_type.semantic.empty() && !material_semantic(parameter_type.semantic)) {
                     work(semantics.size());
-                    const auto semantic = std::find_if(semantics.begin(), semantics.end(), [&](const Semantic& item) {
-                        return core::iequals(item.name, parameter_type.semantic);
-                    });
-                    if (semantic == semantics.end()) fail(diagnostic_codes::unsupported, "used engine semantic is unsupported");
-                    if (binding.shape.kind != EffectValueKind::floating || binding.shape.rows != semantic->rows
-                        || binding.shape.columns != semantic->columns || binding.shape.elements != semantic->elements)
-                        fail(diagnostic_codes::descriptor, "engine semantic has an incompatible numeric shape");
-                    binding.engine_input = semantic->input;
-                    binding.update = semantic->domain;
-                    if (semantic->input == EngineInput::skin_palette
+                    const auto semantic = numeric_semantic(parameter_type, binding.shape).value();
+                    binding.engine_input = semantic.input;
+                    binding.update = semantic.domain;
+                    if (semantic.input == EngineInput::skin_palette
                         && (binding.shape.value_class != EffectValueCategory::column_matrix || constant.register_count != 72U))
                         fail(diagnostic_codes::unsupported, "skin palette requires 24 three-register transforms");
                 } else if (parameter.initializer) {
@@ -410,6 +416,23 @@ core::Result<ProgramBindings> make_program_bindings(const assets::EffectView& ef
         auto issue = diagnostic(program, failure, &effect.source);
         if (!planner.current_name().empty()) issue.message += " (constant " + echoed_name(planner.current_name()) + ")";
         return core::Result<ProgramBindings>::failure(std::move(issue));
+    }
+}
+
+core::Result<std::optional<EngineInput>> parameter_engine_input(const assets::EffectView& effect, std::size_t parameter) {
+    try {
+        if (parameter >= effect.parameters.size() || effect.parameters[parameter].value >= effect.values.size())
+            fail(diagnostic_codes::descriptor, "numeric parameter index is invalid");
+        const auto& value = effect.values[effect.parameters[parameter].value];
+        if (value.type >= effect.types.size()) fail(diagnostic_codes::descriptor, "numeric parameter type is invalid");
+        const auto& parameter_type = effect.types[value.type];
+        const NumericShape numeric_shape{parameter_type.kind, parameter_type.value_class,
+            parameter_type.rows, parameter_type.columns, std::max(1U, parameter_type.array_count)};
+        const auto semantic = numeric_semantic(parameter_type, numeric_shape);
+        return core::Result<std::optional<EngineInput>>::success(semantic ? std::optional{semantic->input} : std::nullopt);
+    } catch (Failure failure) {
+        assets::EffectProgram origin; origin.source = effect.source;
+        return core::Result<std::optional<EngineInput>>::failure(diagnostic(origin, failure));
     }
 }
 

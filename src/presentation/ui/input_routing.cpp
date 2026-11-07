@@ -42,4 +42,9 @@ bool world_accepts(const InputClass input, const InputFocus focus) noexcept {
     return false;
 }
 
+bool world_feeds_pointer_position(const PointerFeedState& state) noexcept {
+    return !state.attract && !state.ready_phase && !state.camera_movie
+        && world_accepts(InputClass::motion, state.focus);
+}
+
 } // namespace eawr::presentation::ui

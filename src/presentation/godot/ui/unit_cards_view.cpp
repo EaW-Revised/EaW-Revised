@@ -172,7 +172,7 @@ void EawrUnitCards::show_units(const model::CardLayout& layout, const std::span<
     cards.reserve(layout.cards.size());
     for (const auto& card : layout.cards) {
         if (card.unit >= units.size()) continue;
-        cards.push_back({card.slot, units[card.unit].type, card.count, card.stacked, card.health_level, card.shield});
+        cards.push_back({card.slot, units[card.unit].type, card.count, card.stacked, card.health_level, card.shield, {}});
     }
     show(std::move(cards), layout.borders);
 }

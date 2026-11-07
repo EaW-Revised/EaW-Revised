@@ -80,6 +80,8 @@ struct PlanetView final {
     Rgb colour;
     Relation relation{Relation::neutral};
     PlanetAbilityMetadata ability{};
+    PlanetWeatherMetadata weather{};
+    PlanetInfoMetadata info{};
 };
 
 struct RouteView final {
@@ -152,10 +154,18 @@ struct OrbitCamera final {
     float distance{1000.0F};
 };
 
-inline constexpr float orbit_min_pitch = 20.0F;
+// #5617: the flattest overview pitch (degrees above the galaxy plane); the single tuning point for the tilt floor.
+inline constexpr float orbit_min_pitch = 10.0F;
 inline constexpr float orbit_max_pitch = 89.0F;
 inline constexpr float orbit_min_distance = 60.0F;
 inline constexpr float orbit_max_distance = 6000.0F;
+// #5617: farthest overview zoom-out as a multiple of the authored overview pullback (1 = the old and still the
+// zoom-in limit), one wheel notch multiplies the pullback by overview_zoom_step, and the eye never goes beyond
+// overview_zoom_max_distance, chosen so the far half of the galaxy (the eye distance plus the fitted galaxy radius,
+// at most about a quarter of the pullback) stays inside the 10000 far plane even at the lowest pitch.
+inline constexpr float overview_zoom_out_max_factor = 1.8F;
+inline constexpr float overview_zoom_step = 1.12F;
+inline constexpr float overview_zoom_max_distance = 8000.0F;
 
 // Frames the whole galaxy at the given aspect and vertical field of view.
 [[nodiscard]] OrbitCamera overview_camera(const GalaxyView& view, float aspect, float vertical_fov_degrees);
@@ -187,6 +197,9 @@ struct CameraConstants final {
     float focused_light{0.5F};
     Vec3 out_angles{0.0F, 160.0F, 58.0F};
     Vec3 in_angles{0.0F, 235.0F, 18.0F};
+    // #5601 (project deviation, presentation only): degrees one Ctrl+middle-drag mouse unit (1/100 of the viewport
+    // height) tilts the overview camera.
+    float tilt_degrees_per_unit{1.25F};
 };
 
 enum class CameraState { overview, inward, focused, outward };
@@ -218,6 +231,20 @@ public:
     bool toggle(const PlanetView& planet, bool renderable, ZoomGates gates = {});
     bool refocus(const PlanetView& planet, bool renderable);
     void service(std::uint64_t wall_milliseconds);
+    // #5601/#5617: Ctrl+middle-drag tilt. Fractional viewport motion (dragging down raises the pitch, inverted by
+    // #5617); overview only; the resulting overview pitch is clamped to orbit_min_pitch..orbit_max_pitch and fades
+    // out in the focused planet view.
+    bool tilt(float fraction_y);
+    // #5617: the same drag's sideways part. Dragging right turns the galaxy right; unclamped, wraps at 360.
+    bool yaw(float fraction_x);
+    // Plain middle-click: back to the authored pitch and zero yaw.
+    void reset_tilt() noexcept { tilt_offset_ = 0.0F; yaw_offset_ = 0.0F; }
+    [[nodiscard]] float tilt_offset() const noexcept { return tilt_offset_; }
+    [[nodiscard]] float yaw_offset() const noexcept { return yaw_offset_; }
+    // #5617: wheel zoom within the overview. direction > 0 zooms in, < 0 out. Returns true when it consumed the
+    // notch; zooming in at the authored pullback (the limit) returns false so the caller starts the planet zoom.
+    bool zoom_overview(float direction);
+    [[nodiscard]] float overview_zoom() const noexcept { return overview_zoom_; }
     [[nodiscard]] OrbitCamera pose() const;
     [[nodiscard]] CameraLighting lighting() const;
     [[nodiscard]] CameraState state() const noexcept { return state_; }
@@ -238,6 +265,9 @@ private:
     std::optional<std::uint64_t> start_;
     bool advanced_map_{};
     float radar_rate_{1.0F};
+    float tilt_offset_{};
+    float yaw_offset_{};
+    float overview_zoom_{1.0F};
 };
 
 // WGUI-90: centred radar-local coordinates, independent of camera bounds.

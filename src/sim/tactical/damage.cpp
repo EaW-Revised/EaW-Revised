@@ -431,7 +431,8 @@ core::Result<HitOutcome> apply_hit(const DurabilityProfile& profile, const Damag
     HitOutcome outcome;
     outcome.routed_hardpoint = hit.hardpoint;
     // DG-40: retain collision/aiming and every hardpoint; script damage remains privileged.
-    if (profile.scenario_invulnerable && (hit.projectile || hit.kind != HitKind::ordinary)) {
+    // TL-03: the per-unit script flag acts exactly like the scenario type flag.
+    if ((profile.scenario_invulnerable || hit.target_script_invulnerable) && (hit.projectile || hit.kind != HitKind::ordinary)) {
         return core::Result<HitOutcome>::success(outcome);
     }
     Arithmetic q;

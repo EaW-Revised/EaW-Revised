@@ -696,6 +696,31 @@ void retail_value_rules() {
         expect(loaded.tables && has_row(loaded.tables->unresolved, "Skirmish_Test_Base", "Starting_Spawned_Units_Tech_0", "TBD"),
             "M2: malformed spawned pairs remain diagnosed under existing list selection");
     }
+    {
+        // #5559: a non-station hangar whose only authored squadron does not resolve can never launch; the
+        // motion table reports it once (EAWR-LOAD-0456) instead of failing silently in a battle.
+        TempTree tree;
+        auto xml = units_xml("3600", "Unit_Select_Test");
+        const std::string authored = "<Starting_Spawned_Units_Tech_0>Test_Squadron, 2</Starting_Spawned_Units_Tech_0>";
+        const auto at = xml.find(authored);
+        expect(at != std::string::npos, "#5559: the hangar authors one starting list");
+        if (at == std::string::npos) return;
+        xml.replace(at, authored.size(), "<Starting_Spawned_Units_Tech_0>No_Such_Squadron, 2</Starting_Spawned_Units_Tech_0>");
+        write_fixture(tree.root, xml);
+        const auto loaded = load(tree.root, models(-40.0F));
+        expect(static_cast<bool>(loaded.tables), "#5559: the unresolved-squadron fixture loads");
+        if (loaded.tables) {
+            eawr::core::LoadNoteBuffer load_notes;
+            const auto motion = eawr::units::motion_table(*loaded.tables, {}, nullptr, &load_notes);
+            expect(static_cast<bool>(motion), "#5559: the motion table binds");
+            eawr::core::LoadNoteCollector collector;
+            collector.merge(load_notes);
+            const auto notes = collector.snapshot();
+            expect(std::count_if(notes.begin(), notes.end(), [](const auto& note) {
+                return note.code == "EAWR-LOAD-0456" && note.object == "Skirmish_Test_Base";
+            }) == 1, "#5559: a hangar that can never launch is reported once");
+        }
+    }
 }
 
 // WSQ-60: container type defaults and inherited overrides are independent of the roster.

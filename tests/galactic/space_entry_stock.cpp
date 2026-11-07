@@ -1,4 +1,6 @@
 #include "../support/env.hpp"
+#include "eawr/sim/tactical/fighters.hpp"
+#include "eawr/vfs/vfs.hpp"
 #include "../support/result.hpp"
 #include "space_entry_private.hpp"
 #include "galactic_support.hpp"

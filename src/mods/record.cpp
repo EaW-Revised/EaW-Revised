@@ -20,6 +20,9 @@ constexpr std::array<std::pair<ModState, std::string_view>, 4> kStates{{
     {ModState::installed, "installed"}, {ModState::needs_update, "needs-update"}, {ModState::downloading, "downloading"},
     {ModState::missing, "missing"}}};
 
+constexpr std::array<std::pair<ContentDigestState, std::string_view>, 3> kContentStates{{
+    {ContentDigestState::unavailable, "unavailable"}, {ContentDigestState::pending, "pending"}, {ContentDigestState::ready, "ready"}}};
+
 template <typename Enum, std::size_t N>
 std::string_view name_of(const std::array<std::pair<Enum, std::string_view>, N>& table, Enum value) noexcept {
     for (const auto& [entry, text] : table) {
@@ -120,6 +123,8 @@ std::optional<std::vector<Warning>> read_warnings(const JsonValue* list) {
 std::string_view to_string(ModKind kind) noexcept { return name_of(kKinds, kind); }
 std::string_view to_string(ModRole role) noexcept { return name_of(kRoles, role); }
 std::string_view to_string(ModState state) noexcept { return name_of(kStates, state); }
+std::string_view to_string(ContentDigestState state) noexcept { return name_of(kContentStates, state); }
+std::optional<ContentDigestState> parse_content_digest_state(std::string_view text) noexcept { return parse_name(kContentStates, text); }
 std::optional<ModKind> parse_mod_kind(std::string_view text) noexcept { return parse_name(kKinds, text); }
 std::optional<ModRole> parse_mod_role(std::string_view text) noexcept { return parse_name(kRoles, text); }
 std::optional<ModState> parse_mod_state(std::string_view text) noexcept { return parse_name(kStates, text); }
@@ -129,6 +134,15 @@ bool ModRecord::has_warning(std::string_view code) const {
         if (warning.code == code) return true;
     }
     return false;
+}
+
+std::string content_digest_to_json(const ContentDigest& content) {
+    std::string out = "{\"state\": " + json_quote(to_string(content.state));
+    out += ", \"sha256\": " + json_quote(content.sha256);
+    out += ", \"files\": " + std::to_string(content.files);
+    out += ", \"bytes\": " + std::to_string(content.bytes);
+    out += ", \"note\": " + json_quote(content.note) + "}";
+    return out;
 }
 
 std::string record_to_json(const ModRecord& record) {
@@ -152,7 +166,8 @@ std::string record_to_json(const ModRecord& record) {
     out += ", \"tree_files\": " + std::to_string(print.tree_files);
     out += ", \"tree_capped\": ";
     out += print.tree_capped ? "true" : "false";
-    out += "}, \"warnings\": ";
+    out += "}, \"content\": " + content_digest_to_json(record.content);
+    out += ", \"warnings\": ";
     write_warnings(out, record.warnings);
     out += '}';
     return out;
@@ -201,6 +216,22 @@ std::optional<ModRecord> record_from_json(const JsonValue& value) {
     record.fingerprint.acf_manifest = *manifest;
     record.fingerprint.tree = *tree;
     record.fingerprint.tree_capped = capped->boolean;
+
+    // Additive member: a record written before it existed reads as "never asked".
+    if (const JsonValue* content = value.member("content"); content != nullptr) {
+        if (content->kind != JsonValue::Kind::object) return std::nullopt;
+        const std::string* content_state = content->string_member("state");
+        const std::string* sha = content->string_member("sha256");
+        const std::string* note = content->string_member("note");
+        const auto parsed_content = content_state != nullptr ? parse_content_digest_state(*content_state) : std::nullopt;
+        if (!parsed_content || sha == nullptr || note == nullptr || !read_integer(*content, "files", record.content.files)
+            || !read_integer(*content, "bytes", record.content.bytes)) {
+            return std::nullopt;
+        }
+        record.content.state = *parsed_content;
+        record.content.sha256 = *sha;
+        record.content.note = *note;
+    }
 
     auto warnings = read_warnings(value.member("warnings"));
     if (!warnings) return std::nullopt;

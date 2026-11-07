@@ -31,6 +31,8 @@ inline constexpr std::size_t snapshot_player_record_size = 8;
 // An attack on one hardpoint of its target (#531). Opcodes 9 to 11 belong to #556/#574 (see the
 // replay opcode registry).
 inline constexpr std::uint8_t opcode_attack_hardpoint = 12;
+// Event hardpoint byte: indices below this are one byte; this value is followed by the u32 index.
+inline constexpr std::uint32_t event_hardpoint_escape = 0xFF;
 // The highest command opcode the parser accepts. Whichever of #591 and #556/#574 lands second
 // changes only this line; an opcode in the range that no branch handles fails as unsupported.
 inline constexpr std::uint8_t opcode_pad_build = 13; // coordinator-reserved, WBP-09/10
@@ -54,7 +56,8 @@ inline constexpr std::uint8_t opcode_retreat_cinematic = 30; // WR-50..53 record
 inline constexpr std::uint8_t opcode_beacon = 31; // coordinator-reserved, HCB-12
 inline constexpr std::uint8_t opcode_gift = 32; // ADR-020: coordinator-reserved controller transfer.
 inline constexpr std::uint8_t opcode_battle_control = 33; // ADR-020: coordinator-reserved engine transition.
-inline constexpr std::uint8_t max_command_opcode = opcode_battle_control;
+inline constexpr std::uint8_t opcode_script_invulnerable = 34; // TL-03: Lua Make_Invulnerable, engine only.
+inline constexpr std::uint8_t max_command_opcode = opcode_script_invulnerable;
 
 [[nodiscard]] core::Diagnostic diagnostic(
     std::string_view code,

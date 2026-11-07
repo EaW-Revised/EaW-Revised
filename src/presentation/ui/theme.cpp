@@ -1,4 +1,5 @@
 #include "eawr/presentation/ui/theme.hpp"
+#include "eawr/vfs/vfs.hpp"
 #include "eawr/core/text.hpp"
 
 #include <algorithm>

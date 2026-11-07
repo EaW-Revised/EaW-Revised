@@ -93,6 +93,7 @@ func _process(delta):
         self.assertTrue(capture.is_file())
         data = json.loads(report.read_text(encoding="utf-8"))
         self.assertEqual(data["destruction_hud"]["raid_accepts"], 1)
+        self.assertEqual(data["destruction_hud"]["raid_slot_icons_shown"], 0)  # #5506: bare frame, no emblem
         self.assertIn({"fleet": 601, "destination": 102}, data["destruction_hud"]["retained_raids"])
         self.assertEqual(data["live_session"]["submitted_orders"], 1)
         self.assertEqual(data["fleet_hud"]["drag"]["active_fleet"], 0)

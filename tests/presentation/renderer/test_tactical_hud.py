@@ -157,6 +157,9 @@ class TacticalHudStructure(unittest.TestCase):
         self.assertIn('constexpr std::string_view ability_stem = "special_button_";',
                       (ROOT / "src/presentation/ui/hud_shell.cpp").read_text(encoding="utf-8"))
         wiring = (SRC / "map_mode_hud.cpp").read_text(encoding="utf-8")
+        self.assertIn("battle->set_ability_icon(", wiring)
+        self.assertIn("ui::ability_bar(card_layout_, card_units_, state, ability_icon_)",
+                      source_text("apps/viewer/src/battle_input_cards.cpp"))
         for call in ("abilities->set_click(", "input->ability_click(index, right, *live)", "battle->set_ability_point("):
             self.assertIn(call, wiring)
         # #530: the cards and the ability bar refresh together in State::sync_cards(), which the

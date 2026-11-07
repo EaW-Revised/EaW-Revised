@@ -41,6 +41,11 @@ void counts(std::ostream& output, const char* name, const std::map<std::string, 
 
 void UnitEmitters::release() {
     if (released_) return;
+    // N1: an unfinished final batch must stop reading the instances before they are released.
+    if (final_pending_) {
+        final_pending_ = false;
+        static_cast<void>(registry_->finish_advance_all());
+    }
     // Reports are written after teardown. Preserve the last live state before releasing handles.
     emitting_at_release_ = emitting_units();
     released_ = true;
@@ -86,6 +91,7 @@ void UnitEmitters::write_report(std::ostream& output) const {
     output << '}';
     output << ", \"backend_prewarm\": {\"requested\":" << backend_warm_requested_
            << ",\"admitted\":" << backend_warm_admitted_ << ",\"refused\":" << backend_warm_refused_
+           << ",\"refused_program_warmed\":" << backend_warm_refused_programs_
            << ",\"complete\":" << (assets_prepared_ && backend_warm_refused_ == 0 ? "true" : "false")
            << ",\"policies\":" << backend_warm_policies_ << ",\"texture_bytes\":" << backend_warm_texture_bytes_
            << ",\"prepare_ms\":" << backend_warm_ms_ << ",\"fallback\":\"synchronous\""
@@ -145,6 +151,11 @@ void UnitEmitters::write_report(std::ostream& output) const {
     output << ", \"power_to_weapons_drains\": {\"started\": " << power_to_weapons_drains_started_
            << ", \"finished\": " << power_to_weapons_drains_finished_ << ", \"cut_short\": "
            << power_to_weapons_drains_cut_short_ << "}";
+    output << ", \"catchup_screen_space\": {\"frames\": " << ss_.frames << ", \"per_tick\": " << ss_.per_tick
+           << ", \"single_pass\": " << ss_.single_pass << ", \"culled\": " << ss_.culled << ", \"unknown\": " << ss_.unknown
+           << ", \"error_bins_px\": [";
+    for (std::size_t bin = 0; bin < ss_.error_bins.size(); ++bin) output << (bin ? ", " : "") << ss_.error_bins[bin];
+    output << "]}";
     output << ", \"caught_up\": " << caught_up_ << ", \"unknown_samples\": " << unknown_samples_
            << ", \"presented_frames\": " << presented_frames_ << ", \"presented_effects\": " << presented_effects_;
     output << ", \"start_log\": [";

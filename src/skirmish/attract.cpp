@@ -1,4 +1,5 @@
 #include "eawr/skirmish/attract.hpp"
+#include "eawr/vfs/vfs.hpp"
 
 #include "eawr/data/tag_trace.hpp"
 #include "skirmish_internal.hpp"
@@ -230,6 +231,13 @@ void AttractManager::shutdown() noexcept {
     if (!initialized_) return;
     initialized_ = false;
     active_ = false;
+}
+
+std::optional<std::size_t> AttractCandidates::next(AttractManager& manager, const std::uint64_t now_ms) noexcept {
+    if (remaining_ == 0) return std::nullopt;
+    const auto index = manager.advance(now_ms);
+    if (index) --remaining_;
+    return index;
 }
 
 } // namespace eawr::skirmish

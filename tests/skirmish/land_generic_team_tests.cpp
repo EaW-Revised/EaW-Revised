@@ -186,8 +186,60 @@ void stress() {
         }
     }
 }
+// WLPA-86: a container-team company spawns as one rows layout per squad, the squads side by side, instead of one long row.
+void spawn_rows_layout() {
+    auto field = make_field(std::vector<std::string>(128, std::string(128, '.')));
+    auto tables = content(field, false, 15);
+    auto& company = tables.land.companies.front().company;
+    company.team_type_authored = true; company.max_squad_size = 5;
+    const auto initial = setup(1);
+    auto session = take(TacticalSession::create(initial, tables));
+    const auto squads = session.land_movement()->squads();
+    const auto members = session.land_movement()->members();
+    expect(squads.size() == 3 && members.size() == 15, "WLPA-86 a fifteen-man company spawns as three five-man squads");
+    if (squads.size() != 3) return;
+    expect(squads[0].position == sim::math::Vec2{initial.units[0].position.x, initial.units[0].position.y},
+        "WLPA-86 the first squad's parent stands exactly on the entry point");
+    Fixed low[3], high[3];
+    for (std::size_t s = 0; s < 3; ++s) {
+        bool first = true;
+        Fixed rear;
+        bool anchored = false;
+        for (const auto& m : members) if (m.squad == s) {
+            if (first || m.position.y < low[s]) low[s] = m.position.y;
+            if (first || m.position.y > high[s]) high[s] = m.position.y;
+            first = false;
+            rear = std::max(rear, Fixed::from_raw(-m.slot.x.raw()));
+            anchored = anchored || m.position == squads[s].position;
+        }
+        expect(squads[s].has_mapped && rear > Fixed{} && squads[s].rear_extent == rear,
+            "WLPA-86 the spawn rows count as mapped and the rear extent follows them");
+        expect(anchored, "WLPA-86 the squad stands on one of its members");
+    }
+    for (std::size_t a = 0; a < 3; ++a) for (std::size_t b = a + 1; b < 3; ++b)
+        expect(high[a] < low[b] || high[b] < low[a], "WLPA-86 squads of one company do not interleave");
+    Fixed minimum;
+    for (std::size_t a = 0; a < members.size(); ++a) for (std::size_t b = a + 1; b < members.size(); ++b) {
+        const auto d = distance(members[a].position, members[b].position);
+        if ((a == 0 && b == 1) || d < minimum) minimum = d;
+    }
+    expect(minimum >= whole(2), "WLPA-86 no two spawned members overlap");
+
+    // The entry rule holds for any row geometry: three members of one squad (two in row 0, one in row 1) whose single
+    // row-1 member is nearer the layout centre than either row-0 member. The anchor is still a row-0 member, on the entry.
+    auto odd = content(field, false, 3);
+    auto& odd_company = odd.land.companies.front();
+    odd_company.company.team_type_authored = true; odd_company.company.max_squad_size = 3;
+    for (auto& member : odd_company.members) { member.hard_x = Fixed::from_ratio(1, 2).value(); member.hard_y = whole(4); }
+    auto odd_session = take(TacticalSession::create(initial, odd));
+    const auto odd_squads = odd_session.land_movement()->squads();
+    expect(odd_squads.size() == 1 && odd_session.land_movement()->members().size() == 3, "WLPA-86 odd geometry spawns one three-man squad");
+    if (odd_squads.size() == 1)
+        expect(odd_squads[0].position == sim::math::Vec2{initial.units[0].position.x, initial.units[0].position.y},
+            "WLPA-86 the first parent stands on the entry even when a row-1 member is nearest the layout centre");
+}
 }
 int main() {
-    try { independent_motion(); session_contracts(); stress(); return checks.finish(); }
+    try { independent_motion(); session_contracts(); spawn_rows_layout(); stress(); return checks.finish(); }
     catch (const std::exception& error) { std::cerr << "FAIL: " << error.what() << '\n'; return 1; }
 }

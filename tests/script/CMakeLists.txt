@@ -9,6 +9,13 @@ target_compile_definitions(
 eawr_target_project_warnings(script_tests)
 
 add_test(NAME script_contracts COMMAND script_tests)
+
+add_executable(provider_transaction_tests provider_transaction_tests.cpp)
+target_link_libraries(provider_transaction_tests PRIVATE eawr::platform)
+target_compile_features(provider_transaction_tests PRIVATE cxx_std_20)
+eawr_target_project_warnings(provider_transaction_tests)
+add_test(NAME provider_transaction_contracts COMMAND provider_transaction_tests)
+
 find_package(Python3 3.8 REQUIRED COMPONENTS Interpreter)
 add_test(
     NAME sflua_namespace_qualification

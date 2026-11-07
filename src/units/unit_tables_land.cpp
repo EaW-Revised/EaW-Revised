@@ -1,6 +1,9 @@
 #include "unit_tables_decode.hpp"
+#include "eawr/core/load_profile.hpp"
 
 #include "eawr/data/retail_values.hpp"
+
+#include <algorithm>
 
 namespace eawr::units::unit_tables_detail {
 
@@ -61,6 +64,7 @@ bool land_ground_object(Object& object) {
 }
 
 void Loader::load_land_body(Object& object, UnitType& unit) {
+    core::load_profile::Scope unit_body_scope(core::load_profile::Phase::unit_body);
     // Shared combat profile classification; the land session supplies its own locomotion.
     unit.kind = UnitKind::ship;
     // WSU-10/13/21: the land body also publishes the authored selection and pick flags.
@@ -141,6 +145,9 @@ void Loader::load_land_static(Object& object) {
         [&](const auto& row) { return iequals(row.id, object.effective.object_id); })) return;
     LandStaticObject row;
     row.id = object.effective.object_id; row.xml_type = object.effective.type_name;
+    row.hq_victory_relevant = flag(object, "HQ_Win_Condition_Relevant", false).value_or(false);
+    row.victory_relevant = flag(object, "Victory_Relevant", false).value_or(false);
+    row.land_victory_relevant = flag(object, "Land_Victory_Relevant", false).value_or(false);
     for (const auto tag : {"Behavior", "LandBehavior"})
         for (const auto& behavior : tokens(object.text(tag))) {
             row.behaviors.push_back(behavior);
@@ -307,6 +314,13 @@ void Loader::load_land_company(Object& object) {
                 report_.note(company.id, "Max_Speed", selected_team, "team type authors no Max_Speed; the engine default is used");
             company.team_max_speed = team_speed.value_or(Fixed::from_raw(Fixed::scale / 4)); // xml-fallback: Max_Speed
             company.team_formation_spacing = team->retail_float("FormationSpacing", report_);
+            // WLPA-82/95: the container's own class and jiggle distance. An absent class is None (no body).
+            company.team_max_jiggle = team->retail_float("MaxJiggleDistance", report_);
+            if (const auto* node = team->single("UnitCollisionClass")) {
+                const auto name = trim(node->raw_text);
+                if (const auto parsed = parse_land_collision_class(name)) company.team_collision_class = *parsed;
+                else report_.note(selected_team, "UnitCollisionClass", name, "not a collision class name; None stays (LSL-06)");
+            }
             team->note_duplicates(report_);
         } else {
             complete = false;

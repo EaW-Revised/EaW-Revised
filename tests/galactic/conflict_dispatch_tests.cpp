@@ -296,20 +296,12 @@ void land_fallback() {
         });
         check(game.queue_conflict(record, {vote ? campaign::ConflictRoute::pending_tactical : campaign::ConflictRoute::tactical, forced, false}));
         take(game.step(executor));
-        if (vote) {
-            take(game.step(executor));
-            check(game.submit({{game.completed_tick(), {1}, 1}, gc::BattleChoice{record.id, true}}));
-        }
+        // Guards must not abort matches: a refused land fight settles through the shared auto-resolver, forced or not.
+        // The stub resolver returns no outcome, so the conflict stays admitted and is offered again: count 'reached it'.
         auto selected = game.step(executor);
-        if (forced) {
-            if (vote) {
-                expect(selected && selected.value().diagnostics.size() == 1
-                    && selected.value().diagnostics.front().code == campaign::unavailable_conflict_tactical,
-                    "forced land vote returns the dispatcher's named refusal");
-            } else expect(!selected && selected.error().code == campaign::unavailable_conflict_tactical,
-                "forced land automatic selection returns the same dispatcher refusal");
-            expect(resolved == 0, "forced land selection cannot silently auto-resolve");
-        } else expect(selected && resolved == 1, "ordinary land selection preserves its auto-resolve service tick");
+        if (vote) selected = game.step(executor);
+        expect(static_cast<bool>(selected), "a refused land fight never fails the match, forcing gate or not");
+        expect(resolved >= 1, "a refused land fight reaches the shared auto-resolver, forcing gate or not");
         expect(!game.battle() && space_calls == Calls{}, "land selection never calls a space child hook");
     }
     auto direct = take(Game::create(setup));
@@ -326,9 +318,121 @@ void land_fallback() {
     expect(!explicit_refused && explicit_refused.error().code == campaign::unavailable_conflict_tactical,
         "an explicit scheduler cannot bypass the layer capability");
 }
+// #4546 item 2: with no land provider and nothing to auto-resolve, a land request is refused by name at admission.
+void land_admission_refusal() {
+    const auto setup = gc::synthetic_galaxy({7, 2, 2, 1, 1, false});
+    const auto record = conflict(setup, Layer::land);
+    {
+        auto game = take(Game::create(setup));
+        game.set_conflict_service([](const auto&, const auto&, auto) {
+            return core::Result<std::optional<campaign::RecordedAdmission>>::success({});
+        }, [](const auto& value) { return core::Result<tt::TacticalContent>::success(content(value)); }, {},
+            campaign::ScriptRequirement::none);
+        auto queued = game.queue_conflict(record, {campaign::ConflictRoute::tactical, false, false});
+        expect(!queued && queued.error().code == campaign::unavailable_conflict_tactical,
+            "a land request without a land provider or auto-resolver is refused by name, not left pending");
+        expect(!game.battle() && !game.has_pending_conflict_for_admission(), "the refused land request leaves nothing pending");
+    }
+    {
+        auto game = take(Game::create(setup));
+        Calls space_calls;
+        check(game.install_conflict_layer(Layer::space, provider(Layer::space, space_calls)));
+        game.set_auto_resolver([](const auto&, const auto&, const auto&) {
+            return core::Result<std::optional<campaign::AutoResolveOutcomeApplication>>::success({});
+        });
+        check(game.queue_conflict(record, {campaign::ConflictRoute::tactical, false, false}));
+    }
+    {
+        auto game = take(Game::create(setup));
+        Calls space_calls, land_calls;
+        check(game.install_conflict_layer(Layer::space, provider(Layer::space, space_calls)));
+        check(game.install_conflict_layer(Layer::land, provider(Layer::land, land_calls)));
+        check(game.queue_conflict(record, {campaign::ConflictRoute::tactical, false, false}));
+    }
+}
+// #4546 item 1: a recorded land child is rebuilt through the land layer's own dispatcher services.
+void land_recording() {
+    const sim::InlineExecutor executor;
+    const auto setup = gc::synthetic_galaxy({7, 2, 2, 1, 1, false});
+    auto game = take(Game::create(setup));
+    std::array<Calls, 2> calls{};
+    install(game, calls, false);
+    const auto record = conflict(setup, Layer::land);
+    check(game.queue_conflict(record, {campaign::ConflictRoute::tactical, false, false}));
+    for (unsigned i = 0; i < 4 && !game.battle(); ++i) take(game.step(executor));
+    expect(game.battle() != nullptr, "land child enters through the dispatcher");
+    if (!game.battle()) return;
+    check(game.submit({{game.completed_tick(), {2}, 1}, quit(record)}));
+    for (unsigned i = 0; i < 10 && game.battle(); ++i) take(game.step(executor));
+    expect(!game.battle(), "recorded land child returns");
+    const auto recording = game.recording();
+    unsigned borrowed_space_content{};
+    std::array<Calls, 2> replay_calls{};
+    auto replay = take(Game::from_recording(recording, [&](const auto& value) {
+        ++borrowed_space_content; return core::Result<tt::TacticalContent>::success(content(value));
+    }, {}, campaign::ScriptRequirement::required, [&](Game& owner) {
+        install(owner, replay_calls, false); return core::Result<void>::success();
+    }));
+    while (replay.completed_tick() < recording.commands.final_tick_count) take(replay.step(executor));
+    expect(borrowed_space_content == 0 && replay_calls[1].content + replay_calls[1].entry >= 1 && replay_calls[1].scripts == 1
+            && replay_calls[1].configure == 1 && replay_calls[0] == Calls{},
+        "replayed land child is built by the land layer only");
+    expect(replay_calls[1].decorate == calls[1].decorate && replay_calls[1].apply == calls[1].apply,
+        "replayed land child returns through the same land result consumers");
+    expect(replay.state_sha256() == game.state_sha256(), "land recording replay reproduces the live state");
+}
+// #4546 item 3: the multiplayer vote path asks the dispatcher whether a land conflict may be fought.
+void land_vote_route() {
+    const sim::InlineExecutor executor;
+    auto setup = gc::synthetic_galaxy({7, 2, 2, 1, 1, false});
+    setup.networked_transport = true;
+    setup.seats[1].kind = gc::SeatKind::human; setup.seats[1].human_side_id = 2;
+    const auto record = conflict(setup, Layer::land);
+    for (const bool provider_installed : {false, true}) {
+        auto game = take(Game::create(setup));
+        check(game.configure_multiplayer_votes(30));
+        Calls space_calls, land_calls;
+        check(game.install_conflict_layer(Layer::space, provider(Layer::space, space_calls)));
+        Game::ConflictLayerServices land;
+        if (provider_installed) land = provider(Layer::land, land_calls);
+        else land.tactical_refusal = "land tactical provider is unavailable";
+        check(game.install_conflict_layer(Layer::land, std::move(land)));
+        unsigned resolved{};
+        game.set_auto_resolver([&](const auto&, const auto&, const auto&) {
+            ++resolved; return core::Result<std::optional<campaign::AutoResolveOutcomeApplication>>::success({});
+        });
+        // WAR-01: multiplayer non-human combat resolves even when a tactical gate is set.
+        // An unavailable land provider also cannot terminate a networked match.
+        check(game.queue_conflict(record, {campaign::ConflictRoute::pending_tactical, !provider_installed, false}));
+        for (unsigned i = 0; i < 4; ++i) take(game.step(executor));
+        // The stub resolver returns no outcome, so the pending conflict stays admitted and every later step offers it again:
+        // count 'reached the resolver', not exactly one call.
+        expect(provider_installed ? resolved == 0 : resolved >= 1,
+            "the vote path takes its land route from the dispatcher: auto-resolve without a land provider, a vote with one");
+        expect(land_calls.entry == 0 && land_calls.content == 0 && !game.battle(), "no land child starts before the vote ends");
+    }
+}
+// A networked SP-rules campaign must override solo instant-auto admission for a human side.
+void coop_vote_route() {
+    const sim::InlineExecutor executor;
+    auto setup = gc::synthetic_galaxy({7, 2, 2, 1, 1, true});
+    setup.networked_transport = true;
+    const auto record = conflict(setup, Layer::land);
+    auto game = take(Game::create(setup));
+    check(game.configure_multiplayer_votes(30));
+    Calls calls;
+    check(game.install_conflict_layer(Layer::land, provider(Layer::land, calls)));
+    unsigned resolved{};
+    game.set_auto_resolver([&](const auto&, const auto&, const auto&) {
+        ++resolved; return core::Result<std::optional<campaign::AutoResolveOutcomeApplication>>::success({});
+    });
+    check(game.queue_conflict(record, {campaign::ConflictRoute::instant_auto, false, false}));
+    for (unsigned i = 0; i < 4; ++i) take(game.step(executor));
+    expect(resolved == 0 && !game.battle(), "networked human versus AI waits for a vote even when solo admission says auto");
+}
 }
 int case_galactic_conflict_dispatch_tests() {
-    try { layer_hooks(); land_fallback(); automatic_persistence(); child_persistence(); }
+    try { layer_hooks(); land_fallback(); land_admission_refusal(); land_recording(); land_vote_route(); coop_vote_route(); automatic_persistence(); child_persistence(); }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
     return galactic_test::failures ? 1 : 0;
 }

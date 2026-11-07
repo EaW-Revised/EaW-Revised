@@ -26,4 +26,5 @@ set(EAWR_GODOT_UI_SOURCES
     "${CMAKE_CURRENT_LIST_DIR}/load_game_view.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/message_box_view.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/movie_player.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/bink_movie.cpp"
 )

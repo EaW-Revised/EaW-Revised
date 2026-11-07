@@ -1,4 +1,5 @@
 #include "render_test_support.hpp"
+#include "eawr/vfs/vfs.hpp"
 #include "eawr/presentation/particles/prewarmed_capacity.hpp"
 #include <sstream>
 
@@ -443,6 +444,51 @@ void test_heat_pixel_change_bound() {
 void test_authored_effect_admission() {
     using Registry = particles::EffectRegistry;
     using eawr::presentation::ResourceKind;
+    // Render support belongs to each emitter. An unsupported renderer must
+    // retain its CPU lifecycle, including children that have supported renderers.
+    for (const auto unsupported_kind : {0, 1, 2}) {
+        RecordingBackend mixed_backend;
+        Registry mixed_registry(mixed_backend);
+        auto mixed = std::make_shared<particles::SystemDefinition>();
+        mixed->emitters.push_back(drawable_emitter());
+        auto parent = drawable_emitter();
+        parent.lifetime = 0.1F;
+        if (unsupported_kind == 0) parent.blend_mode = 5;
+        else if (unsupported_kind == 1) { parent.renderer_id = 52; parent.primitive_mode = 0; }
+        else parent.renderer_id = 999;
+        mixed->emitters.push_back(parent);
+        auto child = drawable_emitter();
+        child.creator_id = 40;
+        child.parent_emitter = 1;
+        mixed->emitters.push_back(child);
+        mixed->emitters.push_back(parent); // trailing unsupported plans have no backend stage
+        auto unsupported_only = std::make_shared<particles::SystemDefinition>();
+        unsupported_only->emitters.push_back(parent);
+        expect(mixed_registry.spawn_authored(unsupported_only, 42).refusal == Registry::Refusal::definition_failure,
+            "effect without any drawable plan is still refused explicitly");
+        const auto admitted = mixed_registry.spawn_authored(mixed, 42);
+        expect(bool(admitted), "unsupported render plan does not refuse drawable siblings");
+        if (!admitted) continue;
+        expect(mixed_backend.created == 2, "only drawable plans acquire backend resources");
+        const auto first = mixed_registry.advance(admitted.handle, 1.0F / 30.0F, test_camera());
+        expect(bool(first) && first.value().emitters[0].drawn && first.value().emitters[0].quads > 0,
+            "supported sibling uploads its visible stream");
+        const auto* plans = mixed_registry.plans(admitted.handle);
+        expect(bool(first) && !first.value().emitters[1].drawn && plans && !plans->at(1).cause.empty(),
+            "unsupported renderer retains its explicit cause");
+        const auto after = mixed_registry.advance(admitted.handle, 0.2F, test_camera());
+        expect(bool(after) && after.value().emitters[2].drawn && after.value().emitters[2].quads > 0,
+            "unsupported renderer preserves supported children at parent death");
+        expect(bool(mixed_registry.release(admitted.handle)), "mixed render ownership releases normally");
+        const auto reused = mixed_registry.spawn_authored(mixed, 42);
+        expect(bool(reused) && reused.reused && mixed_backend.created == 4,
+            "mixed render layout can be reused without resources for unsupported plans");
+        if (reused) expect(bool(mixed_registry.release(reused.handle)), "reused mixed ownership releases");
+        mixed_registry.fail_next_admission(Registry::AdmissionStage::backend);
+        expect(mixed_registry.spawn_authored(mixed, 42).refusal == Registry::Refusal::allocation_failed
+            && mixed_backend.live.empty() && mixed_backend.invalid_destroys == 0,
+            "mixed render backend failure rolls back all acquired resources");
+    }
     RecordingBackend backend;
     eawr::presentation::PayloadBudget budget;
     Registry registry(backend);

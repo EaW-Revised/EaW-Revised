@@ -43,7 +43,7 @@ public:
     struct ProxyInstance { sim::EntityId entity{}, source{}; sim::AssetId asset{}; };
     struct Impl {
         struct Instance {
-            sim::AssetId asset_id{}; RID rid{}, skeleton{}; bool visible{}, reserved_proxy{};
+            sim::AssetId asset_id{}; RID rid{}, skeleton{}; bool visible{}, applied_visible{true}, reserved_proxy{};
             std::uint64_t category_surfaces{};
             render_categories::Role category_role{render_categories::Role::unknown};
             bool category_casts{true};
@@ -56,6 +56,7 @@ public:
         std::map<sim::AssetId, Resource> resources_;
         std::map<sim::EntityId, Pending> skin_poses_;
         std::map<sim::EntityId, render_categories::Role> category_roles_;
+        std::map<sim::EntityId, int> diagnostic_owners_;
         std::map<sim::EntityId, int> light_scales_, colorizations_, opacities_;
         std::set<sim::AssetId> non_casting_;
         struct Reservations {

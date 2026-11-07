@@ -4,6 +4,7 @@
 #include "eawr/core/sha256.hpp"
 #include "eawr/script/numeric/binary64.hpp"
 #include "galactic_api_inventory.hpp"
+#include "eawr/script/foc/tactical_ai.hpp"
 
 #include <algorithm>
 #include <map>
@@ -68,6 +69,46 @@ Binding missing(std::string name) {
 
 } // namespace
 
+core::Result<void> register_galactic_first_object(ScriptScheduler& scripts,
+    const std::vector<std::pair<std::string, gc::TypeId>>& types,
+    const std::vector<std::pair<std::string, gc::PlanetId>>& planets, GalacticSnapshotReader reader) {
+    const auto normalize = [](std::string name) {
+        for (char& c : name) if (c >= 'a' && c <= 'z') c = static_cast<char>(c - ('a' - 'A'));
+        return name;
+    };
+    std::map<std::string, gc::TypeId> names;
+    for (const auto& [name, id] : types) names.try_emplace(normalize(name), id);
+    std::map<std::string, gc::PlanetId> locations;
+    for (const auto& [name, id] : planets) {
+        const auto [it, inserted] = locations.try_emplace(normalize(name), id);
+        if (!inserted) it->second = std::min(it->second, id);
+    }
+    return scripts.register_binding("Find_First_Object", [names = std::move(names), locations = std::move(locations),
+        reader = std::move(reader), normalize](BindingContext& context, const ValueList& arguments) {
+        using Result = core::Result<ValueList>;
+        if (arguments.empty() || !std::holds_alternative<std::string>(arguments.front().data)) {
+            context.report(codes::invalid_request, "Find_First_Object requires a string first argument");
+            context.request_exit();
+            return Result::success({});
+        }
+        const auto name = normalize(std::get<std::string>(arguments.front().data));
+        const auto snapshot = reader ? reader() : nullptr;
+        sim::EntityId selected{};
+        const auto consider = [&](sim::EntityId id) { if (id && (!selected || id < selected)) selected = id; };
+        if (const auto planet = locations.find(name); planet != locations.end()) {
+            if (!snapshot || std::any_of(snapshot->planets().begin(), snapshot->planets().end(),
+                [&](const auto& row) { return row.id == planet->second; })) consider(planet->second);
+        }
+        if (snapshot) if (const auto type = names.find(name); type != names.end()) {
+            // Conservative ordering: lowest live identity; retail duplicate ordering remains an open gap.
+            for (const auto& object : snapshot->actor_records())
+                if (!object.dead && !object.delete_pending && object.current_type == type->second) consider(object.id);
+        }
+        if (!selected) return Result::success({});
+        return Result::success({Value{Handle{foc::handle_game_object, selected}}});
+    });
+}
+
 struct ScriptedGalacticSession::Impl {
     gc::GalacticSession world;
     ScriptScheduler ai;
@@ -80,6 +121,7 @@ struct ScriptedGalacticSession::Impl {
     std::set<gc::SeatId> exhausted_seats;
     std::vector<ScriptCommand> pending;
     std::optional<core::Diagnostic> failure;
+    std::function<void(ServiceReport&)> global_value_committer;
     bool stepped{};
 
     Impl(gc::GalacticSession world_in, ScriptScheduler ai_in, ScriptScheduler story_in)
@@ -139,6 +181,14 @@ struct ScriptedGalacticSession::Impl {
 
     core::Result<ServiceReport> service(const sim::PartitionExecutor& executor, const gc::GalacticTick& tick,
         ScriptScheduler& scripts, const std::shared_ptr<GalacticScriptEngine>& engine, const bool is_story) {
+        const auto run = [&] { return service_once(executor, tick, scripts, engine, is_story); };
+        auto result = engine ? engine->service_phase(executor, world, tick, scripts, run) : run();
+        if (result) world.add_runtime_load_notes(result.value().load_notes);
+        return result;
+    }
+
+    core::Result<ServiceReport> service_once(const sim::PartitionExecutor& executor, const gc::GalacticTick& tick,
+        ScriptScheduler& scripts, const std::shared_ptr<GalacticScriptEngine>& engine, const bool is_story) {
         if (auto clock = scripts.set_galactic_frame(world.clock().galactic_frame); !clock)
             return core::Result<ServiceReport>::failure(clock.error());
         ServiceOptions options;
@@ -189,6 +239,7 @@ struct ScriptedGalacticSession::Impl {
             if (auto taken = engine->after_service(report.value()); !taken)
                 return core::Result<ServiceReport>::failure(taken.error());
         }
+        if (is_story && global_value_committer) global_value_committer(report.value());
         if (is_story) {
             for (const auto id : scripts.instances()) {
                 auto slots = scripts.thread_slots(id);
@@ -402,6 +453,10 @@ core::Result<ScriptedGalacticTick> ScriptedGalacticSession::step(
     } catch (...) {
         return abort(error(codes::session_abort, "the galactic script host threw an exception"));
     }
+}
+
+void ScriptedGalacticSession::set_global_value_committer(std::function<void(ServiceReport&)> committer) {
+    impl_->global_value_committer = std::move(committer);
 }
 
 void ScriptedGalacticSession::set_state_hasher(std::shared_ptr<sim::StateHasher> hasher) noexcept {

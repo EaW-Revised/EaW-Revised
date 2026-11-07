@@ -14,8 +14,9 @@ FoC galactic conquest and the galactic systems shared with story campaigns,
 researched 2026-10-02. Scope: campaign selection and session construction,
 authored starting planets/forces/credits/tech, victory and defeat dispatch,
 manual/quick/automatic save entry points, persisted state and restore fixups,
-and the lifetime of the parent galaxy during tactical combat. This walk writes
-no galactic implementation and makes no retail save-file compatibility promise.
+and the lifetime of the parent galaxy during tactical combat. This walk records
+the original inventory and makes no retail save-file compatibility promise. The
+current qualification matrix below supersedes the original gap estimates.
 
 Sources are **debug build**, **XML data**, **retail capture**, existing sourced
 behavior notes and **unverified**. Opaque evidence IDs identify private records
@@ -257,6 +258,27 @@ Document coverage and implementation coverage are separate: **68 rules,
 | [Lua script model](../lua-script-model.md) L-32 and [Lua persistence](../../lua-persistence.md) | **Same** script/event and sandbox infrastructure boundary; complete galaxy checkpoint **missing there** | WGS-07/40/41/58/62/68 links story/global/script identity; existing deterministic Lua persistence is an integration dependency, not proof original nested script loaders were fully audited |
 | [Hero walk](heroes.md) WHE-01 and movement WGM-78..80 | **Same** classification and scheduled return interface; multiplayer setup/checkpoint fields **missing there** | WGS-14/52 retains duplicate guarding and pending hero deadline/attribution; special-action internals belong to GC corruption/heroes |
 
+## Current save/load qualification (2026-10-28)
+
+DONE means the named native behavior is implemented and exercised; GAP names
+unqualified retail routes or an incomplete native counterpart. A row covering
+multiple clauses is GAP if any clause remains open. Original file compatibility
+is not implied. The earlier ownership estimates below are historical.
+
+| Rules | Status and evidence |
+| --- | --- |
+| WGS-33, 143 | DONE for multiplayer quick/autosave refusal and reserved native slot: `tests/galactic/game_checkpoint_tests.cpp` and `tests/galactic/live_save_tests.cpp`. |
+| WGS-34 | GAP for retail network callback delivery qualification; native local slot projection is covered by `tests/galactic/game_checkpoint_tests.cpp`. |
+| WGS-35 | GAP: invasion callback registration and force filtering remain unqualified and unimplemented. |
+| WGS-36, 159 | GAP for other retail failure classes; native publication and reporting use `src/platform/galactic/live_save_transport.cpp` and `tests/galactic/live_save_tests.cpp`. |
+| WGS-95..99, 120 | GAP: bounded solo captures do not qualify land, network, story-lock or all failure routes. |
+| WGS-142, 144..145, 165 | GAP for invasion, automatic tactical and land routes and retail failure effects; pending solo space Begin and quit are covered by `tests/galactic/live_save_tests.cpp`. |
+| WGS-152 | GAP for retail land, network and story-lock execution; native menu predicates are tested in `tests/galactic/live_save_tests.cpp`. |
+| WGS-153..158, 160..162 | GAP: native screens exist in `apps/viewer/src/galactic/galactic_save.cpp`, but complete retail interaction, timing, list and transition parity is not established. |
+| WGS-163..164 | GAP: retail corrupt/version/mod error presentation and fallback remain unqualified; native validate-before-swap refusal is covered by `tests/galactic/game_checkpoint_tests.cpp`. |
+| Hotkeys, WGS-98 and U04 | GAP for complete retail mode and focus qualification; native configured F6/F5 dispatch is tested in `tests/galactic/live_save_tests.cpp`. |
+| WGS-U04 | GAP: callback wiring, multiplayer, land, remaining hotkey and failure cases require the bounded captures described below. |
+
 ## Gap matrix and M3 ownership
 
 Repository inspection finds `src/data/xml_registry.cpp` registry identities,
@@ -271,9 +293,9 @@ checkpoint owners. G1/G2 are the only new implementation packets.
 |---|---|---|---|
 | G1 Campaign selection-to-session construction and root teardown | WGS-01..14, 67..68 | **missing**; new GC session, validated data, economy_rules/production, AI engine, Lua, save/replay | Session setup ticket (legacy EAWR-1149); **L, 20 / 36 / 60 h**; reuse data/model, fiscal and story owners (legacy EAWR-679, EAWR-680, EAWR-682, EAWR-683) |
 | G2 Galactic victory/defeat monitor and result event dispatch | WGS-15..32, 57 | **missing**; new GC predicates/monitor, tactical victory/result bridge, political/hero state, Lua, save/replay | Victory ticket (legacy EAWR-1150); **M, 12 / 24 / 40 h**; return/control owners (legacy EAWR-1116, EAWR-1114); do not reuse tactical thresholds |
-| G3 Complete GC checkpoint, save admission and restore | WGS-33..58, 59..64, 66 | **missing**; new GC serializers/reference graph around existing save/replay and deterministic Lua persistence; economy_rules/production/AI/story participation | Reuse versioned checkpoint (legacy EAWR-681), **L, 16 / 28 / 48 h** existing estimate; GC model adds its fields (legacy EAWR-680). This walk supplies state/admission acceptance, not another format ticket |
-| G4 Checkpoint capacity and work bounds | WGS-36..58, especially 47/48/54..56 | **missing**; save/replay, new GC graph and queues; deterministic work counters | Reuse GC checkpoint capacity (legacy EAWR-252); **M, 8 / 16 / 28 h** walk planning estimate; capacity qualification follows G3. Measure representative galaxy plus retained tactical child; do not use serialized writer limits as live caps |
-| G5 Persistent battle handoff, return and script/AI continuity | WGS-42/44/48/52/63..66/68 | **missing**; new galaxy/conflict/roster state, tactical result/reinforcement, production, AI engine, Lua, save/replay | Reuse admission/handoff (legacy EAWR-1115), **L, 24 / 44 / 72 h**, return (legacy EAWR-1116), **L, 24 / 48 / 80 h**, AI return/checkpoint (legacy EAWR-1127), and fiscal/production event delivery (legacy EAWR-1131) |
+| G3 Complete GC checkpoint, save admission and restore | WGS-33..58, 59..64, 66 | **partly implemented**; native GC and child checkpoint paths exist; retail admission and delegated parity gaps remain below | Reuse versioned checkpoint (legacy EAWR-681), **L, 16 / 28 / 48 h** existing estimate; GC model adds its fields (legacy EAWR-680). This walk supplies state/admission acceptance, not another format ticket |
+| G4 Checkpoint capacity and work bounds | WGS-36..58, especially 47/48/54..56 | **partly implemented**; native bounds are validated; retail capacity and representative workload qualification remain open | Reuse GC checkpoint capacity (legacy EAWR-252); **M, 8 / 16 / 28 h** walk planning estimate; capacity qualification follows G3. Measure representative galaxy plus retained tactical child; do not use serialized writer limits as live caps |
+| G5 Persistent battle handoff, return and script/AI continuity | WGS-42/44/48/52/63..66/68 | **partly implemented**; native parent/child, AI and script checkpoint paths exist; retail continuation parity remains open | Reuse admission/handoff (legacy EAWR-1115), **L, 24 / 44 / 72 h**, return (legacy EAWR-1116), **L, 24 / 48 / 80 h**, AI return/checkpoint (legacy EAWR-1127), and fiscal/production event delivery (legacy EAWR-1131) |
 
 The tracking issue (legacy EAWR-1148) contains the two new child packets and
 links the reused owners. Highest-impact M3 gaps are: a repeatable authored

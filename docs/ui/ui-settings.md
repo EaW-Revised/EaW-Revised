@@ -42,7 +42,7 @@ as the defaults. No compatibility is kept before 1.0: change the format, bump th
 | ST-N1 | Quickmatch default, connection speed, preferred faction, lobby locale | integers | 1 (land), 0 (modem), 0 (random), -1 (the game language) | debug build |
 | ST-N2 | Online service (project-authored) | host, port, trust mode, certificate pin or CA file, relay-only preference | empty host, port 27020, pin trust, relay-only off | project |
 | ST-K3 | Camera keys | arrows / WASD | arrows (retail) | owner request |
-| ST-P3 | Render thread (Performance page, restart required) | Separate / Safe | Separate | owner request |
+| ST-P3 | Render thread (Performance page, restart required) | Separate (legacy Safe shown when saved) | Separate | owner request |
 | ST-K1 | Key overrides (command name to key text) | map | empty: the project's keys | project |
 
 The retail anti-aliasing level is not stored: its slider drives the render profile (section 4).
@@ -68,7 +68,7 @@ table of controls and reasons lives next to the record (`find_option_status`) an
 | ST-V5 | Windowed check, vsync check | Apply applies changed values and stays; Accept applies changed values and leaves; Cancel leaves without applying. An unchanged Accept makes no video calls, including when accepting another page. Vsync, window mode/size, texture detail and render profile are compared independently against the last committed values. Apply is disabled until something changes. The shared engine apply also checks current mode, size, vsync and texture detail, including at startup. Vsync on requests FIFO directly. Render-profile setters compare current viewport values. Retail release capture confirms no visible display reset on unchanged Accept. |
 | ST-P1 | Anti-aliasing slider | Off is the retail look, Max the enhanced one (section 4). |
 | ST-G3 | Tactical game speed | The battle's speed step (TM-01) unless `--eawr-live-speed` chose one. |
-| PD-01 | Reinforcement areas only while placing | Enabled Gameplay checkbox. On: red no-drop areas appear only during placement; off: follows the retail/mod panel-or-drag rule. Accept saves immediately, Cancel discards edits, Defaults enables it. Presentation only. |
+| PD-01 | Reinforcement areas only while placing | Enabled Tweaks checkbox. On: red no-drop areas appear only during placement; off: follows the retail/mod panel-or-drag rule. Accept saves immediately, Cancel discards edits, Defaults enables it. Presentation only. |
 | ST-O1 | Gamma, detail sliders, advanced page, widescreen, hardware cursor, subtitles, audio provider | Disabled: the detail levels and cursor kind are not built, the layout follows the window already. |
 | ST-O1 | Galactic speed, auto-resolve | Disabled: the galactic game is not part of this build. |
 | ST-O1 | Scroll speed, absolute scroll, right-button scroll, rotate with both buttons, alternate mouse | Disabled: the camera takes its controls from the project's bindings. |
@@ -79,7 +79,7 @@ table of controls and reasons lives next to the record (`find_option_status`) an
 The retail difficulty radios appear only in a campaign game (debug build); this build has no
 campaign, so they are hidden.
 
-Reinforcement areas only while placing is enabled by default in **Options > Gameplay**.
+Reinforcement areas only while placing is enabled by default in **Options > Tweaks**.
 The red no-drop grid appears during placement and disappears when placement ends, even with the panel open.
 Turn it off to follow the retail/mod panel-or-drag rule. Accept saves the choice; Cancel discards edits; Defaults enables it.
 This changes presentation only and takes effect without restarting.
@@ -188,7 +188,7 @@ Driven audio recordings keep their explicit audio-pace render clock, including r
 
 Both Options hubs add **Performance**. This project-owned page uses the loaded dialog skin and
 button styles. The render-thread selector moves here from Video; frame-rate limit and vsync
-remain under Video. **Separate (default)** and **Safe** take effect after restart. Apply and Accept
+remain under Video. **Separate (default)** takes effect after restart. A previously saved Safe choice remains visible; Safe is otherwise available through the launcher. Apply and Accept
 save only this preference; Cancel discards it; Defaults selects Separate and saves only after
 Apply or Accept. Other Video settings are preserved.
 
@@ -213,3 +213,38 @@ camera chords before installing the binding table. Keyboard options and tactical
 tooltips show the same resolved command keys. Menu text entry keeps GUI-first routing.
 Applying this preset commits only the keyboard choice and makes no display or renderer
 setter calls. Camera/input presentation changes do not enter simulation hashes.
+
+### Optional bulk selection (SH-01)
+
+Options > Tweaks has a default-off **Selection hotkeys** toggle. In Options > Controls,
+**Select own units** defaults to Ctrl+Q and **Select own units on screen** defaults to Q.
+Each dropdown offers the verified free tactical Q, Ctrl+Q, Ctrl+U and Ctrl+Y chords and rejects a duplicate.
+Selection hotkeys are suspended while the development free camera is active.
+Labels follow the active keyboard layout; stored chords refer to physical keys.
+These feature rows persist through Apply/Accept; Cancel discards changes and Reset selection keys restores
+the active XML defaults (Ctrl+Q/Q without a layer override). The general retail keyboard editor remains read-only. See
+[SH-01](../behaviour/performance-deviations.md#sh-01-optional-selection-hotkeys) for admission.
+
+### Revised game-data layer (SH-02, SH-03)
+
+Build private sources with `python tools/install_selection_advisor.py --source <private-source>
+--destination <layers-folder>/Revised`. The builder selects 7 all-units and 4 local-units takes
+per faction, uses processed Empire/Underworld and plain Rebel takes, and excludes the rejected
+local-units take. Output must be outside the repository. Audio never ships with the code.
+
+The launcher enables the built-in **Revised** layer by default; its switch can disable the layer.
+Other mods take precedence over Revised and can override its files.
+The layer contains Data/Audio/SFX files and normal Data/XML SFX event definitions, registered
+additively by SFXEventFilesAdditions.xml alongside the winning primary SFX registry. Removing
+or disabling Revised restores ordinary selection responses; existing game events remain loaded.
+The folder is general project-added data and can hold future Revised additions.
+
+SelectionControls.xml supplies optional XML defaults: Selection_Advisor_Enabled (No),
+Selection_Action Name (SELECT_OWN_ALL or SELECT_OWN_SCREEN), Default_Key (Ctrl+Q / Q), and
+repeatable Faction_SFXEvent text (`faction,event`) for an explicit override, Advisor_SFXEvent (`advisor event,event`) for derived voice, and Default_Faction_SFXEvent (`faction,event`) for fallback. Candidates merge from lower to higher layers; faction overrides apply only above Revised when it is present. An unmapped advisor falls back to the faction default, then silence. A layer can author just one action. Mods with custom advisor events can add mappings or an explicit faction override.
+Options > Tweaks overrides the default enable switch; Controls rebinding overrides XML
+keys, and Reset selection keys restores the active XML defaults. Heroes (including team heroes)
+join both selections; an action's optional Include_Heroes (Yes by default) set to No leaves them
+out. Structures and decorations stay excluded. Audio uses normal SFX Play_Sequentially, Is_HUD_VO and Localize policies.
+
+The built-in Revised data layer uses `revised_layer_enabled` (0 or 1, default 1 when absent) and an optional `revised_layer_path` development override in the same settings file (for example `revised_layer_path=<workspace>/eawr-layers/Revised`); it names the folder containing `Data`. Service changes apply on the next start, and the launcher disables the switch while a game runs.

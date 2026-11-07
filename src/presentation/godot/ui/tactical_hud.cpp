@@ -32,10 +32,11 @@ int TacticalHud::options_presses() const noexcept {
 }
 EawrTacticalHud* TacticalHud::hud() const noexcept { return state_->hud; }
 
-void TacticalHud::prepare_command_bar_movie(const vfs::Vfs& filesystem, const std::string_view movie) {
+void TacticalHud::prepare_command_bar_movie(const vfs::Vfs& filesystem, const std::string_view movie, BinkSourceFactory decoder_factory,
+    std::function<void(std::string, std::string, std::string)> failure_sink) {
     if (state_->movie_bone && state_->hud) {
         state_->hud->set_meta("eawr_movie_ready", false);
-        state_->command_bar_movie.prepare(filesystem, movie, *state_->movie_bone, *state_->hud);
+        state_->command_bar_movie.prepare(filesystem, movie, *state_->movie_bone, *state_->hud, std::move(decoder_factory), std::move(failure_sink));
         state_->hud->set_movie_warmup([state = state_.get()] {
             if (!state->command_bar_movie.warmup()) return false;
             state->hud->set_meta("eawr_movie_ready", true);
@@ -68,6 +69,7 @@ void TacticalHud::set_gift_handler(std::function<void(sim::SeatId)> handler) { s
 
 void TacticalHud::set_gift(const bool policy, const bool enabled, const std::vector<model::ObserverOwner>& recipients) {
     auto& state = *state_;
+    state.gift_policy = policy;
     const bool changed = state.gift_recipients != recipients;
     state.gift_enabled = policy && enabled && !recipients.empty();
     if (state.gift_open && (recipients.size() != state.gift_recipients.size()
@@ -75,27 +77,49 @@ void TacticalHud::set_gift(const bool policy, const bool enabled, const std::vec
             [](const auto& a, const auto& b) { return a.seat == b.seat; }))) state.gift_open = false;
     if (changed) state.gift_recipients = recipients;
     if (!state.gift_enabled) state.gift_open = false;
-    if (!policy || !state.hud || state.shell.order_buttons.empty()) {
+    const auto definition = state.project_hud.find("gift");
+    if (!policy || !state.hud || definition == state.project_hud.end() || !definition->second.enabled) {
         if (state.gift_button) state.gift_button->hide();
         if (state.gift_scroll) state.gift_scroll->hide();
         for (auto& cell : state.gift_cells) cell.button->hide();
         state.gift_viewport = Vector2(-1, -1);
         return;
     }
-    if (state.gift_button && !changed && state.gift_viewport == state.hud->get_size()
-        && state.gift_drawn_enabled == state.gift_enabled && state.gift_drawn_open == state.gift_open) return;
+    const auto& look = definition->second;
+    if (look.stock_art && state.shell.order_buttons.empty()) {
+        if (!state.gift_dock_warning) state.warn("EAWR-UI-0790", "gift control stock art is unavailable");
+        state.gift_dock_warning = true;
+        if (state.gift_button) state.gift_button->hide();
+        if (state.gift_scroll) state.gift_scroll->hide();
+        return;
+    }
+    const auto& normal_name = look.stock_art ? state.shell.order_buttons.front().blank : look.normal;
+    if (state.command_texture(normal_name, "gift normal", true).is_null()) {
+        if (!state.gift_dock_warning) state.warn("EAWR-UI-0790", "gift control normal texture is unavailable", normal_name);
+        state.gift_dock_warning = true;
+        state.gift_open = false;
+        if (state.gift_button) state.gift_button->hide();
+        if (state.gift_scroll) state.gift_scroll->hide();
+        return;
+    }
+    const auto previous_viewport = state.gift_viewport;
+    const bool previous_enabled = state.gift_drawn_enabled;
+    const bool previous_open = state.gift_drawn_open;
     state.gift_viewport = state.hud->get_size();
-    state.gift_drawn_enabled = state.gift_enabled;
-    state.gift_drawn_open = state.gift_open;
-    // ADR-020 project placement: immediately above the authored command row.
-    // Reuse that row's blank/state art; the feature has no retail Gift icon.
-    const auto& look = state.shell.order_buttons.front();
     const auto make_button = [&](Control* parent) {
         auto* button = memnew(EawrHudButton);
-        button->setup_art({.normal = state.command_texture(look.blank, "gift command blank"),
-            .hover = state.command_texture(look.mouse_over, "gift command hover"),
-            .pressed = state.command_texture(look.pressed, "gift command pressed"),
-            .disabled = state.command_texture(look.blank, "gift command disabled")});
+        if (look.stock_art && !state.shell.order_buttons.empty()) {
+            const auto& stock = state.shell.order_buttons.front();
+            const auto blank = state.command_texture(stock.blank, "gift command blank");
+            button->setup_art({.normal = blank, .hover = {}, .pressed = {}, .disabled = blank,
+                .portrait = {}, .overlays = HudButtonArt::Overlays{state.command_texture(stock.mouse_over, "gift command hover"),
+                    state.command_texture(stock.pressed, "gift command pressed"), {}, !stock.selected_alpha}});
+        } else {
+            button->setup_art({.normal = state.command_texture(look.normal, "gift normal"),
+                .hover = state.command_texture(look.hover, "gift hover"),
+                .pressed = state.command_texture(look.pressed, "gift pressed"),
+                .disabled = state.command_texture(look.disabled, "gift disabled"), .portrait = {}, .overlays = {}});
+        }
         parent->add_child(button);
         auto* label = memnew(Label);
         label->set_mouse_filter(Control::MOUSE_FILTER_IGNORE);
@@ -116,7 +140,8 @@ void TacticalHud::set_gift(const bool policy, const bool enabled, const std::vec
         state.gift_button->set_name("gift");
         const data::ui::TextDatabase empty;
         data::ui::TextLookup lookup(state.text_database ? *state.text_database : empty);
-        cell.label->set_text(text(data::ui::to_utf8(lookup.text("TEXT_EAWR_GIFT_UNITS"))));
+        cell.label->set_text(text(data::ui::to_utf8(lookup.text(look.caption))));
+        state.gift_button->set_tooltip_text(text(data::ui::to_utf8(lookup.text(look.tooltip))));
         state.gift_button->set_action([this] {
             auto& current = *state_;
             if (!current.gift_enabled) return;
@@ -133,25 +158,89 @@ void TacticalHud::set_gift(const bool policy, const bool enabled, const std::vec
         state.gift_scroll->add_child(state.gift_list);
     }
     const float scale = static_cast<float>(state.hud->space().scale);
-    const Vector2 size(96.0F * scale, 30.0F * scale);
-    Vector2 position(12.0F * scale, state.hud->get_size().y - 220.0F * scale);
-    if (const auto anchor = state.order_buttons.find("attack"); anchor != state.order_buttons.end())
-        position = anchor->second->get_position() - Vector2(0, size.y + 4.0F * scale);
-    position.x = std::clamp(position.x, 0.0F, std::max(0.0F, state.hud->get_size().x - size.x));
-    position.y = std::clamp(position.y, 0.0F, std::max(0.0F, state.gift_viewport.y - size.y));
+    std::map<std::string, model::PixelRect> anchors;
+    std::vector<model::PixelRect> occupied;
+    for (const auto& component : state.project_hud_anchors) {
+        if (!component.visible) continue;
+        const auto r = model::shell_to_screen(component.rect, state.hud->placement());
+        anchors.emplace(component.name, r);
+        occupied.push_back(r);
+    }
+    const Vector2 hud_origin = state.hud->get_global_position();
+    const auto occupy_screen_rect = [&](const Rect2& r, const bool input_wrapper = false) {
+        model::record_project_hud_occupancy(occupied,
+            {r.position.x - hud_origin.x, r.position.y - hud_origin.y, r.size.x, r.size.y}, input_wrapper);
+    };
+    // Hero and production rects are already hud-local (shell_to_screen), unlike get_global_rect().
+    const auto occupy_hud_rect = [&](const Rect2& r) {
+        occupied.push_back({r.position.x, r.position.y, r.size.x, r.size.y});
+    };
+    if (state.heroes && state.heroes->is_visible_in_tree()) {
+        for (const auto tray : {EawrHeroTray::Tray::friendly, EawrHeroTray::Tray::hostile}) {
+            for (std::size_t slot = 0; slot < state.heroes->icons(tray).size(); ++slot) {
+                if (const auto rect = state.heroes->slot_rect(tray, slot)) occupy_hud_rect(*rect);
+            }
+        }
+    }
+    if (state.production && state.production->is_visible_in_tree() && state.production->pane_open()) {
+        if (const auto rect = state.production->control_rect("r_close")) occupy_hud_rect(*rect);
+        for (std::size_t row = 0; row < model::pool_row_limit; ++row) {
+            for (std::size_t column = 0; column < model::pool_columns; ++column) {
+                const auto name = "r_0" + std::to_string(row) + "0" + std::to_string(column);
+                if (const auto rect = state.production->control_rect(name)) occupy_hud_rect(*rect);
+            }
+        }
+    }
+    for (const auto& [name, button] : state.order_buttons) {
+        if (!button->is_visible_in_tree()) continue;
+        const auto r = button->get_global_rect();
+        anchors[name] = {r.position.x - hud_origin.x, r.position.y - hud_origin.y, r.size.x, r.size.y};
+    }
+    const auto collect = [&](const auto& self, Node* node) -> void {
+        if (node == state.gift_button || node == state.gift_scroll) return;
+        // These custom controls span the viewport but handle input only over their drawn content.
+        const bool input_wrapper = node == state.cards || node == state.heroes || node == state.abilities
+            || node == state.production || node == state.minimap;
+        if (auto* control = Object::cast_to<Control>(node); control && control != state.hud
+            && control->is_visible_in_tree() && control->get_mouse_filter() == Control::MOUSE_FILTER_STOP) {
+            occupy_screen_rect(control->get_global_rect(), input_wrapper);
+        }
+        for (int i = 0; i < node->get_child_count(); ++i) self(self, node->get_child(i));
+    };
+    collect(collect,state.hud);
+    const auto placed = model::dock_project_hud(look, {0,0,state.gift_viewport.x,state.gift_viewport.y}, scale,
+        anchors, occupied, state.gift_recipients.size());
+    if (!placed) {
+        if (!state.gift_dock_warning) state.warn("EAWR-UI-0790", "gift control has no safe docking candidate");
+        state.gift_dock_warning = true;
+        state.gift_open = false;
+        state.gift_button->hide(); state.gift_scroll->hide();
+        for (auto& cell : state.gift_cells) cell.button->hide();
+        return;
+    }
+    state.gift_dock_warning = false;
+    const Vector2 size(static_cast<float>(placed->width), static_cast<float>(placed->height));
+    const Vector2 position(static_cast<float>(placed->x), static_cast<float>(placed->y));
+    if (!changed && previous_viewport == state.gift_viewport && previous_enabled == state.gift_enabled
+        && previous_open == state.gift_open && state.gift_button->is_visible()
+        && state.gift_button->get_position() == position && state.gift_button->get_size() == size) return;
+    state.gift_drawn_enabled = state.gift_enabled;
+    state.gift_drawn_open = state.gift_open;
     state.gift_button->set_position(position);
     state.gift_button->set_size(size);
     state.gift_button->set_hit_rect({{}, size});
-    state.gift_button->set_disabled(!state.gift_enabled);
+    if (look.stock_art) state.gift_button->set_special_disabled(!state.gift_enabled);
+    else state.gift_button->set_disabled(!state.gift_enabled);
     state.gift_button->set_modulate(state.gift_enabled ? Color(1, 1, 1) : Color(0.5F, 0.5F, 0.5F));
     state.gift_button->show();
-    const Vector2 recipient_size(180.0F * scale, size.y);
-    const float rows_height = static_cast<float>(state.gift_recipients.size()) * (size.y + 2.0F * scale);
-    const float available = std::max(size.y, position.y - 4.0F * scale);
-    const float list_height = std::min(rows_height, available);
-    state.gift_scroll->set_position({std::clamp(position.x, 0.0F,
-        std::max(0.0F, state.gift_viewport.x - recipient_size.x)), std::max(0.0F, position.y - list_height - 2.0F * scale)});
-    state.gift_scroll->set_size({recipient_size.x, list_height});
+    const Vector2 recipient_size(static_cast<float>(look.list_width) * scale, static_cast<float>(look.row_height) * scale);
+    // The dock check guarantees the whole list (rows and gap) fits above the button, so it needs no height clamp.
+    const float row_gap = static_cast<float>(look.row_gap) * scale;
+    const float row_pitch = recipient_size.y + row_gap;
+    const float rows_height = static_cast<float>(state.gift_recipients.size()) * row_pitch;
+    const auto list = model::project_hud_list_rect(look, *placed, scale, state.gift_recipients.size());
+    state.gift_scroll->set_position({static_cast<float>(list.x), static_cast<float>(list.y)});
+    state.gift_scroll->set_size({static_cast<float>(list.width), static_cast<float>(list.height)});
     state.gift_list->set_custom_minimum_size({recipient_size.x, rows_height});
     state.gift_scroll->set_visible(state.gift_open);
     for (std::size_t i = 0; i < state.gift_recipients.size(); ++i) {
@@ -176,12 +265,43 @@ void TacticalHud::set_gift(const bool policy, const bool enabled, const std::vec
         if (cell.label->get_text() != name) cell.label->set_text(name);
         cell.button->set_tooltip_text(name);
         cell.button->set_name(String("gift_to_") + String::num_uint64(cell.seat.value));
-        cell.button->set_position({0, static_cast<float>(i) * (size.y + 2.0F * scale)});
+        cell.button->set_position({0, static_cast<float>(i) * row_pitch});
         cell.button->set_size(recipient_size);
         cell.button->set_hit_rect({{}, recipient_size});
         cell.button->set_visible(state.gift_open);
     }
     for (std::size_t i = state.gift_recipients.size(); i < state.gift_cells.size(); ++i) state.gift_cells[i].button->hide();
+}
+void TacticalHud::refresh_gift_layout() {
+    auto& state = *state_;
+    if (!state.gift_policy || !state.hud) return;
+    // Runs every frame: sample only the few values that move the docking result (no names, no
+    // allocation once the buffers are warm) and re-dock when they change. The open production
+    // pane's rectangles are fixed by the hud placement and the open flag.
+    auto& watch = state.gift_layout;
+    watch.begin();
+    const auto size = state.hud->get_size();
+    const auto placement = state.hud->placement();
+    watch.add(size.x, size.y, placement.left, placement.bottom);
+    watch.add(placement.scale);
+    if (state.heroes && state.heroes->is_visible_in_tree()) {
+        for (const auto tray : {EawrHeroTray::Tray::friendly, EawrHeroTray::Tray::hostile}) {
+            const auto count = state.heroes->icons(tray).size();
+            watch.add(static_cast<double>(count));
+            for (std::size_t slot = 0; slot < count; ++slot) {
+                if (const auto rect = state.heroes->slot_rect(tray, slot))
+                    watch.add(rect->position.x, rect->position.y, rect->size.x, rect->size.y);
+            }
+        }
+    }
+    watch.add(state.production && state.production->is_visible_in_tree() && state.production->pane_open() ? 1.0 : 0.0);
+    for (const auto& [name, button] : state.order_buttons) {
+        if (!button->is_visible_in_tree()) continue;
+        const auto r = button->get_global_rect();
+        watch.add(r.position.x, r.position.y, r.size.x, r.size.y);
+    }
+    if (!watch.commit()) return;
+    set_gift(state.gift_policy, state.gift_enabled, state.gift_recipients);
 }
 void TacticalHud::set_beacon(const bool enabled, const bool targeting) {
     if (auto* button = state_->beacon_button) {

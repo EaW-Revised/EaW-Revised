@@ -37,6 +37,10 @@
 #include "path_bench_internal.hpp"
 #include "eawr/battle/start.hpp"
 
+#include <algorithm>
+#include <fstream>
+#include <iostream>
+
 using namespace path_bench;
 
 int main(const int argc, const char* const argv[]) {

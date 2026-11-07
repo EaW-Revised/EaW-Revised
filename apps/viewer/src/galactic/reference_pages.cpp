@@ -6,6 +6,22 @@
 #include <limits>
 
 namespace eawr::viewer::galactic {
+std::vector<LegendEntry> legend_entries(const std::vector<std::string>& icons,
+    const std::vector<std::string>& text_ids, const std::vector<int>& rgb,
+    const std::function<std::string(std::string_view)>& text) {
+    std::vector<LegendEntry> out;
+    const auto count = std::min({icons.size(), text_ids.size(), rgb.size() / 3});
+    for (std::size_t index = 0; index < count; ++index) {
+        LegendEntry entry;
+        entry.icon.icon = icons[index];
+        entry.text = text ? text(text_ids[index]) : text_ids[index];
+        entry.icon.name = entry.text;
+        const auto channel = [&](std::size_t at) { return static_cast<float>(std::clamp(rgb[index * 3 + at], 0, 255)) / 255.F; };
+        entry.colour = {channel(0), channel(1), channel(2)};
+        out.push_back(std::move(entry));
+    }
+    return out;
+}
 std::optional<HistoryFacts> published_history(const sim::galactic::GalacticSnapshot& snapshot,
     const GalaxySnapshotStub& metadata) {
     const auto* published = snapshot.history();

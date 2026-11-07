@@ -1,6 +1,6 @@
 #include "session_impl.hpp"
 #include "session_tick.hpp"
-#include "session_land_combat_internal.hpp"
+#include "session_land_combat_internal.hpp" // include-guard: keep
 #include "tactical_internal.hpp"
 #include "eawr/core/tick_profile.hpp"
 #include "eawr/core/text.hpp"
@@ -120,6 +120,67 @@ core::Result<void> TacticalSession::Impl::initialize_land(const TacticalContent&
         const bool container_layout = !company.members.empty() && company.members.front().create_team
             && company.team_type_authored && core::iequals(company.team_locomotor, "LAND_TEAM_CONTAINER_LOCOMOTOR");
         Fixed accumulated_offset;
+        // WLPA-84: a container team spawns in its rows layout, one squad cell after the other along the side axis (the
+        // team box), not as one long sideward row of the whole company. spawn_at is the world position per member;
+        // anchor_of is the row-0 member of each planned squad nearest the layout centre, which becomes the squad position so
+        // that the parent stands on ground a member was placed on.
+        std::vector<Vec2> spawn_at(company.members.size());
+        std::vector<std::size_t> squad_of(company.members.size()), anchor_of;
+        if (container_layout) {
+            const auto whole_company = units::plan_land_company(company);
+            if (!whole_company) return invalid("invalid land company expansion plan");
+            const auto two = Fixed::from_raw(2 * Fixed::scale);
+            const auto spacing_scale = Fixed::from_raw(land_formation_spacing_scale * Fixed::scale);
+            const auto magnitude = [](Fixed value) { return value < Fixed{} ? Fixed::from_raw(-value.raw()) : value; };
+            Fixed cursor;
+            for (std::size_t group_index = 0; group_index < whole_company->squads.size(); ++group_index) {
+                const auto& group = whole_company->squads[group_index].members;
+                std::vector<LandRowsInput> inputs;
+                std::vector<Fixed> half_cell;
+                for (std::size_t k = 0; k < group.size(); ++k) {
+                    const auto& bound_member = binding->members[group[k]];
+                    Fixed gap, half_gap, half;
+                    if (!math::try_multiply(bound_member.formation_spacing.value_or(binding->formation_spacing), spacing_scale, gap)
+                        || !math::try_divide(gap, two, half_gap) || !math::try_add(bound_member.hard_y, half_gap, half))
+                        return invalid("land spawn rows overflow");
+                    inputs.push_back({static_cast<EntityId>(k + 1), Fixed{}, Fixed::from_raw(static_cast<std::int64_t>(k) * Fixed::scale),
+                        bound_member.hard_x, bound_member.hard_y, gap});
+                    half_cell.push_back(half);
+                    squad_of[group[k]] = group_index;
+                }
+                const auto slots = land_rows_layout(inputs);
+                if (!slots) return invalid("land spawn rows overflow");
+                Fixed low, high, best;
+                std::size_t anchor = 0;
+                bool have_anchor = false;
+                for (std::size_t k = 0; k < group.size(); ++k) {
+                    Fixed edge_low, edge_high, distance;
+                    if (!math::try_subtract((*slots)[k].y, half_cell[k], edge_low) || !math::try_add((*slots)[k].y, half_cell[k], edge_high)
+                        || !math::try_add(magnitude((*slots)[k].x), magnitude((*slots)[k].y), distance))
+                        return invalid("land spawn rows overflow");
+                    if (k == 0 || edge_low < low) low = edge_low;
+                    if (k == 0 || edge_high > high) high = edge_high;
+                    // Only a row-0 member (forward offset zero) can stand on the entry point; the nearest one to the centre.
+                    if ((*slots)[k].x == Fixed{} && (!have_anchor || distance < best)) { best = distance; anchor = k; have_anchor = true; }
+                }
+                // The first squad stands on the entry point, as the container does in the stock spawn: its cell starts so that the
+                // anchor member lies on the entry's side axis. Every later squad's cell starts where the previous one ended.
+                if (group_index == 0 && !math::try_subtract(low, (*slots)[anchor].y, cursor)) return invalid("land spawn rows overflow");
+                Fixed shift, advance;
+                if (!math::try_subtract(cursor, low, shift) || !math::try_subtract(high, low, advance)
+                    || !math::try_add(cursor, advance, cursor)) return invalid("land spawn rows overflow");
+                for (std::size_t k = 0; k < group.size(); ++k) {
+                    Fixed side_offset, t1, t2, t3, t4;
+                    if (!math::try_add((*slots)[k].y, shift, side_offset)
+                        || !math::try_multiply(direction.cosine, (*slots)[k].x, t1) || !math::try_multiply(direction.sine, side_offset, t2)
+                        || !math::try_subtract(t1, t2, t3) || !math::try_add(entry.position.x, t3, spawn_at[group[k]].x)
+                        || !math::try_multiply(direction.sine, (*slots)[k].x, t1) || !math::try_multiply(direction.cosine, side_offset, t2)
+                        || !math::try_add(t1, t2, t4) || !math::try_add(entry.position.y, t4, spawn_at[group[k]].y))
+                        return invalid("land spawn slot overflow");
+                }
+                anchor_of.push_back(group[anchor]);
+            }
+        }
         for (std::size_t i = 0; i < company.members.size(); ++i) {
             const auto& content = binding->members[i];
             const auto mask = source.land_terrain->movement_mask(company.members[i].movement_class);
@@ -130,6 +191,9 @@ core::Result<void> TacticalSession::Impl::initialize_land(const TacticalContent&
             member.source = company.members[i]; member.profile = content.locomotion; member.mask = *mask;
             member.collision_class = content.collision_class;
             member.facing = facing.value();
+            member.hard_x = content.hard_x; member.hard_y = content.hard_y;
+            if (!math::try_multiply(content.formation_spacing.value_or(binding->formation_spacing),
+                    Fixed::from_raw(land_formation_spacing_scale * Fixed::scale), member.gap)) return invalid("land member gap overflow");
             Fixed offset, dx, dy;
             Vec2 desired;
             // LC-79: zero additional spacing preserves the members' hard geometry.
@@ -149,7 +213,8 @@ core::Result<void> TacticalSession::Impl::initialize_land(const TacticalContent&
                     || !math::try_add(accumulated_offset, step, accumulated_offset)) return invalid("land hard-footprint spacing overflow");
             }
             offset = accumulated_offset;
-            if (i > max_units || !math::try_multiply(offset, direction.sine, dx)
+            if (container_layout) desired = spawn_at[i];
+            else if (i > max_units || !math::try_multiply(offset, direction.sine, dx)
                 || !math::try_multiply(offset, direction.cosine, dy)
                 || !math::try_subtract(entry.position.x, dx, desired.x)
                 || !math::try_add(entry.position.y, dy, desired.y)) return invalid("land spawn slot overflow");
@@ -177,9 +242,20 @@ core::Result<void> TacticalSession::Impl::initialize_land(const TacticalContent&
             squad.object = first ? entry.entity_id : allocate(); first = false;
             if (!squad.object) return invalid("land squad identity space exhausted");
             squad.position = members[group.members.front()].position; squad.facing = facing.value();
+            if (container_layout) {
+                // WLPA-84: the squad stands on its row-0 member nearest the layout centre (when that member exists); the
+                // spawn slots were laid out as rows for the spawn heading, which counts as mapped.
+                const auto anchor = anchor_of[squad_of[group.members.front()]];
+                if (created[anchor] && std::find(group.members.begin(), group.members.end(), anchor) != group.members.end())
+                    squad.position = members[anchor].position;
+                squad.has_mapped = true; squad.mapped_axis = facing.value();
+            }
             squad.has_formation = plan->forms_squads;
             squad.generic_team = plan->forms_squads && core::to_lower(company.team_locomotor) == "team_locomotor";
             if (plan->forms_squads && !squad.generic_team) {
+                // WLPA-82/95: the squad is one collision body read from its container type; a type without a class has none.
+                squad.collision_class = company.team_collision_class;
+                squad.jiggle = std::max(company.team_max_jiggle.value_or(Fixed{}), Fixed{});
                 if (!binding->effective_team_max_speed) return invalid("land squad requires its converted team maximum speed");
                 squad.maximum_speed = binding->effective_team_type_max_speed.value_or(*binding->effective_team_max_speed);
                 // LC-82: only successfully created members of this instance constrain the type cap.
@@ -335,8 +411,11 @@ core::Result<TacticalTick> TacticalSession::Impl::step_land(TacticalSession& ses
                 }
             }
             auto request = land->requests.at(id);
+            // WLPA-88: a squad that is translating along its own path keeps walking while the re-order is searched.
+            // Bound the search start to one second of travel along the current segment.
+            const auto anchor = move ? land->movement.bounded_splice_anchor(index) : std::nullopt;
             if (move) {
-                request.start = squad->position;
+                request.start = anchor ? *anchor : squad->position;
                 LandPlacementQuery query;
                 query.mask = request.mask; query.from = request.start;
                 query.desired = {move->destination.x, move->destination.y}; query.radius = request.radius;
@@ -349,8 +428,9 @@ core::Result<TacticalTick> TacticalSession::Impl::step_land(TacticalSession& ses
                 request.end = placement.position;
             }
             // A refused replacement leaves the current tracker and any pending search intact.
+            if (anchor) land->movement.cut_splice_anchor(index, *anchor);
             land->searches.erase(id);
-            if (!land->movement.drop_order(index)) return core::Result<TacticalTick>::failure(
+            if (!anchor && !land->movement.drop_order(index)) return core::Result<TacticalTick>::failure(
                 detail::diagnostic(diagnostic_codes::invalid_command, "land stop rejected"));
             unit->state.order = Order{};
             unit->state.order.issued_tick = tick;
@@ -393,11 +473,39 @@ core::Result<TacticalTick> TacticalSession::Impl::step_land(TacticalSession& ses
             if (!LandPathService::ended(search->second)) { ++search; continue; }
             const auto squads = land->movement.squads();
             const auto squad = std::find_if(squads.begin(), squads.end(), [&](const auto& row) { return row.object == search->first; });
+            if (squad == squads.end()) { search = land->searches.erase(search); continue; }
             auto path = LandPathService::result(search->second);
-            if (path.status == LandPathStatus::found && !land->movement.install_path(
-                static_cast<std::size_t>(squad - squads.begin()), std::move(path), tick))
-                return core::Result<TacticalTick>::failure(detail::diagnostic(diagnostic_codes::invalid_setup, "land path install rejected"));
+            if (path.status != LandPathStatus::found)
+                diagnostics.push_back(detail::diagnostic(diagnostic_codes::command_rejected,
+                    "land move path search ended without a route", {}, core::Severity::warning));
+            const auto id = search->first;
+            const auto index = static_cast<std::size_t>(squad - squads.begin());
+            // WLPA-88/89: a result that starts at the squad's current splice anchor joins the walk without a stop. A
+            // too-sharp corner or a stale result searches once from standing (the stop and turn of WLPA-68).
+            bool again = false;
+            if (path.status == LandPathStatus::found) {
+                auto result = LandMovement::SpliceResult::rejected;
+                if (const auto anchor = land->movement.splice_anchor(index); anchor && !path.nodes.empty() && path.nodes.front() == *anchor)
+                    result = land->movement.splice_path(index, path);
+                if (result == LandMovement::SpliceResult::sharp) again = true;
+                else if (result == LandMovement::SpliceResult::rejected) {
+                    if (path.nodes.empty() || path.nodes.front() != squad->position
+                        || !land->movement.install_path(index, std::move(path), tick)) again = true;
+                }
+            } else if (squad->order == LandMoveOrder::following || squad->order == LandMoveOrder::recovering) {
+                // The replacement found no route: the squad that kept walking for it now stops, as before.
+                if (!land->movement.drop_order(index)) return core::Result<TacticalTick>::failure(
+                    detail::diagnostic(diagnostic_codes::invalid_command, "land stop rejected"));
+            }
             search = land->searches.erase(search);
+            if (again) {
+                auto request = land->requests.at(id);
+                if (!land->movement.drop_order(index)) return core::Result<TacticalTick>::failure(
+                    detail::diagnostic(diagnostic_codes::invalid_command, "land stop rejected"));
+                request.start = land->movement.squads()[index].position;
+                land->requests[id] = request;
+                land->searches.emplace(id, LandPathService::begin(land->occupancy, land->arena, request));
+            }
         }
     }
     auto moved = [&] {
@@ -460,13 +568,23 @@ core::Result<TacticalTick> TacticalSession::Impl::step_land(TacticalSession& ses
     std::vector<Event> events;
     std::vector<CombatEvent> combat_events;
     Tick phases(session, this, executor);
+    if (auto counted = phases.land_victory_census(live); !counted)
+        return core::Result<TacticalTick>::failure(counted.error());
     if (auto fought = phases.land_combat(live, starts, events, combat_events); !fought)
         return core::Result<TacticalTick>::failure(fought.error());
-    rebuild(live, false);
+    phases.land_commit_victory(events);
+    {
+        core::tick_profile::Scope rebuild_phase("land-rebuild");
+        rebuild(live, false);
+    }
     ++completed_tick;
-    publish_staged(live, std::move(events), std::move(combat_events));
+    {
+        core::tick_profile::Scope publish_phase("land-publish-staged");
+        publish_staged(live, std::move(events), std::move(combat_events));
+    }
     TacticalTick result;
     result.completed_tick = completed_tick; result.snapshot = current_snapshot; result.diagnostics = std::move(diagnostics);
+    if (hash_policy == StateHashPolicy::on_demand) return core::Result<TacticalTick>::success(std::move(result));
     auto bytes = [&] {
         core::tick_profile::Scope phase("land-canonical-state");
         return canonical_bytes(executor);

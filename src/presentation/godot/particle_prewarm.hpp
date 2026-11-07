@@ -16,6 +16,8 @@ namespace eawr::presentation::godot_backend::detail {
 
 struct ParticleWarmCoverage final {
     std::size_t requested{}, admitted{}, refused{};
+    // Refused plans whose shader-only fallback hold succeeded (stage 2 of #5175).
+    std::size_t refused_program_warmed{};
 };
 
 // Population-only pass. The backend qualifies/deduplicates actual creation
@@ -29,6 +31,23 @@ template<class Plans, class Warm>
         ++coverage.requested;
         if (std::invoke(warm, plan)) ++coverage.admitted;
         else ++coverage.refused;
+    }
+    return coverage;
+}
+
+// Same pass, plus a shader-only fallback for each refused plan: the refused
+// policy still takes the synchronous create at spawn, but its program is no
+// longer compiled for the first time during play. Output is unchanged.
+template<class Plans, class Warm, class WarmProgram>
+[[nodiscard]] ParticleWarmCoverage prewarm_particle_plans(const Plans& plans, Warm&& warm,
+                                                          WarmProgram&& warm_program) {
+    ParticleWarmCoverage coverage;
+    for (const auto& plan : plans) {
+        if (!plan.drawable) continue;
+        ++coverage.requested;
+        if (std::invoke(warm, plan)) { ++coverage.admitted; continue; }
+        ++coverage.refused;
+        if (std::invoke(warm_program, plan)) ++coverage.refused_program_warmed;
     }
     return coverage;
 }

@@ -104,42 +104,67 @@ identity. This binding boundary is distinct from the per-instance Lua graph
 save mechanism described in [Lua persistence](../lua-persistence.md), which can
 retain cycles and closures inside an instance.
 
-The AI GlobalValue binding is narrower still: its registry maps a string to
-`LuaNumber` (the AI's `Real` alias). Numbers are staged and committed; Get returns
-the number or no value. Nil, boolean, string, sequential list and recognised
-host handle cross the ordinary binding boundary but Set currently silently
-ignores them. Thus **not every unsupported mod call currently diagnoses**.
-Malformed Set arguments report a script error; graph kinds rejected before the
-binding report `EAWR-SCRIPT-0210`. These are controlled script failures, not
-native crashes. Wrapper rejection required by L-55 is also a fidelity gap when
-a recognised handle reaches this numeric-only Set.
+## Shared scalar implementation
 
-The desired failure contract for unsupported mod kinds is an explicit script
-diagnostic naming the API and kind, leaving the registry unchanged and following
-the scheduler's normal script-error handling. Fixing silent rejection, extending
-the accepted kinds, and defining cross-instance table/function identity are
-mod-support follow-ups (legacy EAWR-2209), not implemented by this stock-only decision.
-No common-mod corpus was supplied or surveyed; no claim about common mods is made.
+L-55 now has additional debug-build evidence: the shared-table save path writes
+all key/value pairs through the Lua value serializer with no script owner. Its
+load path first clears the table and then restores those pairs through the Lua
+value loader, again without a script owner. A separate reset path clears the
+same table. This establishes persistence of this external registry, beyond the
+per-instance Lua graph save. A targeted writer cross-reference identifies the
+save path as a caller. The evidence does not establish a Create operation;
+no Create call appeared in the surveyed stock corpus or the inspected mod.
 
-## Minimal deterministic design
+The game-owned AI engine now holds one ordered registry of binary64 numbers,
+byte strings and booleans. Galactic story, AI and object bindings read that
+registry. Set stages a command in the calling instance's transaction; the
+ordered service tail commits it, including writes from object instances without
+a plan. Missing keys return nil, and Set of nil removes a key. False, zero and
+an empty string remain distinct from absence. The Stargate story serializer
+returns a string consumed by other scripts, so numeric-only support loses its
+state. Inspected mod calls also pass booleans and a list; this is not a survey
+of all mods. No mod script or asset is copied into the repository.
 
-Retain one shared string-to-LuaNumber registry for the AI host. This already
-covers every observed stock value kind without a cross-instance graph store or
-a change to `Value`. Preserve the binary64 number representation; do not narrow
-it through host floats or integers. Preserve exact key bytes, including the
-player-specific names, and distinguish an absent key from stored numeric zero.
+The native records hash key bytes, value kind and payload canonically and retain
+them for service-phase rollback. Numeric records keep their previous encoding.
+Checkpoint encoding retains the numeric map field and appends
+`global-scalars-v1` only when string or boolean entries exist. The optional tail
+contains two sorted maps, strings then booleans; the decoder rejects empty tails,
+duplicate keys across kinds, invalid booleans, trailing bytes and ordinary
+archive quota violations before publication. Empty and numeric-only stores emit
+no tail. The same scalar tail is used by tactical native checkpoint composition.
+No checkpoint version or replay opcode changes.
 
-Writes must retain the existing staging and ordered commit path rather than
-mutating shared state during partitioned Lua service. Collision resolution must
-follow stable command order, independent of worker count. Any owner-level save
-or hash of this registry must enumerate keys canonically and encode the numeric
-bits, so 1/2/4/8 workers agree. These are deterministic design requirements, not
-a new claim about retail scheduling, immediate read-after-write visibility, or
-checkpoint coverage in the current tactical host; those seams are outside this
-value-kind survey. The existing per-instance graph codec alone does not save an
-external registry.
+Set admission uses project archive quotas, not bounds inferred from stock values:
+keys and string values are at most 1,048,576 bytes, and the registry has at most
+262,144 entries. All native collections together also share the archive's
+1,048,576-node quota. A count-only walk of the same field inventory measures
+existing usage once per batch; scalar-only collections contribute their size
+without visiting or copying their values. Before mutation, the ordered batch
+accounts for displaced and
+new kind-27 record bytes plus the retained native owner's other record bytes.
+That sum must fit the 32 MiB native component budget minus its existing 1,024-byte
+archive reserve. A rejected write adds a runtime LoadNote and preserves the prior
+value and native hash; deletion remains available to release capacity. Quota
+refusal does not retire a script or abort the game. This admission work sums the
+registry once per batch containing writes and then accounts each command locally.
 
-Decision: close the stock **code expansion** as “not needed for stock.” Keep the
-broader retail/mod fidelity gap explicit. This docs-only decision changes no
-simulation, bindings, save format, hashes or replay pins and needs no replay or
-installed battle run.
+## Remaining fidelity gaps
+
+- Sequential tables are deliberately not copied into a shared graph: alias and
+  cross-instance identity semantics need a separate design. They leave the
+  registry unchanged, emit a nonfatal unsupported-API diagnostic and produce a
+  runtime LoadNote. Associative/cyclic tables and functions fail at the ordinary
+  binding boundary; galactic scripts retire with a LoadNote and the game continues.
+- Engine wrapper values produce the script error required by L-55.
+- `GlobalValue.Create` has no observed call site or proven contract and is not
+  invented here.
+- Reads see the preceding completed service's writes, plus earlier host services
+  in the same barrier. Exact retail immediate Set/Get visibility remains unverified.
+- The galactic story/AI/object host shares one store. Sharing that store with a
+  separately constructed tactical child remains unverified and unwired.
+
+The scalar-kind work improves the broader mod gap (legacy EAWR-2209), but does not
+close cross-instance tables/functions or every boundary-kind diagnostic. The
+stock numeric-only survey remains valid; it no longer describes the host's full
+accepted scalar set.

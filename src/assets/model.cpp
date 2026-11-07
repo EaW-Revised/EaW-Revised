@@ -1,4 +1,5 @@
 #include "eawr/core/load_profile.hpp"
+#include "eawr/vfs/vfs.hpp"
 #include "asset_internal.hpp"
 
 #include <algorithm>

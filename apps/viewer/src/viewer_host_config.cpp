@@ -96,6 +96,9 @@ void ViewerHost::read_host_options(const PackedStringArray& arguments) {
             const auto value = index + 1 < arguments.size() ? utf8(arguments[++index]) : std::string{};
             if (value != "on" && value != "off") options_->profile_error = "--eawr-content-cache expects on or off";
             else options_->cache_content = value == "on";
+        } else if (argument == "--eawr-texture-census") {
+            // Opt-in texture owner census; set before any upload so shared and particle textures are noted.
+            GodotRenderer::set_texture_census(true);
         } else if (argument == "--eawr-texture-share") {
             const auto value = index + 1 < arguments.size() ? utf8(arguments[++index]) : std::string{};
             if (value != "on" && value != "off") options_->profile_error = "--eawr-texture-share expects on or off";

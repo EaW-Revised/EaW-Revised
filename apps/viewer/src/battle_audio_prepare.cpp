@@ -1,6 +1,8 @@
 #include "eawr/core/load_profile.hpp"
 #include "battle_audio.hpp"
+#include "eawr/presentation/ui/selection_config.hpp"
 #include "audio_output.hpp"
+#include "viewer_path.hpp"
 
 #include "eawr/presentation/space/space.hpp"
 #include "eawr/battle/start.hpp"
@@ -9,6 +11,8 @@
 
 #include <godot_cpp/classes/audio_effect_hard_limiter.hpp>
 #include <godot_cpp/classes/audio_server.hpp>
+#include <godot_cpp/classes/os.hpp>
+#include <godot_cpp/classes/project_settings.hpp>
 #include <godot_cpp/classes/audio_stream_mp3.hpp>
 #include <godot_cpp/classes/audio_stream_wav.hpp>
 #include <godot_cpp/core/memory.hpp>
@@ -183,9 +187,11 @@ void BattleAudio::expand_initial_audio_types(const units::UnitTables& tables, st
 
 void BattleAudio::prepare_event_registry() {
     // BA-01: the SFXEvents in SFXEventFiles order (presets first), each definition in file order.
+    const bool additions = std::any_of(catalog_->registry_roots().begin(), catalog_->registry_roots().end(),
+        [](const auto& root) { return root.registry_path == "data/xml/sfxeventfilesadditions.xml" && root.outcome == "loaded"; });
     std::vector<const data::Definition*> definitions;
     for (const data::Definition& definition : catalog_->definitions()) {
-        if (definition.category == data::Category::sfx && definition.active) definitions.push_back(&definition);
+        if (definition.category == data::Category::sfx && definition.active && (!additions || definition.namespace_winner)) definitions.push_back(&definition);
     }
     std::stable_sort(definitions.begin(), definitions.end(), [](const data::Definition* a, const data::Definition* b) {
         return std::pair(a->registry_order, a->definition_order) < std::pair(b->registry_order, b->definition_order);
@@ -620,7 +626,8 @@ void BattleAudio::prepare_unit_cues(const units::UnitTables& tables, const sim::
 }
 
 void BattleAudio::prepare(const units::UnitTables& tables, const tactical::CombatTable& combat,
-                          const std::string_view local_faction, std::set<tactical::TypeId> first_types) {
+                          const std::string_view local_faction, std::set<tactical::TypeId> first_types,
+                          const EnqueueLoadStep* queue) {
     core::load_profile::Scope load_scope(core::load_profile::Phase::audio);
     local_faction_ = std::string(local_faction);
     if (options_.preload) expand_initial_audio_types(tables, first_types);
@@ -636,6 +643,14 @@ void BattleAudio::prepare(const units::UnitTables& tables, const tactical::Comba
     prepare_event_registry();
     prepare_music_and_faction_cues(local_faction, event);
     prepare_speech_registry();
+    const auto selection_config = ui::load_selection_config(*filesystem_);
+    std::vector<std::string> advisors;
+    if (auto faction = catalog_->resolve(local_faction, data::Category::faction))
+        advisors = ui::selection_faction_advisors(faction.value());
+    for (std::size_t index = 0; index < selection_events_.size(); ++index) {
+        const auto cue = ui::selection_advisor_event(selection_config.actions[index], local_faction, advisors);
+        if (!cue.empty()) selection_events_[index] = event(cue, std::string(local_faction));
+    }
     std::map<tactical::TypeId, const audio::SfxEvent*> spotted;
     const audio::SfxEvent* generic_spotted = nullptr;
     if (auto faction = catalog_->resolve(local_faction, data::Category::faction)) {
@@ -719,6 +734,10 @@ void BattleAudio::prepare(const units::UnitTables& tables, const tactical::Comba
     }
     if (options_.preload) {
         for (const auto& file : preload_music_files_) scheduled.emplace(LoadKind::music, file);
+        if (queue) {
+            enqueue_audio_batches(scheduled, *queue);
+            return;
+        }
         prepare_audio_batch(scheduled);
     } else {
         // Diagnostic control: legacy global/initial spatial warmup, no music
@@ -727,6 +746,10 @@ void BattleAudio::prepare(const units::UnitTables& tables, const tactical::Comba
         for (const auto& key : scheduled) commit_audio(key, prepare_audio(filesystem_, key), false);
         audio_prepare_wall_ms_ = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - begin).count();
     }
+    finish_prepare();
+}
+
+void BattleAudio::finish_prepare() {
     for (const auto& [name, cached] : samples_) {
         static_cast<void>(cached);
         preloaded_samples_.insert(name);
@@ -735,7 +758,9 @@ void BattleAudio::prepare(const units::UnitTables& tables, const tactical::Comba
     if (!options_.preload) return;
     try {
         audio_loader_ = std::make_unique<BattleAudioLoadQueue<LoadKey, PreparedAudio>>(
-            [filesystem = filesystem_](const LoadKey& key) { return prepare_audio(filesystem, key); });
+            [filesystem = filesystem_](const LoadKey& key) {
+                return prepare_audio(filesystem, key);
+            });
     } catch (const std::system_error& error) {
         // Thread exhaustion must never turn a gameplay miss into a blocking read.
         problems_.push_back("audio worker unavailable; unanticipated cues remain deferred: " + std::string(error.what()));
@@ -849,32 +874,96 @@ godot::Ref<godot::AudioStream> BattleAudio::music_stream(const std::string& file
     return open_stream(audio::music_sample_path(file), file, "music");
 }
 
+void BattleAudio::prepare_audio_chunk(platform::ThreadWorkerAdapter& pool, const std::vector<LoadKey>& ordered,
+                                      const std::size_t at, const std::size_t batch_size) {
+    const auto count = std::min(batch_size, ordered.size() - at);
+    std::vector<PreparedAudio> prepared(count);
+    const auto phase = pool.execute_phase("audio_prepare", count, [&](const std::size_t index) {
+        prepared[index] = prepare_audio(filesystem_, ordered[at + index]);
+    });
+    if (!phase) {
+        // This fallback is confined to the loading barrier, never gameplay.
+        problems_.push_back("audio loading pool: " + core::format_diagnostic(phase.error()));
+        for (std::size_t index = 0; index < count; ++index)
+            prepared[index] = prepare_audio(filesystem_, ordered[at + index]);
+    }
+    for (std::size_t index = 0; index < count; ++index)
+        commit_audio(ordered[at + index], std::move(prepared[index]), false);
+}
+
+// The preload reads every file once and publishes the same bytes whatever the order, so the order is free: put it in
+// disk position (file, then offset). A spinning disk then sees a near-sequential sweep from the eight readers instead of
+// 2,600 name-ordered seeks (stock HDD: audio 19 s for 195 MB = 10 MB/s). Files without a location (missing) go last.
+void BattleAudio::order_by_disk_position(const vfs::Vfs& filesystem, std::vector<LoadKey>& keys) {
+    struct Placed { std::string source; std::uint64_t offset{}; bool known{}; LoadKey key; };
+    std::vector<Placed> placed;
+    placed.reserve(keys.size());
+    for (auto& key : keys) {
+        std::optional<vfs::ReadLocation> where;
+        if (key.first == LoadKind::sfx) where = audio::sfx_sample_location(filesystem, key.second);
+        else if (const auto record = filesystem.stat(key.first == LoadKind::speech
+                     ? audio::speech_sample_path("english", key.second) : audio::music_sample_path(key.second)))
+            where = filesystem.read_location(record.value());
+        if (where) placed.push_back({std::move(where->source), where->offset, true, std::move(key)});
+        else placed.push_back({{}, 0, false, std::move(key)});
+    }
+    std::stable_sort(placed.begin(), placed.end(), [](const Placed& a, const Placed& b) {
+        if (a.known != b.known) return a.known;
+        if (a.source != b.source) return a.source < b.source;
+        return a.offset < b.offset;
+    });
+    for (std::size_t index = 0; index < placed.size(); ++index) keys[index] = std::move(placed[index].key);
+}
+
 void BattleAudio::prepare_audio_batch(const std::set<LoadKey>& keys) {
     using Clock = std::chrono::steady_clock;
     const auto begin = Clock::now();
     std::vector<LoadKey> ordered(keys.begin(), keys.end());
+    order_by_disk_position(*filesystem_, ordered);
     const auto workers = std::min<std::size_t>(8, platform::ThreadWorkerAdapter::hardware_worker_count());
     platform::ThreadWorkerAdapter pool(workers);
     audio_worker_count_ = workers;
     // Bound temporary decoded/encoded payloads; each finished batch is published
     // before the next batch starts, without sharing a resource between tasks.
     const auto batch_size = std::max<std::size_t>(1, workers * 2);
-    for (std::size_t at = 0; at < ordered.size(); at += batch_size) {
-        const auto count = std::min(batch_size, ordered.size() - at);
-        std::vector<PreparedAudio> prepared(count);
-        const auto phase = pool.execute_phase("audio_prepare", count, [&](const std::size_t index) {
-            prepared[index] = prepare_audio(filesystem_, ordered[at + index]);
-        });
-        if (!phase) {
-            // This fallback is confined to the loading barrier, never gameplay.
-            problems_.push_back("audio loading pool: " + core::format_diagnostic(phase.error()));
-            for (std::size_t index = 0; index < count; ++index)
-                prepared[index] = prepare_audio(filesystem_, ordered[at + index]);
-        }
-        for (std::size_t index = 0; index < count; ++index)
-            commit_audio(ordered[at + index], std::move(prepared[index]), false);
-    }
+    for (std::size_t at = 0; at < ordered.size(); at += batch_size) prepare_audio_chunk(pool, ordered, at, batch_size);
+    // The report lists the loads in key order, as before the reads were put in disk order.
+    std::stable_sort(audio_load_rows_.begin(), audio_load_rows_.end(),
+                     [](const AudioLoadRow& a, const AudioLoadRow& b) { return a.key < b.key; });
     audio_prepare_wall_ms_ = std::chrono::duration<double, std::milli>(Clock::now() - begin).count();
+}
+
+// The same batches as prepare_audio_batch, one load step each (same order, same sizes, same publication), then the
+// closing step. The wall figure is the sum of the steps' own times.
+void BattleAudio::enqueue_audio_batches(const std::set<LoadKey>& keys, const EnqueueLoadStep& queue) {
+    struct Batches final {
+        std::vector<LoadKey> ordered;
+        std::unique_ptr<platform::ThreadWorkerAdapter> pool;
+        std::size_t batch_size{1};
+    };
+    auto batches = std::make_shared<Batches>();
+    batches->ordered.assign(keys.begin(), keys.end());
+    order_by_disk_position(*filesystem_, batches->ordered);
+    const auto workers = std::min<std::size_t>(8, platform::ThreadWorkerAdapter::hardware_worker_count());
+    batches->pool = std::make_unique<platform::ThreadWorkerAdapter>(workers);
+    audio_worker_count_ = workers;
+    batches->batch_size = std::max<std::size_t>(1, workers * 2);
+    audio_prepare_wall_ms_ = 0.0;
+    for (std::size_t at = 0; at < batches->ordered.size(); at += batches->batch_size) {
+        queue([this, batches, at] {
+            const auto begin = std::chrono::steady_clock::now();
+            prepare_audio_chunk(*batches->pool, batches->ordered, at, batches->batch_size);
+            audio_prepare_wall_ms_ += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - begin).count();
+            return true;
+        });
+    }
+    queue([this, batches] {
+        batches->pool.reset();
+        std::stable_sort(audio_load_rows_.begin(), audio_load_rows_.end(),
+                         [](const AudioLoadRow& x, const AudioLoadRow& y) { return x.key < y.key; });
+        finish_prepare();
+        return true;
+    });
 }
 
 void BattleAudio::commit_audio(const LoadKey& key, PreparedAudio prepared, const bool runtime) {
@@ -896,7 +985,7 @@ void BattleAudio::commit_audio(const LoadKey& key, PreparedAudio prepared, const
         pending_audio_.erase(pending);
     }
     if (!stream.is_valid()) missing_samples_[key.second] = prepared.cause;
-    if (key.first == LoadKind::sfx) samples_.emplace(key.second, Sample{stream, prepared.cause});
+    if (key.first == LoadKind::sfx) samples_.emplace(key.second, Sample{stream, prepared.cause, {}});
     else if (key.first == LoadKind::speech) speech_streams_.emplace(key.second, stream);
     else music_streams_.emplace(key.second, stream);
     const auto commit_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - begin).count();

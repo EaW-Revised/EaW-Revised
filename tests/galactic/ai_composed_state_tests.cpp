@@ -14,6 +14,7 @@
 #include <string>
 #include <optional>
 #include "../support/env.hpp"
+#include "eawr/vfs/vfs.hpp"
 #include "../support/result.hpp"
 // Native ownership/restore infrastructure coverage, not a live opponent proof.
 #include "galactic_support.hpp"

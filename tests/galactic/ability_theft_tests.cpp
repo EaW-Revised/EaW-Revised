@@ -4,10 +4,12 @@
 #include <cstdint>
 #include <iostream>
 #include <string>
+#include <stdexcept>
 #include <vector>
 #include "../support/result.hpp"
 #include "galactic_support.hpp"
 #include "ability_fixture.hpp"
+#include "../../src/campaign/galactic_ai_runtime.hpp"
 #include "eawr/campaign/game_session.hpp"
 #include "eawr/checkpoint/game.hpp"
 #include "eawr/platform/sim_workers.hpp"
@@ -189,6 +191,190 @@ void parent_loss(const eawr::sim::PartitionExecutor& pool, std::vector<std::stri
     const auto identities = cp::game_identities(config); const auto saved = take(cp::save_game_checkpoint(game, identities));
     auto fresh = take(cp::load_game_checkpoint(saved, identities, {}, pool));
     expect(take(cp::save_game_checkpoint(fresh.session, identities)) == saved, "parent-loss cleanup reconstructs in canonical saved owners");
+}
+void landing_theft_seam(const eawr::sim::PartitionExecutor& pool, std::vector<std::string>& hashes) {
+    auto config = setup();
+    const auto parent = buyer(config), target = config.planets[0].id;
+    constexpr eawr::sim::EntityId hero = 50000;
+    config.fleets[1].members[0].type = 2000;
+    config.census->objects[1].original_type = config.census->objects[1].current_type = 2000;
+    config.census->objects.push_back(ability_fixture::census_actor(hero, 1000, 2, target, parent));
+    config.census->types.push_back({2000, {}, 0});
+    config.fleet_control->types.push_back({2000, true, true, false});
+    config.control->types.push_back({2000, 0, false, false});
+    auto& movement = ability_fixture::add_movement(config);
+    movement.types[1].transport = true;
+    movement.contents = {{parent, {{hero, 1000}}}};
+    config.ability_host->profiles[0].ground_activated = {gc::AbilityKind::technology_theft};
+    auto world = take(gc::GalacticSession::create(config));
+    const auto landed = take(world.land_native_transports(2, config.fleets[1].id));
+    expect(landed.admitted && world.ability_state()->preparations.size() == 1
+        && world.ability_state()->preparations[0].actor == hero
+        && world.snapshot()->control()->planets[0].landed.empty(),
+        "hostile native fleet landing dispatches the contained theft bearer without ordinary landing");
+    hashes.push_back(world.state_sha256());
+    auto staged = take(gc::GalacticSession::create(config));
+    const std::array<gc::PlayerId, 1> players{2};
+    auto barrier = take(staged.begin_native_barrier(players, 32));
+    take(barrier->select_player(2));
+    expect(take(staged.land_native_transports(2, config.fleets[1].id)).admitted
+        && staged.ability_state()->preparations.empty(),
+        "partition landing retains ability state unchanged before ordered commit");
+    take(barrier->begin_tail()); take(barrier->commit());
+    expect(staged.ability_state()->preparations.size() == 1
+        && staged.ability_state()->preparations[0].actor == hero,
+        "ordered commit dispatches the contained ability exactly once");
+    const auto recording = staged.record();
+    expect(std::count_if(recording.native_effects.begin(), recording.native_effects.end(),
+        [](const auto& effect) { return effect.kind == gc::NativeEffectKind::land; }) == 1,
+        "hostile barrier landing is recorded exactly once");
+    auto replayed = take(gc::GalacticSession::from_replay(recording));
+    take(replayed.replay_native_barrier(pool));
+    take(replayed.finish_native_replay());
+    expect(replayed.ability_state()->preparations.size() == 1,
+        "hostile barrier preparation survives replay reconstruction");
+    expect(replayed.state_sha256() == staged.state_sha256(),
+        "hostile barrier replay preserves preparation and synchronized RNG");
+    hashes.push_back(staged.state_sha256());
+    auto inaccessible = config;
+    inaccessible.control->planets[0].surface_accessible = false;
+    auto closed = take(gc::GalacticSession::create(inaccessible));
+    expect(take(closed.land_native_transports(2, inaccessible.fleets[1].id)).admitted
+        && closed.ability_state()->preparations.empty(),
+        "inaccessible surfaces retain the empty landing block without ability dispatch");
+    auto game = take(eawr::campaign::GameSession::create(config));
+    order(game, 1, gc::DeployGroundAbility{parent, target});
+    hashes.push_back(take(game.step(pool)).state_hash.get());
+    const auto* state = game.galaxy().ability_state();
+    expect(state->preparations.size() == 1 && state->preparations[0].actor == hero
+        && state->results.empty(), "explicit ground deployment prepares the contained theft bearer but does not execute a choice");
+    hashes.push_back(take(game.step(pool)).state_hash.get());
+    expect(game.galaxy().ability_state()->results.empty()
+        && game.galaxy().snapshot()->player_economy()->players[1].current_tech == 2,
+        "idle session does not execute the prepared choice without a command");
+}
+gc::GalacticSetup landing_config(bool ai, bool multiple, bool succeeds) {
+    auto config = setup(succeeds, multiple);
+    const auto parent = buyer(config), target = config.planets[0].id;
+    constexpr eawr::sim::EntityId hero = 50000;
+    config.fleets[1].members[0].type = 2000;
+    config.census->objects[1].original_type = config.census->objects[1].current_type = 2000;
+    config.census->objects.push_back(ability_fixture::census_actor(hero, 1000, 2, target, parent));
+    config.census->types.push_back({2000, {}, 0});
+    config.fleet_control->types.push_back({2000, true, true, false});
+    config.control->types.push_back({2000, 0, false, false});
+    auto& movement = ability_fixture::add_movement(config);
+    movement.types[1].transport = true;
+    movement.contents = {{parent, {{hero, 1000}}}};
+    config.ability_host->profiles[0].ground_activated = {gc::AbilityKind::technology_theft};
+    if (ai) for (auto& player : config.economy_corruption->players) if (player.player == 2) player.human = false;
+    return config;
+}
+// Live-only loss from a native landing must reach the same retained AI owner
+// as a loss observed outside a prepared native barrier (GFS-25/GFD-A05).
+void ai_landing_loss_notification(const eawr::sim::PartitionExecutor& pool, std::vector<std::string>& hashes) {
+    namespace ga = eawr::script::foc::galactic_ai;
+    namespace ai = eawr::script::foc::ai;
+    auto config = landing_config(true, false, true);
+    const auto transport = buyer(config);
+    constexpr eawr::sim::EntityId hero = 50000;
+    auto world = take(gc::GalacticSession::create(config));
+    world.set_ability_consumption_handler([&](const gc::HeroDefeat& defeat) {
+        auto removed = defeat.removed_objects; removed.push_back(defeat.id);
+        std::sort(removed.begin(), removed.end());
+        removed.erase(std::unique(removed.begin(), removed.end()), removed.end());
+        return world.apply_battle_losses(removed);
+    });
+    ga::NativeActions actions(world, std::make_shared<ai::GalacticFunding>(), {}, {});
+    auto& store = actions.qualified_freestore();
+    for (const auto id : {transport, hero}) {
+        ga::FreestoreFacts facts; facts.object.id = id; facts.object.type = id == transport ? 2000 : 1000;
+        facts.current_type = facts.object.type; facts.object.owner = 2; facts.object.planet = config.planets[0].id;
+        facts.parent = id == transport ? config.fleets[1].id : transport; facts.qualified = true;
+        take(store.update(ga::ordinary_freestore_birth(facts)));
+    }
+    const std::array offers{transport, hero}; take(store.initialize(2, offers));
+    actions.bind_admission_gate([] { return false; });
+    actions.bind_freestore_movement([&](auto, const auto&, const auto&) {
+        ga::NativeActions::FreestoreMoveInput input; input.actor_valid = true;
+        input.source_ai_usable = true; input.grandparent = config.planets[0].id;
+        return eawr::core::Result<ga::NativeActions::FreestoreMoveInput>::success(input);
+    });
+    actions.bind_freestore_path([](auto, const auto&, auto, auto) -> eawr::core::Result<ga::NativeActions::FreestorePathInput> {
+        throw std::runtime_error("deferred movement must not query a path");
+    }, [] { return true; });
+    const bool moving = take(actions.admit_freestore_move(2, transport, config.planets[1].id));
+    expect(moving && actions.movements().size() == 1, "fixture registers a retained movement for the consumed transport");
+    using Change = gc::GalacticSession::NativeActorChange;
+    std::vector<eawr::sim::EntityId> losses;
+    world.set_native_actor_changes_handler([&](const auto&, auto changes) {
+        for (const auto& change : changes) if (change.kind == Change::Kind::lost) {
+            losses.push_back(change.actor);
+            if (auto retired = actions.retire_freestore_movement(change.actor, true); !retired) return retired;
+        }
+        return eawr::campaign::apply_galactic_ai_actor_changes(store, changes,
+            [](auto) -> eawr::core::Result<ga::FreestoreFacts> { throw std::runtime_error("unexpected non-loss actor change"); }, pool);
+    });
+    const std::array<gc::PlayerId, 1> players{2};
+    auto barrier = take(world.begin_native_barrier(players, 32));
+    take(barrier->select_player(2));
+    expect(take(world.land_native_transports(2, config.fleets[1].id)).admitted,
+        "AI hostile landing is staged before live theft");
+    expect(losses.empty() && store.facts(hero), "shadow landing retains the live actor before commit");
+    take(barrier->begin_tail()); take(barrier->commit());
+    expect(std::count(losses.begin(), losses.end(), hero) == 1
+        && std::count(losses.begin(), losses.end(), transport) == 1,
+        "live consumption publishes each removed actor exactly once");
+    expect(!store.facts(hero) && !store.facts(transport), "live consumption retires AI actor facts");
+    expect(actions.movements().size() == 1 && !actions.movements().begin()->second.registered
+        && !actions.movements().begin()->second.actor, "live consumption retires the removed transport movement");
+    hashes.push_back(world.state_sha256());
+}
+// WGCH-32: a landing for an AI seat chooses among affordable items and executes at once.
+void ai_landing_theft(const eawr::sim::PartitionExecutor& pool, std::vector<std::string>& hashes) {
+    const auto run = [&](gc::GalacticSetup config) {
+        auto game = take(eawr::campaign::GameSession::create(config));
+        order(game, 1, gc::DeployGroundAbility{buyer(config), config.planets[0].id});
+        hashes.push_back(take(game.step(pool)).state_hash.get());
+        return game;
+    };
+    {   // one item left: success unlocks it, advances the level, consumes the droid
+        auto game = run(landing_config(true, false, true));
+        const auto* state = game.galaxy().ability_state();
+        expect(state->results.size() == 1 && state->results[0].outcome == gc::AbilityOutcome::purchased
+            && state->results[0].technology == first_type, "AI landing executes the sole affordable theft");
+        expect(game.galaxy().snapshot()->player_economy()->players[1].current_tech == 3,
+            "AI theft leaving exactly one item advances the technology level");
+    }
+    {   // two items: unlock without a level raise
+        auto game = run(landing_config(true, true, true));
+        expect(game.galaxy().ability_state()->results.size() == 1
+            && game.galaxy().snapshot()->player_economy()->players[1].current_tech == 2,
+            "AI theft with several items left keeps the level");
+    }
+    {   // nothing affordable: no result, no menu, droid stays
+        auto config = landing_config(true, false, true);
+        config.player_economy->players[1].credits = f(1);
+        auto game = run(config);
+        expect(game.galaxy().ability_state()->results.empty() && game.galaxy().ability_state()->preparations.empty(),
+            "AI with no affordable choice leaves the bearer in place");
+    }
+    {   // an unlisted slicer is a hand-built profile only (WGCH-187: the live setup always lists theft)
+        auto config = landing_config(true, false, true);
+        config.ability_host->profiles[0].ground_activated.clear();
+        auto game = run(config);
+        expect(game.galaxy().ability_state()->results.size() == 1,
+            "AI landing deploys a slicer that is not listed as ground-activated");
+        auto human = landing_config(false, false, true);
+        human.ability_host->profiles[0].ground_activated.clear();
+        auto manual = run(human);
+        expect(manual.galaxy().ability_state()->results.empty() && manual.galaxy().ability_state()->preparations.empty(),
+            "a human drop does not deploy a slicer that is not listed as ground-activated");
+        const auto events = manual.galaxy().snapshot()->events();
+        expect(std::any_of(events.begin(), events.end(), [&](const auto& event) {
+            return event.kind == gc::GalacticEventKind::command_rejected && event.subject == buyer(human);
+        }), "the refused drop names the supplied object, so the seat can say which drop failed");
+    }
 }
 gc::GalacticSetup spy_setup(bool consumes = true) {
     auto s = setup();
@@ -389,9 +575,9 @@ void auto_spy_cases(const eawr::sim::PartitionExecutor& pool, std::vector<std::s
 int case_galactic_ability_theft_tests() {
     ability_fixture::arm_watchdog();
     try {
-        std::vector<std::string> baseline; eawr::platform::ThreadWorkerAdapter one(1); cases(one, baseline); lifecycle(one, baseline); parent_loss(one, baseline); spy_cases(one, baseline); first_appropriate_bearer(one, baseline); consumed_contained_spy(one, baseline); auto_spy_cases(one, baseline);
+        std::vector<std::string> baseline; eawr::platform::ThreadWorkerAdapter one(1); cases(one, baseline); lifecycle(one, baseline); parent_loss(one, baseline); landing_theft_seam(one, baseline); ai_landing_theft(one, baseline); ai_landing_loss_notification(one, baseline); spy_cases(one, baseline); first_appropriate_bearer(one, baseline); consumed_contained_spy(one, baseline); auto_spy_cases(one, baseline);
         for (std::size_t workers : {2U, 4U, 8U}) {
-            eawr::platform::ThreadWorkerAdapter pool(workers); std::vector<std::string> hashes; cases(pool, hashes); lifecycle(pool, hashes); parent_loss(pool, hashes); spy_cases(pool, hashes); first_appropriate_bearer(pool, hashes); consumed_contained_spy(pool, hashes); auto_spy_cases(pool, hashes);
+            eawr::platform::ThreadWorkerAdapter pool(workers); std::vector<std::string> hashes; cases(pool, hashes); lifecycle(pool, hashes); parent_loss(pool, hashes); landing_theft_seam(pool, hashes); ai_landing_theft(pool, hashes); ai_landing_loss_notification(pool, hashes); spy_cases(pool, hashes); first_appropriate_bearer(pool, hashes); consumed_contained_spy(pool, hashes); auto_spy_cases(pool, hashes);
             expect(hashes == baseline, "theft effects and restore hashes equal on1/2/4/8");
         }
         observer_and_idle();

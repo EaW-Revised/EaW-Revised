@@ -2,6 +2,7 @@
 
 #include "eawr/assets/assets.hpp"
 #include "eawr/presentation/godot/renderer.hpp"
+#include "eawr/scene/scene.hpp"
 #include "legacy/registry.hpp"
 
 #include <cstddef>
@@ -34,6 +35,17 @@ namespace eawr::presentation::godot_backend {
     texture.format = assets::PixelFormat::rgba8;
     texture.mips.push_back(std::move(mip));
     return texture;
+}
+
+// The names of the bindings, besides BaseTexture, that the effect's family samples as tangent-space normal maps: the ones
+// that declare the flat-normal fallback. Read from the family table, so a new normal-mapped family needs no change here.
+[[nodiscard]] inline std::vector<std::string_view> normal_binding_names(const scene::LegacySelector& selector) {
+    std::vector<std::string_view> names;
+    if (const legacy::Family* family = legacy::find_family(selector.program, selector.technique)) {
+        for (const legacy::TextureBinding& binding : family->binding_textures)
+            if (binding.placeholder == legacy::TexturePlaceholder::flat_normal) names.push_back(binding.name);
+    }
+    return names;
 }
 
 // One entry per texture the material's family samples besides BaseTexture,

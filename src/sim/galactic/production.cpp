@@ -5,6 +5,7 @@
 #include "native_population_projection.hpp"
 #include "native_production_admission.hpp"
 
+#include <stdexcept>
 #include <algorithm>
 #include <cassert>
 #include <limits>
@@ -143,6 +144,7 @@ core::Result<std::int64_t> GalacticSession::set_technology(const TechnologyWrite
     if (write.maximum != TechnologyMaximum::keep) detail::put_u8(bytes, static_cast<std::uint8_t>(write.maximum));
     auto recorded = append_native_effect(NativeEffectKind::technology, std::move(bytes));
     if (!recorded) return Result::failure(recorded.error());
+    note_native_output_published(); // story technology is a live write
     auto result = impl.assign_technology(write);
     if (!result) return result;
     const auto events = impl.snapshot->events();
@@ -173,6 +175,7 @@ core::Result<GalacticSession::ProductionLockReceipt> GalacticSession::apply_prod
     detail::put_u8(bytes, write.slicer_check ? 1 : 0); detail::put_i64(bytes, account->current_tech);
     auto recorded = append_native_effect(NativeEffectKind::production_lock, std::move(bytes));
     if (!recorded) return Result::failure(recorded.error());
+    note_native_output_published(); // story production locks write the live account
     ProductionLockReceipt receipt;
     // WST-64: remove the build lock and list the unlock, then list the lock. Both lists stay ascending.
     if (write.unlock) {
@@ -1057,10 +1060,66 @@ core::Result<void> GalacticSession::Impl::refresh_population(const PartitionExec
     std::vector<DetachedUnit> detached;
     detached.reserve(detached_units.size());
     for (const auto& [id, row] : detached_units) { (void)id; detached.push_back(row); }
-    auto projected = session_detail::project_native_population(*native_population_schema, sorted_planets(), sorted_fleets(), detached,
-        control ? &*control : nullptr, movement_inputs.get(), production_originals, *production, executor);
-    if (!projected) return core::Result<void>::failure(projected.error());
-    auto result = std::move(projected).value();
+    const auto planet_rows = sorted_planets();
+    const auto fleet_rows = sorted_fleets();
+    // Every dynamic field the projection reads (the schema is fixed at session creation, so it is not part of the key), in a fixed order; the structure is delimited by counts so keys cannot alias.
+    std::vector<std::uint64_t> key;
+    key.reserve(population_projection_key.size());
+    key.push_back(planet_rows.size());
+    for (const auto& row : planet_rows) { key.push_back(row.id); key.push_back(row.owner); }
+    key.push_back(fleet_rows.size());
+    for (const auto& row : fleet_rows) {
+        key.push_back(row.id); key.push_back(row.owner); if (!population_memo_drop_orbit) key.push_back(row.orbit); key.push_back(row.members.size());
+        for (const auto& member : row.members) { key.push_back(member.id); key.push_back(member.type); }
+    }
+    key.push_back(detached.size());
+    for (const auto& row : detached) { key.push_back(row.member.id); key.push_back(row.member.type); key.push_back(row.owner); key.push_back(row.planet); }
+    if (control) {
+        key.push_back(control->planets.size());
+        for (const auto& planet : control->planets) {
+            key.push_back(planet.planet); key.push_back(planet.landed.size());
+            for (const auto& force : planet.landed) { key.push_back(force.id); key.push_back(force.type); key.push_back(force.owner); }
+        }
+    }
+    if (movement_inputs) {
+        key.push_back(movement_inputs->contents.size());
+        for (const auto& row : movement_inputs->contents) {
+            key.push_back(row.container); key.push_back(row.children.size());
+            for (const auto& child : row.children) { key.push_back(child.id); key.push_back(child.type); }
+        }
+    }
+    key.push_back(production_originals.size());
+    for (const auto& row : production_originals) { key.push_back(row.id); key.push_back(row.original_type); }
+    key.push_back(production->players.size());
+    for (const auto& row : production->players) { key.push_back(row.player); key.push_back(row.human ? 1U : 0U); }
+    key.push_back(production->planets.size());
+    for (const auto& planet : production->planets) {
+        key.push_back(planet.planet); key.push_back(planet.starbase_owner); key.push_back(planet.starbase_type);
+        for (const auto& queue : planet.queues) {
+            key.push_back(queue.size());
+            for (const auto& entry : queue) key.push_back(entry.type);
+        }
+        key.push_back(planet.objects.size());
+        for (const auto& row : planet.objects) { key.push_back(row.id); key.push_back(row.type); key.push_back(row.owner); }
+    }
+    session_detail::NativePopulationProjection result;
+    if (population_memo_enabled && population_projection_cache && key == population_projection_key) {
+        result = *population_projection_cache;
+        if (verify_cached_hash) {
+            auto fresh = session_detail::project_native_population(*native_population_schema, planet_rows, fleet_rows, detached,
+                control ? &*control : nullptr, movement_inputs.get(), production_originals, *production, executor);
+            if (!fresh || fresh.value().totals != result.totals || fresh.value().original_counts != result.original_counts
+                || fresh.value().resolved_counts != result.resolved_counts || fresh.value().objects != result.objects)
+                throw std::runtime_error("galactic cached population projection differs from an independent recomputation");
+        }
+    } else {
+        auto projected = session_detail::project_native_population(*native_population_schema, planet_rows, fleet_rows, detached,
+            control ? &*control : nullptr, movement_inputs.get(), production_originals, *production, executor);
+        if (!projected) return core::Result<void>::failure(projected.error());
+        result = std::move(projected).value();
+        population_projection_cache = result;
+        population_projection_key = std::move(key);
+    }
     population_objects += result.objects; population_producers += production->planets.size();
     population_stale = false;
     if (population != result.totals) { population = std::move(result.totals); dirty[11] = true; }
@@ -1098,7 +1157,9 @@ GalacticSession::Impl::ProductionOfferInputs GalacticSession::Impl::production_o
     detail::put_u32(bytes, local);
     detail::put_u64(bytes, next_id);
     detail::put_u64(bytes, live_object_count);
-    detail::put_i64(bytes, account->credits.raw());
+    // The rows read the balance only for a pay-at-purchase builder (the credits check of a purchase). A pay-as-you-go
+    // human's rows are the same at every balance, so its per-tick bills must not invalidate them (#5982).
+    if (!player->pay_as_you_go) detail::put_i64(bytes, account->credits.raw());
     detail::put_i64(bytes, account->current_tech);
     detail::put_i64(bytes, account->maximum_tech);
     detail::encode_production_menu_inputs(bytes, *production, local, result.visible);
@@ -1275,6 +1336,7 @@ void GalacticSession::Impl::execute_object_sale(const GameCommand& command, std:
         }
         if (control) for (auto& row : control->planets) {
             std::erase_if(row.landed, [&](const auto& unit) { return removed.contains(unit.id); });
+            std::erase_if(row.ground_layout, [&](const auto& entry) { return removed.contains(entry.object); });
             const auto producer = std::lower_bound(production->planets.begin(), production->planets.end(), row.planet,
                 [](const auto& value, auto key) { return value.planet < key; });
             if (producer != production->planets.end() && producer->planet == row.planet)
@@ -1308,6 +1370,10 @@ void GalacticSession::Impl::execute_object_sale(const GameCommand& command, std:
         if (std::erase_if(production_originals, [&](const auto& row) { return row.id == object->id; }))
             published_production_originals.reset();
         const bool special = object->kind == ProductionKind::structure && object->domain == ProductionDomain::ground;
+        if (control) for (auto& row : control->planets) {
+            if (std::erase_if(row.ground_layout, [&](const auto& entry) { return entry.object == object->id; }))
+                dirty[static_cast<std::size_t>(StateSection::control)] = true;
+        }
         planet->objects.erase(object); --live_object_count;
         // WGM-188: removing a ground special refreshes the ground base level.
         if (special) refresh_ground_base_level(static_cast<std::size_t>(planet - production->planets.begin()));

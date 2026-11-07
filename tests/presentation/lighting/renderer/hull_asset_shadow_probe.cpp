@@ -17,6 +17,7 @@
 // --eawr-hull-upload rigid_skinned|unskinned (the matched skinning control:
 // the same vertices, material, pose and scene without the Hull's bone binding).
 #include "eawr/presentation/animation/animation.hpp"
+#include "eawr/vfs/vfs.hpp"
 #include "eawr/presentation/godot/renderer.hpp"
 #include "eawr/sim/replay.hpp"
 #include "eawr/sim/snapshot.hpp"

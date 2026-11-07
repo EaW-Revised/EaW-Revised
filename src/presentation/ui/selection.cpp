@@ -396,6 +396,23 @@ bool Selection::all(const std::span<const BattleUnit> units) {
     return replace(next);
 }
 
+bool Selection::bulk(const std::span<const BattleUnit> units, const std::optional<ScreenRect> viewport,
+                     const bool include_heroes) {
+    std::vector<sim::EntityId> next;
+    for (const auto& unit : units) {
+        if (unit.entity == sim::invalid_entity_id || !unit.own || !unit.controlled || !unit.selectable
+            || unit.neutral || !unit.locomotion || unit.decoration || (unit.hero && !include_heroes)) continue;
+        if (viewport) {
+            if (!unit.selection_bounds) continue;
+            const auto& bounds = *unit.selection_bounds;
+            if (bounds[2] < viewport->min_x || bounds[0] >= viewport->max_x
+                || bounds[3] < viewport->min_y || bounds[1] >= viewport->max_y) continue;
+        }
+        next.push_back(unit.entity);
+    }
+    return replace(next);
+}
+
 bool Selection::type_on_screen(const sim::tactical::TypeId type, const std::span<const BattleUnit> units,
                                const ScreenRect& viewport) {
     bool added = false;

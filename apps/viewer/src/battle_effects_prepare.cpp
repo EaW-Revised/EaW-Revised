@@ -1,4 +1,5 @@
 #include "eawr/core/load_profile.hpp"
+#include "eawr/vfs/vfs.hpp"
 #include "battle_effects.hpp"
 #include "eawr/data/tag_trace.hpp"
 
@@ -413,9 +414,12 @@ void BattleEffects::prepare_unit_looks(const units::UnitTables& tables, const si
                 continue;
             }
             if (nested.kind != tactical::SpecialAbilityKind::energy_weapon && nested.kind != tactical::SpecialAbilityKind::tractor_beam
-                && nested.kind != tactical::SpecialAbilityKind::leech_shields) continue;
+                && nested.kind != tactical::SpecialAbilityKind::leech_shields
+                && nested.kind != tactical::SpecialAbilityKind::super_laser) continue;
+            // WSPL-06: the super laser draws as a textured beam, like the shield leech's.
             const auto beam = nested.kind == tactical::SpecialAbilityKind::energy_weapon ? 0U
-                : nested.kind == tactical::SpecialAbilityKind::leech_shields ? 2U : 1U;
+                : (nested.kind == tactical::SpecialAbilityKind::leech_shields
+                    || nested.kind == tactical::SpecialAbilityKind::super_laser) ? 2U : 1U;
             if (beam == 2) {
                 auto& look = leech_beams_[id];
                 look.texture = nested.leech_texture;
@@ -464,8 +468,10 @@ void BattleEffects::prepare_unit_looks(const units::UnitTables& tables, const si
                         const auto values = numbers(text(key)); return values.empty() ? fallback : values.front();
                     };
                     // TBF-07: defaults are engine defaults, not bounds inferred from retail data.
-                    lightning.texture = text("Texture_Name");
-                    if (lightning.texture.empty()) lightning.texture = "lightning_default.tga";
+                    // TBF-09: the definition is read, but the retail draw resolves this
+                    // conventional texture through the active data stack for every bolt.
+                    static_cast<void>(text("Texture_Name"));
+                    lightning.texture = "lightning_default.tga";
                     lightning.width_min = scalar("Width_Min", 20.0F); lightning.width_max = scalar("Width_Max", 5.0F);
                     lightning.fade_min = scalar("Fadeout_Time_Min", 3.0F); lightning.fade_max = scalar("Fadeout_Time_Max", 1.0F);
                     lightning.interval_min = scalar("Bolt_Creation_Interval_Min", 0.05F);
@@ -523,7 +529,7 @@ void BattleEffects::prewarm_effect_programs() {
                 &looks.barrage_weapons, &looks.charged_weapons}) {
             for (const auto& weapon : *weapons) {
                 const auto& look = weapon.second;
-                for (const auto* name : {&look.detonation, &look.lifetime_detonation,
+                for (const auto* name : {&look.detonation, &look.lifetime_detonation, &look.ground_detonation,
                         &look.death_explosion, &look.armor_reduced, &look.shield_absorbed}) warm(*name);
             }
         }
@@ -574,6 +580,7 @@ void BattleEffects::prepare(const units::UnitTables& tables, const tactical::Com
         if (colour.size() >= 4) look.colour = {colour[0] / 255.0F, colour[1] / 255.0F, colour[2] / 255.0F, colour[3] / 255.0F};
         look.detonation = tag(value, "Projectile_Object_Detonation_Particle");
         look.lifetime_detonation = tag(value, "Projectile_Lifetime_Detonation_Particle");
+        look.ground_detonation = tag(value, "Projectile_Ground_Detonation_Particle");
         const auto death_explosions = type_list(value, "Death_Explosions");
         if (!death_explosions.empty()) look.death_explosion = death_explosions.front();
         look.armor_reduced = tag(value, "Projectile_Object_Armor_Reduced_Detonation_Particle");

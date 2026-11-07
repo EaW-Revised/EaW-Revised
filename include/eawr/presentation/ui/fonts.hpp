@@ -9,7 +9,7 @@
 
 #include "eawr/core/diagnostic.hpp"
 #include "eawr/data/ui/sfnt.hpp"
-#include "eawr/vfs/vfs.hpp"
+#include "eawr/vfs/vfs_fwd.hpp"
 
 #include <array>
 #include <cstddef>

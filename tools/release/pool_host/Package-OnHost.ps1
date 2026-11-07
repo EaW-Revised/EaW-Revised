@@ -11,11 +11,15 @@
 # Stages a clean copy of the source tree (the slot is not touched afterwards), then runs tools/release/package_release.py there with
 # the pinned patched Godot (-Godot), the pinned manager artifact (-LauncherArtifact) and --with-mods-manager. Prints
 # "EAWR-RELEASE FILE <path> <bytes> <sha256>" for every archive. The private symbol archive goes to <Base>\release-kit\symbols-<kind>.
+#   -NoSymbols      owner TEST kit: skip private symbol retention (package_release.py --no-symbols); refused with -Public.
+#   -BuildDir       defaults to out\build\windows-msvc-ninja-relay, the preset the release tree is built with; -Kind debug needs
+#                   -BuildDir out\build\release-debug (where Build-DebugOnHost.ps1 builds).
 param(
     [Parameter(Mandatory)][string]$Base, [Parameter(Mandatory)][string]$Sha, [Parameter(Mandatory)][ValidateSet('release', 'debug')][string]$Kind,
     [Parameter(Mandatory)][string]$Version, [Parameter(Mandatory)][string]$Godot, [Parameter(Mandatory)][string]$LauncherArtifact,
     [string]$Slot = '0', [string]$ViewerZip = '', [string]$Tag = '',
-    [string]$BuildDir = 'out\build\windows-msvc-ninja', [string]$InputsDir = '', [string]$KitName = 'release-kit', [string]$ViewerTree = ''
+    [string]$RevisedLayer = $env:EAWR_REVISED_LAYER_DIR, [switch]$AllowMissingRevisedLayer, [switch]$Public, [switch]$NoSymbols,
+    [string]$BuildDir = 'out\build\windows-msvc-ninja-relay', [string]$InputsDir = '', [string]$KitName = 'release-kit', [string]$ViewerTree = '', [string]$Tree = ''
 )
 $ErrorActionPreference = 'Stop'
 function Say([string]$t) { [Console]::Out.WriteLine($t); [Console]::Out.Flush() }
@@ -23,9 +27,22 @@ if ($Sha -notmatch '^[0-9a-f]{40}$') { throw 'bad sha' }
 $kit = Join-Path $Base $KitName
 if (-not $Tag) { $Tag = "$($Sha.Substring(0,9))-$Kind" }
 $stage = Join-Path $kit $Tag
-$src = if ($Kind -eq 'release') { if ($Slot -eq '0') { Join-Path $Base 'src' } else { Join-Path $Base "src$Slot" } } else { Join-Path $kit 'debug\src' }
+$src = if ($Kind -eq 'release' -and $Tree) { $Tree } elseif ($Kind -eq 'release') { if ($Slot -eq '0') { Join-Path $Base 'src' } else { Join-Path $Base "src$Slot" } } else { Join-Path $kit 'debug\src' }
 $head = (& git -C $src rev-parse HEAD).Trim()
 if ($head -ne $Sha) { throw "tree $src is at $head, expected $Sha" }
+$buildSrc = Join-Path $src $BuildDir
+if (-not (Test-Path -LiteralPath $buildSrc -PathType Container)) { throw "build dir not found: $buildSrc (built with --preset windows-msvc-ninja-relay? pass -BuildDir for another preset)" }
+if ($NoSymbols -and $Public) { throw '-NoSymbols is for owner test kits and cannot be combined with -Public' }
+$tools = 'sim_headless','sim_bench','path_bench','asset_scan','asset_validate','xml_scan','scene_scan','sky_scan','unit_scan','script_smoke','hud_movie_prepare'
+# Every expected binary must be in the build tree before anything is staged.
+$expected = @(); foreach ($t in $tools) { $expected += "$t.exe", "$t.pdb" }
+if ($Kind -eq 'release') { $expected += 'EAWR.exe', 'EAWR Mods.exe', 'eawr_mods_service.exe', 'eawr_loadcheck.exe', 'EAWR.pdb' }
+$buildApps = Join-Path $buildSrc 'apps'
+if (-not (Test-Path -LiteralPath $buildApps -PathType Container)) { throw "build tree has no apps folder: $buildApps" }
+foreach ($file in $expected) {
+    $found = @(Get-ChildItem -LiteralPath $buildApps -Recurse -Filter $file -File | Where-Object { $_.FullName -notmatch '\\CMakeFiles\\' })
+    if ($found.Count -ne 1) { throw "expected binary $file : $($found.Count) matches under $buildApps (wrong -BuildDir, or the tree was not built)" }
+}
 Say "stage $stage from $src"
 if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage -Recurse -Force }
 New-Item -ItemType Directory -Path "$stage\out" -Force | Out-Null
@@ -54,12 +71,10 @@ if ($ViewerTree) {
     }
     $global:LASTEXITCODE = 0
 }
-$tools = 'sim_headless','sim_bench','path_bench','asset_scan','asset_validate','xml_scan','scene_scan','sky_scan','unit_scan','script_smoke','hud_movie_prepare'
-$buildSrc = Join-Path $src $BuildDir
 $bd = Join-Path $stage 'build'
 function Copy-Built([string]$name, [string]$ext) {
     $hits = @(Get-ChildItem -LiteralPath (Join-Path $buildSrc 'apps') -Recurse -Filter ($name + $ext) -File | Where-Object { $_.FullName -notmatch '\\CMakeFiles\\' })
-    if ($hits.Count -ne 1) { throw "$name$ext : $($hits.Count) matches under $buildSrc\apps" }
+    if ($hits.Count -ne 1) { throw "expected binary $name$ext : $($hits.Count) matches under $buildSrc\apps (wrong -BuildDir, or the tree was not built)" }
     $rel = $hits[0].FullName.Substring($buildSrc.Length + 1)
     $dest = Join-Path $bd $rel
     New-Item -ItemType Directory -Force -Path (Split-Path $dest) | Out-Null
@@ -88,6 +103,10 @@ $out = Join-Path $stage 'out'
 $args = @("$stage\src\tools\release\package_release.py", '--expect-identity', $Sha, '--build-dir', $bd, '--platform', 'windows-x64', '--version', $Version,
     '--out', $out, '--symbol-store', (Join-Path $kit "symbols-$Kind"), '--godot', $Godot, '--launcher', $launcher, '--with-mods-manager',
     '--mods-service', $service, '--launcher-artifact', $LauncherArtifact)
+if ($RevisedLayer) { $args += @('--revised-layer', $RevisedLayer) }
+if ($AllowMissingRevisedLayer) { $args += '--allow-missing-revised-layer' }
+if ($Public) { $args += '--public' }
+if ($NoSymbols) { $args += '--no-symbols' }
 if ($Kind -eq 'debug') { $args += '--debug' }
 Say ("python " + ($args -join ' '))
 $log = Join-Path $stage 'package.log'

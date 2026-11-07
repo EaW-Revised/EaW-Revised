@@ -45,6 +45,8 @@ EAWR_GALACTIC_POLICY(AssignBattleTeamRole, human_wire);
 EAWR_GALACTIC_POLICY(RecheckOrbit, engine_only); // script-only dispatch (WGM-154)
 EAWR_GALACTIC_POLICY(MoveFleet, human_wire);
 EAWR_GALACTIC_POLICY(LandFleet, human_wire);
+EAWR_GALACTIC_POLICY(LandUnits, human_wire);
+EAWR_GALACTIC_POLICY(SetGroundLayout, human_wire);
 EAWR_GALACTIC_POLICY(BattleChoice, human_wire);
 EAWR_GALACTIC_POLICY(AutoResolveWithdraw, human_wire);
 EAWR_GALACTIC_POLICY(ObserverCommand, engine_only); // ability, control and clock owners via the script seat
@@ -60,6 +62,7 @@ EAWR_GALACTIC_POLICY(TransferSurface, human_wire);
 EAWR_GALACTIC_POLICY(TransferFleetMembers, human_wire);
 EAWR_GALACTIC_POLICY(SetFleetPathfinder, human_wire);
 EAWR_GALACTIC_POLICY(BattleSummaryAcknowledge, human_wire);
+EAWR_GALACTIC_POLICY(GuiClick, human_wire); // a seat raises its own HUD click to its own plots (WST-37)
 EAWR_GALACTIC_POLICY(InvasionAccept, human_wire); // the sending seat accepts its own prepared selection (GCMP-04)
 #undef EAWR_GALACTIC_POLICY
 
@@ -121,6 +124,7 @@ GalacticSessionAdapter::GalacticSessionAdapter(campaign::GameSession& game, cons
     : game_(&game), executor_(&executor), options_(options), clock_limiter_(options.clock_policy),
       roster_(game.galaxy().setup().seats), debug_commands_(game.galaxy().setup().debug_commands) {
     std::sort(roster_.begin(), roster_.end(), [](const auto& left, const auto& right) { return left.seat_id < right.seat_id; });
+    game.galaxy().prepare_exchange_encoding(); // the first exchange must not build the offer tables mid-game
 }
 
 std::uint64_t GalacticSessionAdapter::completed_tick() const { return game_->completed_tick(); }
@@ -144,6 +148,66 @@ Bytes GalacticSessionAdapter::clock_state() const {
     return bytes;
 }
 
+core::Result<std::unique_ptr<GalacticSessionAdapter>> GalacticSessionAdapter::owned(
+    std::shared_ptr<campaign::GameSession> game, std::shared_ptr<const sim::PartitionExecutor> executor,
+    GalacticAdapterOptions options, std::shared_ptr<const void> services) {
+    if (!game || !executor) return fail_with<std::unique_ptr<GalacticSessionAdapter>>(
+        session_errors::options, "private recovery needs its game and executor owners");
+    auto adapter = std::make_unique<GalacticSessionAdapter>(*game, *executor, options);
+    adapter->runtime_services_ = std::move(services); adapter->owned_executor_ = std::move(executor); adapter->owned_game_ = std::move(game);
+    if (!adapter->game_->network_resume_state().empty()) {
+        auto restored = adapter->restore_network_state(adapter->game_->network_resume_state());
+        if (!restored) return core::Result<std::unique_ptr<GalacticSessionAdapter>>::failure(restored.error());
+    }
+    return core::Result<std::unique_ptr<GalacticSessionAdapter>>::success(std::move(adapter));
+}
+
+core::Result<void> GalacticSessionAdapter::restore_network_state(std::span<const std::uint8_t> bytes) {
+    const auto original = bytes;
+    const auto read_word = [&](std::uint64_t& value, unsigned width) {
+        if (bytes.size() < width) return false;
+        value = 0;
+        for (unsigned i = 0; i < width; ++i) value |= static_cast<std::uint64_t>(bytes[i]) << (8U * i);
+        bytes = bytes.subspan(width); return true;
+    };
+    const auto invalid = [] { return fail_with<void>(session_errors::options, "invalid saved campaign clock continuation"); };
+    std::uint64_t policy{}, window{}, limit{}, present{}, actor{}, count{};
+    if (!read_word(policy, 1) || policy != static_cast<std::uint8_t>(options_.clock_policy)
+        || !read_word(window, 8) || window != GalacticClockLimiter::window_ticks
+        || !read_word(limit, 4) || limit != GalacticClockLimiter::changes_per_window
+        || !read_word(present, 1) || present > 1 || !read_word(actor, 4) || (!present && actor)
+        || (present && !seat(sim::SeatId{static_cast<std::uint32_t>(actor)}))
+        || !read_word(count, 4) || count > roster_.size()) return invalid();
+    GalacticClockLimiter::History history; GalacticClockLimiter::Toggles toggles;
+    for (std::uint64_t i = 0; i < count; ++i) {
+        std::uint64_t id{}, length{};
+        if (!read_word(id, 4) || !read_word(length, 4) || !length || length > GalacticClockLimiter::changes_per_window) return invalid();
+        const sim::SeatId key{static_cast<std::uint32_t>(id)};
+        if (!seat(key) || (!history.empty() && key <= history.rbegin()->first)) return invalid();
+        auto& row = history[key];
+        for (std::uint64_t j = 0; j < length; ++j) {
+            std::uint64_t tick{};
+            if (!read_word(tick, 8) || tick >= game_->completed_tick() || (!row.empty() && tick < row.back())) return invalid();
+            row.push_back(tick);
+        }
+    }
+    if (!read_word(count, 4) || count > roster_.size()) return invalid();
+    for (std::uint64_t i = 0; i < count; ++i) {
+        std::uint64_t id{}, tick{};
+        if (!read_word(id, 4) || !read_word(tick, 8) || tick >= game_->completed_tick()) return invalid();
+        const sim::SeatId key{static_cast<std::uint32_t>(id)};
+        if (!seat(key) || (!toggles.empty() && key <= toggles.rbegin()->first)) return invalid();
+        toggles.emplace(key, tick);
+    }
+    if (!bytes.empty() || (options_.clock_policy == GalacticClockPolicy::unrestricted && (!history.empty() || !toggles.empty() || present)))
+        return invalid();
+    clock_limiter_.restore(std::move(history), std::move(toggles));
+    pause_actor_ = present ? std::optional{sim::SeatId{static_cast<std::uint32_t>(actor)}} : std::nullopt;
+    const auto canonical = clock_state();
+    if (!std::equal(canonical.begin(), canonical.end(), original.begin(), original.end())) return invalid();
+    return core::Result<void>::success();
+}
+
 std::string GalacticSessionAdapter::clock_hash(std::string base) const {
     if (options_.clock_policy == GalacticClockPolicy::unrestricted) return base;
     constexpr std::string_view domain = "eawr-galactic-lan-clock-v2";
@@ -155,10 +219,12 @@ std::string GalacticSessionAdapter::clock_hash(std::string base) const {
 }
 
 Bytes GalacticSessionAdapter::canonical_state() const {
-    auto bytes = game_->galaxy().canonical_state_bytes();
+    // The lockstep exchange encodes the same bytes as before, with sections (and the child's records) built on the
+    // executor (#5519). canonical_state_bytes() stays the fresh serial encode used by saves and as the verify oracle.
+    auto bytes = game_->galaxy().exchange_state_bytes(*executor_);
     // While a child battle runs the whole-session state is the galaxy plus the child (ADR-012 section 3).
     if (const auto* child = game_->battle()) {
-        const auto tactical = child->canonical_state_bytes();
+        const auto tactical = child->canonical_state_bytes(*executor_);
         bytes.push_back(1);
         put(bytes, game_->conflict() ? game_->conflict()->id : 0, 8);
         put(bytes, tactical.size(), 8);
@@ -191,10 +257,14 @@ core::Result<galactic::GameCommand> GalacticSessionAdapter::authorize(const Seat
     if (issuer->kind != sim::SeatKind::human || issuer->player == 0)
         return fail_with<galactic::GameCommand>(session_errors::admission, "only commandable human seats may send galactic input");
     const auto& payload = decoded.value().payload;
+    if (save_host_ && std::holds_alternative<galactic::SaveRequest>(payload) && input.key.seat != *save_host_)
+        return fail_with<galactic::GameCommand>(session_errors::admission, "only the agreed host can request a campaign save");
     // D8: a Galactic MP seat stays departed until checkpoint-based rejoin is available (GCMP-15).
-    if (std::holds_alternative<galactic::SeatRejoin>(payload))
+    if (std::holds_alternative<galactic::SeatRejoin>(payload)) {
+        if (recovery_rejoins_.contains(input.key)) return decoded;
         return fail_with<galactic::GameCommand>(session_errors::admission,
             "Galactic multiplayer rejoin is disabled; a departed seat cannot return (GCMP-15, #4368).");
+    }
     if (galactic_payload_authority(payload) != GalacticPayloadAuthority::human_wire)
         return fail_with<galactic::GameCommand>(session_errors::admission, "engine-only payload cannot cross the human wire");
     if (!debug_commands_ && (std::holds_alternative<galactic::DebugSetPlanetOwner>(payload)
@@ -215,6 +285,26 @@ core::Result<void> GalacticSessionAdapter::validate(const SeatInput& input) cons
 bool GalacticSessionAdapter::is_departure(const SeatInput& input) const {
     const auto command = authorize(input);
     return command && std::holds_alternative<galactic::SeatLeave>(command.value().payload);
+}
+
+bool GalacticSessionAdapter::is_rejoin(const SeatInput& input) const {
+    const auto decoded = decode_galactic_input(input);
+    return decoded && std::holds_alternative<galactic::SeatRejoin>(decoded.value().payload);
+}
+
+core::Result<void> GalacticSessionAdapter::validate_recovery_input(const SeatInput& input) {
+    const auto decoded = decode_galactic_input(input);
+    if (!decoded) return core::Result<void>::failure(decoded.error());
+    if (!std::holds_alternative<galactic::SeatRejoin>(decoded.value().payload)) return validate(input);
+    const auto* original = seat(input.key.seat);
+    const auto live = game_->galaxy().seats();
+    const auto current = std::find_if(live.begin(), live.end(), [&](const auto& row) { return row.seat_id == input.key.seat; });
+    if (input.key.tick != game_->completed_tick() || !original || original->kind != sim::SeatKind::human
+        || current == live.end() || current->active || !game_->galaxy().seat_control()
+        || recovery_rejoins_.size() >= max_match_seats)
+        return fail_with<void>(session_errors::admission, "recorded recovery transition has no inactive saved human seat");
+    recovery_rejoins_.insert(input.key);
+    return core::Result<void>::success();
 }
 
 core::Result<void> GalacticSessionAdapter::install(const std::span<const SeatInput> canonical) {
@@ -307,6 +397,7 @@ core::Result<void> GalacticSessionAdapter::install(const std::span<const SeatInp
             }
             return fail_with<void>(session_errors::simulation, submitted.error().message);
         }
+        recovery_rejoins_.erase(sim::SeatCommandKey{command.key.tick, command.key.seat, command.key.sequence});
         tick_commands_.push_back(std::move(command));
     }
     return core::Result<void>::success();
@@ -350,6 +441,12 @@ core::Result<CompletedTick> GalacticSessionAdapter::step() {
     last_tick_->state_sha256 = hash;
     last_tick_->state_hash = sim::StateHash(hash);
     return core::Result<CompletedTick>::success({last_tick_->completed_tick, hash});
+}
+
+bool GalacticSessionAdapter::checkpoint_requested() const {
+    return last_tick_ && std::any_of(last_tick_->save_events.begin(), last_tick_->save_events.end(), [](const auto& event) {
+        return event.kind == galactic::GalacticEventKind::save_requested;
+    });
 }
 
 core::Result<Bytes> GalacticSessionAdapter::canonical_input() const {

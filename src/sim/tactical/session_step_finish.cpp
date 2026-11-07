@@ -118,6 +118,8 @@ void session_detail::Tick::track_victory_change(const UnitState* before, const U
     }
     const auto& rules = impl_->victory;
     if (rules.condition == VictoryCondition::none) return;
+    // LC-71 domination awaits the land capture-point service.
+    if (rules.condition == VictoryCondition::control_point_domination) return;
     // WGT-29/WGM-51: campaign installs these alongside all-enemy-units, without a lobby choice.
     if (!pending_outcome_ && evaluate && before && !after && impl_->setup.campaign) {
         const auto leader = [&](auto&& self, const CarriedObject& object) -> bool {
@@ -147,6 +149,13 @@ void session_detail::Tick::track_victory_change(const UnitState* before, const U
     // VT-02, WCC-40: publish pending victory in the ordered destruction hook,
     // before any later damage delivery. Only relevant lifecycle hooks visit player/base rows.
     const bool all_units = rules.condition == VictoryCondition::all_enemy_units_destroyed;
+    if (impl_->land) {
+        const auto known = [&](const UnitState* unit) {
+            return !unit || std::any_of(impl_->setup.players.begin(), impl_->setup.players.end(),
+                [&](const Player& player) { return player.player_id == unit->owner; });
+        };
+        if (!known(before) || !known(after)) return;
+    }
     const auto count_of = [&](const PlayerId owner) -> std::uint64_t& {
         const auto player = std::lower_bound(impl_->setup.players.begin(), impl_->setup.players.end(), owner,
             [](const Player& entry, const PlayerId value) { return entry.player_id < value; });
@@ -157,6 +166,7 @@ void session_detail::Tick::track_victory_change(const UnitState* before, const U
         if (all_units) {
             auto& count = count_of(before->owner);
             if (count == 0) {
+                if (impl_->land) return;
                 victory_error_ = detail::diagnostic(diagnostic_codes::worker_failure,
                     "victory relevance count underflow for unit " + std::to_string(before->entity_id));
                 return;
@@ -171,7 +181,7 @@ void session_detail::Tick::track_victory_change(const UnitState* before, const U
     }
     if (relevant(after)) {
         if (all_units) ++count_of(after->owner);
-        else if (std::binary_search(rules.contenders.begin(), rules.contenders.end(), after->owner)) {
+        else if (impl_->land || std::binary_search(rules.contenders.begin(), rules.contenders.end(), after->owner)) {
             const auto position = std::lower_bound(pending_starbases_.begin(), pending_starbases_.end(), after->entity_id,
                 [](const StarbaseEntry& entry, const EntityId id) { return entry.unit < id; });
             pending_starbases_.insert(position, StarbaseEntry{after->entity_id, after->owner});
@@ -186,6 +196,23 @@ void session_detail::Tick::track_victory_change(const UnitState* before, const U
         }
         winner = all_units_destroyed_winner(rules, impl_->setup.players, before->owner,
             std::span<const OwnerUnitCount>{counts.data(), impl_->setup.players.size()});
+    } else if (rules.condition == VictoryCondition::enemy_hq_destroyed
+        || rules.condition == VictoryCondition::enemy_base_components_destroyed) {
+        const auto lost = std::find_if(impl_->setup.players.begin(), impl_->setup.players.end(),
+            [&](const Player& player) { return player.player_id == before->owner; });
+        if (lost != impl_->setup.players.end()) for (const auto candidate : rules.contenders) {
+            const auto player = std::find_if(impl_->setup.players.begin(), impl_->setup.players.end(),
+                [&](const Player& entry) { return entry.player_id == candidate; });
+            if (player == impl_->setup.players.end() || !players_hostile(impl_->snapshot_players, candidate, lost->player_id)
+                || (!rules.installed_players.empty() && !std::binary_search(rules.installed_players.begin(), rules.installed_players.end(), candidate))) continue;
+            const bool enemy = std::any_of(pending_starbases_.begin(), pending_starbases_.end(), [&](const StarbaseEntry& base) {
+                const auto owner = std::find_if(impl_->setup.players.begin(), impl_->setup.players.end(),
+                    [&](const Player& entry) { return entry.player_id == base.owner; });
+                return owner != impl_->setup.players.end()
+                    && players_hostile(impl_->snapshot_players, candidate, owner->player_id);
+            });
+            if (!enemy) { winner = candidate; break; }
+        }
     } else {
         winner = starbase_destroyed_winner(rules, impl_->setup.players, before->owner, pending_starbases_);
     }
@@ -640,7 +667,11 @@ core::Result<void> session_detail::Tick::commit() {
     auto& registry_component_writes = committed_.value().registry_component_writes.emplace();
     committed_.value().staged_map_copies.emplace(crafts.copied_elements() + minds.copied_elements() + spawners.copied_elements());
     mark("rebuild_registry", true);
-    impl_->commit_units(survivors, registry_component_writes);
+    {
+        core::tick_profile::Scope units_scope("serial.tactical.commit.units");
+        if (const auto committed = impl_->commit_units(survivors, registry_component_writes, executor); !committed)
+            return core::Result<void>::failure(committed.error());
+    }
     committed_.value().registry_emplacements.emplace(impl_->registry_emplacement_count - initial_emplacements);
     mark("rebuild_registry", false);
     impl_->starbases = std::move(starbases);
@@ -659,10 +690,13 @@ core::Result<void> session_detail::Tick::commit() {
     impl_->squadrons = std::move(squadrons);
     impl_->free_garrisons = std::move(fighters_.value().free_garrisons.value());
     impl_->tick_work = tick_work;
-    crafts.commit();
-    minds.commit();
-    spawners.commit();
-    respawns.commit();
+    {
+        core::tick_profile::Scope journals_scope("serial.tactical.commit.journals");
+        crafts.commit();
+        minds.commit();
+        spawners.commit();
+        respawns.commit();
+    }
     impl_->spins = std::move(spins);
     impl_->collection = std::move(collection);
     impl_->projectile_collection = std::move(targets_.value().projectile_collection.value());
@@ -677,8 +711,11 @@ core::Result<void> session_detail::Tick::commit() {
     impl_->ledgers = std::move(ledgers);
     if (bonuses_.value().command_ledger) impl_->command_ledger = std::move(*bonuses_.value().command_ledger);
     if (sources_changed && !impl_->bonus_categories.empty()) impl_->committed_bonus_profiles.swap(impl_->bonus_profiles);
-    impl_->pad_stage.commit(impl_->pads);
-    impl_->construction_stage.commit(impl_->construction);
+    {
+        core::tick_profile::Scope pad_scope("serial.tactical.commit.pad_journals");
+        impl_->pad_stage.commit(impl_->pads);
+        impl_->construction_stage.commit(impl_->construction);
+    }
     impl_->arrivals = std::move(arrivals);
     impl_->shares = std::move(shares);
     impl_->earners = std::move(earners);
@@ -745,7 +782,7 @@ core::Result<TacticalTick> session_detail::Tick::finish() {
     }
     std::string hash;
     StateHash state_hash;
-    {
+    if (impl_->hash_policy == StateHashPolicy::always) {
         auto bytes = impl_->canonical_bytes(executor);
         // A threaded hasher measures submission/backpressure here; its digest stays off-thread.
         core::tick_profile::Scope hash_profile_scope("serial.tactical.finish.hash");
@@ -759,17 +796,22 @@ core::Result<TacticalTick> session_detail::Tick::finish() {
     core::tick_profile::Scope publication_profile("serial.tactical.finish.publication");
     // #424: the squadrons' targets for the world UI (presentation only, not hashed).
     std::vector<SquadronTarget> squadron_targets;
-    for (const auto& [container, mind] : impl_->minds) {
-        if (mind.target != invalid_entity_id) {
-            squadron_targets.push_back({container, mind.target, closing_squadrons.contains(container), mind.cell.has_value(), mind.joined,
-                mind.cell ? mind.cell->x : 0, mind.cell ? mind.cell->y : 0});
+    {
+        core::tick_profile::Scope targets_scope("serial.tactical.finish.squadron_targets");
+        for (const auto& [container, mind] : impl_->minds) {
+            if (mind.target != invalid_entity_id) {
+                squadron_targets.push_back({container, mind.target, closing_squadrons.contains(container), mind.cell.has_value(), mind.joined,
+                    mind.cell ? mind.cell->x : 0, mind.cell ? mind.cell->y : 0});
+            }
         }
     }
+    std::optional<core::tick_profile::Scope> snapshot_scope("serial.tactical.finish.snapshot");
     impl_->current_snapshot = std::make_shared<const TacticalSnapshot>(impl_->completed_tick, impl_->snapshot_players,
         std::move(instances), std::move(events), std::move(combat_events), impl_->projectiles, impl_->outcome,
         std::move(spinning), std::move(squadron_targets), impl_->squadrons,
         impl_->economy_views(impl_->ledgers, impl_->shares), impl_->pad_views(), impl_->quits, impl_->losses, impl_->productions,
         impl_->manual_clock_views(), impl_->economy_cues, impl_->ability_spawns, session_.retreat_views(), impl_->garrison_timer_views(), impl_->beacons, impl_->setup.controllers);
+    snapshot_scope.reset();
     std::vector<std::pair<EntityId, PlayerId>> deaths;
     if (impl_->setup.first_free_entity_id) {
         deaths.reserve(loss_killers_.size());

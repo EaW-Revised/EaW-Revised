@@ -1,5 +1,7 @@
 #include "eawr/core/json_text.hpp"
+#include "eawr/vfs/vfs.hpp"
 #include "debris_props.hpp"
+#include "eawr/presentation/particles/lane_guard.hpp"
 #include "presentation_constants.hpp"
 
 #include "eawr/scene/scene.hpp"
@@ -82,6 +84,7 @@ DebrisProps::DebrisProps(godot::Node3D& host, const vfs::Vfs& filesystem, const 
           host, [this](const std::string_view name) { return resolve_texture(name); })),
       registry_(std::make_unique<particles::EffectRegistry>(*backend_)) {
     backend_->set_churn_owner(render_churn::Owner::debris_particle);
+    backend_->set_merge_additive(GodotParticleBackend::merge_additive_default());
     // #638: nothing here reads the streams' hashes, so the frames do not compute them.
     registry_->set_stream_hashes(false);
 }
@@ -159,7 +162,7 @@ void DebrisProps::prepare(const units::UnitTables& tables, const tactical::Comba
             const std::string prop_type = object ? tag(object.value(), "Death_Breakoff_Prop") : std::string{};
             if (prop_type.empty()) continue;
             std::string status = "ready";
-            Prop prop{.unit = unit, .hardpoint = hardpoint, .ship = placed_ships.size(), .type = prop_type};
+            Prop prop{.unit = unit, .hardpoint = hardpoint, .ship = placed_ships.size(), .type = prop_type, .fire = {}, .explosion = {}};
             auto prop_object = catalog_->resolve(prop_type, data::Category::game_object);
             const tactical::TargetHardpoint* point = nullptr;
             if (profile != nullptr) {
@@ -255,6 +258,7 @@ void DebrisProps::retire(const space::DebrisFlights::Ended& ended) {
 void DebrisProps::pose(const std::span<const platform::LiveTickEvents> reached, const SnapshotAt& snapshot_at,
                        const tactical::PlayerId viewer, const double presented_tick,
                        std::vector<SpacePopulation::LivePose>& live, const bool reveal) {
+    particles::lane::guard_main(); // L1.2: counts a main-thread call while a lane job owns this state; never aborts
     if (released_) return;
     // #401 review 2: the effect clock starts at the first frame, or at the birth of the oldest
     // tick that frame reaches, so an effect born before the first frame keeps its age.
@@ -550,8 +554,7 @@ bool DebrisProps::effects(const FixedCamera& camera, const double presented_tick
         return static_cast<std::uint64_t>(std::max(0.0, std::ceil(tick - *clock_start_ - 1.0e-9)));
     };
     const auto due = static_cast<std::uint64_t>(std::max(0.0, std::floor(presented_tick - *clock_start_ + 1.0e-9)));
-    const bool folded = particles::EffectRegistry::catchup_folding_default() && due > samples_ && due - samples_ > 2;
-    const auto frame_uploads = registry_->defer_uploads(folded);
+    const auto frame_uploads = registry_->defer_uploads(particles::EffectRegistry::defers_catchup_uploads(due, samples_));
     // BP-33: each new prop carries its fire from its birth.
     for (const auto& [serial, flight] : flights_.flights()) {
         if (serial <= fired_through_) continue;

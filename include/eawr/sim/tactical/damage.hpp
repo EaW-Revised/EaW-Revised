@@ -71,6 +71,8 @@ struct Hit {
     math::Fixed take_damage_multiplier{math::Fixed::from_raw(math::Fixed::scale)};
     math::Fixed cause_damage_multiplier{math::Fixed::from_raw(math::Fixed::scale)};
     bool bypass_take_damage_mode{}; // explicit internal delivery bypass, not a damage category
+    // TL-03: the target's per-unit Lua Make_Invulnerable flag; blocks combat and environment damage like DG-40.
+    bool target_script_invulnerable{};
 };
 
 struct HitOutcome {

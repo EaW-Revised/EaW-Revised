@@ -15,14 +15,17 @@ Usage: launcher_smoke.py <EAWR.exe> <fake_godot.exe> <apps/viewer/project/projec
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import pathlib
 import shutil
+import signal
 import struct
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 LAUNCHER = FAKE_GODOT = PROJECT_GODOT = None
@@ -96,6 +99,10 @@ class Package:
         shutil.copy2(LAUNCHER, self.package / "EAWR.exe")
         shutil.copy2(FAKE_GODOT, self.package / "godot" / GODOT_NAME)
         (self.package / "project" / "project.godot").write_text("config_version=5\n", encoding="utf-8")
+        # runtime.json names the packaged engine; without a matching hash the launcher flags the engine as unverified.
+        engine_sha = hashlib.sha256((self.package / "godot" / GODOT_NAME).read_bytes()).hexdigest()
+        (self.package / "runtime.json").write_text(
+            json.dumps({"schema": "eawr-player-runtime/1", "godot_sha256": engine_sha}), encoding="utf-8")
         self.game = self.root / "Games" / "Star Wars 日本 café"
         (self.game / "GameData" / "Data").mkdir(parents=True)
         (self.game / "corruption" / "Data").mkdir(parents=True)
@@ -153,9 +160,10 @@ class LauncherSmoke(unittest.TestCase):
         self.assertEqual(argv[-2:], ["--eawr-audio", "off"])
         self.assertFalse(any("console" in part.casefold() for part in argv))
         self.assertFalse(any(part == "--eawr-settings-file" for part in argv), "settings belong in user data")
+        self.assertNotIn("--eawr-engine-unverified", argv, "the packaged engine matches runtime.json")
         self.assertFalse((p.user_data / "launcher" / "launcher.json").exists(), "an explicit --game-root is not the player's choice")
         # Nothing but user data was written: not the package, not the game.
-        self.assertEqual(sorted(entry.name for entry in p.package.iterdir()), ["EAWR.exe", "godot", "project"])
+        self.assertEqual(sorted(entry.name for entry in p.package.iterdir()), ["EAWR.exe", "godot", "project", "runtime.json"])
         self.assertEqual(sorted(entry.name for entry in p.game.iterdir()), ["GameData", "corruption"])
 
     def test_saved_choice_and_environment_override(self):
@@ -221,6 +229,128 @@ class LauncherSmoke(unittest.TestCase):
         plain = p.run("--game-root", str(p.game), env={"EAWR_FAKE_GODOT_EXIT": "9"})
         self.assertEqual(plain.returncode, 9)
         self.assertIn("exit code 9", plain.stderr.decode("utf-8"))
+
+    def test_instance_two_has_its_own_state_appdata_and_flags(self):
+        p = self.package
+        p.viewer_data.mkdir(parents=True)
+        (p.viewer_data / "eawr-settings.cfg").write_text("eawr-settings 1\nvideo.windowed=0\n", encoding="utf-8")
+        (p.viewer_data / "eawr-profile.cfg").write_text("eawr-profile 1\nplayer.name=Dee\n", encoding="utf-8")
+        # Instance 1's request files must survive an instance 2 start untouched.
+        (p.user_data / "launcher").mkdir(parents=True)
+        (p.user_data / "launcher" / "next-action.json").write_text('{"action":"open-manager"}', encoding="utf-8")
+        result = p.run("--game-root", str(p.game), "--instance", "2")
+        self.assertEqual(result.returncode, 0, result.stderr.decode("utf-8", "replace"))
+        record = p.recorded()
+        inst = p.user_data / "instances" / "2"
+        self.assertEqual(pathlib.Path(record["appdata"]), inst / "appdata")
+        self.assertEqual(record["path"], os.environ.get("PATH", ""), "all other variables are inherited unchanged")
+        argv = record["argv"]
+        self.assertEqual(pathlib.Path(argv[argv.index("--eawr-save-dir") + 1]), p.viewer_data / "saves")
+        self.assertEqual(pathlib.Path(argv[argv.index("--eawr-font-cache") + 1]), p.viewer_data / "fonts")
+        self.assertEqual(argv[argv.index("--eawr-lan-game-port") + 1], "47626")
+        self.assertEqual(pathlib.Path(argv[argv.index("--eawr-report") + 1]), inst / "launcher" / "front-end-report.json")
+        copied = inst / "appdata" / "Godot" / "app_userdata" / "EAWR Viewer"
+        self.assertIn("video.windowed=1", (copied / "eawr-settings.cfg").read_text(encoding="utf-8"))
+        self.assertIn("player.network_name=Dee #2", (copied / "eawr-profile.cfg").read_text(encoding="utf-8"))
+        self.assertEqual(sorted(entry.name for entry in copied.iterdir()), ["eawr-profile.cfg", "eawr-settings.cfg"])
+        self.assertEqual(json.loads((inst / "launcher" / "launch-result.json").read_text(encoding="utf-8"))["status"], "finished")
+        self.assertFalse((inst / ".claim").exists(), "the slot is released at exit")
+        self.assertFalse((inst / "launcher" / "game-running.json").exists())
+        self.assertEqual((p.user_data / "launcher" / "next-action.json").read_text(encoding="utf-8"), '{"action":"open-manager"}')
+        self.assertFalse((p.user_data / "launcher" / "game-running.json").exists())
+        # The first instance is unchanged: no instance flags, the inherited APPDATA.
+        self.assertEqual(p.run("--game-root", str(p.game), "--instance", "1").returncode, 0)
+        record = p.recorded()
+        self.assertEqual(pathlib.Path(record["appdata"]), p.appdata)
+        self.assertNotIn("--eawr-lan-game-port", record["argv"])
+        self.assertNotIn("--eawr-save-dir", record["argv"])
+        for bad in ("0", "-3", "abc", "99"):
+            self.assertEqual(p.run("--game-root", str(p.game), "--instance", bad).returncode, 2, bad)
+
+    def start(self, *arguments: str, record: str, sleep_ms: int) -> subprocess.Popen:
+        p = self.package
+        environment = os.environ.copy()
+        environment.update({"EAWR_FAKE_GODOT_RECORD": str(p.root / record), "APPDATA": str(p.appdata),
+                            "EAWR_FAKE_GODOT_SLEEP_MS": str(sleep_ms)})
+        return subprocess.Popen([str(p.package / "EAWR.exe"), "--user-data", str(p.user_data), "--no-dialogs",
+                                 "--game-root", str(p.game), *arguments], stdin=subprocess.DEVNULL,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=environment)
+
+    def test_two_launchers_started_together_take_different_instances(self):
+        p = self.package
+        p.viewer_data.mkdir(parents=True)
+        launchers = [self.start("--instance", "auto", record=f"record{index}.json", sleep_ms=2500) for index in range(3)]
+        try:
+            for launcher in launchers:
+                _, stderr = launcher.communicate(timeout=TIMEOUT)
+                self.assertEqual(launcher.returncode, 0, stderr.decode("utf-8", "replace"))
+        finally:
+            for launcher in launchers:
+                if launcher.poll() is None:
+                    launcher.kill()   # only the processes this test started
+        ids = sorted(entry.name for entry in (p.user_data / "instances").iterdir())
+        self.assertEqual(ids, ["2", "3", "4"])
+        for instance in (2, 3, 4):
+            result = json.loads((p.user_data / "instances" / str(instance) / "launcher" / "launch-result.json").read_text(encoding="utf-8"))
+            self.assertEqual(result["instance"], instance)
+            self.assertFalse((p.user_data / "instances" / str(instance) / ".claim").exists())
+        records = [json.loads((p.root / f"record{index}.json").read_text(encoding="utf-8")) for index in range(3)]
+        self.assertEqual(sorted(r["argv"][r["argv"].index("--eawr-lan-game-port") + 1] for r in records), ["47626", "47628", "47630"])
+        self.assertEqual(len({r["appdata"] for r in records}), 3)
+
+    def test_auto_instance_reuses_a_stale_slot_and_says_so(self):
+        p = self.package
+        p.viewer_data.mkdir(parents=True)
+        inst = p.user_data / "instances" / "2"
+        inst.mkdir(parents=True)
+        (inst / ".claim").write_text('{"pid":4000000000}\n', encoding="utf-8")   # no such process
+        result = p.run("--game-root", str(p.game), "--instance", "auto")
+        self.assertEqual(result.returncode, 0, result.stderr.decode("utf-8", "replace"))
+        self.assertEqual(pathlib.Path(p.recorded()["appdata"]), inst / "appdata")
+        log = (inst / "launcher" / "launcher.log").read_text(encoding="utf-8")
+        self.assertEqual(log.count("reused a stale slot claim"), 1, log)
+        self.assertFalse((inst / ".claim").exists())
+        self.assertFalse(list(inst.glob(".claim*")), "no lock or temporary file is left behind")
+
+    def test_a_killed_instance_leaves_a_stale_slot_that_the_next_start_reuses(self):
+        p = self.package
+        p.viewer_data.mkdir(parents=True)
+        launcher = self.start("--instance", "2", record="killed.json", sleep_ms=60000)
+        inst = p.user_data / "instances" / "2"
+        running = inst / "launcher" / "game-running.json"
+        game_pid = None
+        try:
+            import time
+            deadline = time.time() + 60
+            while time.time() < deadline and not running.exists():
+                time.sleep(0.1)
+            self.assertTrue(running.exists(), "the instance never published its running state")
+            state = json.loads(running.read_text(encoding="utf-8"))
+            game_pid = state["pid"]
+            self.assertEqual(state["instance"], 2)
+            self.assertEqual(state["host_port"], 47626)
+            # A second start of the same slot while it is live is refused, and changes nothing.
+            refused = p.run("--game-root", str(p.game), "--instance", "2")
+            self.assertEqual(refused.returncode, 2)
+            self.assertIn("already running", refused.stderr.decode("utf-8"))
+            self.assertTrue(running.exists() and (inst / ".claim").exists())
+        finally:
+            launcher.kill()   # the EAWR.exe this test started
+            launcher.wait(timeout=30)
+            if game_pid:
+                # The fake game it started (read from its own state file); it is a leaf process.
+                try:
+                    os.kill(game_pid, signal.SIGTERM)   # TerminateProcess on Windows
+                except OSError:
+                    pass
+                time.sleep(1)
+        self.assertTrue((inst / ".claim").exists() and running.exists(), "a killed launcher cannot clean up")
+        again = p.run("--game-root", str(p.game), "--instance", "2")
+        self.assertEqual(again.returncode, 0, again.stderr.decode("utf-8", "replace"))
+        log = (inst / "launcher" / "launcher.log").read_text(encoding="utf-8")
+        self.assertIn("reused a stale slot claim", log)
+        self.assertIn("removed stale game-running state", log)
+        self.assertFalse((inst / ".claim").exists())
 
     def test_unknown_build_flag_is_passed_to_the_viewer(self):
         p = self.package

@@ -1,14 +1,27 @@
 #include "map_mode_internal.hpp"
 #include "land_battle_camera.hpp"
 #include "land_battle_scene.hpp"
+#include "battle_effects.hpp"
 #include <godot_cpp/classes/viewport.hpp>
-#include <godot_cpp/variant/utility_functions.hpp>
 #include <algorithm>
+#include <cstdio>
 #include <fstream>
 #include <sstream>
 #include <iomanip>
 
 namespace eawr::presentation::godot_backend {
+
+namespace {
+// Owner pathing diagnosis: one stderr line per rows re-map and per turn-in-place change (rate-limited). Logging only; the
+// simulation never reads it (docs/land-live-view.md, "Land movement debug overlay").
+void write_land_move_trace(const sim::tactical::LandMoveTrace& event) {
+    static sim::tactical::LandMoveTraceLimiter limiter;
+    const auto line = limiter.line(event);
+    if (!line.empty()) std::fprintf(stderr, "%s\n", line.c_str());
+}
+} // namespace
+
+void MapMode::State::install_land_move_trace_log() { sim::tactical::set_land_move_trace_sink(&write_land_move_trace); }
 
 bool MapMode::State::ready_land_live(Node3D& host, const assets::Map& map,
     std::vector<sim::RenderInstance>& instances, sim::AssetId& next_asset, sim::EntityId& next_entity) {
@@ -18,12 +31,13 @@ bool MapMode::State::ready_land_live(Node3D& host, const assets::Map& map,
     // BLD-11/12/13: a land battle waits behind the loading screen's Begin like space does. A hosted
     // screen sets the barrier itself; otherwise `--eawr-live-begin` or the interactive default decides.
     open_loading_screen(host, map);
-    UtilityFunctions::print("EAWR land camera viewport at load: ", camera.width, "x", camera.height);
+    load_report(presentation::ui::load_stage_map, 1, 1);
     if (!catalog) return fail_ready("land live battle requires the XML catalog");
     live_session = std::make_unique<LiveSessionView>(live_options);
     std::string error;
     if (!live_session->prepare(*filesystem, *catalog, options.map_path, error) || !live_session->start(error))
         return fail_ready(error);
+    load_report(presentation::ui::load_stage_session, 1, 1);
     if (options.interactive && !map_camera) {
         if (!map.terrain || !tactical || !live_session->start_data())
             return fail_ready("interactive land battle needs terrain and tactical camera constants");
@@ -70,6 +84,15 @@ bool MapMode::State::ready_land_live(Node3D& host, const assets::Map& map,
         ParticleWorkers::default_count(platform::ThreadWorkerAdapter::hardware_worker_count())));
     live_session->set_pose_workers(particle_workers.get());
     live_session->prepare_land_models(*filesystem, *catalog);
+    // #5835 PR1: the land shots, hits and ground impacts. Presentation only: it reads the published snapshots
+    // (combat events and projectiles) and never feeds the session. Model projectiles and muzzle bones stay with
+    // later PRs (muzzles use the member origin until land bone poses exist).
+    battle_effects = std::make_unique<BattleEffects>(host, *filesystem, *catalog);
+    battle_effects->set_workers(particle_workers.get());
+    if (auto detail = battle_effects->set_particle_detail(live_options.particle_detail); !detail)
+        return fail_ready(core::format_diagnostic(detail.error()));
+    battle_effects->collect_axis_diagnostics(!options.report_path.empty());
+    battle_effects->prepare(*live_session->tables(), *live_session->effects_combat());
     SpacePopulation::Options population;
     population.map_sha256 = map_hash; population.catalog = &*catalog;
     population.policy = policy; population.shadows = shadows;
@@ -84,26 +107,32 @@ bool MapMode::State::ready_land_live(Node3D& host, const assets::Map& map,
     members.source = map.source; members.kind = assets::MapKind::land;
     if (!land_population->compose(*renderer, members, *filesystem, camera, {}, next_asset, next_entity))
         return fail_ready(land_population->failure());
+    load_report(presentation::ui::load_stage_scene, 1, 1);
     land_static_instances = instances;
     instances.insert(instances.end(), land_population->instances().begin(), land_population->instances().end());
+    land_overlay = std::make_unique<LandOverlayView>(host);
+    install_land_move_trace_log();
     battle = std::make_unique<BattleInput>(host);
     battle->prepare(*filesystem, *catalog, *live_session, options.shaders);
     host.set_process_input(true); host.set_process_unhandled_input(true);
     // Retail land and space share one tactical shell. Land fills its selection cards from the squad roster;
     // the reinforcement pane, garrison timer and minimap stay inert until their tickets.
+    load_report(presentation::ui::load_stage_interface, 0, 1);
     if (!build_hud(host, map.context_name)) return fail_ready(failure);
+    load_report(presentation::ui::load_stage_interface, 1, 1);
     live_session->loading_complete();
     load_progress.complete();
     if (loading) {
         if (live_session->phase() == LiveSessionView::Phase::ready) loading->show_ready();
         else loading->dismiss();
     }
-    UtilityFunctions::print("EAWR land camera viewport at ready: ", camera.width, "x", camera.height);
     sync_battle_hud();
     return true;
 }
 
 std::optional<int> MapMode::State::process_land_live(double delta) {
+    // finish() already ran (or the session never started): a later frame must not touch the closed session.
+    if (completed || !live_session) return std::nullopt;
     auto update = live_session->frame(*land_population, *renderer, delta);
     if (!update) {
         failure = core::format_diagnostic(update.error()); completed = true;
@@ -114,6 +143,21 @@ std::optional<int> MapMode::State::process_land_live(double delta) {
         auto instances = land_static_instances;
         instances.insert(instances.end(), state.instances->begin(), state.instances->end());
         snapshot = std::make_shared<const sim::RenderSnapshot>(frame, std::move(instances));
+    }
+    if (battle_effects) {
+        const auto& battle_data = live_session->battle_frame();
+        if (!state.error && battle_data.latest && battle_data.previous) {
+            const bool shown = battle_effects->frame(battle_data.reached, *battle_data.previous, *battle_data.latest,
+                battle_data.alpha,
+                [this](const sim::EntityId entity) { return live_session->unit_frame(entity); },
+                camera, battle_data.presented_tick,
+                [this](const std::uint64_t at) { return live_session->snapshot_at(at); });
+            GodotParticleBackend::flush_merged();
+            if (!shown) {
+                failure = battle_effects->failure(); completed = true;
+                live_session->finish(); status = "failed"; (void)write_report(); return 2;
+            }
+        }
     }
     if (const auto failed = draw_map_frame(delta)) return failed;
     const auto tick = static_cast<std::uint64_t>(live_session->presented_tick());
@@ -138,6 +182,10 @@ std::optional<int> MapMode::State::process_land_live(double delta) {
             row << '}';
             land_pose_trace.push_back(row.str());
         }
+    }
+    if (land_overlay && land_overlay->shown()) {
+        const auto data = live_session->land_overlay();
+        if (data) land_overlay->frame(data.get(), *live_session->land_terrain());
     }
     LandBattleCamera view(camera, map_camera.get());
     battle->frame(*live_session, *land_population, view);

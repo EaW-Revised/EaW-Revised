@@ -809,7 +809,7 @@ int main() {
     test_teammate_level_up();
     test_teammate_level_up_one_at_a_time();
     test_zero_health_replacement();
-    test_no_upgrade_layout(); test_replacement_attack(); test_order_after_reinforcement(); test_replacement_projectiles(); test_destroyed_station(); test_hangar_replacement(); test_production_work(); test_census_recount();
+    test_no_upgrade_layout(); test_replacement_attack(); test_order_after_reinforcement(); test_replacement_projectiles(); test_destroyed_station(); test_hangar_replacement(); test_solo_craft_free_spot_launch(); test_vanilla_ship_launch_ignores_lane_blocker(); test_production_work(); test_census_recount();
     test_staged_source_removal();
     test_upgrade_holder_loss();
     test_respawn_inherits_upgrade();

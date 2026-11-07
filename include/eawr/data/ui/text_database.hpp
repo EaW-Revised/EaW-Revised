@@ -6,7 +6,7 @@
 #include "eawr/assets/assets.hpp"
 #include "eawr/core/diagnostic.hpp"
 #include "eawr/core/result.hpp"
-#include "eawr/vfs/vfs.hpp"
+#include "eawr/vfs/vfs_fwd.hpp"
 
 #include <cstddef>
 #include <cstdint>

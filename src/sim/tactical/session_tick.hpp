@@ -25,6 +25,8 @@ public:
     core::Result<void> land_combat(std::vector<LiveUnit>& live,
         const std::vector<std::pair<EntityId, math::Vec3>>& starts,
         std::vector<Event>& events, std::vector<CombatEvent>& combat_events);
+    core::Result<void> land_victory_census(const std::vector<LiveUnit>& live);
+    void land_commit_victory(std::vector<Event>& events);
 
 
 private:
@@ -68,8 +70,7 @@ private:
     void scan_member_targets_partition(const std::size_t& partition, std::vector<std::size_t>& scan_indices,
         const std::map<EntityId, EntityId>& craft_squadron, std::vector<LiveUnit>& moving,
         const std::map<EntityId, ArrivalState>& arrivals, std::map<EntityId, SquadronFrame>& squadron_frames,
-        detail::MapStage<SquadronState>& minds, auto& scans, const detail::CombatWorld& view,
-        detail::CombatWorld& scan_view);
+        detail::MapStage<SquadronState>& minds, auto& scans, const detail::CombatWorld& view);
     core::Result<void> refresh_target_inputs(std::vector<LiveUnit>& moving,
         const std::map<EntityId, EntityId>& craft_squadron);
     core::Result<void> retry_buzz_targets(std::vector<LiveUnit>& moving, detail::MapStage<SquadronState>& minds,

@@ -122,21 +122,27 @@ without invoking a presentation sink. Runtime family consumers own partition
 buffers and merge them on the simulation owner at a joined phase boundary;
 only load/shutdown code publishes them.
 
+The mod load check (`eawr_loadcheck`) report groups engine diagnostics by code. Each example
+now ends with `(file <logical path>:<line>:<column>)` when the diagnostic has a location, so
+a malformed XML file (EAWR-XML-0001), including one nothing references, is named in the
+report. Only the example text changes; loading is untouched.
+
 ## Code allocation
 
 Ranges are centrally assigned; never derive a code from diagnostic text.
 
 | Range (`EAWR-LOAD-`) | Owner / family |
 |---|---|
-| 0001–0099 | Infrastructure; 0001 = missing registry include, XML R-10; 0002 = report sink warning |
+| 0001–0099 | Infrastructure; 0001 = missing registry include, XML R-10; 0002 = report sink warning; 0003 = XML header compatibility retry; 0004 = skipped unparseable XML file (a registered file only, XML R-12; an unreferenced file leaves a diagnostic, no note) |
 | 0100–0149 | Tactical durability and damage |
+| 0125 | Malformed destroyable hardpoint Health: leading number kept when only trailing text is ignored (AU-82), otherwise zero / HD-06 destroyed-slot fallback (class C; retail malformed-input handling unverified) |
 | 0150–0199 | Motion |
 | 0200–0249 | Fighters and garrisons |
 | 0250–0299 | Stealth and ability/combat globals |
 | 0300–0349 | Visibility and fog |
 | 0350–0399 | Tactical economy |
 | 0400–0449 | Lobby and registry |
-| 0450–0499 | Placement and per-type skip |
+| 0450–0499 | Placement and per-type skip; 0452 = TED position not representable in Q24; 0453 = TED orientation not representable in Q24; 0454 = duplicate footprint type CRC; 0455 = colliding TED placement type CRC uses the first catalog definition; 0456 = a non-station hangar authors a starting complement but has no fighter bay, or no squadron resolves in any mode (a resolving campaign tier still launches), so it launches nothing |
 | 0500–0549 | Scoring |
 | 0550–0599 | Tactical AI |
 | 0600–0649 | Tactical runtime arithmetic |
@@ -144,5 +150,5 @@ Ranges are centrally assigned; never derive a code from diagnostic text.
 
 The worked example preserves XML R-10: an unavailable initial include remains
 omitted and its existing diagnostic/health count stays intact. Its additional
-class B note points at the registry's authored `File` element. Unreadable admitted
-files and malformed content retain their existing handling.
+class B note points at the registry's authored `File` element. Unparseable XML files are skipped with a separate note; unreadable admitted
+files retain their existing handling.

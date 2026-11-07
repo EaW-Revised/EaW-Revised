@@ -19,7 +19,7 @@ play-demo.cmd --game-root "path to game" --godot "path to Godot executable"
 sh ./play-demo.sh --game-root "path to game" --godot "path to Godot executable"
 ```
 
-This archive uses the **Safe render thread only**. The start scripts select it
+This archive is a developer/tester route on a stock Godot engine, Safe render thread (the stock engine cannot do Separate); it is not a supported way to play or to measure performance: use the player zip. It uses the **Safe render thread only**. The start scripts select it
 automatically (`--render-thread safe`); the standard Godot engine lacks the patch
 needed for the player download's default Separate render thread. Start through the
 scripts to preserve this setting and prepare the fonts.

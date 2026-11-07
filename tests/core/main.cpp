@@ -1,5 +1,6 @@
 #include <string_view>
 #include "../support/check.hpp"
+#include "eawr/core/build_label.hpp"
 #include "eawr/core/diagnostic.hpp"
 #include "eawr/core/json_text.hpp"
 #include "eawr/core/result.hpp"
@@ -98,6 +99,15 @@ int main() {
     auto failure = Result<std::string>::failure(diagnostic);
     expect(!failure.has_value(), "failed Result must not have a value");
     expect(failure.error().code == "EAWR-TEST-0001", "failed Result must preserve its diagnostic");
+
+    const std::string sha = "0123456789abcdef0123456789abcdef01234567";
+    expect(eawr::core::build_label("0.3.2g+" + sha + "+gcsync3") == "0.3.2g (0123456)", "kit label with short sha");
+    expect(eawr::core::build_label("0.1.0+" + sha + "+dirty+gcsync3") == "0.1.0 (0123456) dirty", "dirty dev build");
+    expect(eawr::core::build_label("0.1.0+" + sha) == "0.1.0 (0123456)", "identity without suffixes");
+    expect(eawr::core::build_label("strict-source-inventory") == "strict-source-inventory", "override of another shape unchanged");
+    expect(eawr::core::build_label("1.0+short+gcsync3") == "1.0+short+gcsync3", "short commit unchanged");
+    expect(eawr::core::build_label("+" + sha) == "+" + sha, "empty label unchanged");
+    expect(eawr::core::build_label("").empty(), "empty identity");
 
     if (failures == 0) {
         std::cout << "core contracts passed\n";

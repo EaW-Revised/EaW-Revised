@@ -15,9 +15,12 @@
 #include "eawr/platform/live_session.hpp"
 #include "eawr/presentation/ui/command_sink.hpp"
 #include "eawr/skirmish/setup.hpp"
+#include <chrono>
 #include <memory>
+#include <filesystem> // include-guard: keep
 #include <functional>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <limits>
@@ -39,6 +42,8 @@ struct LanView {
     std::uint16_t port{47624};
     std::uint64_t input_delay{3};
     std::string peer_name{"Opponent"}, message, bundle_path, setup_summary;
+    bool mod_review_pending{};
+    std::vector<std::uint8_t> host_mod_description;
     std::optional<std::uint64_t> desync_tick;
     std::optional<std::uint64_t> peer_confirmed_tick;
     std::optional<bool> victory;
@@ -131,6 +136,12 @@ private:
     }
     return net::mesh_newcomer_refusal_text(online_refusal_name(seats, other), relay_configured);
 }
+// The first frame a joiner reads from the host is a lobby frame (kinds 72..79). Anything else is match traffic (rejoin proofs,
+// lockstep input): the host has started, and a newcomer has no seat to take (Galactic multiplayer has no rejoin).
+inline constexpr const char* lan_match_running_refusal = "This game is already running; rejoin is not available.";
+[[nodiscard]] inline bool lan_host_match_running(std::span<const std::uint8_t> frame) {
+    return !frame.empty() && (frame.front() < net::lobby_snapshot_kind || frame.front() > net::lobby_rejected_kind);
+}
 [[nodiscard]] inline bool lan_gameplay_enabled(const LanView& view) {
     return view.phase == LanPhase::running && (view.recovery == LanRecovery::none
         || view.recovery == LanRecovery::waiting || view.recovery == LanRecovery::recovered);
@@ -167,6 +178,15 @@ private:
 [[nodiscard]] std::string lan_incident_message(const LanView& view);
 [[nodiscard]] std::string online_pair_message(const net::GnsPairDiagnostic& pair);
 [[nodiscard]] std::string online_mesh_failure_text(std::string_view code);
+// Online text for a failed campaign Start. The raw message never reaches the player: a known differing part of the
+// two players' setups is named in plain words, anything else gets the generic sentence. Empty for other codes and
+// for rooms that are not campaign rooms (skirmish keeps the generic online text).
+[[nodiscard]] std::string online_start_failure_text(const core::Diagnostic& diagnostic, LanReason reason, bool galactic);
+// The campaign Start diagnostic for a room that left starting/committed: the room notice's own reason and message.
+[[nodiscard]] core::Diagnostic galactic_start_aborted(const std::optional<net::LobbyNotice>& notice);
+// The detail logged beside a failure code: the message of lobby and setup codes, with paths cut and bounded;
+// empty for every other code, whose messages may name players or addresses.
+[[nodiscard]] std::string failure_log_detail(const core::Diagnostic& diagnostic);
 // Start failures always reach lobby feedback; only OS entropy failure closes the room.
 void handle_online_start_failure(const core::Diagnostic& error,
     const std::function<void(const core::Diagnostic&)>& feedback,
@@ -291,6 +311,7 @@ public:
     virtual bool lobby_kick(net::PeerIndex) { return false; }
     virtual void lobby_leave() {}
     virtual std::optional<LanLobbyState> lobby_state() const { return {}; }
+    virtual void accept_mod_review() {}
     // GCMP-07 (#4363): Galactic Conquest mode. The host owns the mode, and it holds for the room's lifetime: set_galactic_game
     // right after host() (which discards any earlier room) and before the first pump opens the room in GC mode. The options
     // travel in LobbyGame::options, so every peer reads the same mode from the same revision; a room that never gets it is a
@@ -299,6 +320,8 @@ public:
     virtual void configure_galactic(std::shared_ptr<GalacticLobbyBackend>) {}
     virtual bool set_galactic_game(net::GalacticLobbyOptions) { return false; }
     virtual bool lobby_galactic_game(const net::GalacticLobbyOptions&) { return false; }
+    // Host atomically configures campaign rows and saved-faction assignments; existing lobby wire only.
+    virtual bool lobby_galactic_checkpoint(const net::GalacticLobbyOptions&, const std::vector<net::SetupSeat>&) { return false; }
     // Whether the live room is in GC mode, and the Start seam once it froze (host after Start, guests when the host started).
     virtual bool galactic_room() const { return false; }
     virtual std::optional<GalacticLobbyStart> galactic_start() const { return {}; }
@@ -319,6 +342,9 @@ public:
     virtual void set_discard_observer(std::function<void(std::uint64_t)>) {}
     // Applies only to the next host() call. Default off; joining never maps a port.
     virtual void set_port_mapping(bool) {}
+    // Test seam: shortens the LAN link timeout and the campaign setup timeout (production: 180 s each) so a test can
+    // make a slow load outlast both. Set before host() or join().
+    virtual void set_timeouts_for_test(std::chrono::milliseconds /*link*/, std::chrono::milliseconds /*setup*/) {}
     // Set before online host(): password rooms must never mint a public alias.
     virtual void set_public_invitation(bool) {}
     virtual void join(std::string endpoint) = 0;

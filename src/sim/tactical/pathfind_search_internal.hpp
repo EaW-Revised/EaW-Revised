@@ -2,6 +2,8 @@
 
 #include "pathfind_internal.hpp"
 
+#include <optional>
+
 namespace eawr::sim::tactical::pathfind_detail {
 
 // ---- Path finder (AV-10 to AV-14; research E71-01 to E71-11, E71-22, E71-23) ----

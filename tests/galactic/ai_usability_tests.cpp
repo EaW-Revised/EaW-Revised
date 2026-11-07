@@ -5,6 +5,7 @@
 #include "galactic_ai_execution_state.hpp"
 #include "eawr/checkpoint/game.hpp"
 #include "eawr/platform/sim_workers.hpp"
+#include "eawr/script/foc/galactic_ai_state.hpp"
 #include "../../src/sim/galactic/encoding.hpp"
 #include "../support/reverse_partition_executor.hpp"
 
@@ -211,10 +212,10 @@ std::string deadline_projection(unsigned workers, bool fog) {
     }
     return result;
 }
-std::string trace(const ai::GalacticConnectivity& value, bool archived_only = false) {
+std::string trace(const ai::GalacticConnectivity& value) {
     std::ostringstream out; out << value.revision << ';';
     for (const auto id : value.stealth_fleets) out << "stealth:" << id << ';';
-    for (const auto& row : value.goal_reach) { if (archived_only && row.policy == "Single_Hop_Disconnected") continue; out << row.player << ':' << row.source << ':' << row.policy << ':'; for (const auto id : row.production_sites) out << id << ','; out << ';'; }
+    for (const auto& row : value.goal_reach) { out << row.player << ':' << row.source << ':' << row.policy << ':'; for (const auto id : row.production_sites) out << id << ','; out << ';'; }
     for (const auto& row : value.island_paths) out << row.player << ':' << row.planet << ':' << row.least_force << ':' << row.largest << ';';
     return out.str();
 }
@@ -703,7 +704,7 @@ std::string contracts(unsigned workers, bool fog) {
     cp::GalacticAiUsabilityProvider restored(immutable); Host loaded(setup);
     done(loaded.world.bind(session.snapshot(), {}, executor, session.completed_tick(), session.next_entity_id()));
     done(loaded.world.restore(saved_world)); done(restored.restore(native));
-    expect(trace(take(restored.connectivity(session, loaded.world, loaded.engine, executor)), true) == trace(first, true)
+    expect(trace(take(restored.connectivity(session, loaded.world, loaded.engine, executor))) == trace(first)
         && take(restored.state_hash()) == take(provider.state_hash()), "retained flags/sites/deadlines and derived output restore exactly");
     auto damaged = native; damaged.components.at("GALACTIC_USABILITY").push_back(0);
     const auto before = take(restored.state_hash()); expect(!restored.restore(damaged) && take(restored.state_hash()) == before, "trailing native bytes refuse atomically");
@@ -757,7 +758,7 @@ std::string stealth_publication(unsigned workers, bool fog) {
     Host loaded(setup); cp::GalacticAiUsabilityProvider restored(immutable);
     done(loaded.world.bind(session.snapshot(), {}, executor, session.completed_tick(), session.next_entity_id()));
     done(loaded.world.restore(world_saved)); done(restored.restore(native));
-    expect(trace(take(restored.connectivity(session, loaded.world, loaded.engine, executor)), true) == trace(first, true)
+    expect(trace(take(restored.connectivity(session, loaded.world, loaded.engine, executor))) == trace(first)
         && take(restored.state_hash()) == take(provider.state_hash()), "restore rebuilds stealth from the world owner without duplicate archived flags");
     done(session.apply_actor_stealth(51, 51, {}, false));
     const auto removed = take(provider.connectivity(session, host.world, host.engine, executor));
@@ -773,6 +774,65 @@ std::string stealth_publication(unsigned workers, bool fog) {
         && take(refused.state_hash()) == unchanged && !missing.world.available(),
         "missing live actor owner refuses before publication without a type fallback");
     return trace(removed) + take(provider.state_hash()) + take(host.world.state_hash()) + session.state_sha256();
+}
+// A completed save can contain a newer observer owner than its last admitted
+// perception publication. Load must retain that lag until ordinary service.
+std::string pending_visibility_restore(unsigned workers) {
+    const eawr::platform::ThreadWorkerAdapter executor(workers);
+    auto session = take(world_session(fixture()));
+    auto setup = perception(true);
+    setup.cache_intervals["ENEMYFORCE.GROUNDTOTALUNNORMALIZED"] = real(30);
+    const auto immutable = content(setup);
+    Host continuous(setup); cp::GalacticAiUsabilityProvider uninterrupted(immutable);
+    (void)take(uninterrupted.connectivity(session, continuous.world, continuous.engine, executor));
+    expect(continuous.query("Variable_Target.EnemyForce.GroundTotalUnnormalized", 1, 2).has_value(),
+        "visibility continuation witness caches the initially hidden ground force");
+    const auto generation = continuous.world.observer_input_generation();
+    gc::ObserverCommand reveal{}; reveal.action = gc::ObserverAction::add;
+    reveal.player = 1; reveal.planet = 2; reveal.gameplay_frame = session.completed_tick();
+    reveal.source = {1, 1, "synthetic ground intelligence", gc::bit(gc::Intelligence::ground_count), 0};
+    reveal.duration = f(-1);
+    done(session.submit({{session.completed_tick(), {3}, 1}, reveal}));
+    (void)take(session.step(executor));
+    expect(session.snapshot()->observer_input_generation() != generation,
+        "observer advances after the last admitted perception publication");
+    const auto native = take(uninterrupted.capture());
+    const auto archived = take(continuous.world.capture());
+    Host loaded(setup); cp::GalacticAiUsabilityProvider restored(immutable);
+    done(loaded.world.bind(session.snapshot(), {}, executor, session.completed_tick(), session.next_entity_id()));
+    done(loaded.world.restore(archived)); done(restored.restore(native));
+    (void)take(restored.connectivity(session, loaded.world, loaded.engine, executor));
+    // The composed loader also binds completed/native publications while checking
+    // reconstructed owners. Those same-frame callbacks must not spend the lag.
+    for (unsigned repeat = 0; repeat < 2; ++repeat)
+        done(loaded.world.bind(session.snapshot(), {}, executor, session.completed_tick(), session.next_entity_id()));
+    expect(take(loaded.world.capture()).components == archived.components
+        && take(restored.capture()).components == native.components,
+        "reconstruction preserves archived visibility and cache stamps exactly");
+    (void)take(session.step(executor));
+    const auto before_attempt = take(loaded.world.capture());
+    auto phase = take(loaded.world.begin_phase(executor));
+    done(loaded.world.bind(session.snapshot(), {}, executor, session.completed_tick(), session.next_entity_id()));
+    expect(!loaded.world.needs_observation_refresh(session.completed_tick()),
+        "speculative ordinary publication consumes its pending visibility transition");
+    done(phase->rollback());
+    expect(loaded.world.needs_observation_refresh(session.completed_tick())
+        && take(loaded.world.capture()).components == before_attempt.components,
+        "native fault rollback retains the pending visibility transition for the healthy retry");
+    const auto expected = take(uninterrupted.connectivity(session, continuous.world, continuous.engine, executor));
+    const auto resumed = take(restored.connectivity(session, loaded.world, loaded.engine, executor));
+    const auto state = loaded.world.state();
+    const auto row = std::find_if(state.cache.begin(), state.cache.end(), [](const auto& value) {
+        return value.key.player == 1 && value.key.planet == 2
+            && value.key.tokens == std::vector<std::string>{"VARIABLE_TARGET", "ENEMYFORCE", "GROUNDTOTALUNNORMALIZED"};
+    });
+    expect(row != state.cache.end() && row->frame == session.completed_tick(),
+        "first ordinary publication applies the saved pending visibility transition");
+    expect(trace(expected) == trace(resumed)
+        && take(continuous.world.capture()).components == take(loaded.world.capture()).components
+        && take(uninterrupted.capture()).components == take(restored.capture()).components,
+        "pending visibility resumes with equal outputs, observation ages and perception expiry stamps");
+    return trace(resumed) + take(loaded.world.state_hash()) + take(restored.state_hash());
 }
 std::string expired_connectivity(unsigned workers, bool fog) {
     eawr::platform::ThreadWorkerAdapter executor(workers);
@@ -797,7 +857,7 @@ std::string expired_connectivity(unsigned workers, bool fog) {
     const auto input_revision = loaded.world.movement_input_revision();
     const auto world_hash = take(loaded.world.state_hash());
     const auto barrier = take(restored.connectivity(session, loaded.world, loaded.engine, executor));
-    expect(trace(barrier, true) == trace(initial, true) && take(restored.capture()).components == saved.components,
+    expect(trace(barrier) == trace(initial) && take(restored.capture()).components == saved.components,
         "expired B restore keeps exact archived lists, flags, publication revision and producer frames");
     expect(take(loaded.world.capture()).components == perception_state.components
         && take(loaded.world.state_hash()) == world_hash && loaded.world.state_revision() == world_revision
@@ -859,17 +919,16 @@ std::string refreshed_force_clock(unsigned workers) {
     Host loaded(setup); cp::GalacticAiUsabilityProvider restored(immutable);
     done(loaded.world.bind(session.snapshot(), {}, executor, session.completed_tick(), session.next_entity_id()));
     done(loaded.world.restore(world_saved)); done(restored.restore(saved));
-    expect(trace(take(restored.connectivity(session, loaded.world, loaded.engine, executor)), true) == trace(initial, true)
+    expect(trace(take(restored.connectivity(session, loaded.world, loaded.engine, executor))) == trace(initial)
         && take(restored.capture()).components == saved.components && take(loaded.world.capture()).components == world_saved.components,
         "B restore retains its consumed expiry instead of adopting a later reader's fresh clock");
     const auto expected = take(uninterrupted.connectivity(session, continuous.world, continuous.engine, executor));
     const auto resumed = take(restored.connectivity(session, loaded.world, loaded.engine, executor));
-    expect(trace(expected, true) == trace(resumed, true) && take(restored.capture()).components == take(uninterrupted.capture()).components
+    expect(trace(expected) == trace(resumed) && take(restored.capture()).components == take(uninterrupted.capture()).components
         && take(loaded.world.capture()).components == take(continuous.world.capture()).components,
         "first ordinary B tick retains the same earlier consumed expiry despite unchanged force values");
     expect(take(uninterrupted.capture()).components != saved.components, "the consumed-expiry fixture actually admits a refresh");
-    for (const auto& row : resumed.goal_reach) if (row.policy == "Single_Hop_Disconnected")
-        expect(row.production_sites.empty(), "B-U07 original unsaved policy 4 remains empty through its saved TTL");
+    expect(trace(expected) == trace(resumed), "policy-4 sites remain equal before the saved producer TTL");
     while (session.completed_tick() <= std::uint64_t(setup.logical_fps) * 10 + 1)
         (void)take(session.step(executor));
     const auto ordinary = take(uninterrupted.connectivity(session, continuous.world, continuous.engine, executor));
@@ -893,17 +952,17 @@ std::string pending_access_restore(unsigned workers) {
     Host loaded(setup); cp::GalacticAiUsabilityProvider restored(immutable);
     done(loaded.world.bind(session.snapshot(), {}, executor, session.completed_tick(), session.next_entity_id()));
     done(loaded.world.restore(world_saved)); done(restored.restore(saved));
-    expect(trace(take(restored.connectivity(session, loaded.world, loaded.engine, executor)), true) == trace(initial, true)
+    expect(trace(take(restored.connectivity(session, loaded.world, loaded.engine, executor))) == trace(initial)
         && take(restored.capture()).components == saved.components && take(loaded.world.capture()).components == world_saved.components,
         "pending native access change does not admit a producer refresh inside the load barrier");
     const auto expected = take(uninterrupted.connectivity(session, continuous.world, continuous.engine, executor));
     const auto resumed = take(restored.connectivity(session, loaded.world, loaded.engine, executor));
-    expect(trace(expected, true) == trace(resumed, true)
+    expect(trace(expected) == trace(resumed)
         && take(uninterrupted.capture()).components == take(restored.capture()).components
         && take(continuous.world.capture()).components == take(loaded.world.capture()).components,
         "first ordinary tick preserves pre-save pending-input invalidation across fresh process generations");
     expect(take(restored.capture()).components != saved.components, "pending input fixture actually refreshes producer state");
-    return trace(resumed, true) + take(restored.state_hash()) + take(loaded.world.state_hash());
+    return trace(resumed) + take(restored.state_hash()) + take(loaded.world.state_hash());
 }
 std::string pending_site_restore(unsigned workers) {
     eawr::platform::ThreadWorkerAdapter executor(workers);
@@ -921,17 +980,17 @@ std::string pending_site_restore(unsigned workers) {
     Host loaded(setup); cp::GalacticAiUsabilityProvider restored(immutable);
     done(loaded.world.bind(session.snapshot(), {}, executor, session.completed_tick(), session.next_entity_id()));
     done(loaded.world.restore(world_saved)); done(restored.restore(saved));
-    expect(trace(take(restored.connectivity(session, loaded.world, loaded.engine, executor)), true) == trace(initial, true)
+    expect(trace(take(restored.connectivity(session, loaded.world, loaded.engine, executor))) == trace(initial)
         && take(restored.capture()).components == saved.components
         && take(loaded.world.capture()).components == world_saved.components,
         "load retains a pending site publication without repeating already consumed movement inputs");
     const auto expected = take(uninterrupted.connectivity(session, continuous.world, continuous.engine, executor));
     const auto resumed = take(restored.connectivity(session, loaded.world, loaded.engine, executor));
-    expect(trace(expected, true) == trace(resumed, true)
+    expect(trace(expected) == trace(resumed)
         && take(uninterrupted.capture()).components == take(restored.capture()).components
         && take(continuous.world.capture()).components == take(loaded.world.capture()).components,
         "first ordinary site publication preserves consumed ownership and observation stamps");
-    return trace(resumed, true) + take(restored.state_hash()) + take(loaded.world.state_hash());
+    return trace(resumed) + take(restored.state_hash()) + take(loaded.world.state_hash());
 }
 std::string reconstruction(unsigned workers, bool fog) {
     eawr::platform::ThreadWorkerAdapter executor(workers);
@@ -1064,7 +1123,7 @@ std::string discovery_counter_reuse(unsigned workers, bool fog) {
     done(loaded.world.restore(take(owner.world.capture()))); done(restored.restore(native));
     (void)take(restored.connectivity(session, loaded.world, loaded.engine, executor));
     const auto restored_work = restored.work();
-    expect(trace(take(restored.connectivity(session, loaded.world, loaded.engine, executor)), true) == trace(first, true)
+    expect(trace(take(restored.connectivity(session, loaded.world, loaded.engine, executor))) == trace(first)
         && restored.work().generations == restored_work.generations && restored.work().searches == restored_work.searches
         && take(restored.capture()).components == native.components,
         "counter-only fingerprint drift does not refresh first ordinary demand after restore");
@@ -1130,7 +1189,7 @@ std::string negative_connecting_hops(unsigned workers) {
     expect(provider.work().edges <= 30, "closed connecting nodes bound five searches to the six directed chain edges each");
     const auto native = take(provider.capture()); cp::GalacticAiUsabilityProvider restored(immutable);
     done(restored.restore(native));
-    expect(trace(take(restored.connectivity(session, host.world, host.engine, executor)), true) == trace(output, true)
+    expect(trace(take(restored.connectivity(session, host.world, host.engine, executor))) == trace(output)
         && take(restored.capture()).components == native.components, "negative connecting outputs restore without searching again");
     (void)take(session.set_planet_access(2, true, true));
     Host restricted_host(setup); cp::GalacticAiUsabilityProvider restricted(immutable);
@@ -1273,16 +1332,8 @@ std::string multiplayer_view_independence(unsigned workers, bool fog) {
     done(loaded.world.restore(perception_state)); done(restored.restore(native));
     (void)session.view_snapshot({3});
     const auto reconstructed = take(restored.connectivity(session, loaded.world, loaded.engine, executor));
-    // WGA-262/329 intentionally omits policy 4's site list while saving its TTL.
-    // Normalize only that sourced load behavior; every other output field and
-    // all native bytes must still match across the UI view switch.
-    auto loaded_expected = before; loaded_expected.goal_reach.clear();
-    for (auto row : before.goal_reach) {
-        if (row.policy == "Single_Hop_Disconnected") row.production_sites.clear();
-        loaded_expected.goal_reach.push_back(std::move(row));
-    }
-    expect(trace(reconstructed) == trace(loaded_expected),
-        "MP reconstruction differs only in the native-unsaved policy-4 site list");
+    expect(trace(reconstructed) == trace(before),
+        "MP reconstruction retains every ordered policy site list before its saved TTL");
     expect(take(restored.capture()).components == native.components,
         "MP reconstruction preserves every archived native cache byte across a view switch");
     expect(session.snapshot()->sha256() == owner_hash,
@@ -1290,6 +1341,141 @@ std::string multiplayer_view_independence(unsigned workers, bool fog) {
     return trace(before);
 }
 
+// Qualification witness for the shared checkpoint freeze. This deliberately
+// requires decision equality as well as equal canonical save hashes.
+class ContinuationState final : public ga::StateContributor {
+public:
+    Host host;
+    cp::GalacticAiUsabilityProvider provider;
+    explicit ContinuationState(const ai::GalacticPerceptionSetup& setup)
+        : host(setup), provider(content(setup)) {}
+    eawr::core::Result<ga::NativeState> capture() const override {
+        auto value = host.world.capture();
+        if (!value) return value;
+        auto sites = provider.capture();
+        if (!sites) return sites;
+        value.value().components.insert(sites.value().components.begin(), sites.value().components.end());
+        return value;
+    }
+    eawr::core::Result<void> restore(const ga::NativeState& value) override {
+        if (auto result = host.world.restore(value); !result) return result;
+        return provider.restore(value);
+    }
+    eawr::core::Result<std::string> state_hash() const override {
+        auto value = capture();
+        if (!value) return eawr::core::Result<std::string>::failure(value.error());
+        return ga::native_state_hash(value.value());
+    }
+};
+std::string checkpoint_decision_drift(unsigned workers) {
+    const eawr::platform::ThreadWorkerAdapter executor(workers);
+    auto config = take(world_session(fixture())).setup();
+    config.rules.fiscal_cycle_frames = 10000;
+    auto game = take(cp::GameSession::create(config));
+    const auto setup = perception(false);
+    auto live = std::make_shared<ContinuationState>(setup);
+    done(live->host.world.bind(game.galaxy().snapshot(), {}, executor, 0, game.galaxy().next_entity_id()));
+    done(game.set_galactic_ai_services({live, {}}));
+    // Populate real producers at a nonzero barrier, before their saved TTL.
+    for (unsigned i = 0; i < 2; ++i) {
+        (void)take(game.step(executor));
+        (void)take(live->provider.connectivity(game.galaxy(), live->host.world, live->host.engine, executor));
+    }
+    namespace ck = eawr::checkpoint;
+    const auto identities = ck::game_identities(config);
+    const auto bytes = take(ck::save_game_checkpoint(game, identities));
+    std::shared_ptr<ContinuationState> resumed;
+    ck::GameLoadOptions options;
+    options.configure_native_ai = [&](cp::GameSession& loaded) {
+        resumed = std::make_shared<ContinuationState>(setup);
+        auto bound = resumed->host.world.bind(loaded.galaxy().snapshot(), {}, executor,
+            loaded.completed_tick(), loaded.galaxy().next_entity_id());
+        if (!bound) return bound;
+        return loaded.set_galactic_ai_services({resumed, {}});
+    };
+    auto loaded = take(ck::load_game_checkpoint(bytes, identities, options, executor));
+    expect(loaded.work.resimulated_ticks == 0 && loaded.session.state_sha256() == game.state_sha256(),
+        "drift witness restores the actual checkpoint exactly before the first AI read");
+    expect(take(ck::save_game_checkpoint(loaded.session, identities)) == bytes,
+        "equal recapture is insufficient to qualify AI continuation");
+    unsigned differences{}, hash_differences{};
+    std::string decisions;
+    const auto decide = [&](ContinuationState& state, const gc::GalacticSession& galaxy) {
+        auto publication = take(state.provider.connectivity_publication(galaxy, state.host.world, state.host.engine, executor));
+        done(state.host.world.bind_publication(galaxy.snapshot(), publication, executor,
+            galaxy.completed_tick(), galaxy.next_entity_id()));
+        // The production selector uses this exact admission predicate for a
+        // goal at enemy planet 2 and a producer at allied planet 1 (WGA-18).
+        return state.host.world.goal_reachable(1, 2, 1, "Single_Hop_Disconnected");
+    };
+    for (unsigned tick = 0; tick < 90; ++tick) {
+        const auto expected = decide(*live, game.galaxy());
+        const auto actual = decide(*resumed, loaded.session.galaxy());
+        expect(expected.has_value() && actual.has_value(), "both timelines publish a known selector row");
+        expect(expected == std::optional{true} && actual == expected,
+            "both selectors admit the saved allied producer before the unchanged policy deadline");
+        if (expected != actual) ++differences;
+        if (game.state_sha256() != loaded.session.state_sha256()) ++hash_differences;
+        decisions += expected.value_or(false) ? '1' : '0';
+        decisions += actual.value_or(false) ? '1' : '0';
+        (void)take(game.step(executor));
+        (void)take(loaded.session.step(executor));
+    }
+    expect(differences == 0 && hash_differences == 0, "all 90 AI decisions and hashes continue equally after checkpoint restore");
+    std::cout << "AI_CONTINUATION workers=" << workers << " saved_tick=2 ticks=90 decision_differences="
+        << differences << " hash_differences=" << hash_differences << " persist=ordered-policy-4-sites" << std::endl;
+    return decisions;
+}
+
+void usability_phase_rollback(unsigned workers, bool fog) {
+    eawr::platform::ThreadWorkerAdapter executor(workers);
+    auto config = fixture(); config.rules.fiscal_cycle_frames = 10000;
+    auto session = take(world_session(config)); const auto setup = perception(fog); const auto immutable = content(setup);
+    Host owner(setup), oracle(setup);
+    cp::GalacticAiUsabilityProvider provider(immutable), reference(immutable);
+    (void)take(session.step(executor));
+    (void)take(provider.connectivity(session, owner.world, owner.engine, executor));
+    (void)take(reference.connectivity(session, oracle.world, oracle.engine, executor));
+    while (session.completed_tick() <= std::uint64_t(setup.logical_fps) * 15 + 1) (void)take(session.step(executor));
+    owner.world.set_synchronized_frame(session.completed_tick()); oracle.world.set_synchronized_frame(session.completed_tick());
+    const auto before = take(provider.capture()); const auto world_before = take(owner.world.capture());
+    const auto hash_before = take(provider.record_sync_hash());
+    const auto expected = take(reference.connectivity(session, oracle.world, oracle.engine, executor));
+    for (const bool throws : {false, true}) for (const bool mutate : {false, true}) {
+        auto world_phase = take(owner.world.begin_phase(executor)); auto phase = take(provider.begin_phase());
+        done(provider.rebuild_phase_inputs(owner.engine, executor));
+        expect(phase->retained_rows() == 0, "usability phase begins without retained-domain copies");
+        const auto fail = [&]() -> eawr::core::Result<void> {
+            if (mutate) {
+                (void)take(provider.connectivity(session, owner.world, owner.engine, executor));
+                expect(phase->retained_rows() > 0, "expired producer writes retain first changed shared rows");
+                (void)take(provider.connectivity(session, owner.world, owner.engine, executor));
+            }
+            if (throws) throw std::runtime_error("injected usability provider fault");
+            eawr::core::Diagnostic diagnostic; diagnostic.code = "INJECTED"; diagnostic.message = "injected usability Result fault";
+            return eawr::core::Result<void>::failure(std::move(diagnostic));
+        };
+        bool failed{};
+        try { failed = !fail(); } catch (const std::runtime_error&) { failed = true; }
+        expect(failed, "usability deterministic Result/exception fault reached");
+        done(world_phase->rollback()); done(phase->rollback());
+        expect(take(provider.capture()).components == before.components && take(provider.record_sync_hash()) == hash_before
+            && take(provider.record_sync_hash(true)) == hash_before && take(owner.world.capture()).components == world_before.components,
+            "usability fault restores exact native bytes, pending flags, rows, deadlines and world queries");
+    }
+    auto world_phase = take(owner.world.begin_phase(executor)); auto phase = take(provider.begin_phase());
+        done(provider.rebuild_phase_inputs(owner.engine, executor));
+    const auto retried = take(provider.connectivity(session, owner.world, owner.engine, executor));
+    done(world_phase->commit()); done(phase->commit());
+    expect(trace(retried) == trace(expected) && take(provider.capture()).components == take(reference.capture()).components
+        && take(owner.world.capture()).components == take(oracle.world.capture()).components,
+        "usability retry consumes producer deadlines once and equals the ordinary independent owner");
+    {
+        auto abandoned = take(provider.begin_phase());
+        expect(abandoned->retained_rows() == 0, "quiet usability phase has no retained planet rows");
+    }
+    expect(!provider.record_sync_hash(), "unsettled usability phase refuses hashing");
+}
 void access_checkpoint(const eawr::sim::PartitionExecutor& executor) {
     const auto config = fixture(); auto game = take(cp::GameSession::create(config));
     auto access = *game.galaxy().snapshot()->planet_access(); ++access.generation;
@@ -1310,6 +1496,15 @@ void access_checkpoint(const eawr::sim::PartitionExecutor& executor) {
 }
 int case_galactic_ai_usability_tests(int argc, char** argv) {
     try {
+        if (argc > 1 && std::string_view(argv[1]) == "--checkpoint-drift") {
+            std::string reference;
+            for (const unsigned workers : {1U, 2U, 4U, 8U}) {
+                const auto result = pending_visibility_restore(workers) + checkpoint_decision_drift(workers);
+                if (reference.empty()) reference = result;
+                else expect(result == reference, "AI continuation witness is identical on 1/2/4/8 workers");
+            }
+            return galactic_test::failures ? 1 : 0;
+        }
         if (argc > 1 && std::string_view(argv[1]) == "--connectivity-players") {
             connectivity_player_order();
             return galactic_test::failures ? 1 : 0;
@@ -1317,7 +1512,7 @@ int case_galactic_ai_usability_tests(int argc, char** argv) {
         connecting_heap_order();
         for (const bool fog : {false, true}) {
             std::string reference;
-            for (const unsigned workers : {1U, 2U, 4U, 8U}) { indigenous(workers); connecting_capacity(workers); const auto result = multiplayer_view_independence(workers, fog) + route_publications(workers, fog) + equal_connecting_routes(workers) + deadline_projection(workers, fog) + stealth_publication(workers, fog) + discovery_counter_reuse(workers, fog) + pending_access_restore(workers) + pending_site_restore(workers) + negative_connecting_hops(workers) + refreshed_force_clock(workers) + expired_connectivity(workers, fog) + reconstruction(workers, fog) + contracts(workers, fog) + expiry_only_replay(workers, fog) + incremental_equals_clean(workers, fog) + partitioned_supplier(workers, fog); if (reference.empty()) reference = result; else expect(result == reference, "provider output and native/world hashes equal on 1/2/4/8"); }
+            for (const unsigned workers : {1U, 2U, 4U, 8U}) { usability_phase_rollback(workers, fog); indigenous(workers); connecting_capacity(workers); const auto result = multiplayer_view_independence(workers, fog) + route_publications(workers, fog) + equal_connecting_routes(workers) + deadline_projection(workers, fog) + stealth_publication(workers, fog) + discovery_counter_reuse(workers, fog) + pending_access_restore(workers) + pending_site_restore(workers) + negative_connecting_hops(workers) + refreshed_force_clock(workers) + expired_connectivity(workers, fog) + reconstruction(workers, fog) + contracts(workers, fog) + expiry_only_replay(workers, fog) + incremental_equals_clean(workers, fog) + partitioned_supplier(workers, fog); if (reference.empty()) reference = result; else expect(result == reference, "provider output and native/world hashes equal on 1/2/4/8"); }
         }
         for (const bool fog : {false, true}) expect(partitioned_supplier(16, fog) == partitioned_supplier(1, fog), "usability supplier contract 1/16 equality");
         eawr::sim::InlineExecutor executor; access_checkpoint(executor);

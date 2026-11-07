@@ -1,4 +1,5 @@
 #include "../support/result.hpp"
+#include "eawr/vfs/vfs.hpp"
 #include "../support/env.hpp"
 #include "../support/temp_dir.hpp"
 #include "galactic_support.hpp"
@@ -324,6 +325,7 @@ void gift_keeps_campaign_return() {
             auto c = conflict(setup);
             for (std::uint32_t seat = 3; seat <= humans + 1; ++seat) c.seats.push_back({{seat}, 1});
             c.tactical.campaign.emplace(); c.tactical.controllers.emplace();
+            c.tactical.campaign->reserves = {{22, 1, 1, false, 0, {}}};
             for (const auto owner : {1U, 2U}) {
                 tactical::EconomyPlayer account; account.player = owner; account.credit_cap = f(1000);
                 account.credits = f(100); account.population_cap = 20;
@@ -336,6 +338,8 @@ void gift_keeps_campaign_return() {
             binding.economy.players = c.tactical.campaign->players;
             binding.economy.campaign_population = {{1, 1}, {3, 0}};
             binding.retreat->prevention.clear(); binding.retreat->attrition_factor = {};
+            tactical::RetreatActor reserve_actor{22, 1, true, true, true, true}; reserve_actor.persistent = true;
+            binding.retreat->actors.push_back(reserve_actor);
             auto game = checked(campaign::GameSession::create(setup));
             okay(game.stage_battle(c, binding, campaign::ScriptRequirement::none));
             const eawr::platform::ThreadWorkerAdapter executor(workers);
@@ -356,7 +360,16 @@ void gift_keeps_campaign_return() {
                 okay(game.submit({{game.completed_tick(), sender, sequence},
                     gc::TacticalLayerCommand{c.id, tactical::command_body_opcode(command), body}}));
             };
-            if (gifting) issue(source->controller_seat, 1, {source->entity_id}, tactical::GiftPayload{{recipient}});
+            issue({1}, 1, {}, tactical::ReinforcePayload{1, {}, 22});
+            (void)checked(game.step(executor));
+            const auto arrivals = game.battle()->units();
+            expect(std::any_of(arrivals.begin(), arrivals.end(), [](const auto& unit) {
+                return unit.entity_id == 22 && unit.owner == 1 && unit.controller_seat.value == 1;
+            }), "P7 return fixture deploys the persistent reserve for its caller");
+            if (gifting) {
+                issue(source->controller_seat, 2, {source->entity_id}, tactical::GiftPayload{{recipient}});
+                issue({1}, 3, {22}, tactical::GiftPayload{{3}});
+            }
             (void)checked(game.step(executor));
             if (gifting) {
                 const auto after = game.battle()->units();
@@ -364,7 +377,9 @@ void gift_keeps_campaign_return() {
                 expect(gifted != after.end() && gifted->owner == source->owner && gifted->controller_seat.value == recipient,
                     "gift changes temporary control while retaining the campaign faction owner");
             }
-            issue({1}, 2, {}, tactical::RetreatPayload{tactical::RetreatAction::start});
+            okay(game.submit({{game.completed_tick(), {1}, 4}, gc::SeatLeave{}}));
+            (void)checked(game.step(executor));
+            issue({3}, 5, {}, tactical::RetreatPayload{tactical::RetreatAction::start});
             std::optional<campaign::BattleResult> result;
             for (unsigned frame = 0; frame < 600 && game.battle(); ++frame) {
                 const auto tick = checked(game.step(executor));
@@ -372,6 +387,9 @@ void gift_keeps_campaign_return() {
             }
             expect(result && !game.battle(), "gifted persistent units return through the ordinary campaign retreat path");
             if (!result) continue;
+            expect(std::any_of(result->forces.begin(), result->forces.end(), [](const auto& force) {
+                return force.id == 22 && force.disposition == campaign::ForceDisposition::retreated;
+            }), "P7 called-in reserve survives gift/departure and retreats for its original faction");
             if (!reference_result) { reference_result = result; reference_galaxy = game.galaxy().state_sha256(); }
             expect(result == reference_result && game.galaxy().state_sha256() == reference_galaxy,
                 "gifting leaves faction battle result, credits, population, losses and returned fleets unchanged on 1/2/4/8 workers");

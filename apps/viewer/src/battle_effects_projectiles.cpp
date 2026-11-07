@@ -1,5 +1,6 @@
 #include "eawr/core/load_profile.hpp"
 #include "battle_effects.hpp"
+#include "eawr/presentation/particles/lane_guard.hpp"
 #include "frame_timer.hpp"
 
 #include "eawr/presentation/space/space.hpp"
@@ -119,11 +120,17 @@ void push(particles::VertexStream& stream, const V position, const particles::Co
     placed.pitch_degrees = values[4];
     return placed;
 }
+// A projectile slot's live entity depends only on its pool and slot index, never on when the slot was created:
+// the emitters' seeds use it, so the growth schedule must not move them. Slot 0 keeps the id it always had.
+[[nodiscard]] sim::EntityId projectile_slot_entity(const std::size_t pool_ordinal, const std::size_t slot) noexcept {
+    constexpr sim::EntityId first_slot_entity = std::numeric_limits<sim::EntityId>::max() / 8U;
+    if (slot == 0) return first_slot_entity + pool_ordinal;
+    return first_slot_entity + ((static_cast<sim::EntityId>(pool_ordinal) + 1U) << 20U) + slot;
+}
 } // namespace
 
 void BattleEffects::plan_projectile_models(std::vector<SpacePopulation::Options::PlacedShip>& placed_ships) {
     // Between the launch slots (max / 4 up) and the session's own entities.
-    constexpr sim::EntityId first_slot_entity = std::numeric_limits<sim::EntityId>::max() / 8U;
     for (const auto& [type, looks] : types_) {
         // #862: an ability shot (AB-66) may fly a model of its own.
         std::vector<const ProjectileLook*> all;
@@ -135,10 +142,11 @@ void BattleEffects::plan_projectile_models(std::vector<SpacePopulation::Options:
             const ProjectileLook& look = *entry;
             if (look.render != Render::model || model_pools_.contains(look.projectile)) continue;
             ModelPool& pool = model_pools_[look.projectile];
+            pool.ordinal = model_pools_.size() - 1U;
             for (std::size_t index = 0; index < pool.slots.size(); ++index) {
                 SpacePopulation::Options::PlacedShip ship;
                 ship.object_id = look.projectile;
-                ship.live_entity = first_slot_entity + model_ship_slot_.size();
+                ship.live_entity = projectile_slot_entity(pool.ordinal, index);
                 ship.projectile_slot = true;
                 model_ship_slot_.emplace(placed_ships.size(), std::pair{look.projectile, index});
                 pool.ships.push_back(placed_ships.size());
@@ -198,6 +206,7 @@ const BattleEffects::ProjectileLook* BattleEffects::look_of(const tactical::Proj
 void BattleEffects::observe_projectiles(const tactical::TacticalSnapshot& previous,
                                         const tactical::TacticalSnapshot& latest, const double presented_tick,
                                         ProjectileObserver observer) {
+    particles::lane::guard_main(); // L1.2: counts a main-thread call while a lane job owns this state; never aborts
     projectile_observer_ = std::move(observer);
     const auto observe = [&](const tactical::Projectile& projectile, const double tick,
                              const tactical::TacticalSnapshot& snapshot) {
@@ -284,6 +293,7 @@ void BattleEffects::pose_projectile_models(const tactical::TacticalSnapshot& pre
                                            const tactical::TacticalSnapshot& latest, const double alpha,
                                            const UnitLookup&, std::vector<SpacePopulation::LivePose>& live,
                                            BattleScene* population, GodotRenderer* renderer) {
+    particles::lane::guard_main(); // L1.2: counts a main-thread call while a lane job owns this state; never aborts
     modelled_now_.clear();
     if (released_ || model_pools_.empty()) return;
     // Birth metadata follows the projectile identity, not its reusable renderer slot.
@@ -328,11 +338,10 @@ void BattleEffects::pose_projectile_models(const tactical::TacticalSnapshot& pre
             // Stage map nodes before backend publication: adding an index must
             // never fail after a proxy has been successfully admitted.
             std::map<std::size_t, std::pair<std::string, std::size_t>> staged;
-            constexpr sim::EntityId first_slot_entity = std::numeric_limits<sim::EntityId>::max() / 8U;
             for (std::size_t index = old_size; index < request.preferred; ++index) {
                 SpacePopulation::Options::PlacedShip ship;
                 ship.object_id = name;
-                ship.live_entity = first_slot_entity + model_ship_slot_.size() + placed.size();
+                ship.live_entity = projectile_slot_entity(pool.ordinal, index);
                 ship.projectile_slot = true;
                 placed.push_back(std::move(ship));
                 staged.emplace(index - old_size, std::pair{name, index});
@@ -802,11 +811,11 @@ bool BattleEffects::draw_ability_beams(const sim::tactical::TacticalSnapshot& la
         if (type == types_.end()) continue;
         for (const auto& status : instance.abilities) {
             if (!status.active || (status.kind != tactical::AbilityKind::energy_weapon && status.kind != tactical::AbilityKind::tractor_beam
-                && status.kind != tactical::AbilityKind::leech_shields)) continue;
+                && status.kind != tactical::AbilityKind::leech_shields && status.kind != tactical::AbilityKind::super_laser)) continue;
             const auto target = units(status.target);
             if (!target) continue;
             const auto beam = status.kind == tactical::AbilityKind::energy_weapon ? 0U
-                : status.kind == tactical::AbilityKind::leech_shields ? 2U : 1U;
+                : (status.kind == tactical::AbilityKind::leech_shields || status.kind == tactical::AbilityKind::super_laser) ? 2U : 1U;
             if (beam == 1) active_tractors.insert(instance.entity_id);
             auto origin = space::live_model_point(type->second.beam_origins[beam], source->position,
                 source->yaw_degrees, source->roll_degrees, 1.0, source->pitch_degrees);
@@ -949,12 +958,18 @@ bool BattleEffects::draw_ability_beams(const sim::tactical::TacticalSnapshot& la
                             const float repeats = lightning.repeat == 0.0F ? 1.0F : distance * lightning.repeat;
                             auto& mesh = lightning.batch.stream;
                             const auto first = static_cast<std::uint32_t>(mesh.vertices.size());
-                            const float v0 = bolt.points[point].x * repeats + offset;
-                            const float v1 = bolt.points[point + 1].x * repeats + offset;
-                            push(mesh, add(a, side), colour, 0.0F, v0); push(mesh, sub(a, side), colour, 1.0F, v0);
-                            push(mesh, add(b, side), colour, 0.0F, v1); push(mesh, sub(b, side), colour, 1.0F, v1);
+                            const float u0 = bolt.points[point].x * repeats + offset;
+                            const float u1 = bolt.points[point + 1].x * repeats + offset;
+                            // TBF-09: U follows the bolt; V crosses its width.
+                            push(mesh, add(a, side), colour, u0, 0.0F); push(mesh, sub(a, side), colour, u0, 1.0F);
+                            push(mesh, add(b, side), colour, u1, 0.0F); push(mesh, sub(b, side), colour, u1, 1.0F);
                             for (const auto index : {0U, 1U, 2U, 1U, 3U, 2U}) mesh.indices.push_back(first + index);
                             ++mesh.quads; ++lightning.segments_drawn;
+                        }
+                        if (lightning.batch.stream.vertices.size() >= 4) {
+                            const auto& vertices = lightning.batch.stream.vertices;
+                            lightning.last_uv_ends = {vertices.front().u, vertices.front().v,
+                                vertices[1].u, vertices[1].v, vertices.back().u, vertices.back().v};
                         }
                     }
                     lightning.last_start = {start.x, start.y, start.z}; lightning.last_end = {end.x, end.y, end.z};
@@ -1094,6 +1109,7 @@ bool BattleEffects::draw_projectiles(const tactical::TacticalSnapshot& previous,
 
 void BattleEffects::note_ability_shots(const std::span<const platform::LiveTickEvents> reached,
                                        const tactical::TacticalSnapshot& latest, const SnapshotAt& snapshot_at) {
+    particles::lane::guard_main(); // L1.2: counts a main-thread call while a lane job owns this state; never aborts
     for (const platform::LiveTickEvents& record : reached) {
         if (ability_noted_through_ && record.tick <= *ability_noted_through_) continue;
         ability_noted_through_ = record.tick;

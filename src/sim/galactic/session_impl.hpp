@@ -89,9 +89,9 @@ public:
     [[nodiscard]] core::Result<std::int64_t> assign_technology(const TechnologyWrite&);
     std::optional<IncomeState> income;
     std::optional<EconomyCorruptionState> economy_corruption;
-    // GCMP-24: both saved copies come from the one campaign setup mode.
+    // WGS-33: save and session policy follow transport, independently of campaign balance.
     [[nodiscard]] bool multiplayer_flag() const noexcept {
-        return victory ? victory->context.multiplayer : economy_corruption && economy_corruption->multiplayer;
+        return setup.uses_network_transport();
     }
     std::optional<GalacticAbilityState> ability_host;
     // GHUD-S61: raw scoring counters; only ordered commits write them.
@@ -233,6 +233,11 @@ public:
     // Offers are immutable for the owner's lifetime, including after a checkpoint load.
     // The independent hash path recomputes these digests to verify the cache.
     mutable std::optional<detail::ProductionOfferDigests> production_offer_hashes;
+    // Canonical bytes of each planet's offer table for the lockstep exchange encode (#5519): built on first use under the
+    // same immutability contract as production_offer_hashes, reset beside it, never read by the save/serial path.
+    // Written from the exchange encode's tasks: safe because canonical_state() runs on the pump thread with no tick phase
+    // in flight (one writer per slot, see exchange_scratch).
+    mutable std::optional<detail::ProductionOfferRows> production_offer_rows;
     // Derived observer-local offer rows (never hashed), keyed by their admission inputs.
     mutable std::uint64_t production_offer_rebuilds{};
     // Published production state: copied again only after the production section changed (its dirty flag is
@@ -260,6 +265,12 @@ public:
     void refresh_containing_fleet_combat_skip(EntityId);
     std::vector<PopulationTotal> population;
     bool population_stale{true};
+    // Exact dynamic inputs of the last population projection and its result: an equal key is an equal result (the
+    // projection is a pure function of these inputs and the immutable schema), so a tick that only moved fleets reuses it.
+    std::vector<std::uint64_t> population_projection_key;
+    std::optional<session_detail::NativePopulationProjection> population_projection_cache;
+    bool population_memo_enabled{true}; // test runtime option, never authoritative state
+    bool population_memo_drop_orbit{}; // test-only negative control: omit the fleet orbit from the key
     std::uint64_t population_objects{}, population_producers{};
     [[nodiscard]] core::Result<void> refresh_population(const PartitionExecutor&);
     std::optional<ObserverSetup> observer;
@@ -327,6 +338,8 @@ public:
     NativeProductionHandler native_production_handler;
     NativeProductionOutcomeHandler native_production_outcome_handler;
     NativeActorChangesHandler native_actor_changes_handler;
+    // During prepared replay, live-only ground abilities still publish their actor changes.
+    const NativeActorChangesHandler* native_live_ability_actor_changes{};
     bool conflict_requests_enabled{};
     bool native_invasions_enabled{}; // runtime capability of the explicit-list campaign owner
     std::uint64_t next_native_invasion{1};
@@ -334,6 +347,11 @@ public:
     std::vector<std::uint64_t> native_invasion_queue;
     std::size_t native_invasion_transport_count{}; // derived bounded queue inventory
     [[nodiscard]] GalacticRejectReason validate_landing(PlayerId, FleetId, PlanetId, bool) const;
+    struct SelectedLandingMember { FleetId fleet; FleetMember member; };
+    [[nodiscard]] GalacticRejectReason admit_selected_landing(PlayerId, PlanetId, std::span<const EntityId>, bool,
+        std::vector<SelectedLandingMember>&) const;
+    void execute_land_units(const GameCommand&, std::uint64_t, std::vector<GalacticEvent>&, bool);
+    void execute_ground_layout(const GameCommand&, std::uint64_t, std::vector<GalacticEvent>&, bool);
     [[nodiscard]] core::Result<void> complete_undefended_invasion(NativeInvasion&, std::vector<GalacticEvent>&);
     [[nodiscard]] core::Result<void> replay_native_invasion(GalacticSession&, const NativeEffect&);
     NativeMovementListener native_movement_listener;
@@ -371,6 +389,10 @@ public:
     // Ascending stable ID -> private handle, per object kind.
     std::map<EntityId, entt::entity> planets;
     std::map<EntityId, entt::entity> routes;
+    // Derived, never encoded: routes by incident planet in route-ID order. Routes are only inserted while the
+    // session is built or restored, and the restore path drops this.
+    mutable std::shared_ptr<const std::map<PlanetId, std::vector<Route>>> incident_route_cache;
+    [[nodiscard]] const std::map<PlanetId, std::vector<Route>>& incident_route_rows() const;
     std::map<EntityId, entt::entity> fleets;
     std::map<EntityId, DetachedUnit> detached_units;
     std::size_t live_object_count{};
@@ -415,6 +437,8 @@ public:
     std::shared_ptr<const GalacticSnapshot> snapshot;
     // Diagnostic ownership flag, never a simulation input or archive field.
     std::atomic<bool> native_barrier_active{};
+    std::atomic<bool>* native_output_published{}; // borrowed from the phase token, never archived
+    std::uint64_t native_post_publication_faults{}; // diagnostic only
     // Only the ordered replay of a fully prepared AI barrier may substitute
     // logical publications. Callbacks already consumed their staged views.
     std::shared_ptr<const GalacticSnapshot> native_commit_publication;
@@ -505,7 +529,17 @@ public:
     void execute(const GameCommand& command, std::uint64_t tick, std::vector<GalacticEvent>& events,
         bool pending_local_conflict = false);
 
-    [[nodiscard]] std::vector<std::uint8_t> encode_section(StateSection section) const;
+    // `shared_fleets` (optional) is the caller's sorted_fleets(), so the three sections that read the fleet rows share one copy.
+    // Appends to an empty caller buffer (the exchange encode reuses its buffers across exchanges).
+    void encode_section_into(StateSection section, std::vector<std::uint8_t>& bytes,
+        const std::vector<Fleet>* shared_fleets = nullptr, bool offer_cache = false) const;
+    // One reusable output buffer per section id for the exchange encode: capacity survives between exchanges, so the
+    // multi-megabyte sections are not re-allocated and page-faulted every 30 ticks. Slot i is written only by the task
+    // that encodes section i, and read by the serial concatenation after the phase.
+    mutable std::vector<std::vector<std::uint8_t>> exchange_scratch;
+    // `offer_cache` (exchange encode only) takes the production offer tables from production_offer_rows.
+    [[nodiscard]] std::vector<std::uint8_t> encode_section(StateSection section, const std::vector<Fleet>* shared_fleets = nullptr,
+        bool offer_cache = false) const;
     [[nodiscard]] std::vector<std::uint8_t> encode_hash_section(StateSection section, bool reuse = true) const;
     // Owner-thread publication only: const authoritative reads may rebuild the
     // mutable derived projection cache. Never call from partition workers.

@@ -2,6 +2,8 @@
 // seats reach the tick-zero barrier on identities each peer derived from its own content; every refusal happens
 // before a shared step; the skirmish proposal bytes keep their documented layout.
 #include "setup_test_support.hpp"
+#include "eawr/net/galactic_checkpoint_transfer.hpp"
+#include "eawr/core/sha256.hpp"
 #include "fake_transport.hpp"
 
 #include "eawr/campaign/mp_agreement.hpp"
@@ -275,6 +277,51 @@ void check_ready_group(Group& group, const net::SetupOffer& proposal, const std:
     }
 }
 
+void agreement_rules_flavour() {
+    Local host, peer;
+    auto mp_terms = default_terms();
+    auto sp_terms = mp_terms; sp_terms.rules_flavour = cp::CampaignRulesFlavour::single_player;
+    auto mp_roster = coop_eight(), sp_roster = coop_eight();
+    const auto mp = require(cp::seal_mp_agreement(host.content, mp_roster, mp_terms));
+    const auto sp = require(cp::seal_mp_agreement(host.content, sp_roster, sp_terms));
+    const auto same = require(cp::derive_mp_agreement(peer.content, sp_roster, sp_terms));
+    expect(mp.plan->rules_flavour() == cp::CampaignRulesFlavour::multiplayer
+        && sp.plan->mode() == cp::CampaignSetupMode::multiplayer
+        && sp.plan->rules_flavour() == cp::CampaignRulesFlavour::single_player,
+        "agreement resolves rules independently of networked transport");
+    expect(mp.content != sp.content && same.content == sp.content,
+        "agreed flavour is deterministic and different flavours cannot agree");
+    const auto rules_domain = [](const auto& agreement) {
+        const auto found = std::find_if(agreement.content.domains.begin(), agreement.content.domains.end(),
+            [](const auto& row) { return row.name == cp::mp_domains::rules; });
+        return found->digest;
+    };
+    expect(rules_domain(mp) != rules_domain(sp), "rules digest explicitly seals the flavour");
+    const auto mismatch = require(cp::derive_mp_agreement(peer.content, sp_roster, mp_terms));
+    expect(mismatch.content != sp.content, "a peer using another flavour refuses the SP agreement");
+    // B2: a single-player entry is admitted with single-player rules and its authored human faction only.
+    peer.data.campaigns.front().is_multiplayer = false;
+    expect(!cp::derive_mp_agreement(peer.content, sp_roster, sp_terms), "a single-player entry with no human faction is refused");
+    for (auto* local : {&host, &peer}) { local->data.campaigns.front().is_multiplayer = false; local->data.campaigns.front().starting_active_player = "Rebel"; }
+    auto coop_roster = coop_eight();
+    const auto sealed = require(cp::seal_mp_agreement(host.content, coop_roster, default_terms()));
+    const auto derived = require(cp::derive_mp_agreement(peer.content, coop_roster, default_terms()));
+    expect(derived.plan->mode() == cp::CampaignSetupMode::multiplayer
+        && derived.plan->rules_flavour() == cp::CampaignRulesFlavour::single_player
+        && derived.plan->multiplayer_heroes().empty() && !derived.plan->solo_reference_human(),
+        "an omitted flavour follows the single-player entry: networked transport, authored rules, no MP heroes");
+    expect(sealed.content == derived.content, "both peers derive the same co-op agreement from the entry alone");
+    auto explicit_mp = default_terms(); explicit_mp.rules_flavour = cp::CampaignRulesFlavour::multiplayer;
+    expect(!cp::derive_mp_agreement(peer.content, coop_roster, explicit_mp),
+        "multiplayer rules on a single-player entry are refused");
+    peer.data.campaigns.front().starting_active_player = "Empire";
+    expect(!cp::derive_mp_agreement(peer.content, coop_roster, default_terms()), "humans off the authored faction are refused");
+    peer.data.campaigns.front().starting_active_player = "Rebel";
+    peer.data.campaigns.front().is_story_campaign = true;
+    expect(!cp::derive_mp_agreement(peer.content, coop_roster, default_terms()), "a story campaign is refused");
+    peer.data.campaigns.front().is_story_campaign.reset(); peer.data.campaigns.front().tutorial = true;
+    expect(!cp::derive_mp_agreement(peer.content, coop_roster, default_terms()), "a tutorial is refused");
+}
 void agreement_two_peers() {
     auto cohort = peers_of(2);
     const auto proposal = make_offer(*cohort[0], two_sides());
@@ -459,19 +506,67 @@ void payload_codec() {
     expect(!net::decode_galactic_setup(trailing), "trailing byte refused");
     auto wrong_magic = proposal.setup; wrong_magic[0] ^= 1;
     expect(!net::decode_galactic_setup(wrong_magic), "wrong magic refused");
-    auto wrong_version = proposal.setup; wrong_version[4] = 2;
+    auto wrong_version = proposal.setup; wrong_version[4] = 3;
     expect(!net::decode_galactic_setup(wrong_version), "unknown payload version refused");
     for (std::size_t index = 8; index < proposal.setup.size(); ++index) {
         auto flipped = proposal.setup; flipped[index] ^= 0x80;
         const auto decoded = net::decode_galactic_setup(flipped);
         expect(!decoded || require(net::encode_galactic_setup(decoded.value())) == flipped, "any accepted mutation re-encodes to itself");
     }
+    auto resume = payload; resume.start = net::GalacticStart::checkpoint; resume.initial_tick = 77;
+    resume.checkpoint_digest.fill(1); resume.state_digest.fill(2); resume.frontier_digest.fill(3); resume.terms_digest.fill(4);
+    expect(require(net::decode_galactic_setup(require(net::encode_galactic_setup(resume)))) == resume,
+        "resume start, nonzero tick and four agreement digests round-trip in wire v2");
+    auto incomplete_resume = resume; incomplete_resume.frontier_digest = {};
+    expect(!net::encode_galactic_setup(incomplete_resume), "incomplete resume agreement is refused");
+    auto mixed_start = resume; mixed_start.start = net::GalacticStart::new_campaign;
+    expect(!net::encode_galactic_setup(mixed_start), "new campaign cannot carry resume agreement");
     auto bad_quota = payload; bad_quota.command_quota += 1;
     expect(!net::encode_galactic_setup(bad_quota), "quotas other than the session limits are refused");
     expect(require(net::decode_setup_offer(require(net::encode_setup_offer(proposal)))).setup == proposal.setup, "offer round trip keeps the payload");
     const auto encoded = require(net::encode_setup_offer(proposal));
     for (std::size_t size = 0; size < encoded.size(); size += 17)
         expect(!net::decode_setup_offer(std::span(encoded).first(size)), "every truncated offer is refused");
+
+    // #5573: the guest names the part of the campaign payload that differs from its own derivation.
+    const auto bytes_of = [](const net::GalacticSetupPayload& value) { return require(net::encode_galactic_setup(value)); };
+    expect(net::galactic_setup_difference(proposal.setup, proposal.setup).empty(), "equal payloads name no part");
+    auto changed_zero = payload; changed_zero.roster.tick_zero[0] ^= 1;
+    expect(net::galactic_setup_difference(proposal.setup, bytes_of(changed_zero)) == net::setup_difference_start_state,
+        "a differing tick-zero claim names the start state");
+    auto changed_ai = changed_zero;
+    const auto ai = std::find_if(changed_ai.roster.players.begin(), changed_ai.roster.players.end(),
+        [](const auto& player) { return !player.ai_configuration.empty(); });
+    expect(ai != changed_ai.roster.players.end(), "the fixture has an AI claim");
+    ai->ai_configuration.push_back(42);
+    expect(net::galactic_setup_difference(proposal.setup, bytes_of(changed_ai)) == net::setup_difference_ai_configuration,
+        "a differing AI claim wins over the tick-zero claim it moves");
+    auto changed_heroes = payload; changed_heroes.roster.custom = true; changed_heroes.roster.allow_heroes = !changed_heroes.roster.allow_heroes;
+    expect(net::galactic_setup_difference(proposal.setup, bytes_of(changed_heroes)).empty(),
+        "a room-choice difference names no derived part");
+    expect(net::galactic_setup_difference(proposal.setup, std::span(proposal.setup).first(10)).empty(), "an undecodable payload names no part");
+}
+
+void local_load_notes() {
+    auto cohort = peers_of(2);
+    const auto proposal = make_offer(*cohort[0], two_sides());
+    const auto payload = require(net::decode_galactic_setup(proposal.setup));
+    for (std::size_t i = 0; i < cohort.size(); ++i) {
+        cohort[i]->content.prepare_session = [i](const cp::CampaignSetupPlan& plan, std::string_view) {
+            auto made = cp::GameSession::create(plan.galaxy());
+            if (!made) return eawr::core::Result<cp::MpPreparedSession>::failure(made.error());
+            eawr::core::LoadNote note; note.code = "LOCAL"; note.object = std::to_string(i);
+            cp::MpPreparedSession prepared;
+            prepared.session = std::make_shared<cp::GameSession>(std::move(made).value());
+            prepared.load_notes.push_back(std::move(note));
+            return eawr::core::Result<cp::MpPreparedSession>::success(std::move(prepared));
+        };
+        const auto agreement = require(cp::derive_mp_agreement(cohort[i]->content, payload.roster, default_terms()));
+        expect(agreement.load_notes.size() == 1 && agreement.load_notes[0].object == std::to_string(i),
+            "each agreement retains its own preparation notes");
+        expect(agreement.content == proposal.identity.content, "local notes do not change identity");
+    }
+    expect(require(net::encode_galactic_setup(payload)) == proposal.setup, "local notes do not change wire bytes");
 }
 
 void roster_refusals() {
@@ -631,12 +726,229 @@ void skirmish_layout_pinned() {
     expect(net::galactic_setup_domain != net::tactical_setup_domain, "the campaign domain is a new domain id");
 }
 
+void checkpoint_transfer_contracts() {
+    auto cohort = peers_of(2);
+    const auto new_game = make_offer(*cohort[0], two_sides());
+    const auto file = std::make_shared<const Bytes>(9 * net::save_chunk_bytes + 17, std::uint8_t{23});
+    auto payload = require(net::decode_galactic_setup(new_game.setup));
+    payload.start = net::GalacticStart::checkpoint; payload.initial_tick = 137;
+    payload.state_digest = payload.roster.tick_zero; payload.checkpoint_digest = eawr::core::sha256(*file);
+    payload.frontier_digest.fill(3); payload.terms_digest.fill(4);
+    net::SaveManifest manifest; manifest.epoch = 1; manifest.byte_length = file->size(); manifest.peers = {0, 1};
+    manifest.offer = new_game; manifest.offer.setup = require(net::encode_galactic_setup(payload));
+    const auto restore = [&](const auto& selected, std::span<const std::uint8_t> bytes) {
+        expect(selected.epoch > 0 && bytes.size() == file->size() && std::equal(bytes.begin(), bytes.end(), file->begin()),
+            "receiver privately restores exactly the selected file");
+        return eawr::core::Result<void>::success();
+    };
+    for (const std::string mode : {"lan", "wan", "corrupt", "truncate", "duplicate", "out_of_order", "cancel", "hash", "idle", "whole"}) {
+        eawr::testing::FakeNetwork network(2);
+        if (mode == "wan") network.emulate(eawr::testing::wan_profiles[2]);
+        eawr::testing::FakeTransport host(network, 0), guest(network, 1);
+        net::GalacticCheckpointTransfer send, receive;
+        require(send.select(host, manifest, file, restore, 0));
+        bool changed = false;
+        for (std::uint64_t round = 1; round < 4000 && !send.view().agreed && !send.view().refusal; ++round) {
+            network.round = round;
+            static_cast<void>(send.pump(host, round));
+            while (auto frame = guest.poll()) {
+                if (frame->frame.front() == net::save_chunk_kind && !changed && (mode == "corrupt" || mode == "truncate")) {
+                    if (mode == "corrupt") frame->frame.back() ^= 1; else frame->frame.pop_back();
+                    changed = true;
+                }
+                if (frame->frame.front() == net::save_chunk_kind && !changed && mode == "out_of_order") {
+                    frame->frame[9] = 1; changed = true;
+                }
+                static_cast<void>(receive.receive(guest, *frame, restore, round));
+                if (frame->frame.front() == net::save_chunk_kind && !changed && mode == "duplicate") {
+                    static_cast<void>(receive.receive(guest, *frame, restore, round)); changed = true;
+                }
+            }
+            if (mode == "cancel" && round == 2) receive.cancel(guest, "peer_cancelled");
+            while (auto frame = host.poll()) {
+                if (mode == "hash" && frame->frame.front() == net::save_restore_kind) frame->frame.back() ^= 1;
+                if (mode != "idle" && mode != "whole") static_cast<void>(send.receive(host, *frame, restore, round));
+            }
+            static_cast<void>(receive.pump(guest, round));
+            if (mode == "idle" && round == 2) static_cast<void>(send.pump(host, 30'000));
+            if (mode == "whole" && round == 2) static_cast<void>(send.pump(host, 600'000));
+        }
+        if (mode == "lan" || mode == "wan") {
+            expect(send.view().agreed && receive.view().restored, "transfer completes over LAN and delayed reliable streams");
+            const auto retained = receive.restored_bytes();
+            expect(retained && *retained == *file && receive.restored_bytes() == retained,
+                "successful lobby restore retains one immutable verified buffer for recovery");
+            expect(!send.view().refusal, "successful transfer has no refusal");
+            // An old manifest cannot replace the prepared owner or newer selection.
+            auto newer = manifest; newer.epoch = 2;
+            require(send.select(host, newer, file, restore, network.round));
+            require(send.pump(host, network.round));
+            network.round += 1000;
+            auto cancelled = guest.poll();
+            expect(cancelled && cancelled->frame.front() == net::save_cancel_kind,
+                "selection replacement cancels the previous epoch before its new manifest");
+            if (cancelled) {
+                const auto refused = receive.receive(guest, *cancelled, restore, network.round);
+                expect(!receive.restored_bytes(), "selection cancellation releases the old recovery buffer");
+                expect(!refused && refused.error().message.find("selection_changed") != std::string::npos,
+                    "previous selection receives its named cancellation");
+            }
+            auto stale = guest.poll();
+            expect(stale && stale->frame.front() == net::save_manifest_kind, "new manifest follows previous epoch cancellation");
+            if (stale) {
+                require(receive.receive(guest, *stale, restore, network.round));
+                auto replay = *stale; replay.frame[1] = 1;
+                const auto rejected = receive.receive(guest, replay, restore, network.round);
+                expect(!rejected && receive.view().epoch == 2 && !receive.view().refusal, "stale selection epoch refuses without poisoning newer transfer");
+                Bytes old_clear{net::save_cancel_kind, 1,0,0,0,0,0,0,0, 17,0,0,0};
+                const std::string clear = "selection_cleared"; old_clear.insert(old_clear.end(), clear.begin(), clear.end());
+                const auto old_refused = receive.receive(guest, {0, old_clear}, restore, network.round);
+                expect(!old_refused && receive.view().epoch == 2 && !receive.view().refusal,
+                    "stale New Campaign cannot clear a newer epoch");
+                old_clear[1] = 2;
+                const auto unauthenticated = send.receive(host, {1, old_clear}, restore, network.round);
+                expect(!unauthenticated && !send.view().refusal && send.manifest(),
+                    "a guest cannot issue host-only selection clear");
+            }
+        } else {
+            expect(send.view().refusal.has_value(), "transfer failure yields a named refusal: " + mode);
+            // Cancellation never kills the room transport; a fresh epoch can transfer again.
+            auto next = manifest; next.epoch = 3;
+            require(send.select(host, next, file, restore, network.round));
+            expect(!send.view().refusal && host.link(1) == net::LinkState::open, "room remains usable after transfer refusal");
+        }
+    }
+    {
+        // Display text is bounded and sanitized independently of the agreed offer.
+        eawr::testing::FakeNetwork network(2);
+        eawr::testing::FakeTransport host(network, 0), guest(network, 1);
+        net::GalacticCheckpointTransfer transfer, receiver;
+        auto display = manifest;
+        display.description = std::string(200, 'x') + "\nignored";
+        display.date = "  Today\n\x01  ";
+        require(transfer.select(host, display, file, restore, 0));
+        expect(transfer.manifest()->description == std::string(net::save_description_limit, 'x')
+            && transfer.manifest()->date == "Today", "host sanitizes and bounds display metadata");
+        expect(require(net::encode_setup_offer(transfer.manifest()->offer)) == require(net::encode_setup_offer(manifest.offer)),
+            "display metadata does not change the agreed offer or state identity");
+        require(transfer.pump(host, 0)); network.round = 1;
+        auto incoming = guest.poll();
+        expect(incoming && incoming->frame.front() == net::save_manifest_kind, "display manifest arrives first");
+        if (incoming) {
+            auto legacy = *incoming;
+            const auto extension_size = 1U + 4U + net::save_description_limit + 4U + 5U;
+            legacy.frame.resize(legacy.frame.size() - extension_size);
+            net::GalacticCheckpointTransfer old_receiver;
+            require(old_receiver.receive(guest, legacy, restore, 1));
+            expect(old_receiver.manifest() && old_receiver.manifest()->description.empty() && old_receiver.manifest()->date.empty(),
+                "old host manifest leaves display metadata unavailable");
+            require(receiver.receive(guest, *incoming, restore, 1));
+            expect(receiver.manifest() && receiver.manifest()->description == std::string(net::save_description_limit, 'x')
+                && receiver.manifest()->date == "Today", "joiner receives sanitized host display values");
+            auto malformed = *incoming;
+            malformed.frame[malformed.frame.size() - extension_size + 1] = 255;
+            net::GalacticCheckpointTransfer rejected;
+            expect(!rejected.receive(guest, malformed, restore, 1) && !rejected.manifest(),
+                "oversized untrusted text is refused before staging");
+            auto untrusted = *incoming;
+            untrusted.frame.back() = '\n';
+            net::GalacticCheckpointTransfer sanitized;
+            require(sanitized.receive(guest, untrusted, restore, 1));
+            expect(sanitized.manifest()->date == "Toda", "receiver strips untrusted control characters");
+            receiver.cancel(guest, "peer_cancelled");
+            expect(receiver.view().refusal && !receiver.view().agreed, "cancellation still refuses the selection");
+        }
+    }
+    {
+        eawr::testing::FakeNetwork network(2);
+        eawr::testing::FakeTransport host(network, 0), guest(network, 1);
+        net::GalacticCheckpointTransfer transfer, receiver;
+        require(transfer.select(host, manifest, file, restore, 0));
+        require(transfer.pump(host, 0)); require(transfer.pump(host, 0));
+        const auto chunks = std::count_if(network.inbox[1].begin(), network.inbox[1].end(), [](const auto& entry) {
+            return entry.received.frame.front() == net::save_chunk_kind;
+        });
+        expect(chunks == 4, "repeated pumps never queue more than four chunks without ACK progress");
+        network.round = 1; auto incoming = guest.poll();
+        expect(incoming && incoming->frame.front() == net::save_manifest_kind, "manifest precedes its bounded chunk window");
+        if (incoming) {
+            const auto declared = static_cast<std::uint64_t>(net::save_transfer_limit) + 1;
+            for (unsigned byte = 0; byte < 8; ++byte) incoming->frame[9 + byte] = static_cast<std::uint8_t>(declared >> (byte * 8U));
+            const auto rejected = receiver.receive(guest, *incoming, restore, 1);
+            expect(!rejected && !receiver.manifest() && receiver.view().total == 0,
+                "oversized incoming manifest refuses before staging allocation independently of host buffer length");
+        }
+    }
+    {
+        eawr::testing::FakeNetwork network(2); eawr::testing::FakeTransport host(network, 0);
+        net::GalacticCheckpointTransfer transfer;
+        auto oversize = manifest; oversize.byte_length = net::save_transfer_limit + 1;
+        expect(!transfer.select(host, oversize, file, restore, 0), "oversize transfer refuses before allocating staging memory");
+        auto duplicate = manifest; duplicate.peers = {0, 0};
+        expect(!transfer.select(host, duplicate, file, restore, 0), "duplicate peer binding refuses");
+    }
+}
+
+void recovery_transfer_contracts() {
+    auto cohort = peers_of(2);
+    const auto offer = make_offer(*cohort[0], two_sides());
+    const auto file = std::make_shared<const Bytes>(2 * net::save_chunk_bytes + 17, std::uint8_t{31});
+    net::SaveManifest manifest; manifest.epoch = 19; manifest.byte_length = file->size();
+    manifest.peers = {0, 1}; manifest.offer = offer;
+    net::RecoveryTransferIdentity identity;
+    identity.source = offer.seats[0].seat; identity.target = offer.seats[1].seat;
+    identity.proof[0] = eawr::core::sha256(*file); identity.proof[1].fill(7); identity.proof[2].fill(9);
+    identity.proof[3] = eawr::core::sha256(require(net::encode_setup_offer(offer)));
+    manifest.recovery = identity;
+    const auto source_restore = [](const net::SaveManifest&, std::span<const std::uint8_t>) {
+        return eawr::core::Result<void>::success();
+    };
+    for (const bool cancel : {false, true}) {
+        eawr::testing::FakeNetwork network(2);
+        eawr::testing::FakeTransport host(network, 0), guest(network, 1);
+        net::GalacticCheckpointTransfer send(true), receive(true), lobby;
+        expect(!lobby.select(host, manifest, file, source_restore, 0), "tick-zero recovery cannot be selected as a lobby save");
+        require(send.select(host, manifest, file, source_restore, 0));
+        bool worker_done = false; std::shared_ptr<const Bytes> staged;
+        const auto worker = [&](const net::SaveManifest& incoming, std::shared_ptr<const Bytes> bytes) {
+            expect(incoming.recovery && incoming.recovery->initial_tick == 0
+                && incoming.offer.setup == offer.setup, "recovery keeps tick zero and the original agreed offer");
+            if (staged) expect(staged == bytes, "worker polls retain one immutable file allocation");
+            staged = std::move(bytes);
+            return eawr::core::Result<bool>::success(worker_done);
+        };
+        for (std::uint64_t round = 1; round < 50 && !receive.view().refusal && !send.view().agreed; ++round) {
+            network.round = round; require(send.pump(host, round));
+            while (auto frame = guest.poll()) {
+                if (frame->frame.front() == net::save_manifest_kind)
+                    expect(!lobby.receive(guest, *frame, source_restore, round), "normal lobby refuses a recovery manifest trailer");
+                require(receive.receive_recovery(guest, *frame, worker, round));
+            }
+            require(receive.pump(guest, round));
+            while (auto frame = host.poll()) {
+                if (frame->frame.front() == net::save_restore_kind)
+                    expect(worker_done, "restore ACK waits for private worker completion");
+                require(send.receive(host, *frame, source_restore, round));
+            }
+            if (staged && !worker_done) {
+                expect(!receive.view().restored && !send.view().agreed, "complete bytes do not imply a restored owner");
+                expect(*staged == *file, "private restore sees the exact bounded checkpoint bytes");
+                if (cancel) { receive.cancel(guest, "cancelled"); break; }
+                worker_done = true;
+            }
+        }
+        if (cancel) expect(receive.view().refusal.has_value() && !receive.view().restored, "cancellation never acknowledges a staged owner");
+        else expect(send.view().agreed && receive.view().restored, "recovery-only tick-zero transfer finishes after worker proof");
+    }
+}
+
 } // namespace
 
 int main() {
     try {
-        skirmish_layout_pinned(); payload_codec(); roster_refusals(); offer_refusals();
-        agreement_two_peers(); agreement_eight_seats(); data_driven_factions();
+        checkpoint_transfer_contracts(); recovery_transfer_contracts();
+        skirmish_layout_pinned(); payload_codec(); local_load_notes(); roster_refusals(); offer_refusals();
+        agreement_rules_flavour(); agreement_two_peers(); agreement_eight_seats(); data_driven_factions();
         content_refusals(); incompatible_content(); seed_refusal(); forged_host_digest(); forged_controller_claim(); readiness();
         std::cout << "galactic setup contracts passed: payload, roster rules, two peers, eight seats, refusals, forged digests\n";
         return 0;

@@ -1,4 +1,5 @@
 #include "ui/theme_builder.hpp"
+#include "eawr/vfs/vfs.hpp"
 
 #include "eawr/core/diagnostic.hpp"
 
@@ -66,22 +67,31 @@ Ref<Image> texture_image(const assets::Texture& texture, std::string& failure) {
         failure = "base mip is not tightly packed";
         return {};
     }
-    std::vector<std::byte> bytes = mip.bytes;
-    if (texture.format == assets::PixelFormat::bgra8) {
-        for (std::size_t at = 0; at + 3U < bytes.size(); at += 4U) std::swap(bytes[at], bytes[at + 2U]);
-    } else if (texture.format == assets::PixelFormat::bgr8) {
-        for (std::size_t at = 0; at + 2U < bytes.size(); at += 3U) std::swap(bytes[at], bytes[at + 2U]);
-    } else if (texture.format == assets::PixelFormat::a8) {
-        // One stored alpha byte per pixel becomes a white luminance/alpha pair.
-        std::vector<std::byte> expanded(bytes.size() * 2U, std::byte{0xFF});
-        for (std::size_t index = 0; index < bytes.size(); ++index) expanded[index * 2U + 1U] = bytes[index];
-        bytes = std::move(expanded);
-    }
+    // One pass from the decoded bytes into the engine buffer: no intermediate
+    // full-page vector, and the swizzle runs in place on that buffer.
     PackedByteArray packed;
-    packed.resize(static_cast<int64_t>(bytes.size()));
-    if (!bytes.empty()) std::memcpy(packed.ptrw(), bytes.data(), bytes.size());
+    if (texture.format == assets::PixelFormat::a8) {
+        // One stored alpha byte per pixel becomes a white luminance/alpha pair.
+        packed.resize(static_cast<int64_t>(mip.bytes.size() * 2U));
+        uint8_t* out = packed.ptrw();
+        for (std::size_t index = 0; index < mip.bytes.size(); ++index) {
+            out[index * 2U] = 0xFF;
+            out[index * 2U + 1U] = static_cast<uint8_t>(mip.bytes[index]);
+        }
+    } else {
+        packed.resize(static_cast<int64_t>(mip.bytes.size()));
+        if (!mip.bytes.empty()) std::memcpy(packed.ptrw(), mip.bytes.data(), mip.bytes.size());
+        uint8_t* out = packed.ptrw();
+        const std::size_t size = mip.bytes.size();
+        if (texture.format == assets::PixelFormat::bgra8) {
+            for (std::size_t at = 0; at + 3U < size; at += 4U) std::swap(out[at], out[at + 2U]);
+        } else if (texture.format == assets::PixelFormat::bgr8) {
+            for (std::size_t at = 0; at + 2U < size; at += 3U) std::swap(out[at], out[at + 2U]);
+        }
+    }
     Ref<Image> image = Image::create_from_data(static_cast<int32_t>(texture.width), static_cast<int32_t>(texture.height),
                                                false, format, packed);
+    packed = PackedByteArray(); // the image is now the only owner: flip_y below works in place
     if (image.is_null() || image->is_empty()) {
         failure = "could not be adopted as an engine image";
         return {};
@@ -95,8 +105,10 @@ Ref<Image> texture_image(const assets::Texture& texture, std::string& failure) {
     return image;
 }
 
-UiTextures::UiTextures(const assets::MegaTextureAtlas& atlas, const vfs::Vfs& filesystem) : filesystem_(filesystem) {
+UiTextures::UiTextures(assets::MegaTextureAtlas& atlas, const vfs::Vfs& filesystem) : filesystem_(filesystem) {
     page_ = texture_image(atlas.page, page_failure_);
+    // The engine image now owns the page pixels; the decoded copy is never read again.
+    atlas.page.mips = std::vector<assets::MipLevel>();
     if (!page_failure_.empty()) page_failure_ = atlas.page.source.logical_path + ": " + page_failure_;
 }
 

@@ -3,10 +3,10 @@
 #include "eawr/core/result.hpp"
 #include "eawr/script/authoritative/tactical_scoring.hpp"
 #include "eawr/script/authoritative/scheduler.hpp"
-#include "eawr/data/xml.hpp"
+#include "eawr/data/xml_fwd.hpp"
 #include "eawr/sim/tactical/snapshot.hpp"
 #include "eawr/units/unit_tables.hpp"
-#include "eawr/vfs/vfs.hpp"
+#include "eawr/vfs/vfs_fwd.hpp"
 
 #include <map>
 #include <memory>

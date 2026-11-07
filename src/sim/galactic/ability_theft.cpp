@@ -89,6 +89,21 @@ void GalacticSession::Impl::execute_spy(const GameCommand& command, const Census
     touch_abilities(); ++ability_work.executions;
     event.kind = GalacticEventKind::ability_settled; events.push_back(event);
 }
+std::vector<const TheftTechnology*> theft_offer_candidates(const GalacticAbilitySetup& host,
+    const ProductionSetup& production, const ProductionPlayer& player, PlayerId actor, std::int64_t current_tech) {
+    std::vector<const TheftTechnology*> result;
+    for (const auto& type : host.technologies) {
+        const auto registered = std::lower_bound(production.technology_types.begin(), production.technology_types.end(), type.type,
+            [](const auto& row, TypeId id) { return row.type < id; });
+        if (registered == production.technology_types.end() || registered->type != type.type) continue;
+        if (!registered->initially_locked || !registered->slicer_unlockable || registered->tech > current_tech
+            || !std::binary_search(registered->affiliated_players.begin(), registered->affiliated_players.end(), actor)
+            || std::binary_search(player.locked.begin(), player.locked.end(), type.type)
+            || std::binary_search(player.unlocked.begin(), player.unlocked.end(), type.type)) continue;
+        result.push_back(&type);
+    }
+    return result;
+}
 void GalacticSession::Impl::prepare_theft(const GameCommand& command, const CensusObject& actor,
     const GalacticAbilityProfile& profile, std::uint64_t tick, std::vector<GalacticEvent>& events) {
     const auto target = std::get<PrepareGalacticAbility>(command.payload).planet;
@@ -119,13 +134,9 @@ void GalacticSession::Impl::prepare_theft(const GameCommand& command, const Cens
     AbilityPreparation prepared; prepared.actor = actor.id; prepared.planet = target;
     prepared.kind = AbilityKind::technology_theft; prepared.open = true;
     // WGCH-54: registration order, exact current player affiliation and locks.
-    for (const auto& type : setup.ability_host->technologies) {
-        ++ability_work.registered_types;
-        const auto* registered = find(production->technology_types, type.type, [](const auto& t) { return t.type; });
-        if (!registered || !registered->initially_locked || !registered->slicer_unlockable || registered->tech > account->current_tech
-            || !std::binary_search(registered->affiliated_players.begin(), registered->affiliated_players.end(), actor.owner)
-            || std::binary_search(player->locked.begin(), player->locked.end(), type.type)
-            || std::binary_search(player->unlocked.begin(), player->unlocked.end(), type.type)) continue;
+    ability_work.registered_types += setup.ability_host->technologies.size();
+    for (const auto* offered : theft_offer_candidates(*setup.ability_host, *production, *player, actor.owner, account->current_tech)) {
+        const auto& type = *offered;
         const bool affinity = std::binary_search(content->affinity_types.begin(), content->affinity_types.end(), type.type);
         auto factor = math::add(availability.value(), affinity ? ability.affinity_price : Fixed{});
         if (!factor) { failed = true; return; }
@@ -143,6 +154,14 @@ void GalacticSession::Impl::prepare_theft(const GameCommand& command, const Cens
     }
     // WGCH-101: ordinary empty-list admission cannot grant free advancement.
     if (prepared.theft_choices.empty()) return reject();
+    // WGCH-32: an AI keeps only choices its credits cover, weights each 1.0 and samples one
+    // (synchronized draw); nothing affordable leaves the droid in place, before any state change.
+    std::vector<std::uint32_t> affordable;
+    if (!purchaser->human) {
+        for (std::uint32_t i = 0; i < prepared.theft_choices.size(); ++i)
+            if (account->credits >= prepared.theft_choices[i].price) affordable.push_back(i);
+        if (affordable.empty()) return reject();
+    }
     Fixed absence;
     if (account->current_tech >= 0 && account->current_tech < 5
         && static_cast<std::size_t>(account->current_tech) < ability.absence_min.size()) {
@@ -162,12 +181,30 @@ void GalacticSession::Impl::prepare_theft(const GameCommand& command, const Cens
     if (auto* menu = find(economy_corruption->menus, actor.id, [](const auto& m) { return m.buyer; }); menu && menu->active) {
         menu->active = false; dirty[static_cast<std::size_t>(StateSection::economy_corruption)] = true;
     }
+    std::optional<std::uint32_t> selected;
+    if (!purchaser->human) {
+        auto draw = economy_draw(*economy_corruption, setup.seed);
+        if (!draw) { failed = true; return; }
+        dirty[static_cast<std::size_t>(StateSection::economy_corruption)] = true;
+        const auto pick = std::min<std::size_t>(affordable.size() - 1,
+            static_cast<std::size_t>(draw.value().raw() * static_cast<std::int64_t>(affordable.size()) / Fixed::scale));
+        selected = affordable[pick];
+    }
+    const auto chosen = selected ? std::optional{prepared_ability(prepared, *selected)} : std::nullopt;
+    if (chosen) {
+        put(ability_host->preparations, std::move(prepared), [](const auto& p) { return p.actor; });
+        touch_abilities(); ++ability_work.executions;
+        auto* retained = find(ability_host->preparations, actor.id, [](const auto& p) { return p.actor; });
+        PreparedAbility request = *chosen; request.preparation = retained->id;
+        execute_theft(command, actor, request, tick, events); return;
+    }
     event.kind = GalacticEventKind::ability_prepared; event.value = prepared.id;
     put(ability_host->preparations, std::move(prepared), [](const auto& p) { return p.actor; });
     touch_abilities(); events.push_back(event);
 }
-void GalacticSession::Impl::execute_theft(const GameCommand& command, const CensusObject& actor,
+void GalacticSession::Impl::execute_theft(const GameCommand& command, const CensusObject& live_actor,
     const PreparedAbility& prepared, std::uint64_t tick, std::vector<GalacticEvent>& events) {
+    const auto actor = live_actor; // consumption can remove the live actor record
     GalacticEvent event{tick, GalacticEventKind::command_rejected, command.key.seat, actor.id, command.key.sequence};
     const auto reject = [&] { event.reason = GalacticRejectReason::unknown_value; events.push_back(event); };
     if (!economy || !production || !ability_consumption_handler || !planets.contains(prepared.planet)) return reject();

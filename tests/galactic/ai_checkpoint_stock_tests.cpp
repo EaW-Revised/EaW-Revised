@@ -13,6 +13,7 @@
 // WGA-56/139 supporting native boundary contracts. The composed installed
 // campaign opponent/victory proof is a separate acceptance, not this fixture.
 #include "galactic_support.hpp"
+#include "ai_campaign_gate.hpp"
 #include "eawr/campaign/game_session.hpp"
 #include "eawr/checkpoint/game.hpp"
 #include "eawr/platform/campaign_service_configuration.hpp"
@@ -54,6 +55,7 @@ class FixtureState final : public ai::StateContributor {
 public:
     ai::FundingState state = funds();
     unsigned restored{}, entered{}, returned{};
+    galactic_campaign_gate::Observations gate_observations;
     std::optional<campaign::BattleResult> observed_return;
     eawr::core::Result<ai::NativeState> capture() const override {
         auto bytes = ai::encode_funding_state(state);
@@ -79,6 +81,7 @@ public:
     }
     campaign::GalacticAiServices services() {
         return {{}, [this](const campaign::GalacticAiBattleNotice& notice) {
+            gate_observations.battle(notice);
             auto& ledger = state.at(1);
             if (notice.kind == campaign::GalacticAiBattleKind::entered) {
                 ++entered; expect(!notice.result, "entry has no fabricated result");
@@ -236,6 +239,9 @@ void checkpoint_boundaries(std::size_t workers, std::vector<std::string>& refere
         hashes.push_back(take(game.step(pool)).state_hash.get());
     expect(game.mode() == campaign::SessionMode::galaxy && native->returned == 1 && !native->state.at(1).tactical.switched,
         "actual casualty/victory returns once into retained native listener");
+    expect(native->gate_observations.last_tactical_return
+        && native->gate_observations.last_tactical_return->id == record.id,
+        "gate observes the real non-auto-resolved tactical return");
     expect(game.latest_tactical_result() && native->observed_return == *game.latest_tactical_result(),
         "retained listener observes the complete final tactical result");
     boundary(); // committed return

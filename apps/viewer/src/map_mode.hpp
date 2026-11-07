@@ -1,11 +1,12 @@
 #pragma once
 
+#include "eawr/presentation/ui/input_routing.hpp"
 #include "eawr/skirmish/start.hpp"
-#include "live_session_view.hpp"
 
 #include <godot_cpp/classes/node3d.hpp>
 #include <godot_cpp/classes/input_event.hpp>
 
+#include <array>
 #include <cstdint>
 #include <filesystem>
 #include <functional>
@@ -17,7 +18,15 @@
 #include <utility>
 #include <vector>
 
+namespace eawr::platform { class TacticalFeed; }
+namespace eawr::sim::tactical {
+enum class RetreatRefusal : std::uint8_t;
+struct RetreatState;
+}
+
 namespace eawr::presentation::godot_backend {
+
+namespace live_session { struct PreparedBattle; }
 
 struct BattleContent;
 class EawrLoadingScreen;
@@ -127,7 +136,7 @@ public:
         std::vector<std::pair<sim::SeatId, std::string>> controller_names;
         // #5130: names belong to the observer, outside deterministic battle content.
         std::vector<std::pair<sim::tactical::PlayerId, std::string>> observer_names;
-        std::shared_ptr<const LiveSessionView::PreparedBattle> borrowed_battle;
+        std::shared_ptr<const live_session::PreparedBattle> borrowed_battle;
         std::shared_ptr<platform::TacticalFeed> borrowed_feed;
         std::function<std::string()> shared_pause_notice{};
         sim::tactical::PlayerId borrowed_player{1};
@@ -155,15 +164,24 @@ public:
     // and uploads everything. A false return has already written the report.
     [[nodiscard]] bool ready(godot::Node3D& host);
 
+    // The menu owns the mode and host throughout these main-thread slices.
+    // Ordinary battles keep the synchronous ready() entry point.
+    enum class ReadyStatus { pending, complete, failed };
+    void begin_ready(godot::Node3D& host);
+    // `input_pending`: the player is interacting, so the load starts no callback this frame (LoadJob::run_for).
+    [[nodiscard]] ReadyStatus advance_ready(bool input_pending = false);
+
     // One frame of the run. Returns the process exit code once the run has
     // finished and the report has been written.
     [[nodiscard]] std::optional<int> process(double delta);
     // The window's close request: a live space view writes its report before the engine quits.
     void close_requested();
     void input(const godot::Ref<godot::InputEvent>& event);
-    void observe_pointer(const godot::Ref<godot::InputEvent>& event);
+    void observe_pointer(const godot::Ref<godot::InputEvent>& event, presentation::ui::InputFocus pointer_focus);
     void focus(bool focused);
     void pointer_left();
+    [[nodiscard]] bool pointer_confine_allowed() const;
+    void set_pointer_blocked(bool blocked);
     void viewport_changed(float width, float height);
 
     // The in-game menu (MNU-19): Escape and the HUD's options button open it. A parent that has a

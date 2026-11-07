@@ -100,9 +100,9 @@ struct Side final {
 };
 
 // The offset of place `index` along its rank, centred on y = 0.
-[[nodiscard]] std::int64_t across(const std::size_t index, const std::int64_t spacing) {
-    const auto column = static_cast<std::int64_t>(index % rank_width);
-    return (2 * column - static_cast<std::int64_t>(rank_width - 1)) * spacing / 2;
+[[nodiscard]] std::int64_t across(const std::size_t index, const std::int64_t spacing, const std::size_t width = rank_width) {
+    const auto column = static_cast<std::int64_t>(index % width);
+    return (2 * column - static_cast<std::int64_t>(width - 1)) * spacing / 2;
 }
 
 } // namespace
@@ -119,6 +119,7 @@ std::string_view to_string(const MeleeSize size) noexcept {
     case MeleeSize::s: return "s";
     case MeleeSize::m: return "m";
     case MeleeSize::l: return "l";
+    case MeleeSize::xl: return "xl";
     }
     return "s";
 }
@@ -129,17 +130,19 @@ core::Result<Melee> build_melee(const units::UnitTables& tables, const SkirmishS
     const auto rebel = lobby_player(start, "Rebel");
     const auto empire = lobby_player(start, "Empire");
     if (!rebel || !empire) return Out::failure(melee_error("the start has no Rebel and Empire lobby players"));
-    const int factor = size == MeleeSize::s ? 1 : size == MeleeSize::m ? 2 : 4;
+    const int factor = size == MeleeSize::s ? 1 : size == MeleeSize::m ? 2 : size == MeleeSize::l ? 4 : 36;
+    const int squadron_factor = size == MeleeSize::xl ? 4 : factor;
+    const std::size_t ship_rank_width = size == MeleeSize::xl ? 32 : rank_width;
     Draws draws(seed);
     std::vector<Side> sides(2);
     sides[0].player = *rebel;
     sides[0].direction = -1;
     sides[0].ships = roster(rebel_ships, factor, draws);
-    sides[0].squadrons = roster(rebel_squadrons, factor, draws);
+    sides[0].squadrons = roster(rebel_squadrons, squadron_factor, draws);
     sides[1].player = *empire;
     sides[1].direction = 1;
     sides[1].ships = roster(empire_ships, factor, draws);
-    sides[1].squadrons = roster(empire_squadrons, factor, draws);
+    sides[1].squadrons = roster(empire_squadrons, squadron_factor, draws);
 
     Melee out;
     auto& replay = out.replay;
@@ -163,9 +166,9 @@ core::Result<Melee> build_melee(const units::UnitTables& tables, const SkirmishS
             if (tables.find(side.ships[index]) == nullptr) {
                 return Out::failure(melee_error(std::string(side.ships[index]) + " is not in the unit tables"));
             }
-            const auto rank = static_cast<std::int64_t>(index / rank_width);
+            const auto rank = static_cast<std::int64_t>(index / ship_rank_width);
             const auto x = side.direction * (front_gap / 2 + 250 + rank * rank_depth);
-            side.ship_ids.push_back(place(side.ships[index], side, x, across(index, ship_spacing)).entity_id);
+            side.ship_ids.push_back(place(side.ships[index], side, x, across(index, ship_spacing, ship_rank_width)).entity_id);
             sum_x += x;
         }
         // Squadrons: the container, then its craft on their Squadron_Offsets slots turned by the

@@ -11,6 +11,7 @@
 namespace eawr::script::foc::ai {
 GalacticFunding::GalacticFunding() { root_.record_digest_ = galactic_ai::funding_records(root_.state_); }
 std::string GalacticFunding::record_sync_hash(bool cold) const {
+    const_cast<GalacticFunding*>(this)->refresh_phase_records();
     if (cold) return galactic_ai::funding_records(bound().state_).digest("funding");
     auto sums = bound().record_digest_.shards();
     for (const auto& [player, slice] : bound().player_records_) {
@@ -19,6 +20,7 @@ std::string GalacticFunding::record_sync_hash(bool cold) const {
     return core::RecordDigest::digest_of("funding", sums);
 }
 std::size_t GalacticFunding::record_byte_upper_bound() const noexcept {
+    if (records_dirty_) return 0; // the fault-only rebuild has not run yet
     auto bytes = bound().record_digest_.byte_size() + bound().state_.size() * 32 + 1024;
     for (const auto& [player, slice] : bound().player_records_) { static_cast<void>(player); bytes += slice.records.byte_size(); }
     return bytes;
@@ -58,6 +60,85 @@ core::Result<funding::Ledger> apply(funding::Ledger ledger, const EvaluatedFundi
     return core::Result<funding::Ledger>::success(std::move(ledger));
 }
 }
+struct GalacticFunding::PhaseSavepoint::Saved {
+    GalacticFunding& owner;
+    std::int32_t timeline{};
+    std::map<sim::galactic::PlayerId, std::optional<funding::Ledger>> prior;
+    Work work;
+    bool settled{};
+
+    explicit Saved(GalacticFunding& value) : owner(value), timeline(value.root_.state_.timeline) {}
+    bool usable() const noexcept { return !settled && owner.active_phase_ == this && frontier_owner_ != &owner; }
+    void discard() noexcept {
+        for (auto& [player, ledger] : prior) {
+            if (ledger) {
+                owner.root_.state_.at(player) = std::move(*ledger);
+                if (++owner.root_.player_records_.at(player).revision == 0) std::terminate();
+            } else {
+                owner.root_.state_.erase(player);
+                owner.root_.player_records_.erase(player);
+            }
+        }
+        owner.root_.state_.timeline = timeline;
+        // Existing derived publications may have seen speculative revisions.
+        // Invalidate them monotonically rather than recycle those revisions.
+        if (++owner.root_.revision_ == 0) std::terminate();
+        owner.records_dirty_ = true;
+        owner.active_phase_ = nullptr;
+        settled = true;
+    }
+};
+GalacticFunding::PhaseSavepoint::PhaseSavepoint(std::unique_ptr<Saved> saved) : saved_(std::move(saved)) {}
+GalacticFunding::PhaseSavepoint::~PhaseSavepoint() {
+    if (!saved_->settled) saved_->discard();
+}
+GalacticFunding::PhaseSavepoint::Work GalacticFunding::PhaseSavepoint::work() const noexcept { return saved_->work; }
+core::Result<void> GalacticFunding::PhaseSavepoint::commit() {
+    if (!saved_->usable()) return invalid<void>("funding phase publication requires its open serial savepoint");
+    saved_->owner.active_phase_ = nullptr;
+    saved_->settled = true;
+    return core::Result<void>::success();
+}
+core::Result<void> GalacticFunding::PhaseSavepoint::rollback() {
+    if (!saved_->usable()) return invalid<void>("funding phase rollback requires its open serial savepoint");
+    saved_->discard();
+    return core::Result<void>::success();
+}
+core::Result<std::unique_ptr<GalacticFunding::PhaseSavepoint>> GalacticFunding::begin_phase() {
+    using Result = core::Result<std::unique_ptr<PhaseSavepoint>>;
+    if (active_phase_ || frontier_owner_ == this || !prepared_players_.empty())
+        return invalid<std::unique_ptr<PhaseSavepoint>>("funding phase requires its unbound serial owner");
+    auto saved = std::make_unique<PhaseSavepoint::Saved>(*this);
+    auto* active = saved.get();
+    auto result = std::unique_ptr<PhaseSavepoint>(new PhaseSavepoint(std::move(saved)));
+    active_phase_ = active;
+    return Result::success(std::move(result));
+}
+void GalacticFunding::retain_previous(sim::galactic::PlayerId player, funding::Ledger&& previous) {
+    if (active_phase_ && !active_phase_->prior.contains(player)) {
+        active_phase_->prior.emplace(player, std::move(previous));
+        ++active_phase_->work.retained_ledgers;
+    }
+}
+void GalacticFunding::retain_initialization(sim::galactic::PlayerId player) {
+    if (active_phase_ && !active_phase_->prior.contains(player)) {
+        active_phase_->prior.emplace(player, std::nullopt);
+        ++active_phase_->work.initializations;
+    }
+}
+void GalacticFunding::refresh_phase_records() {
+    if (!records_dirty_) return;
+    // Fault path only: restoring moved ledgers needs no allocations, and this
+    // derived index is rebuilt once at its next ordinary reader/writer.
+    root_.record_digest_ = {};
+    galactic_ai::update_funding_metadata(root_.record_digest_, root_.state_);
+    for (const auto& [player, ledger] : root_.state_) {
+        auto& records = root_.player_records_.at(player).records;
+        records = {};
+        galactic_ai::update_funding_records(records, player, nullptr, &ledger);
+    }
+    records_dirty_ = false;
+}
 thread_local const GalacticFunding* GalacticFunding::frontier_owner_ = nullptr;
 thread_local GalacticFunding::BoundState* GalacticFunding::active_frontier_ = nullptr;
 GalacticFunding::BoundState& GalacticFunding::bound() noexcept {
@@ -85,7 +166,8 @@ GalacticFunding::SuspendIntents::~SuspendIntents() {
 }
 core::Result<void> GalacticFunding::prepare_player_frontiers(const sim::PartitionExecutor& executor,
     std::span<const sim::galactic::PlayerId> players, ReplaySink sink) {
-    if (frontier_owner_ == this || !std::is_sorted(players.begin(), players.end())
+    refresh_phase_records();
+    if (active_phase_ || frontier_owner_ == this || !std::is_sorted(players.begin(), players.end())
         || std::adjacent_find(players.begin(), players.end()) != players.end()
         || std::any_of(players.begin(), players.end(), [&](auto player) { return !player || !root_.state_.contains(player); }))
         return invalid<void>("funding player frontiers require ordered initialized owners and the serial barrier");
@@ -135,6 +217,7 @@ std::shared_ptr<const funding::Ledger> GalacticFunding::ledger(sim::galactic::Pl
     return value ? std::make_shared<const funding::Ledger>(*value) : nullptr;
 }
 core::Result<void> GalacticFunding::commit_rows(State changes, const std::function<core::Result<void>()>& publish) {
+    refresh_phase_records();
     // A world callback may capture a stack transaction. Never retain it, or
     // replay replacement rows that were calculated against another frontier.
     if (frontier_owner_ == this) return invalid<void>("native funding rows require typed frontier publication");
@@ -149,6 +232,7 @@ core::Result<void> GalacticFunding::commit_rows(State changes, const std::functi
     for (auto& [player, ledger] : changes) {
         auto previous = std::move(bound().state_.at(player)); bound().state_.at(player) = std::move(ledger);
         galactic_ai::update_funding_records(bound().player_records_.at(player).records, player, &previous, &bound().state_.at(player));
+        retain_previous(player, std::move(previous));
     }
     return core::Result<void>::success();
 }
@@ -162,6 +246,7 @@ core::Result<GalacticFunding::PrivateRows> GalacticFunding::prepare_private_rows
     return core::Result<PrivateRows>::success(PrivateRows(active_frontier_, bound().private_generation, state_revision(), std::move(changes)));
 }
 core::Result<void> GalacticFunding::publish_private_rows(PrivateRows prepared) {
+    refresh_phase_records();
     if (!has_player_frontier() || prepared.selected_ != active_frontier_
         || prepared.generation_ != bound().private_generation || prepared.revision_ != state_revision())
         return invalid<void>("private funding rows require their unchanged originating frontier");
@@ -175,7 +260,7 @@ core::Result<void> GalacticFunding::publish_private_rows(PrivateRows prepared) {
     return core::Result<void>::success();
 }
 core::Result<void> GalacticFunding::restore(State state) {
-    if (frontier_owner_ == this) return invalid<void>("funding restore requires the serial boundary");
+    if (active_phase_ || frontier_owner_ == this) return invalid<void>("funding restore requires the serial boundary without a live phase");
     if (state.constructor_income != funding::Amount{} || state.timeline < 0 || state.timeline > 5)
         return invalid<void>("invalid retained funding constructor state");
     for (const auto& [player, value] : state) {
@@ -196,6 +281,7 @@ core::Result<void> GalacticFunding::commit(sim::galactic::PlayerId player, core:
     if (++bound().player_records_.at(player).revision == 0) std::terminate();
     auto previous = std::move(bound().state_.at(player)); bound().state_.at(player) = std::move(result).value();
     galactic_ai::update_funding_records(bound().player_records_.at(player).records, player, &previous, &bound().state_.at(player));
+    retain_previous(player, std::move(previous));
     return core::Result<void>::success();
 }
 core::Result<funding::Amount> GalacticFunding::commit_transfer(sim::galactic::PlayerId player,
@@ -205,6 +291,7 @@ core::Result<funding::Amount> GalacticFunding::commit_transfer(sim::galactic::Pl
     if (++bound().player_records_.at(player).revision == 0) std::terminate();
     auto previous = std::move(bound().state_.at(player)); bound().state_.at(player) = std::move(value.ledger);
     galactic_ai::update_funding_records(bound().player_records_.at(player).records, player, &previous, &bound().state_.at(player));
+    retain_previous(player, std::move(previous));
     return core::Result<funding::Amount>::success(value.credits);
 }
 core::Result<void> GalacticFunding::set_timeline(std::int32_t timeline) {
@@ -244,6 +331,7 @@ core::Result<void> GalacticFunding::initialize_impl(sim::galactic::PlayerId play
     if (!initialized) return core::Result<void>::failure(initialized.error());
     auto& slice = bound().player_records_[player];
     if (++slice.revision == 0) std::terminate();
+    retain_initialization(player);
     bound().state_.emplace(player, std::move(initialized).value());
     galactic_ai::update_funding_records(slice.records, player, nullptr, &bound().state_.at(player));
     return core::Result<void>::success();

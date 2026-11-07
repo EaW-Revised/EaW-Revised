@@ -131,6 +131,12 @@ void contribution_math() {
         && take(galactic::evaluate_income_curve(curve, f(6))) == f(0), "no extrapolation");
     expect(take(galactic::evaluate_income_curve(std::span(curve).first(1), {})) == f(0), "insufficient points zero");
     expect(!galactic::parse_income_curve("0,0,0,1") && !galactic::parse_income_curve("0,0,1"), "duplicate and incomplete pairs reject");
+    const auto identical = take(galactic::parse_income_curve("1.0,1.0, 1.0, 1.0", true));
+    expect(identical.size() == 2 && take(galactic::evaluate_income_curve(identical, f(1))) == f(1), "identical pairs evaluate safely");
+    const auto tied = take(galactic::parse_income_curve("2,8,1,3,2,9", true));
+    expect(tied[1].y == f(8) && tied[2].y == f(9) && take(galactic::evaluate_income_curve(tied, f(2))) == f(8),
+        "duplicate end uses first authored tie without an end dereference");
+    expect(take(galactic::evaluate_income_curve(tied, half)) == f(0), "duplicate curve does not extrapolate");
     expect(!galactic::planet_income_contribution(Fixed::from_raw(std::numeric_limits<std::int64_t>::max()), f(2), {}, {}, {}, {}, {}, {}, {}),
         "overflow is typed failure");
 }

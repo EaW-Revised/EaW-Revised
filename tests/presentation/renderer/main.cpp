@@ -14,8 +14,11 @@
 #include "shader_adapter.hpp"
 #include "upload_identity.hpp"
 #include "upload_winding.hpp"
+#include "global_shadow_quality.hpp"
 
+#include <algorithm>
 #include <array>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -27,6 +30,7 @@
 #include <string>
 #include <string_view>
 #include <tuple>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -34,7 +38,51 @@
 
 namespace eawr_renderer_test {
 
+void global_shadow_quality_contracts() {
+    eawr::presentation::godot_backend::detail::GlobalShadowQuality shared;
+    std::vector<int> calls;
+    const auto render = [&](const std::uint64_t server, const int quality) {
+        shared.apply(server, quality, [&] { calls.push_back(quality); });
+    };
+    render(1, 1);
+    render(1, 1); // Another layer has the same process-wide setting.
+    render(1, 2); // A later scene requests a real change.
+    render(1, 2);
+    render(1, 1); // Returning to the earlier scene restores its quality.
+    render(2, 1); // A replacement server must receive the first call.
+    check(calls == std::vector<int>{1, 2, 1, 1},
+        "global shadow quality only sends first, changed, or replacement-server values");
+
+    eawr::presentation::godot_backend::detail::GlobalShadowQuality concurrent;
+    std::atomic<int> count{0};
+    std::vector<std::thread> workers;
+    for (int index = 0; index < 8; ++index) {
+        workers.emplace_back([&] { concurrent.apply(1, 3, [&] { ++count; }); });
+    }
+    for (auto& worker : workers) worker.join();
+    check(count == 1, "concurrent identical quality requests send one global call");
+
+    eawr::presentation::godot_backend::detail::GlobalShadowQuality transitions;
+    std::vector<int> filters;
+    std::vector<int> atlases;
+    const auto scene = [&](bool shadows, int quality, int atlas) {
+        eawr::presentation::godot_backend::detail::apply_shadow_settings_if_enabled(shadows, [&] {
+            atlases.push_back(atlas);
+            transitions.apply(1, quality, [&] { filters.push_back(quality); });
+        });
+    };
+    scene(false, 1, 4096); // An unshadowed screen must not seed the global cache.
+    scene(true, 2, 8192);  // The first shadowed screen gets its own settings.
+    scene(false, 1, 4096); // Returning to an unshadowed screen does not change them.
+    scene(true, 2, 8192);  // Re-entry retains the existing quality.
+    scene(false, 1, 4096);
+    scene(true, 3, 4096);  // A later shadowed screen may request a new quality.
+    check(filters == std::vector<int>{2, 3}, "only shadowed screens change global shadow quality");
+    check(atlases == std::vector<int>{8192, 8192, 4096}, "only shadowed screens set the shadow atlas");
+}
+
 void churn_contracts();
+void report_privacy_contracts();
 
 eawr::testing::Checker local_checker;
 int& failures = local_checker.failures;
@@ -266,6 +314,19 @@ void reachable_particle_prewarm_contracts() {
         "shared references retain one bounded backend hold and charge per creation identity");
     budget.clear();
     check(budget.emitters() == 0 && budget.texture_bytes() == 0, "load warm ownership releases at teardown");
+    std::vector<int> program_visits;
+    ParticleWarmBudget tight(1, 4096);
+    const auto fallback = prewarm_particle_plans(plans, [&](const Plan& plan) {
+        const std::array charges{ParticleWarmBudget::TextureCharge{plan.policy.texture, plan.texture_bytes}};
+        if (!tight.admits(plan.policy, charges)) return false;
+        tight.commit(plan.policy, charges);
+        return true;
+    }, [&](const Plan& plan) { program_visits.push_back(plan.identity); return plan.identity != 3; });
+    check(fallback.refused == program_visits.size() && fallback.admitted + fallback.refused == fallback.requested,
+        "shader fallback runs exactly once per refused drawable plan");
+    check(fallback.refused_program_warmed + static_cast<std::size_t>(std::count(program_visits.begin(), program_visits.end(), 3)) == fallback.refused,
+        "fallback coverage counts only successful shader holds");
+    check(fallback.refused_program_warmed > 0, "shader fallback warms at least one refused plan");
     const auto empty = prewarm_particle_plans(std::array<Plan, 0>{}, [](const Plan&) { return false; });
     check(empty.requested == 0 && empty.admitted == 0 && empty.refused == 0, "empty closure has no warm work");
 }
@@ -274,7 +335,9 @@ void reachable_particle_prewarm_contracts() {
 
 int main() {
     using namespace eawr_renderer_test;
+    global_shadow_quality_contracts();
     churn_contracts();
+    report_privacy_contracts();
     particle_texture_contracts();
     particle_prewarm_contracts();
     reachable_particle_prewarm_contracts();

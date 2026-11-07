@@ -1,6 +1,7 @@
 #pragma once
 
 #include "galaxy_view.hpp"
+#include "eawr/data/xml.hpp"
 #include "corruption_visuals.hpp"
 #include "eawr/data/galactic/galactic_data.hpp"
 #include "eawr/data/ui/text_database.hpp"
@@ -19,6 +20,7 @@ enum class SceneLayer : std::uint8_t { world, background, midground, midforegrou
 struct PlanetArt final {
     SceneLayer layer{SceneLayer::world};
     std::string idle_animation;
+    std::string land_tactical_map;
     bool loop_idle{};
     bool show_name{};
     std::string label;
@@ -29,6 +31,8 @@ struct PlanetArt final {
 };
 struct ProductionArt final {
     std::string name, icon, text;
+    std::string base_position, every_marker_type, additional_structure;
+    float base_shield_radius{};
     std::string sold_sound{}; // GHUD-S93: authored SFXEvent_Sold_Tactical on the current type.
     // GHUD-S78: focused orbit uses the current station type's galactic art.
     std::string galactic_model;

@@ -1,4 +1,5 @@
 #include "../support/check.hpp"
+#include "eawr/vfs/vfs.hpp"
 #include "data_test_support.hpp"
 #include "../../apps/viewer/src/presentation_constants.hpp"
 #include "eawr/data/xml.hpp"

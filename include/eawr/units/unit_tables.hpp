@@ -11,16 +11,17 @@
 
 #include "eawr/assets/assets.hpp"
 #include "eawr/core/result.hpp"
-#include "eawr/data/xml.hpp"
+#include "eawr/data/xml_fwd.hpp"
 #include "eawr/sim/math/geometry.hpp"
 #include "eawr/sim/tactical/combat.hpp"
 #include "eawr/sim/tactical/abilities.hpp"
 #include "eawr/sim/tactical/durability.hpp"
 #include "eawr/sim/tactical/motion.hpp"
-#include "eawr/vfs/vfs.hpp"
+#include "eawr/vfs/vfs_fwd.hpp"
 #include "eawr/units/population.hpp"
 
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <limits>
@@ -288,6 +289,37 @@ struct InputFile final {
     bool operator==(const InputFile&) const = default;
 };
 
+// Exact decimal text of a Fixed (no trailing zeros), for load-note effective values.
+[[nodiscard]] inline std::string fixed_decimal(const Fixed value) {
+    const auto raw = value.raw();
+    const auto magnitude =
+        raw < 0 ? std::uint64_t{0} - static_cast<std::uint64_t>(raw) : static_cast<std::uint64_t>(raw);
+    const auto scale = static_cast<std::uint64_t>(Fixed::scale);
+    auto text = (raw < 0 ? std::string("-") : std::string{}) + std::to_string(magnitude / scale);
+    auto remainder = magnitude % scale;
+    if (remainder)
+        text += '.';
+    while (remainder) {
+        remainder *= 10;
+        text += static_cast<char>('0' + remainder / scale);
+        remainder %= scale;
+    }
+    return text;
+}
+
+// Diagnostic provenance only; excluded from canonical content and replay identity.
+struct HardpointHealthDefault final {
+    std::string object;
+    std::string hardpoint;
+    std::string authored;
+    std::string file;
+    std::string layer;
+    std::uint64_t line{};
+    std::string effective{"0"}; // the value the slot takes: "0", or the leading number when only trailing text was ignored
+    bool keeps_number{false};   // true when retail kept the leading number (trailing text ignored)
+    bool operator==(const HardpointHealthDefault&) const = default;
+};
+
 struct UnitTables final {
     sim::tactical::BattleDomain domain{sim::tactical::BattleDomain::space}; // BF-2: which variant of the domain tags was read
     bool campaign_scene{}; // opt-in identity for GC-only scene metadata
@@ -308,6 +340,7 @@ struct UnitTables final {
     CombatConstants constants;
     std::vector<Unresolved> unresolved;
     std::vector<Unresolved> notes;
+    std::vector<HardpointHealthDefault> hardpoint_health_defaults;
     std::vector<InputFile> inputs; // XML and ALO files read, sorted by path
 
     [[nodiscard]] const UnitType* find(std::string_view id) const noexcept;
@@ -325,6 +358,16 @@ struct LoadInput final {
     const data::Catalog* catalog{};
     const vfs::Vfs* filesystem{}; // targeting priority sets and gameconstants.xml
     ModelLookup model;
+    // Load-time hints for a decode-ahead (scene::ModelPrefetch); neither changes what is loaded or in which order.
+    // model_hint: a unit type was queued and will probably ask for this model path. model_taken: the loader's own
+    // model request for this path has returned. Both are called on the loading thread; empty = no effect.
+    std::function<void(const std::string& logical_path)> model_hint;
+    // model_skipped: the unit that hinted this path is done (loaded or failed) and the loader never asked for it.
+    std::function<void(const std::string& logical_path)> model_skipped;
+    std::function<void(const std::string& logical_path)> model_taken;
+    // Cooperative stop for a load run off the main thread: when set, the loader stops before its next unit type and
+    // load_unit_tables returns a "cancelled" failure. Never changes the result of a load that is not cancelled.
+    const std::atomic<bool>* cancel{};
     FileDigest digest;
     std::vector<std::string> types; // empty = pinned_m2_types()
     std::vector<std::string> obstacles; // empty with empty `types` = pinned_m2_obstacles()
@@ -354,7 +397,7 @@ struct LoadInput final {
 // per station, ship and craft with a Tactical_Health, keyed by the TED object-type CRC of its
 // name (assets::object_type_crc) and sorted by it. Health is scaled by
 // Object_Max_Health_Multiplier_Space. Missing globals use stock values; duplicate IDs
-// retain the first profile. A destroyable hardpoint with an unparseable Health still fails.
+// retain the first profile. Malformed authored hardpoint Health uses zero with a load note (HD-06).
 // FoC has no health cap (SKI-64): a scaled hull above sim::tactical::max_durability_health is held
 // at that bound and, when `notes` is given, reported there once per type as a warning.
 [[nodiscard]] core::Result<sim::tactical::DurabilityTable> durability_table(const UnitTables& tables,

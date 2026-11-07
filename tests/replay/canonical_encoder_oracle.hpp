@@ -96,6 +96,7 @@ void test_canonical_encoder_oracle(const std::string& fixtures) {
         unit.corrupt.emplace();
         unit.waypoints.emplace();
         unit.garrison_unit = true;
+        unit.script_invulnerable = index % 2 == 0;
         unit.sighting.emplace();
         unit.position_history.emplace();
         unit.approach.emplace();
@@ -189,6 +190,7 @@ void test_canonical_encoder_oracle(const std::string& fixtures) {
     block([&](auto& bytes) { state.append_canonical_approach_state(bytes, live); }, "approach_state");
     block([&](auto& bytes) { state.append_canonical_sightings_state(bytes, live); }, "sightings_state");
     block([&](auto& bytes) { state.append_canonical_garrison_marks_state(bytes, live); }, "garrison_marks_state");
+    block([&](auto& bytes) { state.append_canonical_script_invulnerable_state(bytes, live); }, "script_invulnerable_state");
     block([&](auto& bytes) { state.append_canonical_craft_state(bytes); }, "craft_state");
     block([&](auto& bytes) { state.append_canonical_squadron_orders_state(bytes); }, "squadron_orders_state");
     block([&](auto& bytes) { state.append_canonical_attack_paths_state(bytes); }, "attack_paths_state");

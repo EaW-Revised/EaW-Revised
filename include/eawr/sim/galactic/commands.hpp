@@ -5,6 +5,7 @@
 #include <compare>
 #include <cstdint>
 #include <optional>
+#include <string>
 #include <variant>
 #include <vector>
 
@@ -38,7 +39,8 @@ inline constexpr std::uint16_t post_load_fixup = 13; // coordinator-reserved
 inline constexpr std::uint16_t battle_team_role = 14; // coordinator-reserved
 inline constexpr std::uint16_t auto_resolve_withdraw = 15; // WGM-182, conflict owner
 inline constexpr std::uint16_t invasion_accept = 16; // coordinator-reserved, GCMP-04, WGP-89
-inline constexpr std::uint16_t first_reserved = 17;
+inline constexpr std::uint16_t gui_click = 17; // WST-37: a clicked HUD component raised as a story event (provisional number, coordinator to confirm)
+inline constexpr std::uint16_t first_reserved = 18;
 inline constexpr std::uint16_t last_reserved = 61;
 inline constexpr std::uint16_t debug_set_planet_owner = 62;
 inline constexpr std::uint16_t debug_set_fleet_orbit = 63;
@@ -72,7 +74,9 @@ inline constexpr std::uint16_t launch_fleet = 22; // WGM-199
 inline constexpr std::uint16_t set_pathfinder = 23; // WGT-06/40, GHUD-R43/44
 inline constexpr std::uint16_t ground_deploy = 24; // WGCH-155/156: supplied identity + planet
 inline constexpr std::uint16_t transfer_surface = 25; // GGS-05/06: coordinator-reserved
-inline constexpr std::uint16_t first_reserved = 26;
+inline constexpr std::uint16_t set_ground_layout = 26;
+inline constexpr std::uint16_t land_units = 27;
+inline constexpr std::uint16_t first_reserved = 28;
 inline constexpr std::uint16_t last_reserved = 127;
 } // namespace galactic_opcodes
 
@@ -235,6 +239,21 @@ struct MoveFleet {
     friend bool operator==(const MoveFleet&, const MoveFleet&) = default;
 };
 
+struct GroundLayoutChange {
+    EntityId object{};
+    std::optional<std::uint32_t> marker;
+    friend bool operator==(const GroundLayoutChange&, const GroundLayoutChange&) = default;
+};
+struct SetGroundLayout {
+    PlanetId planet{};
+    std::vector<GroundLayoutChange> entries;
+    friend bool operator==(const SetGroundLayout&, const SetGroundLayout&) = default;
+};
+struct LandUnits {
+    PlanetId planet{};
+    std::vector<EntityId> units;
+    friend bool operator==(const LandUnits&, const LandUnits&) = default;
+};
 struct LandFleet {
     FleetId fleet{};
     PlanetId planet{};
@@ -257,6 +276,20 @@ struct BattleChoice {
 struct InvasionAccept {
     EntityId conflict{};
     friend bool operator==(const InvasionAccept&, const InvasionAccept&) = default;
+};
+
+// WST-37: a click on a named HUD component, raised to the issuing seat's plots as STORY_CLICK_GUI. The name is
+// the authored component name; the story matches it case-insensitively. It changes no sim state of its own.
+inline constexpr std::size_t max_gui_component_name = 96;
+// The most GuiClick commands one seat may have executed in one session tick (#5857). A human cannot reach it. It is a
+// safety cap, not the loop stop: a forced press does not raise a click (the debug build's FORCE_CLICK_GUI reward calls
+// only the control's click slot, WST-75), so forced presses cannot feed each other, and a 1-to-1 chain of them never
+// forms. The command is counted where it executes, so every peer and every replay drops the same clicks. A dropped
+// click is reported as a diagnostic and never ends the match.
+inline constexpr unsigned max_gui_clicks_per_tick = 8;
+struct GuiClick {
+    std::string component;
+    friend bool operator==(const GuiClick&, const GuiClick&) = default;
 };
 
 struct PrepareBlackMarket {
@@ -323,7 +356,7 @@ using CommandPayload =
         SaveRequest, PostLoadFixup, CreateFleet, AddFleetMembers, RemoveFleetMembers, MergeFleets, SetFleetOrbitSlot,
         ProductionCommand, SellObject, SeatLeave, SeatRejoin, AssignBattleTeamRole, RecheckOrbit, MoveFleet, LandFleet, BattleChoice, AutoResolveWithdraw, ObserverCommand,
         PrepareBlackMarket, BuyBlackMarket, PrepareGalacticAbility, ExecutePreparedAbility, CancelGalacticAbility,
-        LaunchFromSurface, LaunchFleet, TransferSurface, SetFleetPathfinder, TransferFleetMembers, BattleSummaryAcknowledge, InvasionAccept, DeployGroundAbility>;
+        LaunchFromSurface, LaunchFleet, TransferSurface, SetFleetPathfinder, TransferFleetMembers, BattleSummaryAcknowledge, InvasionAccept, DeployGroundAbility, SetGroundLayout, LandUnits, GuiClick>;
 
 struct CommandOrderKey {
     std::uint64_t tick{};

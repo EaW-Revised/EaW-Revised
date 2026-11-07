@@ -1,6 +1,7 @@
 #pragma once
 
 #include "scene_content.hpp"
+#include "eawr/data/xml.hpp"
 
 namespace eawr::viewer::galactic {
 

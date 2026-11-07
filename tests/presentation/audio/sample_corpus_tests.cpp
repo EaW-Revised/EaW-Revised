@@ -166,6 +166,23 @@ void synthetic_tree() {
     expect(decode("Data/Audio/SFX/Prefixed.wav", error) == std::optional(std::vector<std::int16_t>{6}),
            "a full-path entry also resolves inside a prefixed conventional archive");
     expect(!decode("Archived.wav", error), "a full-path archive entry does not satisfy a bare request");
+    // The disk position used to order the preload reads names the file open_sfx_sample reads from (#5604).
+    const auto ends_with = [](const std::optional<vfs::ReadLocation>& where, const std::string_view tail) {
+        return where && where->source.size() >= tail.size() && where->source.ends_with(tail);
+    };
+    const auto bare_where = audio::sfx_sample_location(filesystem.value(), "BARE_SAMPLE.WAV");
+    expect(ends_with(bare_where, "bare.meg") && bare_where->offset == 30 + std::string("Bare_Sample.wav").size(),
+           "a bare name is located in the archive, not the loose shadow, at the entry offset");
+    expect(ends_with(audio::sfx_sample_location(filesystem.value(), "Data/Audio/SFX/Bare_Sample.wav"), "leaf/Audio/SFX/Bare_Sample.wav"),
+           "a rooted name is located at the loose leaf file");
+    expect(ends_with(audio::sfx_sample_location(filesystem.value(), "Data/Audio/SFX/Archived.wav"), "full.meg"),
+           "a full-path archive entry is located in its archive");
+    // The location walk is a placement hint: it returns the full.meg record for the bare name, and only the read's archive-entry
+    // name check (Vfs::open) rejects it, so open_sfx_sample still fails for "Archived.wav".
+    expect(ends_with(audio::sfx_sample_location(filesystem.value(), "Archived.wav"), "full.meg"),
+           "a bare name that only matches a full-path archive entry still gets that archive's record as its placement hint");
+    expect(!audio::open_sfx_sample(filesystem.value(), "Archived.wav"), "the read rejects the bare name the hint pointed at");
+    expect(!audio::sfx_sample_location(filesystem.value(), "Absent.wav"), "a sample with no candidate record has no location");
     const auto records = filesystem.value().candidates("data/audio/sfx/bare_sample.wav");
     expect(records && records.value().size() == 3, "loose and archive candidates remain separately available");
     if (records) {

@@ -12,6 +12,7 @@
 #include "eawr/vfs/vfs.hpp"
 #include "galactic/planet_hud.hpp"
 #include "../../src/script/foc/galactic_ai_economic_replay.hpp"
+#include "../../src/sim/galactic/encoding.hpp"
 
 #include <algorithm>
 #include <array>
@@ -136,6 +137,130 @@ void payload_ground_capability() {
             if (workers == 1) reference = actual; else expect(actual == reference, "direct payload landing has 1/2/4/8 canonical equality");
         }
     }
+}
+void selected_landing_commands() {
+    const gc::CommandPayload payload = gc::LandUnits{1, {21, 23}};
+    auto bytes = gc::encode_payload(payload);
+    expect(gc::decode_payload(gc::CommandLayer::galactic, gc::galactic_opcodes::land_units, bytes) == payload,
+        "selected landing payload round trips");
+    bytes.pop_back();
+    expect(!gc::decode_payload(gc::CommandLayer::galactic, gc::galactic_opcodes::land_units, bytes), "truncated selection is rejected");
+    expect(!gc::decode_payload(gc::CommandLayer::galactic, gc::galactic_opcodes::land_units,
+        gc::encode_payload(gc::LandUnits{1, {21, 21}})), "duplicate selection is rejected");
+    const eawr::sim::InlineExecutor executor;
+    auto initial = setup();
+    initial.fleets[0].members.push_back({24, 2});
+    initial.fleets.push_back({12, 1, 1, {{23, 2}, {25, 2}}});
+    auto world = gc::GalacticSession::create(initial).value();
+    const auto send = [&](std::uint64_t seq, gc::SeatId seat, gc::LandUnits order) {
+        world.submit({{world.completed_tick(), seat, seq}, std::move(order)}).value();
+        return world.step(executor).value();
+    };
+    auto result = send(1, gc::SeatId{1}, {1, {21, 999}});
+    expect(result.snapshot->control()->planets[0].landed.empty() && result.snapshot->fleets()[0].members.size() == 3,
+        "invalid membership rejects every selection without mutation");
+    result = send(1, gc::SeatId{2}, {1, {21, 23}});
+    expect(result.snapshot->control()->planets[0].landed.empty(), "foreign seat cannot land selected members");
+    result = send(2, gc::SeatId{1}, {1, {21, 23}});
+    const auto& landed = result.snapshot->control()->planets[0].landed;
+    expect(landed.size() == 2 && landed[0].id == 21 && landed[1].id == 23,
+        "selection lands members across fleets in command order");
+    const auto& fleets = result.snapshot->fleets();
+    expect(fleets[0].members == std::vector<gc::FleetMember>{{20, 1}, {24, 2}}
+        && fleets[2].members == std::vector<gc::FleetMember>{{25, 2}}, "partial landing keeps remaining members aloft");
+    result = send(3, gc::SeatId{1}, {1, {24, 25}});
+    expect(result.snapshot->control()->planets[0].landed.size() == 4 && result.snapshot->fleets().size() == 2
+        && result.snapshot->fleets()[0].members == std::vector<gc::FleetMember>{{20, 1}},
+        "empty source fleet is removed while another partially selected fleet remains");
+    auto paused_setup = initial; paused_setup.fleet_control->pause.surface_deploy = gc::PausedAdmission::refuse;
+    auto paused = gc::GalacticSession::create(paused_setup).value();
+    paused.submit({{0, gc::SeatId{1}, 1}, gc::PauseGalaxy{}}).value();
+    paused.submit({{0, gc::SeatId{1}, 2}, gc::LandUnits{1, {21, 23}}}).value();
+    expect(paused.step(executor).value().snapshot->control()->planets[0].landed.empty(), "paused landing is refused");
+    auto whole = gc::GalacticSession::create(setup()).value();
+    whole.submit({{0, gc::SeatId{1}, 1}, gc::LandFleet{10, 1}}).value();
+    const auto whole_result = whole.step(executor).value();
+    expect(whole_result.snapshot->control()->planets[0].landed.size() == 1
+        && whole_result.snapshot->control()->planets[0].landed[0].id == 21
+        && whole_result.snapshot->fleets()[0].members == std::vector<gc::FleetMember>{{20, 1}}, "whole-fleet landing remains unchanged");
+}
+void ground_layout_commands() {
+    std::vector<std::string> hashes;
+    for (const auto workers : {1U, 2U, 4U, 8U}) {
+        auto initial = setup();
+        initial.control->planets[0].landed = {{30, 2, 1}, {31, 2, 1}};
+        const eawr::platform::ThreadWorkerAdapter executor(workers);
+        auto world = gc::GalacticSession::create(initial).value();
+        const auto send = [&](std::uint64_t sequence, gc::SeatId seat, gc::SetGroundLayout command) {
+            world.submit({{world.completed_tick(), seat, sequence}, std::move(command)}).value();
+            return world.step(executor).value();
+        };
+        auto step = send(1, gc::SeatId{1}, {1, {{30, 7}, {31, 8}}});
+        expect(step.snapshot->control()->planets[0].ground_layout == std::vector<gc::GroundLayoutEntry>{{30, 7}, {31, 8}}, "layout assigns both markers");
+        step = send(2, gc::SeatId{1}, {1, {{30, 8}, {31, 7}}});
+        const auto swapped = step.snapshot->control()->planets[0].ground_layout;
+        expect(swapped == std::vector<gc::GroundLayoutEntry>{{30, 8}, {31, 7}}, "layout swaps atomically");
+        step = send(3, gc::SeatId{1}, {1, {{30, 7}}});
+        expect(step.snapshot->control()->planets[0].ground_layout == swapped, "duplicate marker refuses without mutation");
+        step = send(4, gc::SeatId{1}, {1, {{30, 9}, {99, 10}}});
+        expect(step.snapshot->control()->planets[0].ground_layout == swapped, "missing object refuses the whole layout");
+        step = send(1, gc::SeatId{2}, {1, {{30, 9}}});
+        expect(step.snapshot->control()->planets[0].ground_layout == swapped, "foreign seat cannot change layout");
+        if (hashes.empty()) hashes.push_back(step.state_hash.get());
+        else expect(step.state_hash.get() == hashes.front(), "layout commands agree across worker counts");
+    }
+    const gc::CommandPayload payload = gc::SetGroundLayout{1, {{30, 7}, {31, {}}}};
+    auto bytes = gc::encode_payload(payload);
+    expect(gc::decode_payload(gc::CommandLayer::galactic, gc::galactic_opcodes::set_ground_layout, bytes) == payload, "layout payload round trips");
+    bytes.pop_back();
+    expect(!gc::decode_payload(gc::CommandLayer::galactic, gc::galactic_opcodes::set_ground_layout, bytes), "truncated layout payload is rejected");
+    const gc::CommandPayload duplicate = gc::SetGroundLayout{1, {{30, 7}, {30, 8}}};
+    expect(!gc::decode_payload(gc::CommandLayer::galactic, gc::galactic_opcodes::set_ground_layout, gc::encode_payload(duplicate)), "duplicate object payload is rejected");
+    auto encoded_control = *setup().control;
+    const auto decode_layout = [&](std::vector<gc::GroundLayoutEntry> rows) {
+        encoded_control.planets[0].ground_layout = std::move(rows);
+        std::vector<std::uint8_t> encoded;
+        gc::detail::encode_control(encoded, encoded_control);
+        return gc::detail::decode_control(encoded);
+    };
+    expect(static_cast<bool>(decode_layout({{30, 1}, {31, 2}})), "ordered layout decodes");
+    expect(!decode_layout({{31, 1}, {30, 2}}), "unordered layout is rejected by decoder");
+    expect(!decode_layout({{30, 1}, {30, 2}}), "duplicate layout is rejected by decoder");
+    auto initial = setup(); initial.control->planets[0].landed = {{30, 2, 1}};
+    const eawr::sim::InlineExecutor executor;
+    auto game = eawr::campaign::GameSession::create(initial).value();
+    game.submit({{0, gc::SeatId{1}, 1}, gc::SetGroundLayout{1, {{30, 42}}}}).value();
+    (void)game.step(executor).value();
+    const auto identities = cp::game_identities(initial);
+    const auto saved = cp::save_game_checkpoint(game, identities).value();
+    auto restored = cp::load_game_checkpoint(saved, identities, {}, executor).value();
+    expect(restored.session.galaxy().snapshot()->control()->planets[0].ground_layout == std::vector<gc::GroundLayoutEntry>{{30, 42}}, "checkpoint restores ground layout");
+    expect(restored.session.state_sha256() == game.state_sha256(), "checkpoint restores layout hash");
+    auto launch_world = gc::GalacticSession::create(initial).value();
+    launch_world.submit({{0, gc::SeatId{1}, 1}, gc::SetGroundLayout{1, {{30, 42}}}}).value();
+    (void)launch_world.step(executor).value();
+    const auto launched = launch_world.launch_native_transport(1, 30);
+    expect(launched && launched.value().admitted && launch_world.snapshot()->control()->planets[0].ground_layout.empty(),
+        "launch clears the departing marker");
+    initial.debug_commands = true;
+    auto capture = gc::GalacticSession::create(initial).value();
+    capture.submit({{0, gc::SeatId{1}, 1}, gc::SetGroundLayout{1, {{30, 42}}}}).value();
+    (void)capture.step(executor).value();
+    capture.submit({{capture.completed_tick(), gc::SeatId{1}, 2}, gc::DebugSetPlanetOwner{1, 2}}).value();
+    expect(capture.step(executor).value().snapshot->control()->planets[0].ground_layout.empty(), "owner change clears layout");
+    auto visible = gc::ObservedPlanet{}; visible.planet = 1; visible.knowledge.ground_contents = true;
+    auto hidden = visible; hidden.knowledge.ground_contents = false;
+    auto source = *initial.control; source.planets[0].ground_layout = {{30, 42}};
+    std::vector<gc::ObservedPlanet> views{visible, hidden};
+    gc::project_ground_layout(views, &source);
+    expect(views[0].ground_layout == source.planets[0].ground_layout && views[1].ground_layout.empty(), "layout publication follows ground intelligence");
+    auto paused_setup = initial;
+    paused_setup.fleet_control->pause.fleet_management = gc::PausedAdmission::refuse;
+    auto paused = gc::GalacticSession::create(paused_setup).value();
+    paused.submit({{0, gc::SeatId{1}, 1}, gc::PauseGalaxy{}}).value();
+    paused.submit({{0, gc::SeatId{1}, 2}, gc::SetGroundLayout{1, {{30, 9}}}}).value();
+    const auto result = paused.step(executor).value();
+    expect(result.snapshot->control()->planets[0].ground_layout.empty(), "paused management refusal leaves layout unchanged");
 }
 void authored_mixed_surface_owners() {
     auto initial = setup();
@@ -1201,13 +1326,19 @@ void ground_structure_base_level() {
         expect(level() == gc::ControlBase{1, 2}, "second ground special makes level 2");
         buy(2); run(hashes);
         expect(world.snapshot()->production()->planets[0].queues[0].size() == 1, "a long company build waits in the ground queue");
+        order(gc::SetGroundLayout{1, {{first_object(), 17}}}); run(hashes);
+        expect(world.snapshot()->control()->planets[0].ground_layout.size() == 1, "ground special receives a marker before sale");
         order(gc::SellObject{1, first_object()}); run(hashes);
         expect(world.snapshot()->production()->planets[0].objects.size() == 1 && level() == gc::ControlBase{1, 1},
             "selling a ground special lowers the level by one");
+        expect(world.snapshot()->control()->planets[0].ground_layout.empty(), "selling a ground special clears its marker");
         expect(world.snapshot()->production()->planets[0].queues[0].size() == 1, "level 1 still satisfies the queued company");
         const auto last = first_object();
+        order(gc::SetGroundLayout{1, {{last, 18}}}); run(hashes);
+        expect(world.snapshot()->control()->planets[0].ground_layout.size() == 1, "remaining ground special receives a marker");
         const std::array<eawr::sim::EntityId, 1> destroyed{last};
         expect(bool(world.apply_battle_losses(destroyed, {})), "a destroyed ground special applies");
+        expect(world.snapshot()->control()->planets[0].ground_layout.empty(), "destroying a ground special clears its marker");
         expect(world.snapshot()->production()->planets[0].objects.empty() && level() == gc::ControlBase{},
             "losing the last ground special returns the base to level 0");
         run(hashes);
@@ -2016,6 +2147,120 @@ gc::GalacticSetup native_force_fixture() {
     }
     for (const auto& relation : config.control->relations) nested.relations.push_back({relation.player, relation.other, !relation.allied});
     return config;
+}
+void native_view_reuse_is_exact() {
+    // V1: the admission paths reuse the already built publication instead of rebuilding unchanged rows. The published bytes
+    // at every step must equal the earlier always-rebuild behaviour; a skipped publication reset (negative control) must differ.
+    using Shadow = gc::GalacticSession::NativeActionShadow;
+    using Mode = Shadow::ViewReuse;
+    using Placement = gc::GalacticSession::NativeForcePlacement;
+    const auto take = [](auto result) {
+        if (!result) throw std::runtime_error(result.error().message);
+        return std::move(result).value();
+    };
+    const eawr::sim::InlineExecutor executor;
+    const auto no_mark = [](const auto&) { return eawr::core::Result<gc::GalacticSession::NativeProductionPayment>::success({}); };
+    using Trace = std::vector<std::vector<std::uint8_t>>;
+    const auto run = [&](Mode mode) {
+        Shadow::set_view_reuse_for_test(mode);
+        Trace trace;
+        const auto open = [&](gc::GalacticSession& world, auto first) {
+            auto root = take(world.begin_native_actions(1, 32));
+            return take(root.fork_player(1, first, 32, {}, {}));
+        };
+        const auto mark = [&](Shadow& own) { trace.push_back(own.snapshot()->canonical_bytes()); };
+        { // fleet landing, launch, actor landing
+            auto world = take(gc::GalacticSession::create(native_control_fixture()));
+            auto own = open(world, world.next_entity_id()); mark(own);
+            take(own.land_transports(1, 10, false)); mark(own);
+        }
+        {
+            auto world = take(gc::GalacticSession::create(native_control_fixture()));
+            auto own = open(world, world.next_entity_id() + gc::galactic_max_objects);
+            take(own.launch_transport(1, 51, 0, false)); mark(own);
+        }
+        {
+            auto world = take(gc::GalacticSession::create(native_control_fixture()));
+            take(world.admit_native_fleet(1, gc::RemoveFleetMembers{10, {31}}, false));
+            auto own = open(world, world.next_entity_id());
+            take(own.land_transport(1, 31, 2, false, 3)); mark(own);
+        }
+        { // invasion
+            auto config = native_control_fixture(); config.control->planets[1].ground_base.owner = 2;
+            auto world = take(gc::GalacticSession::create(config)); world.enable_native_invasions(true);
+            auto root = take(world.begin_native_actions(1, 32));
+            auto own = take(root.fork_player(1, root.next_entity_id(), 32, root.next_native_invasion_id() + gc::galactic_max_objects, {}));
+            const std::array<eawr::sim::EntityId, 1> transports{31};
+            take(own.admit_invasion(1, 10, transports, false)); mark(own);
+        }
+        { // production waves (two admissions: the second sees the first's population projection)
+            auto config = native_control_fixture();
+            config.production->players[0].human = false; config.production->players[0].pay_as_you_go = true;
+            config.seats[0].kind = gc::SeatKind::ai; config.seats[0].human_side_id = 0;
+            config.production->maximum_human_queue = 4;
+            gc::ProductionOffer offer; offer.type = 1; offer.domain = gc::ProductionDomain::space;
+            offer.population = f(1); offer.price = f(4); offer.seconds = f(10); offer.affiliated = true; offer.direct_build_allowed = true;
+            config.production->planets[1].offers = {offer};
+            const gc::GalacticSession::NativeProductionRequest request{1, 2, 1, f(4)};
+            auto world = take(gc::GalacticSession::create(config));
+            auto own = open(world, world.next_entity_id() + gc::galactic_max_objects);
+            for (int i = 0; i < 2; ++i) { take(own.admit_production(request, executor, no_mark)); mark(own); }
+        }
+        { // force placement
+            const auto config = native_force_fixture();
+            const gc::GalacticSession::NativeProductionRequest input{1, 2, 1, {}};
+            auto world = take(gc::GalacticSession::create(config));
+            auto own = open(world, world.next_entity_id() + gc::galactic_max_objects);
+            take(own.create_force(input, [&](const auto& view, auto first) {
+                Placement result; result.next_id = first + 1; result.special_control = view.presence.special_control;
+                result.structures.push_back({first, 1, 1, {}, gc::ProductionDomain::ground, gc::ProductionKind::structure});
+                gc::CensusObject actor; actor.id = first; actor.original_type = actor.current_type = 1;
+                actor.owner = 1; actor.planet = actor.container = 2; actor.combat_role = gc::ActorCombatRole::ordinary;
+                result.originals.push_back(actor);
+                return eawr::core::Result<Placement>::success(std::move(result));
+            }, executor)); mark(own);
+        }
+        { // A fleet and nested payload exercise the subtree reader and its blocker publication.
+            auto config = native_force_fixture();
+            config.production->fleet_blockers.emplace();
+            const gc::GalacticSession::NativeProductionRequest input{1, 2, 1, {}};
+            auto world = take(gc::GalacticSession::create(config));
+            auto own = open(world, world.next_entity_id() + gc::galactic_max_objects);
+            const auto first = own.next_entity_id();
+            take(own.create_force(input, [&](const auto& view, auto id) {
+                Placement result; result.next_id = id + 3; result.special_control = view.presence.special_control;
+                result.fleets.push_back({id, 1, 2, {{id + 1, 2}}});
+                result.contents.push_back({id + 1, {{id + 2, 3}}});
+                for (unsigned i = 0; i < 3; ++i) {
+                    gc::CensusObject actor; actor.id = id + i; actor.original_type = actor.current_type = i + 1;
+                    actor.owner = 1; actor.planet = 2; actor.container = i == 0 ? 2 : id + i - 1;
+                    actor.combat_role = i == 1 ? gc::ActorCombatRole::transport : gc::ActorCombatRole::ordinary;
+                    result.originals.push_back(actor);
+                }
+                return eawr::core::Result<Placement>::success(std::move(result));
+            }, executor));
+            const auto snapshot = own.snapshot();
+            for (unsigned i = 0; i < 3; ++i) {
+                const auto rows = snapshot->actor_records();
+                const auto it = std::find_if(rows.begin(), rows.end(), [first, i](const auto& row) { return row.id == first + i; });
+                expect(it != rows.end() && it->container == (i == 0 ? 2 : first + i - 1),
+                    "every placed original is published in the player actor column");
+            }
+            const auto& blockers = *snapshot->production()->fleet_blockers;
+            expect(std::any_of(blockers.begin(), blockers.end(), [first](const auto& row) { return row.fleet == first; }),
+                "placed fleet publishes its combat blocker");
+            mark(own);
+        }
+        Shadow::set_view_reuse_for_test(Mode::reuse);
+        return trace;
+    };
+    try {
+        const auto reused = run(Mode::reuse), rebuilt = run(Mode::rebuild), stale = run(Mode::stale);
+        const auto corrupt = run(Mode::corrupt_blocker);
+        expect(!reused.empty() && reused == rebuilt, "view reuse publishes the same bytes as rebuilding at every admission");
+        expect(stale != rebuilt, "negative control: a skipped publication reset changes the published bytes");
+        expect(corrupt.back() != rebuilt.back(), "negative control: a wrong fleet blocker changes the placement bytes");
+    } catch (...) { Shadow::set_view_reuse_for_test(Mode::reuse); throw; }
 }
 void native_force_reconciliation() {
     using Shadow = gc::GalacticSession::NativeActionShadow;
@@ -2878,7 +3123,7 @@ int main(int argc, const char* const argv[]) {
         if (argc == 2 && std::string_view(argv[1]) == "--capture-build-list") {
             capture_build_and_ground_views(); return galactic_test::failures == 0 ? 0 : 1;
         }
-        load_guard_contracts(); authored_mixed_surface_owners(); native_invasion_cash_reconciliation(); native_finish_orbit_reconciliation(); native_production_reconciliation(); native_force_reconciliation(); wide_galactic_lua_handles(); independent_native_barrier();
+        selected_landing_commands(); ground_layout_commands(); load_guard_contracts(); authored_mixed_surface_owners(); native_view_reuse_is_exact(); native_invasion_cash_reconciliation(); native_finish_orbit_reconciliation(); native_production_reconciliation(); native_force_reconciliation(); wide_galactic_lua_handles(); independent_native_barrier();
         native_control_reconciliation(); native_action_barrier_control(); capture_build_and_ground_views(); surface_roster_paths(); landfleet_observer_roster(); captured_planet_observer_facts(); payload_ground_capability(); initial_control_provider(); control_and_outcome_extensions(); landed_census_checkpoint(); categories(); alignment_strength(); transitions(); replay_checkpoint_and_hooks(); political_fiscal_deadline(); station_production_presence(); first_capture_rewards(); signed_capture_rewards(); capture_structure_cleanup(); ground_structure_base_level(); hostile_landing_refreshes_ground_base_level(); tactical_built_persistence(); native_capture_notices(); landing_admission_and_result(); child_battle_control(); adapter();
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
     return galactic_test::failures == 0 ? 0 : 1;

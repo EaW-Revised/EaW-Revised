@@ -170,6 +170,11 @@ public:
     // a tick barrier. The live session turns it off: it reads only the world's hash. The world,
     // the scripts and every hash that is computed are the same either way.
     void set_authoritative_hash(bool every_tick) noexcept;
+    // The world's TacticalSession::set_state_hash_policy, applied at the start of each step. It
+    // only takes effect with the authoritative hash off (that hash derives from the world's, so
+    // it keeps the world hashing every tick); state_hash_policy() is the policy in force.
+    void set_state_hash_policy(sim::StateHashPolicy policy) noexcept;
+    [[nodiscard]] sim::StateHashPolicy state_hash_policy() const noexcept;
     // Optional mode publication boundary after object commits, before outer AI.
     void set_shared_mode_service(std::function<core::Result<void>()>);
     // Optional campaign controller gate over translated commands. Empty preserves standalone

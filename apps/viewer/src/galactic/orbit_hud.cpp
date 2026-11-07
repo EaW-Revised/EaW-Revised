@@ -41,7 +41,7 @@ bool GalacticMode::State::build_orbit_hud() {
         button->setup_art({.normal = first_texture(*this, *component, data::ui::Field::blank_texture_name),
             .hover = first_texture(*this, *component, data::ui::Field::mouse_over_texture_name),
             .pressed = first_texture(*this, *component, data::ui::Field::selected_texture_name),
-            .portrait = HudButtonArt::Portrait{{}, false, false}});
+            .disabled = {}, .portrait = HudButtonArt::Portrait{{}, false, false}, .overlays = {}});
         button->set_action([] {});
         orbit_hud.slots.emplace(*index, OrbitHudState::Slot{anchor.name, button});
     }

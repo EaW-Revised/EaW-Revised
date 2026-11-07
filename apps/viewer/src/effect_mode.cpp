@@ -1,3 +1,4 @@
+#include "revised_layer.hpp"
 #include "viewer_profile_arguments.hpp"
 #include "effect_mode.hpp"
 #include "effect_mode_internal.hpp"
@@ -191,6 +192,7 @@ bool EffectMode::ready(Node3D& host) {
         roots.emplace_back("base", base);
     }
     std::vector<vfs::MountSpec> specs;
+    mount_revised_layer(roots);
     auto chain = vfs::resolve_manifest_chain(roots);
     if (!chain) return give_up(core::format_diagnostic(chain.error()));
     for (auto& manifest : chain.value()) {

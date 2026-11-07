@@ -4,7 +4,7 @@
 // audit AU-80 to AU-83). Shared by the unit tables and the galactic loaders, so every table that
 // loads types or records beyond the M2 fleet reads values the way the original game does.
 
-#include "eawr/data/xml.hpp"
+#include "eawr/data/xml_fwd.hpp"
 #include "eawr/sim/math/fixed.hpp"
 
 #include <cstdint>

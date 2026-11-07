@@ -2,8 +2,11 @@
 #include "ui/tactical_hud_internal.hpp"
 #include "eawr/presentation/ui/layout.hpp"
 #include <godot_cpp/classes/image_texture.hpp>
+#include <godot_cpp/classes/text_server.hpp>
 #include <algorithm>
 #include <cctype>
+#include <cstdint>
+#include <optional>
 #include <ostream>
 
 using namespace godot;
@@ -31,10 +34,8 @@ bool GalacticMode::State::build_hero_action_hud() {
     // WGUI-47: menus lock world selection, including empty space and disabled rows.
     hero_menu.blocker->set_mouse_filter(Control::MOUSE_FILTER_STOP);
     hero_menu.blocker->hide();
-    for (std::size_t kind = 0; kind < hero_menu.surfaces.size(); ++kind) {
-        auto& surface = hero_menu.surfaces[kind];
-        const auto shell_name = kind == 0 ? "bm_frame" : "target_type_back";
-        const auto* shell = command_catalog.find(shell_name);
+    for (auto& surface : hero_menu.surfaces) {
+        const auto* shell = command_catalog.find("target_type_back"); // WGCH-188
         if (!shell) continue; // Missing authored menus stay unavailable.
         auto loaded = data::ui::load_shell_anchors(*filesystem, shell->text(data::ui::Field::model_name));
         if (!loaded) { failure = core::format_diagnostic(loaded.error()); return false; }
@@ -44,8 +45,17 @@ bool GalacticMode::State::build_hero_action_hud() {
         setup.view = presentation::ui::hud_view_model(surface.anchors, command_catalog,
             presentation::ui::alt_variant(command_faction), presentation::ui::vfs_shell_masks(*filesystem),
             presentation::ui::ShellOrigin::centre);
-        const auto look = presentation::ui::hud_shell(surface.anchors, command_catalog, command_faction);
+        // WGCH-188: this shell's _ALT<n> frames are the dialog's heights by row count, not faction variants. The tallest
+        // holds the description and cancel where they are authored.
+        const auto look = presentation::ui::hud_shell(surface.anchors, command_catalog, command_faction, true);
+        std::optional<std::uint32_t> tallest;
+        float tallest_height{};
+        for (const auto& anchor : surface.anchors.anchors())
+            if (anchor.alt.variant && anchor.rect.height > tallest_height) {
+                tallest = anchor.alt.variant; tallest_height = anchor.rect.height;
+            }
         for (const auto& mesh : look.meshes) {
+            if (mesh.alternate && mesh.alternate != tallest) continue;
             const auto path = presentation::ui::vfs_standalone_textures(*filesystem)(mesh.texture);
             if (!path) { failure = "hero action shell texture is absent: " + mesh.texture; return false; }
             auto texture = assets::load_texture(*filesystem, *path);
@@ -53,11 +63,25 @@ bool GalacticMode::State::build_hero_action_hud() {
             std::string why;
             auto pixels = texture_image(texture.value(), why);
             if (pixels.is_null()) { failure = why; return false; }
-            setup.meshes.push_back({mesh.blend, ImageTexture::create_from_image(pixels), mesh.triangles});
+            setup.meshes.push_back({mesh.blend, ImageTexture::create_from_image(pixels), mesh.triangles, {}});
         }
         surface.panel->setup(std::move(setup), nullptr);
-        surface.close_name = kind == 0 ? "bm_close" : "h_close";
-        const auto prefix = kind == 0 ? "bm_" : "h_";
+        surface.close_name = "h_close";
+        const auto prefix = "h_";
+        const auto add_label = [&](const std::string& name, const data::ui::CommandBarComponent& component) {
+            auto* label = memnew(Label); label->set_mouse_filter(Control::MOUSE_FILTER_IGNORE);
+            label->set_name(String::utf8((name + "_text").c_str()));
+            const auto face = hud_fonts->resolve({std::string(component.text(data::ui::Field::font_name)),
+                component.integer(data::ui::Field::font_point_size).value_or(0)}, "english");
+            label->add_theme_font_override("font", hud_fonts->font(face));
+            const auto tint = component.color(data::ui::Field::text_color)
+                .value_or(component.color(data::ui::Field::color).value_or(data::ui::Rgba8{255,255,255,255}));
+            label->add_theme_color_override("font_color", Color(tint.r/255.0F,tint.g/255.0F,tint.b/255.0F,tint.a/255.0F));
+            label->set_horizontal_alignment(component.flag(data::ui::Field::left_justified)
+                ? HORIZONTAL_ALIGNMENT_LEFT : HORIZONTAL_ALIGNMENT_CENTER);
+            if (name == "text_hero") label->set_autowrap_mode(TextServer::AUTOWRAP_WORD_SMART);
+            surface.panel->add_child(label); surface.labels.emplace(name, label);
+        };
         for (const auto& anchor : surface.anchors.anchors()) {
             const auto* component = command_catalog.find(anchor.name);
             if (!component || !anchor.alt.shown_for(presentation::ui::alt_variant(command_faction))) continue;
@@ -70,7 +94,7 @@ bool GalacticMode::State::build_hero_action_hud() {
                 HudButtonArt art{.normal = command_texture(first(*component, data::ui::Field::icon_texture_name)),
                     .hover = command_texture(first(*component, data::ui::Field::mouse_over_texture_name)),
                     .pressed = command_texture(first(*component, data::ui::Field::selected_texture_name)),
-                    .disabled = command_texture(first(*component, data::ui::Field::disabled_texture_name))};
+                    .disabled = command_texture(first(*component, data::ui::Field::disabled_texture_name)), .portrait = {}, .overlays = {}};
                 if (choice) art.portrait = HudButtonArt::Portrait{{}, false, true};
                 button->setup_art(art);
                 surface.panel->add_child(button);
@@ -80,18 +104,13 @@ bool GalacticMode::State::build_hero_action_hud() {
                     surface.choices.emplace_back(anchor.name, button);
                 }
             }
-            if (component->text(data::ui::Field::font_name).empty()) continue;
-            auto* label = memnew(Label); label->set_mouse_filter(Control::MOUSE_FILTER_IGNORE);
-            label->set_name(String::utf8((anchor.name + "_text").c_str()));
-            const auto face = hud_fonts->resolve({std::string(component->text(data::ui::Field::font_name)),
-                component->integer(data::ui::Field::font_point_size).value_or(0)}, "english");
-            label->add_theme_font_override("font", hud_fonts->font(face));
-            const auto tint = component->color(data::ui::Field::text_color)
-                .value_or(component->color(data::ui::Field::color).value_or(data::ui::Rgba8{255,255,255,255}));
-            label->add_theme_color_override("font_color", Color(tint.r/255.0F,tint.g/255.0F,tint.b/255.0F,tint.a/255.0F));
-            label->set_horizontal_alignment(component->flag(data::ui::Field::left_justified)
-                ? HORIZONTAL_ALIGNMENT_LEFT : HORIZONTAL_ALIGNMENT_CENTER);
-            surface.panel->add_child(label); surface.labels.emplace(anchor.name, label);
+            if (!component->text(data::ui::Field::font_name).empty()) add_label(anchor.name, *component);
+        }
+        // WGCH-188: the title, names and prices are bones of the shell with no mesh of their own.
+        for (const auto& bone : surface.anchors.bones()) {
+            const auto* component = command_catalog.find(bone.name);
+            if (component && !surface.anchors.find(bone.name) && !component->text(data::ui::Field::font_name).empty())
+                add_label(bone.name, *component);
         }
         std::sort(surface.choices.begin(), surface.choices.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
         for (std::size_t index = 0; index < surface.choices.size(); ++index)
@@ -108,6 +127,14 @@ void GalacticMode::State::close_hero_action() {
         game->submit(platform::LiveGameOrder{sim::SeatId{galaxy->local.seat},
             sim::galactic::CancelGalacticAbility{hero_menu.facts->actor, hero_menu.facts->preparation}, {}});
     hero_menu.closed = true; ++hero_menu.closes; hero_menu.blocker->hide();
+}
+
+std::size_t GalacticMode::State::hero_action_offered() const {
+    const auto* facts = hero_menu.facts ? &*hero_menu.facts : nullptr;
+    if (!facts) return 0;
+    if (hero_menu.theft) return facts->theft ? facts->theft->size() : 0;
+    if (hero_menu.sabotage) return facts->sabotage ? facts->sabotage->size() : 0;
+    return facts->neutralization ? facts->neutralization->size() : 0;
 }
 
 void GalacticMode::State::choose_hero_action(std::size_t index) {
@@ -174,19 +201,16 @@ void GalacticMode::State::update_hero_action_hud() {
     const auto* facts = hero_menu.facts ? &*hero_menu.facts : nullptr;
     hero_menu.theft = facts && facts->theft.has_value();
     hero_menu.sabotage = facts && facts->sabotage.has_value();
-    const auto active = hero_menu.theft ? 0U : 1U;
     const bool supplied = facts && (hero_menu.theft ? facts->theft.has_value()
         : hero_menu.sabotage ? true : facts->neutralization.has_value());
     const auto offered = supplied ? (hero_menu.theft ? facts->theft->size()
         : hero_menu.sabotage ? facts->sabotage->size() : facts->neutralization->size()) : 0;
-    // No invented scrolling or silent truncation of the prepared whole list.
-    const bool available = offered > 0 && hero_menu.surfaces[active].panel
-        && offered <= hero_menu.surfaces[active].choices.size();
+    // WGCH-188: the buttons are the whole grid, with no scrolling. A longer list still opens, showing what fits.
+    const bool available = offered > 0 && hero_menu.surfaces[0].panel && !hero_menu.surfaces[0].choices.empty();
     hero_menu.blocker->set_visible(available && !hero_menu.closed && enabled);
-    for (std::size_t kind = 0; kind < hero_menu.surfaces.size(); ++kind) {
-        auto& surface = hero_menu.surfaces[kind];
+    for (auto& surface : hero_menu.surfaces) {
         if (!surface.panel) continue;
-        surface.panel->set_visible(available && kind == active);
+        surface.panel->set_visible(available);
         const auto placement = surface.panel->placement();
         const auto position = [&](Control* control, std::string_view name) {
             const auto* anchor = surface.anchors.find(name);
@@ -196,31 +220,39 @@ void GalacticMode::State::update_hero_action_hud() {
             control->set_size(Vector2(static_cast<float>(rect.width),static_cast<float>(rect.height)));
         };
         for (const auto& [name,label] : surface.labels) {
-            position(label,name); label->set_text({}); label->hide();
+            position(label,name); label->set_text({}); label->hide(); label->set_modulate(Color(1.0F,1.0F,1.0F));
             const auto* component = command_catalog.find(name);
             label->add_theme_font_size_override("font_size", std::max(1, presentation::ui::font_pixel_height(
                 component->integer(data::ui::Field::font_point_size).value_or(0),camera.height)));
         }
         const auto text = [&](const std::string& name, const std::string& value) {
-            if (const auto found=surface.labels.find(name); found != surface.labels.end()) {
-                found->second->set_text(String::utf8(value.c_str())); found->second->show();
-            }
+            const auto found=surface.labels.find(name);
+            if (found == surface.labels.end()) return;
+            auto* label=found->second;
+            label->set_text(String::utf8(value.c_str())); label->show();
+            // A text bone has no mesh to give a box: the line centres on the bone's height, and on its x unless left-justified.
+            const auto* bone = surface.anchors.find(name) ? nullptr : surface.anchors.find_bone(name);
+            if (!bone) return;
+            const auto point = presentation::ui::shell_point_to_screen(bone->origin.x, bone->origin.y, placement);
+            const auto size = label->get_minimum_size();
+            const bool left = label->get_horizontal_alignment() == HORIZONTAL_ALIGNMENT_LEFT;
+            label->set_size(size);
+            label->set_position(Vector2(static_cast<float>(point.x) - (left ? 0.0F : size.x/2.0F),
+                static_cast<float>(point.y) - size.y/2.0F));
         };
         if (surface.close) {
             position(surface.close,surface.close_name); surface.close->set_hit_rect({{},surface.close->get_size()});
-            text(surface.close_name,battle_text("TEXT_BUTTON_CLOSE")); surface.close->set_disabled(!enabled);
+            text(surface.close_name,battle_text("TEXT_BUTTON_CANCEL")); surface.close->set_disabled(!enabled);
         }
         // A shared publication may contain only another ability's menu (e.g. destruction).
         // Its absent theft/neutralization list is not an empty vector to dereference.
-        if (!facts || kind != active || !supplied) continue;
+        if (!facts || !supplied) continue;
         // Sabotage has no authored dialog title of its own here: structure rows and prices stand alone (named seam).
-        if (!hero_menu.sabotage) text(kind == 0 ? "bm_title" : "h_title", battle_text(kind == 0 ? "TEXT_SLICE_DIALOG_TITLE" : "TEXT_NEUTRALIZE_HERO_DIALOG_TITLE"));
-        if (kind == 0) {
-            text("bm_title01",battle_text("TEXT_SLICE_DIALOG_DESCRIPTION"));
-            text("bm_tech_level",std::to_string(facts->tech));
-            text("bm_text_steal",battle_text("TEXT_BUTTON_SLICE"));
+        if (!hero_menu.sabotage) {
+            text("h_title",battle_text(hero_menu.theft ? "TEXT_SLICE_DIALOG_TITLE" : "TEXT_NEUTRALIZE_HERO_DIALOG_TITLE"));
+            text("text_hero",battle_text(hero_menu.theft ? "TEXT_SLICE_DIALOG_DESCRIPTION" : "TEXT_NEUTRALIZE_HERO_DIALOG_DESCRIPTION"));
         }
-        const auto count = kind == 0 ? facts->theft->size() : hero_menu.sabotage ? facts->sabotage->size() : facts->neutralization->size();
+        const auto count = offered;
         for (std::size_t index=0; index<surface.choices.size(); ++index) {
             const auto& [name,button] = surface.choices[index];
             position(button,name); button->set_hit_rect({{},button->get_size()});
@@ -228,7 +260,7 @@ void GalacticMode::State::update_hero_action_hud() {
             if (index>=count) continue;
             sim::galactic::TypeId type{}; sim::math::Fixed price;
             bool admitted{};
-            if (kind == 0) {
+            if (hero_menu.theft) {
                 const auto& choice=facts->theft->at(index);
                 type=choice.live_prepared ? choice.live_prepared->theft.technology : choice.prepared.technology;
                 price=choice.live_prepared ? choice.live_prepared->price : choice.prepared.price; admitted=choice.affordable;
@@ -246,13 +278,11 @@ void GalacticMode::State::update_hero_action_hud() {
                     title=art->second.text; button->set_icon_texture(command_texture(art->second.icon));
                     button->set_tooltip_text(String::utf8(art->second.encyclopedia.c_str()));
                 }
-            // Prices are facts. Unknown type display data stays blank.
-            if (kind == 0) {
-                const auto row=std::to_string(index/2); const auto column=std::to_string(index%2);
-                text("bm_title_"+row+"0"+column,title+"  $ "+galactic_view::credit_balance(price));
-            } else {
-                text("h_name_"+two(index),title); text("h_price_"+two(index),"$ "+galactic_view::credit_balance(price));
-            }
+            // Prices are facts. Unknown type display data stays blank. WGCH-188: a row that cannot be bought is grey.
+            const auto name_label = "h_name_"+two(index), price_label = "h_price_"+two(index);
+            text(name_label,title); text(price_label,"$ "+galactic_view::credit_balance(price));
+            if (!admitted) for (const auto& row : {name_label,price_label})
+                if (const auto found=surface.labels.find(row); found!=surface.labels.end()) found->second->set_modulate(Color(0.5F,0.5F,0.5F));
             const bool live_ready = hero_menu.fixture || (hero_menu.sabotage ? facts->sabotage->at(index).live_prepared.has_value()
                 : hero_menu.theft ? facts->theft->at(index).live_prepared.has_value() : facts->neutralization->at(index).live_prepared.has_value());
             button->set_disabled(!enabled || !admitted || !live_ready);
@@ -266,7 +296,8 @@ void GalacticMode::State::write_hero_action_report(std::ostream& output) const {
     output << "{\"source\": " << json(hero_menu.fixture ? "controlled-observer-snapshot" : "campaign-snapshot")
         << ", \"activation_seam\": \"campaign hero-action host\", \"execution_seam\": \"queued hero-action command provider\""
         << ", \"active\": " << (hero_menu.blocker && hero_menu.blocker->is_visible_in_tree() ? "true" : "false")
-        << ", \"theft\": " << (hero_menu.theft ? "true" : "false") << ", \"rebuilds\": " << hero_menu.rebuilds
+        << ", \"theft\": " << (hero_menu.theft ? "true" : "false") << ", \"offered\": " << hero_action_offered()
+        << ", \"window\": " << hero_menu.surfaces[0].choices.size() << ", \"rebuilds\": " << hero_menu.rebuilds
         << ", \"choices_accepted\": " << hero_menu.choices_accepted << ", \"closes\": " << hero_menu.closes
         << ", \"accepted_index\": " << (hero_menu.accepted_index ? std::to_string(*hero_menu.accepted_index) : "null")
         << ", \"actor\": " << (facts ? facts->actor : 0) << ", \"planet\": " << (facts ? facts->planet : 0) << ", \"controls\": [";
@@ -278,9 +309,18 @@ void GalacticMode::State::write_hero_action_report(std::ostream& output) const {
             << ", \"hit_rect\": [" << rect.position.x << ", " << rect.position.y << ", " << rect.size.x << ", " << rect.size.y << "]}";
         comma=true;
     };
-    const auto& surface=hero_menu.surfaces[hero_menu.theft ? 0 : 1];
+    const auto& surface=hero_menu.surfaces[0];
     control(surface.close_name,surface.close);
     for (const auto& [name,button] : surface.choices) control(name,button);
+    output << "], \"labels\": [";
+    comma=false;
+    for (const auto& [name,label] : surface.labels) {
+        if (!label->is_visible() || label->get_text().is_empty()) continue;
+        const auto rect=label->get_global_rect();
+        output << (comma ? ", " : "") << "{\"name\": " << json(name) << ", \"text\": " << json(label->get_text().utf8().get_data())
+            << ", \"rect\": [" << rect.position.x << ", " << rect.position.y << ", " << rect.size.x << ", " << rect.size.y << "]}";
+        comma=true;
+    }
     output << "], \"options\": [";
     if (facts && hero_menu.theft && facts->theft) for (std::size_t index=0;index<facts->theft->size();++index) {
         const auto& row=facts->theft->at(index);

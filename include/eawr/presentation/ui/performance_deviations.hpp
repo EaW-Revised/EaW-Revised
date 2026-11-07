@@ -23,9 +23,11 @@ struct PerformanceDeviation final {
 
 // Add a row only with an approved behaviour rule and its measured evidence.
 // PD-01: owner #5136 (2026-10-27); measured evidence is in the behaviour document.
-inline constexpr std::array<PerformanceDeviation, 1> performance_deviations{{
+inline constexpr std::array<PerformanceDeviation, 2> performance_deviations{{
     {"PD-01", "gameplay.reinforcement_areas_only_while_placing", "Reinforcement areas only while placing",
      PerformanceDeviationScope::presentation, "1", "Panel or data-authored drag rule", "Only while placing"},
+    {"SH-01", "keyboard.selection_hotkeys", "Selection hotkeys",
+     PerformanceDeviationScope::presentation, "0", "Existing selection gestures", "Optional bulk selection keys"},
 }};
 
 } // namespace eawr::presentation::ui

@@ -17,7 +17,7 @@ using Clock = std::chrono::steady_clock;
 struct JobWork final {
     std::uint64_t before{}, after{}, deadline{}, limit{}, children{}, queries{}, leaves{}, narrow{};
 };
-struct Cost final { std::string_view name; double ms{}; std::uint64_t identity{}; JobWork work{}; };
+struct Cost final { std::string_view name; double ms{}; std::uint64_t identity{}; JobWork work{}; std::uint64_t type{}; };
 struct Recording final {
     std::vector<Cost> costs;
     double barriers_ms{};
@@ -122,8 +122,8 @@ private:
 // diagnostics within a worker barrier, never additive serial/worker cost.
 class JobScope final {
 public:
-    JobScope(const std::string_view name, const std::uint64_t identity, const JobWork* work = nullptr)
-        : recording_(active_jobs), name_(name), identity_(identity), work_(work) {
+    JobScope(const std::string_view name, const std::uint64_t identity, const JobWork* work = nullptr, const std::uint64_t type = 0)
+        : recording_(active_jobs), name_(name), identity_(identity), work_(work), type_(type) {
         if (recording_) started_ = Clock::now();
     }
     JobScope(const JobScope&) = delete;
@@ -131,13 +131,14 @@ public:
     ~JobScope() {
         if (!recording_) return;
         recording_->costs.push_back({name_,
-            std::chrono::duration<double, std::milli>(Clock::now() - started_).count(), identity_, work_ ? *work_ : JobWork{}});
+            std::chrono::duration<double, std::milli>(Clock::now() - started_).count(), identity_, work_ ? *work_ : JobWork{}, type_});
     }
 private:
     Recording* recording_{};
     std::string_view name_;
     std::uint64_t identity_{};
     const JobWork* work_{};
+    std::uint64_t type_{};
     Clock::time_point started_{};
 };
 

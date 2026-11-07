@@ -5,6 +5,12 @@ eawr_target_project_warnings(asset_tests)
 
 add_test(NAME asset_contracts COMMAND asset_tests)
 
+add_executable(texture_chain_tests texture_chain_tests.cpp)
+target_link_libraries(texture_chain_tests PRIVATE eawr::assets)
+target_compile_features(texture_chain_tests PRIVATE cxx_std_20)
+eawr_target_project_warnings(texture_chain_tests)
+add_test(NAME texture_chain_contracts COMMAND texture_chain_tests)
+
 add_executable(effect_reader_tests effect_reader_tests.cpp effect_reader_fuzz.cpp effect_inventory.cpp effect_native_probe.cpp)
 target_link_libraries(effect_reader_tests PRIVATE eawr::assets)
 target_compile_features(effect_reader_tests PRIVATE cxx_std_20)
@@ -25,7 +31,7 @@ eawr_target_project_warnings(mtd_tests)
 add_test(NAME mtd_contracts COMMAND mtd_tests)
 
 add_executable(mod_atlas_tests mod_atlas_tests.cpp)
-target_link_libraries(mod_atlas_tests PRIVATE eawr::assets)
+target_link_libraries(mod_atlas_tests PRIVATE eawr::assets eawr::ui_model)
 target_compile_features(mod_atlas_tests PRIVATE cxx_std_20)
 eawr_target_project_warnings(mod_atlas_tests)
 add_test(NAME mod_atlas_contracts COMMAND mod_atlas_tests)

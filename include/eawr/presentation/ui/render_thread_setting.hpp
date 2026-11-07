@@ -14,7 +14,7 @@ enum class RenderThreadSetting : int { separate, safe };
 
 // The native launcher reads this one startup-only choice without linking the
 // viewer libraries. Keep its header/version and numeric rules shared with UI settings.
-[[nodiscard]] inline std::optional<RenderThreadSetting> stored_render_thread(std::string_view text) {
+[[nodiscard]] inline std::optional<int> stored_startup_integer(std::string_view text, const std::string_view key) {
     const auto trim = [](std::string_view value) {
         const auto last = value.find_last_not_of(" \t\r");
         value = value.substr(0, last == std::string_view::npos ? 0 : last + 1);
@@ -30,7 +30,7 @@ enum class RenderThreadSetting : int { separate, safe };
         return result;
     };
     bool header = false;
-    std::optional<RenderThreadSetting> result;
+    std::optional<int> result;
     while (!text.empty()) {
         const auto end = text.find('\n');
         const auto line = trim(text.substr(0, end));
@@ -45,11 +45,21 @@ enum class RenderThreadSetting : int { separate, safe };
             continue;
         }
         const auto equals = line.find('=');
-        if (equals == std::string_view::npos || trim(line.substr(0, equals)) != "video.render_thread") continue;
+        if (equals == std::string_view::npos || trim(line.substr(0, equals)) != key) continue;
         if (const auto value = number(trim(line.substr(equals + 1))))
-            result = *value <= 0 ? RenderThreadSetting::separate : RenderThreadSetting::safe;
+            result = *value;
     }
     return result;
+}
+
+[[nodiscard]] inline std::optional<RenderThreadSetting> stored_render_thread(const std::string_view text) {
+    if (const auto value = stored_startup_integer(text, "video.render_thread"))
+        return *value <= 0 ? RenderThreadSetting::separate : RenderThreadSetting::safe;
+    return std::nullopt;
+}
+
+[[nodiscard]] inline bool stored_depth_prepass_off(const std::string_view text) {
+    return stored_startup_integer(text, "video.depth_prepass") == 0;
 }
 
 } // namespace eawr::presentation::ui

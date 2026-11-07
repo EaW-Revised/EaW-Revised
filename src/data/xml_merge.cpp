@@ -1,4 +1,5 @@
 #include "xml_internal.hpp"
+#include "eawr/core/load_profile.hpp"
 #include "eawr/data/tag_trace.hpp"
 #include "eawr/data/retail_values.hpp"
 
@@ -70,10 +71,9 @@ void derive_member_flags(const std::span<const Definition* const> definitions,
             }
         }
     };
-    // The entry a variant overlays: the catalog's winner for the base name (the strongest layer, then the later registration,
-    // as Catalog lookups answer), except that an entry naming ITSELF as its base overlays the nearest earlier entry of that
-    // name, and none when there is no earlier one. The catalog still answers duplicates with the last registered entry; the
-    // debug build's first-registered rule (RGC-180..187) is the follow-up #3741.
+    // The entry a variant overlays: the catalog's winner for the base name (the first registered one, as Catalog lookups
+    // answer; RGC-180..187, PL-20), except that an entry naming ITSELF as its base overlays the nearest earlier entry of that
+    // name, and none when there is no earlier one.
     std::unordered_map<std::string, std::vector<std::size_t>> entries;
     const auto base_of = [&](const std::size_t index) -> std::optional<std::size_t> {
         const auto name = ascii_lower(states[index].base);
@@ -333,6 +333,8 @@ core::Result<EffectiveObject> Catalog::resolve(const std::string_view object_id,
 
 core::Result<EffectiveObject> Catalog::resolve_in(const std::string_view object_id,
     const std::optional<Category> category) const {
+    // One check per call without a recording; with one, the calls, total and slowest call of the load-check report.
+    core::load_profile::Scope resolve_scope(core::load_profile::Phase::catalog_resolve);
     if (!impl_) return core::Result<EffectiveObject>::failure(diagnostic(
         diagnostic_codes::object_not_found, "catalog is empty"));
     const auto key = (category ? std::string(to_string(*category)) : std::string("untyped")) + ":" + ascii_lower(object_id);
@@ -349,6 +351,8 @@ core::Result<EffectiveObject> Catalog::resolve_in(const std::string_view object_
         trace_chain(*this, *cached, category);
         return core::Result<EffectiveObject>::success(std::move(*cached));
     }
+    core::load_profile::Scope build_scope(core::load_profile::Phase::catalog_resolve_build);
+    core::load_profile::ResolveDepthScope depth_scope;
     const Definition* current = category ? find(object_id, *category) : find(object_id);
     if (current == nullptr) return core::Result<EffectiveObject>::failure(diagnostic(
         diagnostic_codes::object_not_found, "object not found: " + std::string(object_id)));
@@ -379,6 +383,8 @@ core::Result<EffectiveObject> Catalog::resolve_in(const std::string_view object_
                 &parent->source));
         }
     }
+
+    depth_scope.depth(chain.size());
 
     struct Group {
         std::string key;
@@ -467,6 +473,14 @@ core::Result<EffectiveObject> Catalog::resolve_in(const std::string_view object_
                 result.class_origin = "unclassed";
             }
         }
+    }
+    // SG-CLS-01: whatever the element is called, the object creator places a squadron from the effective Squadron_Units
+    // alone (debug build): no element name and no ancestor is read. A list-bearing object is a Squadron, except a company
+    // (a type with both lists uses one per mode, and a company keeps its land path).
+    if (top.category == Category::game_object && ascii_lower(result.type_name) != "squadron"
+        && result.single("Squadron_Units") && !result.single("Company_Units")) {
+        result.type_name = "Squadron";
+        result.class_origin = "tags:Squadron";
     }
     {
         const std::scoped_lock lock(cache_mutex);

@@ -84,6 +84,9 @@ struct InputGates {
 };
 struct SelectionEffects {
     bool accepted{}, changed{}, deferred{}, position{}, refocus{}, zoom{}, toggle_zoom{}, tutorial{};
+    // Observed in the debug build: a non-null revealed planet becoming the selection starts the
+    // hard-coded GUI event `Planet_Dialog_Appears` (#5503).
+    bool sound{};
     ObjectId target{};
 };
 enum class Navigation { next, previous, next_own, next_other };
@@ -383,6 +386,7 @@ public:
         if (target && !target->discovered) return effect;
         selected = id;
         effect.accepted = effect.changed = true;
+        effect.sound = id != 0;
         effect.refocus = id && (camera == CameraState::focused || camera == CameraState::inward);
         return effect;
     }
@@ -469,8 +473,8 @@ public:
         const float x = point.x - box_start->x, y = point.y - box_start->y;
         if (box_end || x * x + y * y > 144.0F) box_end = point;
     }
-    bool release_box(std::span<const InputWidget> widgets) {
-        if (!box_start || !box_end) { box_start.reset(); return false; }
+    void preview_box(std::span<const InputWidget> widgets) {
+        if (!box_start || !box_end) return;
         multiselection.clear();
         const auto a = *box_start, b = *box_end;
         for (const auto& w : widgets) {
@@ -478,6 +482,10 @@ public:
                 && w.x >= std::min(a.x, b.x) && w.x <= std::max(a.x, b.x)
                 && w.y >= std::min(a.y, b.y) && w.y <= std::max(a.y, b.y)) multiselection.push_back(w.id);
         }
+    }
+    bool release_box(std::span<const InputWidget> widgets) {
+        if (!box_start || !box_end) { box_start.reset(); return false; }
+        preview_box(widgets);
         box_start.reset(); box_end.reset(); return true;
     }
     bool begin_widget(const InputWidget& widget, bool control, bool focused_fleet,

@@ -1,4 +1,5 @@
 #include "ui_gallery_internal.hpp"
+#include "eawr/vfs/vfs.hpp"
 
 namespace eawr::presentation::godot_backend {
 

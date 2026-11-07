@@ -61,7 +61,14 @@ class UiMovieStructure(unittest.TestCase):
         for path in [ROOT / "apps/viewer/CMakeLists.txt", *SRC.glob("*.cpp"),
                      *(ROOT / "src/presentation/godot/ui").glob("*.cpp")]:
             text = source_text(path.relative_to(ROOT).as_posix()).lower()
-            for token in ("avcodec", "avformat", "binkw32", "bink2w", "radgametools"):
+            # The isolated Bink child loads the player's own installed decoder DLL from
+            # inside the game root (never shipped); only that file may name it.
+            tokens = ("avcodec", "avformat", "binkw32", "bink2w", "radgametools")
+            if path.name == "bink_child.cpp":
+                tokens = tuple(token for token in tokens if token != "bink2w")
+                self.assertIn("game / l\"corruption\" / l\"bink2w64.dll\"", text)
+                self.assertIn("lexically_relative(game)", text)
+            for token in tokens:
                 self.assertNotIn(token, text, path)
         shipped = [path.name for path in (ROOT / "apps/viewer/project").rglob("*")
                    if path.suffix.lower() in (".ogv", ".bik", ".bk2")]

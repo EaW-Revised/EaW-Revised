@@ -98,6 +98,12 @@ LiveSaveSlot describe_unlocked(const std::string& directory, std::string_view na
     slot.completed_tick = parsed.value().header.completed_tick;
     slot.galactic_frame = parsed.value().header.galactic_frame;
     slot.child = (parsed.value().header.flags & checkpoint::flag_child) != 0;
+    // A skirmish battle save records no campaign; it is listed as what it is, not as a broken campaign.
+    if ((parsed.value().header.flags & checkpoint::flag_galaxy) == 0 && slot.child
+        && parsed.value().find(checkpoint::SectionId::tactical_host) != nullptr) {
+        slot.skirmish = true;
+        return slot;
+    }
     auto campaign = decode_campaign(parsed.value());
     if (!campaign) slot.diagnostic = campaign.error();
     else slot.campaign = std::move(campaign).value();
@@ -146,6 +152,9 @@ core::Result<void> erase(const std::string& directory, std::string_view name) {
 } // namespace eawr::platform::save_detail
 
 namespace eawr::platform {
+core::Result<std::vector<std::uint8_t>> read_saved_game_bytes(std::string_view directory, std::string_view name) {
+    return save_detail::read(std::string(directory), name);
+}
 core::Result<LiveSaveSlot> read_save_slot(std::string_view directory, std::string_view name) {
     const std::lock_guard lock(save_detail::repository_mutex);
     const std::string root(directory);

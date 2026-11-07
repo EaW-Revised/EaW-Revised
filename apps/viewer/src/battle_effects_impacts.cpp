@@ -1,6 +1,7 @@
 #include "eawr/core/load_profile.hpp"
 #include "battle_effects.hpp"
 #include "frame_timer.hpp"
+#include "eawr/presentation/render_categories.hpp"
 #include "eawr/presentation/particles/contact_frame.hpp"
 #include "eawr/presentation/space/debris.hpp"
 #include "eawr/presentation/space/event_snapshot_cache.hpp"
@@ -28,6 +29,16 @@ namespace tactical = sim::tactical;
 using namespace battle_effects_detail;
 
 namespace {
+
+// Main-thread presentation provenance; nested event scopes restore the previous owner.
+bool fighter_effect_context{};
+struct FighterEffectScope final {
+    bool previous{fighter_effect_context};
+    explicit FighterEffectScope(const sim::EntityId entity) {
+        fighter_effect_context = render_categories::fighter_experiment() && render_categories::fighter_entities.contains(entity);
+    }
+    ~FighterEffectScope() { fighter_effect_context = previous; }
+};
 
 // Separate lightning-bolt work policy; not CPU effect-record admission.
 constexpr std::size_t healing_bolt_limit = 256;
@@ -102,7 +113,8 @@ BattleEffects::SpawnOutcome BattleEffects::spawn(const std::string& particle, co
         ++spawn_failed_[key]; ++effects_dropped_;
         return {SpawnState::refused, particles::EffectRegistry::Refusal::allocation_failed};
     }
-    backend_->set_spawn_context(particle, tick);
+    backend_->set_spawn_context(particle, tick, fighter_effect_context
+        || (render_categories::fighter_experiment() && render_categories::fighter_entities.contains(owner)));
     auto handle = registry_->spawn_authored(type->system, request_seed);
     struct Unpublished final {
         particles::EffectRegistry* registry;
@@ -543,6 +555,9 @@ void BattleEffects::remember_effect_units(const sim::tactical::TacticalSnapshot&
 template <typename SnapshotFor>
 bool BattleEffects::present_combat_effects(const platform::LiveTickEvents& record, const BoneLookup& bones, const FixedCamera& camera, SnapshotFor& snapshot_for) {
     for (const tactical::CombatEvent& event : record.combat_events) {
+        const FighterEffectScope fighter_scope(
+            event.kind == tactical::CombatEventKind::projectile_hit || event.kind == tactical::CombatEventKind::heal_pulse
+                ? event.target : sim::EntityId{});
         if (measure_owner_) {
             ++owner_counts_[0];
             if (event.kind == tactical::CombatEventKind::projectile_hit) ++owner_counts_[1];
@@ -599,7 +614,12 @@ bool BattleEffects::present_combat_effects(const platform::LiveTickEvents& recor
                 continue;
             }
             const V position = vec(event.aim);
-            const auto* terminal = particle_type(look->lifetime_detonation);
+            // WPJ-31: a land shot that met the terrain uses its ground detonation particle, and the lifetime
+            // detonation is then suppressed. Space shots never carry this reason.
+            const bool ground = live::terminal_particle(event) == live::TerminalParticle::ground;
+            const std::string& terminal_name = ground ? look->ground_detonation : look->lifetime_detonation;
+            if (ground && terminal_name.empty()) continue;
+            const auto* terminal = particle_type(terminal_name);
             if (terminal && terminal->decoration) {
                 const std::string_view culled = visibility == projectile_visibility_.end() ? "unobserved"
                     : !visibility->second.hide.drawn() ? "hidden"
@@ -611,8 +631,8 @@ bool BattleEffects::present_combat_effects(const platform::LiveTickEvents& recor
                 }
             }
             bool created = false;
-            if (!process_spawn(look->lifetime_detonation, {position.x, position.y, position.z}, {},
-                "lifetime_detonation", record.tick, sim::invalid_entity_id, 0, &created)) return false;
+            if (!process_spawn(terminal_name, {position.x, position.y, position.z}, {},
+                ground ? "ground_detonation" : "lifetime_detonation", record.tick, sim::invalid_entity_id, 0, &created)) return false;
             // WPJ-35/37: successful service is not proof that a particle was created.
             if (created) terminal_sounds_.push_back({look->projectile, {position.x, position.y, position.z},
                 (event.weapon & 0xc0000000U) == tactical::death_projectile_slot_flag});
@@ -853,6 +873,7 @@ bool BattleEffects::present_reached_effects(const std::span<const platform::Live
             if (!process_spawn(particle_name, place, {vec(axes.x), vec(axes.y), vec(axes.z)}, "asteroid", record.tick)) return false;
         }
         for (const tactical::Event& event : record.events) {
+            const FighterEffectScope fighter_scope(event.unit);
             if (measure_owner_) ++owner_counts_[2];
             if (event.kind != tactical::EventKind::unit_destroyed && event.kind != tactical::EventKind::hardpoint_destroyed
                 && event.kind != tactical::EventKind::spin_away_ended) {
@@ -953,8 +974,8 @@ bool BattleEffects::frame(const std::span<const platform::LiveTickEvents> reache
     const auto due = static_cast<std::uint64_t>(std::max(0.0, std::floor(presented_tick - *clock_start_ + 1.0e-9)));
     due_ = due;
     fold_catchup_ = particles::EffectRegistry::catchup_folding_default() && due > samples_ && due - samples_ > 2;
-    // Ordinary frames submit immediately, without a frame-end registry scan.
-    const auto frame_uploads = registry_->defer_uploads(fold_catchup_);
+    // Ordinary frames submit immediately, without a frame-end registry scan; two or more samples upload only the last pass.
+    const auto frame_uploads = registry_->defer_uploads(particles::EffectRegistry::defers_catchup_uploads(due, samples_));
     note_types(previous, latest);
     owner_setup.finish();
     FrameTimer owner_lookup(measure_owner_ ? &owner_timings_[1] : nullptr);

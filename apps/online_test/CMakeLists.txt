@@ -14,9 +14,10 @@ target_include_directories(eawr_online_test PRIVATE
 target_link_libraries(eawr_online_test PRIVATE eawr::platform_net eawr_online_test_core eawr::net eawr::platform eawr::skirmish eawr::ui_model)
 eawr_target_project_warnings(eawr_online_test)
 
-# Bundle the MSVC runtime app-local; target runtime discovery does not include it.
-# Do not change the relay preset's CRT or its other consumers.
-if(MSVC)
+# Bundle the MSVC runtime app-local when the build host can discover it.
+# A Linux cross host has neither the Visual Studio registry nor redistributable DLLs;
+# its outputs require the target machine to provide the MSVC runtime.
+if(MSVC AND CMAKE_HOST_WIN32)
     set(CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS_SKIP TRUE)
     include(InstallRequiredSystemLibraries)
 endif()

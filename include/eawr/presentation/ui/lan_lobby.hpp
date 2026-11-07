@@ -101,6 +101,9 @@ struct OnlinePageView {
 enum class OnlineHostingPhase : std::uint8_t { idle, publishing, hosted, retrying };
 [[nodiscard]] std::string_view online_hosting_notice(OnlineHostingPhase phase) noexcept;
 [[nodiscard]] std::string_view online_hosting_name(OnlineHostingPhase phase) noexcept;
+// Caption of a failure dialog on the lobby screen. An online game uses the staging header's text (host or join),
+// never the LAN lobby title.
+[[nodiscard]] std::string_view lobby_failure_caption(bool online, bool host) noexcept;
 
 // What a failed service call means to the player. Classified from the diagnostic code only, so the
 // text can never carry a password, a code or an address.
@@ -386,6 +389,25 @@ struct HostOptions {
 // The staging rows are the dialog's player gadgets: IDC_PLAYER_NAME_0, _1, ... counted from zero
 // without a gap. The count comes from the dialog the data supplies, never from a constant here.
 [[nodiscard]] std::size_t staging_row_count(std::span<const std::string> gadget_ids);
+
+// A Galactic Conquest room has one row per faction of the selected campaign, but the dialog draws only as many as it has
+// player gadgets (a mod's dialog may author four where retail has nine). What decides which rows are drawn.
+struct GalacticRowFacts {
+    bool human{};    // the room plans a player on the row
+    bool playable{}; // the row may be switched to a player
+    bool neutral{};  // never drawn
+};
+// The campaign rows in display order, one entry per drawn dialog row (at most `capacity`). When every row fits, the
+// campaign's own order is kept as it is. Otherwise neutral rows are dropped and the planned players come first, then
+// the rows a player could still take, then the AI rows, each group in campaign order, so a player's row is never the
+// one that is cut. Each entry is an index into `rows`.
+[[nodiscard]] std::vector<std::size_t> galactic_row_order(std::span<const GalacticRowFacts> rows, std::size_t capacity);
+// The campaign row drawn on dialog row `slot` (an index into the rows `order` was made from), or nothing past the drawn rows.
+[[nodiscard]] std::optional<std::size_t> galactic_row_at(std::span<const std::size_t> order, std::size_t slot) noexcept;
+// The player ID of the campaign row drawn on dialog row `slot` (`players` holds each campaign row's ID): what a dialog
+// row's buttons act on, since a dialog row is no longer its campaign row's position.
+[[nodiscard]] std::optional<std::uint32_t> galactic_slot_player(std::span<const std::size_t> order,
+                                                                 std::span<const std::uint32_t> players, std::size_t slot) noexcept;
 
 enum class RowKind : std::uint8_t { none, open, human, ai, closed = none };
 

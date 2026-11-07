@@ -35,6 +35,17 @@ HARNESS = r"""
 #include <thread>
 #include <utility>
 #include <vector>
+namespace godot { struct Engine { static Engine* get_singleton() { static Engine engine; return &engine; }
+    std::uint64_t get_process_frames() const { return 0; } }; }
+namespace render_categories {
+inline std::string_view ablation{"off"};
+inline bool fighter_experiment() { return false; }
+struct FighterWork final { std::uint64_t idle_samples{}, clip_samples{}; double sample_cpu_ms{}, palette_cpu_ms{}; };
+inline FighterWork fighter_work;
+inline std::set<std::uint64_t> fighter_entities;
+inline void begin_fighter_frame(std::uint64_t) {}
+}
+struct FrameTimer { explicit FrameTimer(double*, bool = false) {} void finish() {} };
 namespace sim { using EntityId = std::uint64_t; using AssetId = std::uint64_t;
 struct RenderInstance { EntityId entity_id{}; AssetId asset_id{}; };
 }
@@ -79,6 +90,7 @@ core::Result<int> Player::sample_position(std::uint64_t position, std::uint32_t 
 
 }
 namespace particles {
+namespace lane { inline void guard_main() {} }
 class StepExecutor {
 public:
     virtual ~StepExecutor() = default;
@@ -141,8 +153,10 @@ struct SpacePopulation {
         std::vector<std::span<const std::uint8_t>> geometry;
         animation::Pose sample;
         bool pose{}; GodotRenderer::PreparedSkinPose palette; std::string failure;
+        double fighter_sample_ms{}, fighter_palette_ms{};
     };
     std::vector<PreparedLiveClip> prepared_clips_;
+    std::vector<std::uint8_t> diagnostic_fighters_;
     std::vector<std::size_t> active_clips_;
     std::span<const LiveClipPose> pending_clip_poses_;
     void prepare_live_clip(std::size_t);
@@ -411,6 +425,7 @@ LIFECYCLE_HARNESS = r"""
 #include <set>
 #include <utility>
 #include <vector>
+namespace particles::lane { inline void guard_main() {} }
 namespace animation { struct Player {}; struct DeathFrame { bool shown = true; }; }
 struct GodotRenderer {};
 struct SpacePopulation {

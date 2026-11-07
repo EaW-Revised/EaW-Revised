@@ -162,6 +162,10 @@ namespace clip_types { constexpr int deploy = 1, undeploy = 2; }
 std::optional<int> clip_type_index(const char*) { return 1; }
 template<class F> std::vector<std::string> model_clip_paths(const std::string&, int, F, const std::string&) { return {}; }
 }
+namespace core::load_profile {
+inline void slot_composed(std::string_view, std::string_view) {}
+inline void slot_grown(std::string_view) {}
+}
 float to_float(sim::math::Fixed value) { return static_cast<float>(value.raw); }
 std::string space_model_path(int) { return {}; }
 std::string tag_text(int, const char*) { return {}; }
@@ -235,12 +239,18 @@ struct LiveSessionView {
     std::map<tactical::TypeId, const units::UnitType*> presentation_types_;
     std::map<sim::EntityId, int> arrivals_;
     void add_launch_slot(const vfs::Vfs&, const data::Catalog&, const std::string&, const skirmish::StartUnit&,
-        const std::optional<skirmish::LobbyColour>&, tactical::TypeId = 0, bool = false);
+        const std::optional<skirmish::LobbyColour>&, tactical::TypeId = 0, bool = false, std::string_view = "launch");
+    void note_spawned(tactical::TypeId) const {}
     std::optional<std::size_t> grow_launch_slot(sim::EntityId, tactical::TypeId, tactical::PlayerId);
     void prepare_launch_slots(const vfs::Vfs& filesystem, const data::Catalog& catalog,
                               std::optional<battle::ArrivalPlan> selected);
     bool warm_campaign_slots(BattleScene&, GodotRenderer&);
     std::optional<std::size_t> ship_of(sim::EntityId entity, tactical::TypeId type, tactical::PlayerId owner);
+    std::set<tactical::TypeId> launch_slot_types_;
+    std::set<std::pair<tactical::PlayerId, tactical::TypeId>> launch_demand_;
+    bool launch_demand_valid_{};
+    bool launch_demanded(tactical::PlayerId owner, tactical::TypeId type);
+    bool container_without_slot(tactical::TypeId type) const;
     std::string slotless_report_rows() const;
     std::size_t slotless_units() const {
         std::size_t total = 0;
@@ -253,9 +263,11 @@ struct LiveSessionView {
         }));
     }
 };
+__SOURCE_LABEL__
 __ADD_SLOT__
 __PREPARE__
 __WARM__
+__P1__
 __GROW__
 __BIND_IDENTITY__
 __SHIP_OF__
@@ -338,6 +350,49 @@ __STORAGE__
 int main() {
     if (!storage_contract()) return 99;
     const vfs::Vfs filesystem; const data::Catalog catalog;
+    {
+        // P1: a squadron container with no slot of its type early-outs; the original path (forced by a slot-type entry)
+        // gives the same result and the same state: nullopt and the one slotless note, nothing else touched.
+        const auto container = skirmish::type_id("XWing_Squadron");
+        auto early = session(false);
+        auto fallback = session(false);
+        fallback.launch_slot_types_.insert(container);
+        if (!early.container_without_slot(container) || fallback.container_without_slot(container)) return 70;
+        if (early.container_without_slot(skirmish::type_id("Corvette"))) return 71;   // a ship is never a container
+        const auto shape = [](const LiveSessionView& view) {
+            return std::make_tuple(view.launch_slots_.size(), view.ship_of_entity_.size(), view.launched_ship_of_entity_.size(),
+                view.death_clones_.size(), view.slot_identity_of_entity_.size(), view.arrival_slots_.undrawn,
+                view.real_peak_, view.identity_fallbacks_, view.placed_ships_.size());
+        };
+        const auto before = shape(early);
+        for (const sim::EntityId entity : {31000ULL, 31001ULL, 31000ULL}) {
+            if (early.ship_of(entity, container, 1) || fallback.ship_of(entity, container, 1)) return 72;
+            if (early.ship_of(entity, container, 2) || fallback.ship_of(entity, container, 2)) return 73;
+        }
+        if (shape(early) != before || shape(early) != shape(fallback)) return 74;
+        if (early.slotless_hits_ != fallback.slotless_hits_ || early.slotless_hits_.size() != 2
+            || !early.slotless_hits_.at({1, container}).contains(31000) || early.slotless_hits_.at({1, container}).size() != 2) return 75;
+        // A container with a slot of its own type is no early-out: it binds, as before.
+        auto slotted = session(false);
+        slotted.launch_slots_.push_back({container, 0, false, std::nullopt, 0, 1, false});
+        slotted.launch_slot_types_.insert(container);
+        if (slotted.container_without_slot(container)) return 76;
+        if (!slotted.ship_of(32000, container, 1) || !slotted.launched_ship_of_entity_.contains(32000)) return 77;
+        // The launch-demand set answers like the plan scan, for every row, an unplanned type and another owner.
+        auto planned = session(false);
+        planned.arrival_slots_.plan.add(1, "XWing", 3, battle::ArrivalSource::launch, 100);
+        planned.arrival_slots_.plan.add(2, "TIE", 3, battle::ArrivalSource::launch, 200);
+        planned.arrival_slots_.plan.add(1, "Tartan", 3, battle::ArrivalSource::purchase, 100);
+        for (const auto& [owner, name] : {std::pair{1, "XWing"}, {2, "TIE"}, {1, "Tartan"}, {2, "XWing"}, {1, "Corvette"}}) {
+            const bool scanned = std::any_of(planned.arrival_slots_.plan.rows.begin(), planned.arrival_slots_.plan.rows.end(),
+                [&](const auto& row) { return row.source == battle::ArrivalSource::launch && row.owner == owner
+                    && skirmish::type_id(row.type) == skirmish::type_id(name); });
+            if (planned.launch_demanded(owner, skirmish::type_id(name)) != scanned) return 78;
+        }
+        planned.arrival_slots_.plan.add(2, "Tartan", 1, battle::ArrivalSource::launch, 200);  // rows change: prepare resets the index
+        planned.launch_demand_valid_ = false;
+        if (!planned.launch_demanded(2, skirmish::type_id("Tartan"))) return 79;
+    }
     // Arrival-plan selection (#4278): the start's own rows win unless they are empty or the setup is campaign.
     const auto same_plan = [](const battle::ArrivalPlan& left, const battle::ArrivalPlan& right) {
         if (left.rows.size() != right.rows.size()) return false;
@@ -612,6 +667,7 @@ class LiveLaunchSlotRoster(unittest.TestCase):
         defaults = live_option_defaults()
         source = source_text('apps/viewer/src/live_session_fighters.cpp')
         add_slot = extract_function(source, 'void LiveSessionView::add_launch_slot(')
+        source_label = extract_function(source, 'std::string_view source_label(')
         grow = extract_function(source, 'std::optional<std::size_t> LiveSessionView::grow_launch_slot(')
         header = (ROOT / 'include/eawr/battle/arrival_plan.hpp').read_text()
         header = '\n'.join(line for line in header.splitlines() if not line.startswith('#'))
@@ -633,6 +689,8 @@ class LiveLaunchSlotRoster(unittest.TestCase):
         select = extract_function(source_text('apps/viewer/src/battle_source.cpp'),
                                   'void BattleSourceState::select_arrivals(')
         ship_of = extract_function(source, 'std::optional<std::size_t> LiveSessionView::ship_of(')
+        p1_index = (extract_function(source, 'bool LiveSessionView::launch_demanded(')
+                    + extract_function(source, 'bool LiveSessionView::container_without_slot('))
         bind_identity = extract_function(source, 'LiveSessionView::LaunchSlot& LiveSessionView::bind_slot_identity(')
         rows = extract_function(source_text('apps/viewer/src/live_session_report.cpp'),
                                 'std::string LiveSessionView::slotless_report_rows() const')
@@ -696,7 +754,7 @@ bool storage_contract() {
             directory = Path(temp)
             cpp = directory / 'launch_slots.cpp'
             exe = directory / ('launch_slots.exe' if os.name == 'nt' else 'launch_slots')
-            cpp.write_text(HARNESS.replace('__DEF_WARM__', str(defaults['warm_launches'])).replace('__DEF_PURCHASE__', str(defaults['purchase_slots'])).replace('__DEF_BUDGET__', str(defaults['arrival_slot_budget'])).replace('__STORAGE__', storage).replace('__ARRIVAL_HEADER__', header).replace('__ARRIVAL_IMPL__', plan).replace('__ADD_SLOT__', add_slot).replace('__GROW__', grow).replace('__PREPARE__', prepare).replace('__WARM__', warm).replace('__CAMPAIGN_HEADER__', campaign_header).replace('__WARM_HEADER__', warm_header).replace('__DEVICE_HEADER__', device_header).replace('__SELECT__', select).replace('__BIND_IDENTITY__', bind_identity).replace('__SHIP_OF__', ship_of).replace('__ROWS__', rows), encoding='utf-8')
+            cpp.write_text(HARNESS.replace('__DEF_WARM__', str(defaults['warm_launches'])).replace('__DEF_PURCHASE__', str(defaults['purchase_slots'])).replace('__DEF_BUDGET__', str(defaults['arrival_slot_budget'])).replace('__STORAGE__', storage).replace('__ARRIVAL_HEADER__', header).replace('__ARRIVAL_IMPL__', plan).replace('__SOURCE_LABEL__', source_label).replace('__ADD_SLOT__', add_slot).replace('__GROW__', grow).replace('__PREPARE__', prepare).replace('__WARM__', warm).replace('__CAMPAIGN_HEADER__', campaign_header).replace('__WARM_HEADER__', warm_header).replace('__DEVICE_HEADER__', device_header).replace('__SELECT__', select).replace('__BIND_IDENTITY__', bind_identity).replace('__SHIP_OF__', ship_of).replace('__P1__', p1_index).replace('__ROWS__', rows), encoding='utf-8')
             compile_fixture(toolchain, cpp, exe)
             ran = subprocess.run([str(exe)], capture_output=True, text=True, timeout=10)
             self.assertEqual(ran.returncode, 0, ran.stdout + ran.stderr)

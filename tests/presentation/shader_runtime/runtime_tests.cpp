@@ -68,6 +68,7 @@ int main(int argc, char** argv) {
     try {
         Runtime runtime;
         require(runtime.status() == Status::disabled, "construction must not activate translation");
+        require(runtime.verified_lock_sha256().empty(), "disabled runtime has no pin attestation");
         require(!runtime.public_export(Backend::vkd3d, "vkd3d_shader_compile"), "disabled export");
         std::filesystem::path real_package;
         if (argc == 3 && std::string_view(argv[1]) == "--package") real_package = argv[2];
@@ -84,6 +85,7 @@ int main(int argc, char** argv) {
         if (!real_package.empty()) {
             const auto loaded = runtime.open(real_package);
             require(loaded == Status::ready, runtime.diagnostic().c_str());
+            require(runtime.verified_lock_sha256() == "816fedd1459ea0f0a2f9cad0a05ba38673c230f29f26fea8c543e74a2982dfbc", "complete reviewed package attested");
             Runtime second;
             require(second.open(real_package) == Status::ready, "second package owner");
 #ifdef _WIN32
@@ -108,6 +110,19 @@ int main(int argc, char** argv) {
         require(runtime.open(root / "absent") == Status::missing_package, "missing optional package");
         require(runtime.open(root) != Status::ready, "empty optional package");
 #ifdef _WIN32
+        {
+            const auto inert = root / "inert";
+            std::filesystem::create_directory(inert);
+            const std::vector<std::uint8_t> bytes{'n', 'o', 't', '-', 'a', '-', 'P', 'E'};
+            const auto hash = eawr::core::sha256_hex(bytes);
+            for (const auto* name : {"libvkd3d-shader-1.dll", "libspirv-cross-c-shared.dll"}) {
+                std::ofstream file(inert / name, std::ios::binary);
+                file.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+            }
+            const std::array<RuntimeFile, 2> identity{{{"libvkd3d-shader-1.dll", hash, bytes.size()}, {"libspirv-cross-c-shared.dll", hash, bytes.size()}}};
+            require(runtime.open(inert, identity) == Status::load_failure, "native load failure differs from missing export");
+            require(runtime.verified_lock_sha256().empty(), "refused runtime has no pin attestation");
+        }
         if (argc == 4) {
             const std::filesystem::path fake(argv[1]);
             std::ifstream input(fake, std::ios::binary);

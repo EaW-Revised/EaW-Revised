@@ -33,6 +33,7 @@ private:
 struct CorruptionPlanetFact final {
     ObjectId planet{};
     bool corrupted{}, transitioning{}, increasing{};
+    std::uint8_t type{}; // sim corruption type of the planet's current state, 0 none
     std::string particle_type;
     std::optional<float> brightness, scale, energy;
     float fraction{1.0F};
@@ -101,6 +102,7 @@ inline void observed_corruption(
         const auto transition = transitions.find(fact.planet);
         if (transition != transitions.end()) {
             const auto& state = transition->second->transition;
+            fact.type = static_cast<std::uint8_t>(state.current);
             fact.transitioning = state.active(); fact.increasing = state.increasing;
             fact.source_nonempty = state.current != sim::galactic::corruption_fixture::Type::none;
             fact.target_nonempty = fact.transitioning

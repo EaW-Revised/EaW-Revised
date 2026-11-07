@@ -89,6 +89,7 @@ core::Result<GalacticSession::NativeFleetReceipt> launch_native_surface_units(Ow
     for (const auto& row : found) {
         auto& landed = native_owner.control->planets[row.planet].landed;
         landed.erase(std::find_if(landed.begin(), landed.end(), [&](const auto& unit) { return unit.id == row.id; }));
+        std::erase_if(native_owner.control->planets[row.planet].ground_layout, [&](const auto& entry) { return entry.object == row.id; });
     }
     native_owner.dirty[static_cast<std::size_t>(StateSection::control)] = true;
     if (native_owner.observer) {

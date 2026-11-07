@@ -158,7 +158,7 @@ bool MapParticleProvider::prepare(const assets::Map& map, const scene::Scene& bu
                 current.emitters.push_back({.index = plan.emitter_index,
                     .blend = std::string(GodotParticleBackend::material_adapter_name(plan.blend)),
                     .resource = found == resources.end() ? 0 : found->resource,
-                    .fog_handle = found == resources.end() ? 0 : found->fog_handle});
+                    .fog_handle = found == resources.end() ? 0 : found->fog_handle, .fog_source_sha256 = {}});
             }
             if (!plan.drawable) {
                 std::string cause = plan.cause;
@@ -205,7 +205,7 @@ particles::AttachmentLifecycle::Spawn MapParticleProvider::owned_spawner(const s
             emitters.push_back({.index = emitter.emitter_index,
                 .blend = std::string(GodotParticleBackend::material_adapter_name(emitter.blend)),
                 .resource = found == resources.end() ? 0 : found->resource,
-                .fog_handle = found == resources.end() ? 0 : found->fog_handle});
+                .fog_handle = found == resources.end() ? 0 : found->fog_handle, .fog_source_sha256 = {}});
         }
         // The report names the newest generation's emitter resources.
         placements_[placement].emitters = std::move(emitters);
@@ -463,7 +463,7 @@ void MapParticleProvider::start_attached(const particles::MapEffectPlan& plan, c
         current.emitters.push_back({.index = emitter.emitter_index,
             .blend = std::string(GodotParticleBackend::material_adapter_name(emitter.blend)),
             .resource = found == resources.end() ? 0 : found->resource,
-            .fog_handle = found == resources.end() ? 0 : found->fog_handle});
+            .fog_handle = found == resources.end() ? 0 : found->fog_handle, .fog_source_sha256 = {}});
     }
     if (current.causes.empty()) current.status = "ready";
 

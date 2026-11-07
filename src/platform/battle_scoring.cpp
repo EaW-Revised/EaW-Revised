@@ -1,4 +1,6 @@
 #include "eawr/platform/battle_scoring.hpp"
+#include "eawr/data/xml.hpp"
+#include "eawr/vfs/vfs.hpp"
 #include <iomanip>
 #include <limits>
 

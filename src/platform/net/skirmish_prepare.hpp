@@ -3,7 +3,9 @@
 #include "eawr/presentation/ui/lan_lobby.hpp"
 #include "eawr/units/unit_tables.hpp"
 #include <optional>
+#include <atomic>
 #include <set>
+namespace eawr::scene { class ModelPrefetch; }
 namespace eawr::presentation::godot_backend {
 // LLB-18: one row control model for editing, canonical staging and match preparation.
 using LanSeatKind = presentation::ui::RowKind;
@@ -32,7 +34,9 @@ struct PreparedSkirmish {
     PreparedSkirmish& operator=(const PreparedSkirmish&) = delete;
 };
 [[nodiscard]] std::optional<units::UnitTables> load_start_tables(const vfs::Vfs&, const data::Catalog&,
-    std::string& failure, const std::string& map, const std::set<std::string>& additional_types = {});
+    std::string& failure, const std::string& map, const std::set<std::string>& additional_types = {},
+    scene::ModelPrefetch* prefetch = nullptr, // prefetch: decode-ahead for the unit models, attract load only
+    const std::atomic<bool>* cancel = nullptr); // cancel: the attract worker's stop flag (the load fails as cancelled)
 using skirmish::missing_start_types;
 [[nodiscard]] core::Result<PreparedSkirmish> prepare_skirmish(const skirmish::Fixture&, const vfs::Vfs&, const data::Catalog&);
 [[nodiscard]] core::Result<PreparedSkirmish> prepare_skirmish(const skirmish::Fixture&, units::UnitTables, skirmish::StartInputs);

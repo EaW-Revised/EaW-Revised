@@ -1,3 +1,5 @@
+#include "eawr/units/content_selection.hpp"
+#include "eawr/vfs/vfs.hpp"
 #include "eawr/assets/map.hpp"
 #include "eawr/units/unit_tables.hpp"
 #include "unit_internal.hpp"
@@ -115,6 +117,9 @@ std::optional<core::Diagnostic> bind_projectile_flight(const Projectile& project
         }
         if (const auto reason = tactical::flight_profile_error(flight); !reason.empty())
             return failure("projectile '" + projectile.id + "': " + std::string(reason));
+        // #5696: only a lenient load (notes present) takes retail's unchecked lifetime; strict keeps the old 3600 s bound.
+        if (notes == nullptr && flight.lifetime && flight.lifetime->raw() > 3600 * Fixed::scale)
+            return failure("projectile '" + projectile.id + "': Projectile_Max_Lifetime outside supported [0, 3600] seconds");
         shot.flight = flight;
     }
     return std::nullopt;
@@ -137,6 +142,25 @@ struct ShotProfileBuilder final {
         tactical::ShotProfile shot;
         shot.damage = weapon.damage && weapon.damage->raw() > 0 ? *weapon.damage : projectile.damage.value_or(Fixed{});
         shot.blast = projectile.blast; // WAD-02/36: independent of instance direct damage
+        // #5724: a tolerant load saturates a hit damage above the sim's fixed-point bound (debug build: the tag is an
+        // unchecked float, no range message exists; the authored value far exceeds any health). A note names it;
+        // strict loads keep refusing.
+        if (notes != nullptr) {
+            constexpr auto damage_limit = tactical::max_hit_damage * Fixed::scale;
+            const auto saturate = [&](Fixed& value, const char* tag) {
+                if (value.raw() <= damage_limit) return;
+                auto note = failure("projectile '" + projectile.id + "' authors " + tag + " "
+                    + std::to_string(value.raw() / Fixed::scale) + " above the supported "
+                    + std::to_string(tactical::max_hit_damage) + "; it saturates there");
+                note.severity = core::Severity::warning;
+                const bool known = std::any_of(notes->begin(), notes->end(),
+                    [&](const core::Diagnostic& other) { return other.message == note.message; });
+                if (!known) notes->push_back(std::move(note));
+                value = Fixed::from_raw(damage_limit);
+            };
+            saturate(shot.damage, "Projectile_Damage");
+            saturate(shot.blast.damage, "Projectile_Blast_Area_Damage");
+        }
         shot.damage_delay = projectile.damage_delay;
         shot.damage_type = types.damage(!weapon.damage_type.empty() ? weapon.damage_type : projectile.damage_type);
         shot.speed = *projectile.max_speed;
@@ -293,7 +317,8 @@ std::optional<core::Diagnostic> append_hardpoint_combat_profiles(const UnitType&
     const PointPlacement& place, const WeaponProfileBuilder& weapon_profile, const ShotProfileBuilder& shot_profile,
     const ProjectilePower& projectile_power, const Fixed& power_sum, const std::optional<std::uint32_t>& barrage_projectile,
     const std::map<std::size_t, std::uint32_t>::iterator& override_projectile,
-    const std::map<std::size_t, std::uint32_t>& ion_override, std::vector<core::Diagnostic>* notes) {
+    const std::map<std::size_t, std::uint32_t>& ion_override, std::vector<core::Diagnostic>* notes,
+    core::LoadNoteBuffer* load_notes) {
     for (std::uint32_t index = 0; index < unit.hardpoints.size(); ++index) {
         const auto& hardpoint = unit.hardpoints[index];
         profile.hardpoint_meshes.push_back(hardpoint.collision_mesh);
@@ -379,11 +404,19 @@ std::optional<core::Diagnostic> append_hardpoint_combat_profiles(const UnitType&
             }
         }
         if (power_sum.raw() > 0 && unit.ai_combat_power) {
-            auto share = sim::math::divide(projectile_power(hardpoint), power_sum);
-            auto power = share ? sim::math::multiply(share.value(), *unit.ai_combat_power) : share;
-            if (!power) return failure(unit.id + " " + hardpoint.id + " AI combat power: "
-                                                       + power.error().message);
-            entry.value().ai_combat_power = std::max(power.value(), Fixed{});
+            const auto object = unit.id + " " + hardpoint.id;
+            const auto context = object + " AI combat power: ";
+            const auto projectile_rating = projectile_power(hardpoint);
+            const auto share = saturated_power(sim::math::divide(projectile_rating, power_sum),
+                projectile_rating.raw() < 0, object, std::to_string(projectile_rating.raw()) + " / "
+                    + std::to_string(power_sum.raw()), context, diagnostic_codes::combat, load_notes);
+            const auto power = saturated_power(sim::math::multiply(share, *unit.ai_combat_power),
+                (share.raw() < 0) != (unit.ai_combat_power->raw() < 0), object,
+                std::to_string(share.raw()) + " * " + std::to_string(unit.ai_combat_power->raw()),
+                context, diagnostic_codes::combat, load_notes);
+            entry.value().ai_combat_power = bounded_power(std::max(power, Fixed{}), object,
+                "combat table: type " + std::to_string(profile.type_id) + ": invalid weapon "
+                    + std::to_string(index), diagnostic_codes::combat, load_notes);
         }
         auto shot = shot_profile(weapon, true);
         if (!shot) return shot.error();
@@ -634,23 +667,52 @@ std::optional<core::Diagnostic> bind_combat_profile_identity(const UnitType& uni
     // WST-07/08: the type-level reveal range, whether or not the type has REVEAL.
     profile.target_stealth = unit.target_stealth_units;
     if (unit.target_stealth_units) profile.stealth_detection_range = unit.fow_reveal_range.value_or(Fixed{});
+    std::uint32_t death_slot = 0;
     for (const auto index : unit.death_projectile_indices) {
+        const auto slot = death_slot++;
         Weapon payload;
         payload.projectile_index = index;
         auto shot = shot_profile(payload, false);
         if (!shot) return shot.error();
-        if (!shot.value()) return failure(unit.id + ": unresolved Death_Projectiles entry");
+        if (!shot.value()) {
+            // #5696: a Death_Projectiles name that no projectile (with a speed) answers spawns nothing at death;
+            // a tolerant load drops that entry and keeps the type.
+            if (shot_profile.notes == nullptr) return failure(unit.id + ": unresolved Death_Projectiles entry");
+            auto note = failure("unit type '" + unit.id + "' Death_Projectiles entry"
+                + " names no projectile with a speed: the entry is dropped");
+            note.severity = core::Severity::warning;
+            shot_profile.notes->push_back(std::move(note));
+            continue;
+        }
         profile.death_projectiles.push_back(*shot.value());
+        profile.death_projectile_slots.push_back(slot);
     }
+    // WAR-108: the death draw covers every authored entry; keep the slots only when one was dropped.
+    if (profile.death_projectiles.size() == unit.death_projectile_indices.size()) profile.death_projectile_slots.clear();
+    else profile.death_projectile_authored = static_cast<std::uint32_t>(unit.death_projectile_indices.size());
+    // #5696 rule: UNVERIFIED - retail may have no load check for Retreat_Self_Destruct_Explosion (inferred from the absence
+    // of a validation string in the debug build; the parse itself was not decompiled). An unresolved name leaves the
+    // station without a retreat blast (RP-09). Strict refuses, a tolerant load keeps the type and notes it.
+    const auto unresolved_retreat = [&]() -> std::optional<core::Diagnostic> {
+        if (shot_profile.notes == nullptr) return failure(unit.id + ": unresolved Retreat_Self_Destruct_Explosion");
+        auto note = failure("unit type '" + unit.id + "' Retreat_Self_Destruct_Explosion '" + unit.retreat_self_destruct
+            + "' names no projectile with a speed: no retreat blast");
+        note.severity = core::Severity::warning;
+        shot_profile.notes->push_back(std::move(note));
+        return std::nullopt;
+    };
     if (unit.retreat_self_destruct_index != no_index) {
         Weapon payload;
         payload.projectile_index = unit.retreat_self_destruct_index;
         auto shot = shot_profile(payload, false);
         if (!shot) return shot.error();
-        if (!shot.value()) return failure(unit.id + ": unresolved Retreat_Self_Destruct_Explosion");
-        profile.retreat_explosion = *shot.value();
+        if (!shot.value()) {
+            if (auto refused = unresolved_retreat()) return refused;
+        } else {
+            profile.retreat_explosion = *shot.value();
+        }
     } else if (!unit.retreat_self_destruct.empty()) {
-        return failure(unit.id + ": unresolved Retreat_Self_Destruct_Explosion");
+        if (auto refused = unresolved_retreat()) return refused;
     }
     profile.max_attack_distance = unit.targeting_max_attack_distance;
     profile.stickiness = unit.targeting_stickiness_seconds.value_or(Fixed{}); // WCC-15
@@ -668,8 +730,11 @@ std::optional<core::Diagnostic> bind_combat_profile_identity(const UnitType& uni
 
 core::Result<tactical::CombatTable> combat_table(const UnitTables& tables, const ContentErrors policy,
     std::vector<core::Diagnostic>* const skipped, core::LoadNoteBuffer* load_notes) {
-    (void)load_notes;
+    core::LoadNoteBuffer ignored_notes;
+    auto& load = load_notes ? *load_notes : ignored_notes;
     using Result = core::Result<tactical::CombatTable>;
+    const ContentTypeSelection type_selection(tables);
+    type_selection.emit_notes(tables, diagnostic_codes::combat, load_notes);
     const CategoryBits category_bits{tables};
 
     const auto types = damage_type_index(tables);
@@ -683,11 +748,16 @@ core::Result<tactical::CombatTable> combat_table(const UnitTables& tables, const
     // override projectile from their hardpoints while it is on; craft unit index -> projectile.
     std::map<std::size_t, std::uint32_t> ion_override;
     for (const auto& squadron : tables.units) {
+        if (!type_selection.keeps(squadron)) continue;
         if (squadron.kind != UnitKind::squadron) continue;
         for (const auto& ability : squadron.team_abilities) {
             if (!same_name(ability.type, "ION_CANNON_SHOT") || ability.projectile_index == no_index) continue;
             for (const auto& member : squadron.members) {
-                if (member.craft_index != no_index) ion_override.emplace(member.craft_index, ability.projectile_index);
+                if (member.craft_index < tables.units.size()) {
+                    const auto* winner = type_selection.find(tables.units[member.craft_index].id);
+                    const auto winner_index = static_cast<std::size_t>(winner - tables.units.data());
+                    ion_override.emplace(winner_index, ability.projectile_index);
+                }
             }
         }
     }
@@ -712,7 +782,7 @@ core::Result<tactical::CombatTable> combat_table(const UnitTables& tables, const
     // One unit type's rows, built whole before any is added: a type that fails adds nothing.
     const auto build_unit = [&](const std::size_t unit_index) -> std::optional<core::Diagnostic> {
         const auto& unit = tables.units[unit_index];
-        const auto footprint = detail::space_footprint(unit.id, unit.scale_factor, unit.footprint);
+        const auto footprint = detail::space_footprint(unit.id, unit.scale_factor, unit.footprint, load);
         if (!footprint) return footprint.error();
         if (unit.kind == UnitKind::squadron) {
             tactical::CombatProfile company;
@@ -748,17 +818,34 @@ core::Result<tactical::CombatTable> combat_table(const UnitTables& tables, const
         const ProjectilePower projectile_power{tables};
         Fixed power_sum{};
         for (const auto& hardpoint : unit.hardpoints) {
-            auto sum = sim::math::add(power_sum, projectile_power(hardpoint));
-            if (!sum) return failure(unit.id + " AI combat power: " + sum.error().message);
-            power_sum = sum.value();
+            power_sum = add_power(power_sum, projectile_power(hardpoint), unit.id,
+                unit.id + " AI combat power: ", diagnostic_codes::combat, load_notes);
         }
         if (auto phase_error = append_hardpoint_combat_profiles(unit, profile, place, weapon_profile, shot_profile,
-                projectile_power, power_sum, barrage_projectile, override_projectile, ion_override, skipped))
+                projectile_power, power_sum, barrage_projectile, override_projectile, ion_override, skipped, load_notes))
             return phase_error;
         if (auto phase_error = append_object_combat_weapon(unit, profile, place, weapon_profile, shot_profile, barrage_projectile))
             return phase_error;
         if (auto phase_error = append_combat_collision_geometry(unit, profile, place))
             return phase_error;
+        if (shot_profile.notes != nullptr && profile.collision) {
+            // #5704: a scaled backdrop (Scale_Factor 300 on a planet model) can span more than the combat domain; retail
+            // has no such limit. A tolerant load leaves the prop without a collision box and meshes, with a note.
+            const auto limit = tactical::max_combat_distance * Fixed::scale;
+            const auto inside = [&](const Vec3& p) {
+                return p.x.raw() >= -limit && p.x.raw() <= limit && p.y.raw() >= -limit && p.y.raw() <= limit
+                    && p.z.raw() >= -limit && p.z.raw() <= limit;
+            };
+            if (!inside(profile.collision->min) || !inside(profile.collision->max)) {
+                profile.collision.reset();
+                profile.meshes.clear();
+                profile.mesh_bounds.reset();
+                auto note = failure("unit type '" + unit.id + "' collision box exceeds the supported combat domain: "
+                    "the type keeps no collision box (retail has no such limit)");
+                note.severity = core::Severity::warning;
+                shot_profile.notes->push_back(std::move(note));
+            }
+        }
         table.footprints.push_back({footprint.value().type_id, footprint.value().radius,
             footprint.value().x_extent, footprint.value().y_extent});
         if (unit.unit_ai) table.unit_ai_types.push_back(assets::object_type_crc(unit.id));
@@ -767,10 +854,11 @@ core::Result<tactical::CombatTable> combat_table(const UnitTables& tables, const
         return std::nullopt;
     };
     for (std::size_t unit_index = 0; unit_index < tables.units.size(); ++unit_index) {
+        if (!type_selection.keeps(tables.units[unit_index])) continue;
         auto error = build_unit(unit_index);
         if (!error) continue;
         // Content-error policy (#4589): FoC loads a game with a bad object in it. A lenient load skips that
-        // type, reports it, and fails only a battle that places it; strict (the default) refuses the table.
+        // type and reports it; AG-11 omits its placements and launches. Strict refuses the table.
         if (policy == ContentErrors::strict) return Result::failure(std::move(*error));
         error->message = "skipped unit type '" + tables.units[unit_index].id + "': " + error->message;
         if (skipped != nullptr) skipped->push_back(std::move(*error));
@@ -791,6 +879,7 @@ core::Result<tactical::CombatTable> combat_table(const UnitTables& tables, const
         auto& set = table.priority_sets[target];
         set.unlisted = unlisted_priority;
         for (const auto& unit : tables.units) {
+            if (!type_selection.keeps(unit)) continue;
             set.rows.push_back({assets::object_type_crc(unit.id), attack_priority(tables.priority_sets[source], unit)});
         }
         std::sort(set.rows.begin(), set.rows.end(),
@@ -820,7 +909,7 @@ core::Result<tactical::CombatTable> combat_table(const UnitTables& tables, const
             if (skipped != nullptr) {
                 std::string name = "type " + std::to_string(candidate.type_id);
                 for (const auto& unit : tables.units) {
-                    if (assets::object_type_crc(unit.id) == candidate.type_id) name = "'" + unit.id + "'";
+                    if (type_selection.keeps(unit) && assets::object_type_crc(unit.id) == candidate.type_id) name = "'" + unit.id + "'";
                 }
                 skipped->push_back(failure("skipped unit type " + name + ": " + alone.error().message));
             }

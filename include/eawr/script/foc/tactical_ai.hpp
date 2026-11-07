@@ -32,6 +32,10 @@
 #include <string>
 #include <string_view>
 #include <vector>
+#include <variant>
+#include <stdexcept>
+#include <type_traits>
+#include <utility>
 
 namespace eawr::script::foc {
 // FC-76: synchronized scoring seconds use single-precision integer conversion
@@ -60,6 +64,7 @@ inline constexpr std::string_view verb_reinforce = "foc.reinforce";
 inline constexpr std::string_view verb_ability = "foc.ability"; // issuer, unit, AbilityKind, AbilityAction (#76)
 inline constexpr std::string_view verb_reveal_all = "foc.reveal_all"; // issuer, player (V-20)
 inline constexpr std::string_view verb_special_fire = "foc.special_fire"; // issuer, source, target, admission (WSW-40/41)
+inline constexpr std::string_view verb_make_invulnerable = "foc.make_invulnerable"; // issuer, unit, enabled (TL-03)
 inline constexpr std::string_view verb_campaign_retreat = "foc.campaign_retreat"; // issuer, owning campaign translates
 
 // Event producer of the engine side (EventKey::producer).
@@ -95,6 +100,7 @@ struct AiType {
     bool corrupt_systems_script{};    // WHE-67: ObjectScript_IG2000 proximity/area activation
     bool locomotor{};                 // BEHAVIOR_LOCO: it has a motion profile or is a squadron
     bool star_base{};                 // BEHAVIOR_DUMMY_STAR_BASE
+    bool selectable{};                // WSU-21: SELECTABLE behaviour in the battle domain (Is_Selectable)
     bool space_special_weapon{};     // WSW-47: existing planetary source, available for attachment
     // Goal system and perception inputs (#449).
     bool space_evaluator{};           // Has_Space_Evaluator: a space goal target (GS-10)
@@ -171,6 +177,9 @@ public:
         const std::map<std::string, std::string, std::less<>>& xml);
     // `player_type` is an AIPlayerType name, any case.
     [[nodiscard]] AiDifficultyAdjustment resolve(std::string_view player_type, sim::tactical::AiLevel level) const;
+    // The entry names a player type maps Easy, Normal and Hard to, as authored in difficultyadjustments.xml; a level
+    // the type does not author, or whose entry the file lacks, is an empty name. An unknown type gives three.
+    [[nodiscard]] std::array<std::string, 3> level_entries(std::string_view player_type) const;
 
 private:
     struct Data;
@@ -275,6 +284,25 @@ struct AiEvaluatorStats {
 };
 
 struct AiJournal {
+    // Serial barrier owner only. GC decisions never read these observer rows
+    // during a phase. Defer intents rather than copy retained history: folding
+    // proposals and bounded diagnostic eviction cannot be undone by truncation.
+    class PhaseSavepoint;
+    AiJournal() = default;
+    AiJournal(const AiJournal& other)
+        : plans(other.plans), evaluators(other.evaluators), proposals(other.proposals),
+          costs(other.costs), services(other.services), plans_dropped(other.plans_dropped),
+          costs_dropped(other.costs_dropped), services_dropped(other.services_dropped) {}
+    AiJournal& operator=(const AiJournal& other) {
+        if (this == &other) return *this;
+        if (phase_) throw std::logic_error("cannot replace an active AI journal");
+        plans = other.plans; evaluators = other.evaluators; proposals = other.proposals;
+        costs = other.costs; services = other.services;
+        plans_dropped = other.plans_dropped; costs_dropped = other.costs_dropped;
+        services_dropped = other.services_dropped;
+        return *this;
+    }
+    [[nodiscard]] std::unique_ptr<PhaseSavepoint> begin_phase();
     std::vector<PlanEvent> plans;
     AiEvaluatorStats evaluators;
     std::map<std::string, AiProposalSummary> proposals;
@@ -285,10 +313,45 @@ struct AiJournal {
     std::uint64_t costs_dropped{};
     std::uint64_t services_dropped{};
     void append_plan(PlanEvent row) {
-        if (row.plan == proposal_trace_plan) { fold_proposal(std::move(row)); return; }
-        append_ai_diagnostic(plans, plans_dropped, std::move(row));
+        if (phase_) { phase_->emplace_back(PlanIntent{PlanKind::normal, std::move(row)}); return; }
+        append_plan_now(std::move(row));
+    }
+    // Preserve the existing raw diagnostic path (including proposal rows).
+    void append_raw_plan(PlanEvent row) {
+        if (phase_) { phase_->emplace_back(PlanIntent{PlanKind::raw, std::move(row)}); return; }
+        plans.push_back(std::move(row));
+    }
+    void set_evaluators(AiEvaluatorStats row) {
+        if (defer(row)) return;
+        evaluators = row;
     }
     void fold_proposal(PlanEvent row) {
+        if (phase_) { phase_->emplace_back(PlanIntent{PlanKind::fold, std::move(row)}); return; }
+        fold_proposal_now(std::move(row));
+    }
+    void append_cost(AiTickCost row) {
+        if (defer(row)) return;
+        append_ai_diagnostic(costs, costs_dropped, std::move(row));
+    }
+    void append_service(AiServiceEvent row) {
+        if (defer(row)) return;
+        append_ai_diagnostic(services, services_dropped, std::move(row));
+    }
+private:
+    enum class PlanKind { normal, raw, fold };
+    struct PlanIntent { PlanKind kind; PlanEvent row; };
+    using Intent = std::variant<PlanIntent, AiTickCost, AiServiceEvent, AiEvaluatorStats>;
+    std::vector<Intent>* phase_{};
+    template<class T> bool defer(T&& row) {
+        if (!phase_) return false;
+        phase_->emplace_back(std::forward<T>(row));
+        return true;
+    }
+    void append_plan_now(PlanEvent row) {
+        if (row.plan == proposal_trace_plan) { fold_proposal_now(std::move(row)); return; }
+        append_ai_diagnostic(plans, plans_dropped, std::move(row));
+    }
+    void fold_proposal_now(PlanEvent row) {
         // The reason is "<reason>" or "<reason> | <blocker>": the part before the trace detail.
         const std::string key = std::to_string(row.player) + '|' + row.goal + '|' + row.event + '|' + row.detail.substr(0, row.detail.find('\n'));
         constexpr std::size_t kept_rows = 4096;
@@ -309,9 +372,53 @@ struct AiJournal {
             && std::find(summary.targets.begin(), summary.targets.end(), row.target) == summary.targets.end())
             summary.targets.push_back(row.target);
     }
-    void append_cost(AiTickCost row) { append_ai_diagnostic(costs, costs_dropped, std::move(row)); }
-    void append_service(AiServiceEvent row) { append_ai_diagnostic(services, services_dropped, std::move(row)); }
 };
+
+// The journal outlives its token and must not be moved during the phase.
+// Destruction discards unpublished intents. Commit is the final publication
+// step after deterministic callbacks; allocation failures remain infrastructure
+// failures and must refuse the session rather than attempt provider retirement.
+class AiJournal::PhaseSavepoint final {
+public:
+    PhaseSavepoint(const PhaseSavepoint&) = delete;
+    PhaseSavepoint& operator=(const PhaseSavepoint&) = delete;
+    ~PhaseSavepoint() { rollback(); }
+    [[nodiscard]] std::size_t pending_intents() const noexcept { return intents_.size(); }
+    void rollback() noexcept {
+        if (!owner_) return;
+        owner_->phase_ = nullptr;
+        owner_ = nullptr;
+        intents_.clear();
+    }
+    void commit() {
+        if (!owner_) throw std::logic_error("AI journal phase already settled");
+        auto* journal = owner_;
+        journal->phase_ = nullptr;
+        owner_ = nullptr;
+        for (auto& intent : intents_) std::visit([journal](auto& row) {
+            using T = std::decay_t<decltype(row)>;
+            if constexpr (std::is_same_v<T, PlanIntent>) {
+                switch (row.kind) {
+                case PlanKind::normal: journal->append_plan_now(std::move(row.row)); break;
+                case PlanKind::raw: journal->plans.push_back(std::move(row.row)); break;
+                case PlanKind::fold: journal->fold_proposal_now(std::move(row.row)); break;
+                }
+            } else if constexpr (std::is_same_v<T, AiTickCost>) journal->append_cost(std::move(row));
+            else if constexpr (std::is_same_v<T, AiServiceEvent>) journal->append_service(std::move(row));
+            else journal->set_evaluators(row);
+        }, intent);
+        intents_.clear();
+    }
+private:
+    explicit PhaseSavepoint(AiJournal& owner) : owner_(&owner) { owner.phase_ = &intents_; }
+    AiJournal* owner_;
+    std::vector<Intent> intents_;
+    friend struct AiJournal;
+};
+inline std::unique_ptr<AiJournal::PhaseSavepoint> AiJournal::begin_phase() {
+    if (phase_) throw std::logic_error("nested AI journal phase");
+    return std::unique_ptr<PhaseSavepoint>(new PhaseSavepoint(*this));
+}
 
 struct AiSetup {
     // #3780: selects the goal mode, plan directory, templates and freestore tag; space is the default.
@@ -381,6 +488,8 @@ struct PreparedAiSession {
     authoritative::ScriptScheduler scripts;
     std::function<core::Result<void>(authoritative::ScriptedTacticalSession&)> bind;
     std::vector<core::Diagnostic> load_notes; // SOS-46: one warning per absent object root
+    // WGS-66: hex SHA-256 of the frozen Lua/XML closure the host runs (a save's script identity).
+    std::string closure_sha256{};
 };
 [[nodiscard]] core::Result<PreparedAiSession> prepare_session(
     const AiSetup& setup, const std::map<std::string, std::string>& modules);

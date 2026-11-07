@@ -47,6 +47,88 @@ NativeActions::ExecutorScope::~ExecutorScope() {
 }
 thread_local const NativeActions* NativeActions::frontier_owner_ = nullptr;
 thread_local NativeActions::BoundState* NativeActions::active_frontier_ = nullptr;
+struct NativeActions::PhaseSavepoint::Saved {
+    NativeActions* owner{};
+    std::map<sim::EntityId, std::optional<Purchase>> purchases;
+    std::map<std::uint64_t, std::optional<Movement>> movements;
+    std::map<gc::PlayerId, std::vector<sim::EntityId>> created;
+    std::unique_ptr<QualifiedFreestore::PhaseSavepoint> freestore;
+    gc::GalacticSession::NativeActionShadow::Work immediate_work;
+    std::uint64_t next_movement{}, refusals{};
+    bool settled{};
+};
+NativeActions::PhaseSavepoint::PhaseSavepoint(std::unique_ptr<Saved> saved) : saved_(std::move(saved)) {}
+NativeActions::PhaseSavepoint::~PhaseSavepoint() {
+    if (!saved_ || saved_->settled) return;
+    saved_->owner->phase_ = nullptr; saved_->owner->phase_abandoned_ = true;
+    saved_->owner->mark_state_changed();
+}
+NativeActions::PhaseSavepoint::Work NativeActions::PhaseSavepoint::work() const noexcept {
+    return saved_ ? Work{saved_->purchases.size(), saved_->movements.size(), saved_->created.size()} : Work{};
+}
+core::Result<void> NativeActions::PhaseSavepoint::commit() {
+    if (!saved_ || saved_->settled) return invalid<void>("native action phase already settled");
+    if (auto committed = saved_->freestore->commit(); !committed) return committed;
+    saved_->owner->phase_ = nullptr; saved_->settled = true;
+    saved_->purchases.clear(); saved_->movements.clear(); saved_->created.clear();
+    return core::Result<void>::success();
+}
+core::Result<void> NativeActions::PhaseSavepoint::rollback() {
+    if (!saved_ || saved_->settled) return invalid<void>("native action phase already settled");
+    auto& owner = *saved_->owner;
+    try {
+        if (auto restored = saved_->freestore->rollback(); !restored) return restored;
+        for (const auto& [id, old] : saved_->purchases) {
+            if (old) owner.root_.purchases_.insert_or_assign(id, *old); else owner.root_.purchases_.erase(id);
+        }
+        for (const auto& [id, old] : saved_->movements) {
+            if (old) owner.root_.movements_.insert_or_assign(id, *old); else owner.root_.movements_.erase(id);
+        }
+        for (auto& [player, rows] : saved_->created) owner.root_.player_scratch_.at(player).created = std::move(rows);
+        for (auto& [player, scratch] : owner.root_.player_scratch_) {
+            static_cast<void>(player); scratch.pending.reset(); scratch.pending_goal = 0;
+            scratch.landing_stage.clear(); scratch.landing_surfaces.clear();
+        }
+        owner.root_.next_movement_ = saved_->next_movement; owner.root_.freestore_move_refusals_ = saved_->refusals;
+        owner.root_.immediate_work_ = saved_->immediate_work;
+        // Derived request index and digests rebuild exclusively on fault.
+        owner.root_.freestore_requests_.clear();
+        for (const auto& [id, row] : owner.root_.movements_) if (row.registered && row.freestore_actor)
+            owner.root_.freestore_requests_.emplace(row.freestore_actor, id);
+        owner.records_dirty_ = true; owner.mark_build_state_changed();
+        owner.phase_ = nullptr; saved_->settled = true;
+        saved_->purchases.clear(); saved_->movements.clear(); saved_->created.clear();
+        return core::Result<void>::success();
+    } catch (const std::exception& exception) { return invalid<void>(exception.what()); }
+}
+core::Result<std::unique_ptr<NativeActions::PhaseSavepoint>> NativeActions::begin_phase() {
+    if (phase_ || phase_abandoned_ || frontier_owner_ == this || !prepared_players_.empty() || pending_admission())
+        return invalid<std::unique_ptr<PhaseSavepoint>>("native action phase requires its idle serial root");
+    auto store = root_.freestore_->begin_phase();
+    if (!store) return core::Result<std::unique_ptr<PhaseSavepoint>>::failure(store.error());
+    auto saved = std::make_unique<PhaseSavepoint::Saved>();
+    saved->owner = this; saved->freestore = std::move(store).value();
+    saved->next_movement = root_.next_movement_; saved->refusals = root_.freestore_move_refusals_;
+    saved->immediate_work = root_.immediate_work_;
+    auto phase = std::unique_ptr<PhaseSavepoint>(new PhaseSavepoint(std::move(saved)));
+    phase_ = phase->saved_.get();
+    return core::Result<std::unique_ptr<PhaseSavepoint>>::success(std::move(phase));
+}
+void NativeActions::retain_record(std::uint32_t kind, std::uint64_t id) {
+    if (!phase_) return;
+    if (kind == 1 && !phase_->purchases.contains(id)) {
+        const auto at = root_.purchases_.find(id);
+        phase_->purchases.emplace(id, at == root_.purchases_.end() ? std::optional<Purchase>{} : std::optional{at->second});
+    } else if (kind == 2 && !phase_->movements.contains(id)) {
+        const auto at = root_.movements_.find(id);
+        phase_->movements.emplace(id, at == root_.movements_.end() ? std::optional<Movement>{} : std::optional{at->second});
+    }
+}
+void NativeActions::clear_created(gc::PlayerId player) {
+    auto& rows = bound().player_scratch_.at(player).created;
+    if (phase_ && !phase_->created.contains(player)) phase_->created.emplace(player, std::move(rows));
+    rows.clear();
+}
 NativeActions::PlayerFrontier::PlayerFrontier(NativeActions& owner, gc::PlayerId player)
     : previous_owner_(frontier_owner_), previous_frontier_(active_frontier_) {
     if (!std::binary_search(owner.prepared_players_.begin(), owner.prepared_players_.end(), player))
@@ -60,10 +142,11 @@ NativeActions::PlayerFrontier::~PlayerFrontier() {
 }
 core::Result<void> NativeActions::prepare_player_frontiers(const sim::PartitionExecutor& executor,
     std::span<const gc::PlayerId> players) {
-    if (frontier_owner_ == this || pending_admission() || !std::is_sorted(players.begin(), players.end())
+    if (phase_ || phase_abandoned_ || frontier_owner_ == this || pending_admission() || !std::is_sorted(players.begin(), players.end())
         || std::adjacent_find(players.begin(), players.end()) != players.end()
         || std::any_of(players.begin(), players.end(), [&](auto player) { return !player || !root_.player_scratch_.contains(player); }))
         return invalid<void>("native action frontiers require ordered admitted owners and the serial barrier");
+    if (records_dirty_) { root_.records_ = rebuild_records(); records_dirty_ = false; }
     prepared_players_.clear();
     for (const auto player : players) frontiers_.try_emplace(player);
     auto prepared = executor.execute_phase("galactic-action-frontiers", sim::tick_partition_count, [&](std::size_t partition) {
@@ -110,10 +193,11 @@ void NativeActions::bind_handlers() {
         if (!*lifetime) return;
         const auto found = (*lifetime)->bound().purchases_.find(input.build);
         if (found == (*lifetime)->bound().purchases_.end() || found->second.player != input.player) return;
+        RecordWrite record_write{**lifetime, 1, input.build};
         (*lifetime)->mark_build_state_changed();
         found->second.completed = input.completed;
         found->second.failed = !input.completed;
-        found->second.object = input.object; (*lifetime)->update_record(1, input.build);
+        found->second.object = input.object;
     });
     world_.set_native_production_handler([lifetime = lifetime_](const auto& input) {
         return *lifetime ? (*lifetime)->notice(input) : invalid<gc::GalacticSession::NativeProductionPayment>("native producer owner must be rebound before service");
@@ -294,7 +378,7 @@ core::Result<sim::math::Fixed> NativeActions::build_remaining_cost(gc::PlayerId 
 core::Result<ActionReceipt> NativeActions::admit(const ActionRequest& request) {
     using Result = core::Result<ActionReceipt>;
     const auto scratch = bound().player_scratch_.find(request.player);
-    if (scratch != bound().player_scratch_.end()) scratch->second.created.clear();
+    if (scratch != bound().player_scratch_.end()) clear_created(request.player);
     if (!supports(request.kind)) {
         auto error = invalid<ActionReceipt>("native action requires its movement/landing owner").error();
         error.code = std::string(authoritative::codes::missing_api);
@@ -515,6 +599,7 @@ void NativeActions::bind_movement_listener() {
         for (auto& [id, movement] : (*token)->bound().movements_) {
             (void)id;
             if (!movement.registered || movement.actor != event.subject) continue;
+            (*token)->retain_record(2, id);
             const auto previous = movement;
             if (event.kind == gc::GalacticEventKind::movement_finished && (movement.freestore_actor || !movement.finished)) movement.advance_requested = true;
             if (event.kind == gc::GalacticEventKind::movement_canceled) {
@@ -637,7 +722,7 @@ core::Result<ActionReceipt> NativeActions::admit_movement(const ActionRequest& r
     movement.observed_tick = snapshot->completed_tick(); movement.event_cursor = snapshot->events().size();
     if (auto advanced = advance_movement(movement); !advanced) return core::Result<ActionReceipt>::failure(advanced.error());
     mark_state_changed();
-    const auto id = bound().next_movement_++; bound().movements_.emplace(id, movement); update_record(2, id); update_metadata_record();
+    const auto id = bound().next_movement_++; retain_record(2, id); bound().movements_.emplace(id, movement); update_record(2, id); update_metadata_record();
     return core::Result<ActionReceipt>::success({true, id});
 }
 core::Result<NativeActions::Movement> NativeActions::poll_movement(std::uint64_t request, bool taskforce_has_members) {
@@ -826,7 +911,7 @@ core::Result<bool> NativeActions::admit_freestore_move(gc::PlayerId player, sim:
     // WGA-385: advance before insertion; a known unsafe/no-hop first advance
     // still returns a successfully created block.
     if (auto advanced = advance_freestore_movement(movement); !advanced) return core::Result<bool>::failure(advanced.error());
-    mark_state_changed(); const auto request = bound().next_movement_++; bound().movements_.emplace(request, movement); update_record(2, request); update_metadata_record();
+    mark_state_changed(); const auto request = bound().next_movement_++; retain_record(2, request); bound().movements_.emplace(request, movement); update_record(2, request); update_metadata_record();
     bound().freestore_requests_.emplace(actor, request);
     if (auto refreshed = refresh_freestore_movement(actor, *fleet, true); !refreshed)
         return core::Result<bool>::failure(refreshed.error());
@@ -937,6 +1022,11 @@ core::RecordDigest NativeActions::rebuild_records() const {
     return rebuilt;
 }
 core::Result<std::string> NativeActions::record_sync_hash(bool cold) const {
+    if (phase_abandoned_) return invalid<std::string>("unsettled native action phase");
+    if (records_dirty_) {
+        auto& self = *const_cast<NativeActions*>(this);
+        self.bound().records_ = rebuild_records(); self.records_dirty_ = false;
+    }
     if (pending_admission()) return invalid<std::string>("production digest requires the completed admission barrier");
     const auto records = cold ? rebuild_records().digest(component) : bound().records_.digest(component);
     return core::Result<std::string>::success(compose_native_sync_digests({{"records", records}, {"freestore", bound().freestore_->record_sync_hash(cold)}}));
@@ -955,6 +1045,7 @@ core::Result<NativeState> NativeActions::capture() const {
     return core::Result<NativeState>::success(std::move(out));
 }
 core::Result<void> NativeActions::restore(const NativeState& state) {
+    if (phase_ || phase_abandoned_) return invalid<void>("cannot restore an active or unsettled native action phase");
     if (pending_admission() || state.version != 1 || !funding_) return invalid<void>("production restore requires its completed native/funding boundary");
     const auto found = state.components.find(component);
     if (found == state.components.end()) return invalid<void>("production component is missing");
@@ -1165,6 +1256,43 @@ struct NativeActions::ImmediateState final : authoritative::ImmediateEffectState
             world = std::move(pending_world);
             effects.emplace_back(gc::NativeEffectKind::cash, economic_replay::cash(player, amount.value(), multiplier->second, actual.value()));
             return Result::success({});
+        }
+        if (action == "galactic.story_prevent_ai_usage") {
+            // RGC-178 / L-57: the story script's Prevent_AI_Usage works only for an actor whose owner has an
+            // initialized AI pool. Any other owner (a human seat) is a warning without effect, never a script error.
+            const auto actor = args.size() == 2 ? id(args[0], handle_game_object) : std::nullopt;
+            const auto* prevent = args.size() == 2 ? std::get_if<bool>(&args[1].data) : nullptr;
+            if (!actor || !prevent) return invalid<authoritative::ValueList>("Prevent_AI_Usage requires an actor and Boolean");
+            // Read the refusals from the shared store: a call that publishes nothing never clones it.
+            const auto& view = freestore ? static_cast<const QualifiedFreestore&>(*freestore) : *owner->bound().freestore_;
+            const auto* facts = view.facts(*actor);
+            // Second element names the refusal: "actor" (the object is not a free-store actor) or "pool" (its owner has no AI pool).
+            if (!facts) return Result::success({authoritative::Value{false}, authoritative::Value{std::string("actor")}});
+            if (!view.initialized(facts->object.owner)) return Result::success({authoritative::Value{false}, authoritative::Value{std::string("pool")}});
+            if (!freestore) { freestore = owner->bound().freestore_->clone(); original_freestore = owner->bound().freestore_->encode(); }
+            facts = freestore->facts(*actor);
+            if (!facts) return Result::success({authoritative::Value{false}, authoritative::Value{std::string("actor")}});
+            const auto before = freestore->operation_cursor();
+            const auto result = freestore->prevent_ai_usage(facts->object.owner, *actor, *prevent);
+            if (!result) return Result::failure(result.error());
+            if (auto retained = retain_store_step(before); !retained) return Result::failure(retained.error());
+            return Result::success({authoritative::Value{true}});
+        }
+        if (action == "galactic.spawn_unit") {
+            // RGC-176..178: Spawn_Unit(type, planet, player) creates through the same journaled native creation as
+            // the AI's forced production and the story reward (one deterministic identity block, one replayable
+            // effect, the AI free-store hand-off of an AI owner). The script receives the new object of the
+            // requested type (a fleet creation yields its first ship); an empty list is a null creation.
+            const auto player = args.size() == 3 ? id(args[0], handle_player) : std::nullopt;
+            const auto planet = args.size() == 3 ? id(args[1], handle_game_object) : std::nullopt;
+            const auto type = args.size() == 3 ? id(args[2], handle_type) : std::nullopt;
+            if (!player || !planet || !type) return invalid<authoritative::ValueList>("Spawn_Unit requires a player, planet and type");
+            auto made = apply("galactic.magic_force", {args[0], args[1], authoritative::Value{std::vector<authoritative::Value>{args[2]}}});
+            if (!made) return made;
+            const auto* actors = made.value().size() == 1 ? std::get_if<std::vector<authoritative::Value>>(&made.value()[0].data) : nullptr;
+            if (!actors) return invalid<authoritative::ValueList>("native creation returned no actor list");
+            if (actors->empty()) return Result::success({});
+            return Result::success({authoritative::Value{std::vector<authoritative::Value>{actors->front()}}});
         }
         if (action != "galactic.magic_force" || (args.size() != 3 && args.size() != 4)
             || !id(args[0], handle_player) || !id(args[1], handle_game_object))

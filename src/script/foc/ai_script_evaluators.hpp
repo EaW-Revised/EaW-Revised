@@ -17,22 +17,44 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <stdexcept>
 #include <vector>
 
+namespace eawr::sim { class PartitionExecutor; }
 namespace eawr::script::foc::ai {
 struct Target;
 }
 
 namespace eawr::script::foc::tactical_ai_detail {
 
+class EvaluatorInfrastructureError : public std::runtime_error {
+public:
+    using std::runtime_error::runtime_error;
+};
 class ScriptEvaluators {
 public:
+    class PhaseSavepoint {
+    public:
+        ~PhaseSavepoint();
+        PhaseSavepoint(const PhaseSavepoint&) = delete;
+        PhaseSavepoint& operator=(const PhaseSavepoint&) = delete;
+        [[nodiscard]] core::Result<void> commit();
+        [[nodiscard]] core::Result<void> rollback();
+        [[nodiscard]] std::size_t retained_modules() const noexcept;
+    private:
+        struct Saved;
+        explicit PhaseSavepoint(std::unique_ptr<Saved>);
+        std::unique_ptr<Saved> saved_;
+        friend class ScriptEvaluators;
+    };
+    [[nodiscard]] core::Result<std::unique_ptr<PhaseSavepoint>> begin_phase(const sim::PartitionExecutor&);
     struct Outcome {
         std::optional<ai::Real> value; // set only for a numeric result (as a binary32 value)
         std::string note;              // why there is no value (never part of a decision)
     };
     struct Stats {
         std::uint64_t calls{}, memo_hits{}, instructions{}, failures{}, loaded{};
+        bool operator==(const Stats&) const = default;
     };
 
     // `modules`: the frozen script corpus by logical path. Evaluators are the modules directly

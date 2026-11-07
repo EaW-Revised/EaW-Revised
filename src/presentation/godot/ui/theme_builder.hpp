@@ -22,7 +22,7 @@
 
 #include "eawr/assets/assets.hpp"
 #include "eawr/presentation/ui/theme.hpp"
-#include "eawr/vfs/vfs.hpp"
+#include "eawr/vfs/vfs_fwd.hpp"
 
 #include <godot_cpp/classes/font_variation.hpp>
 #include <godot_cpp/classes/image.hpp>
@@ -49,7 +49,9 @@ inline constexpr std::string_view kit_base_type = "EawrUiBase";
 // Slot textures for one atlas page and the VFS its standalone textures live in.
 class UiTextures final {
 public:
-    UiTextures(const assets::MegaTextureAtlas& atlas, const vfs::Vfs& filesystem);
+    // Takes the atlas page's decoded pixels into an engine image and frees the
+    // decoded copy (the atlas keeps its directory and page metadata).
+    UiTextures(assets::MegaTextureAtlas& atlas, const vfs::Vfs& filesystem);
 
     // Why the page could not be read; empty when it was.
     [[nodiscard]] const std::string& page_failure() const noexcept { return page_failure_; }
