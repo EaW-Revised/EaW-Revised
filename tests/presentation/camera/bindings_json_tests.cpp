@@ -1,3 +1,4 @@
+#include "../../support/runtime_path.hpp"
 #include "camera_binding_test_support.hpp"
 
 #include <cstddef>
@@ -12,7 +13,7 @@
 namespace eawr_camera_binding_test {
 
 void test_committed_project_table_is_valid_and_labelled() {
-    std::ifstream file(EAWR_CAMERA_BINDINGS_PATH, std::ios::binary);
+    std::ifstream file(eawr::testing::runtime_path("EAWR_TEST_SOURCE_ROOT", "apps/viewer/project/config/camera-bindings.json", EAWR_CAMERA_BINDINGS_PATH), std::ios::binary);
     expect(static_cast<bool>(file), "committed camera-bindings.json is readable");
     const std::string text{std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>()};
     auto parsed = input::parse_binding_table(text);
@@ -44,6 +45,16 @@ void test_committed_project_table_is_valid_and_labelled() {
 }
 
 void test_schema_and_version_rejections() {
+    constexpr std::string_view battlecam = R"({"id":"space.battlecam","action":"battlecam","context":"space",
+        "device":"keyboard","control":"C","trigger":"held","scale":1})";
+    const auto remapped = input::parse_binding_table(table_with(battlecam));
+    expect(remapped && remapped.value().bindings.front().action == input::Action::battlecam
+        && remapped.value().bindings.front().code == *input::key_code("C"), "battlecam binding accepts a remapped key");
+    constexpr std::string_view preview = R"({"id":"space.preview","action":"unit_preview","context":"space",
+        "device":"keyboard","control":"P","trigger":"held","scale":1})";
+    const auto preview_table = input::parse_binding_table(table_with(preview));
+    expect(preview_table && preview_table.value().bindings.front().action == input::Action::unit_preview,
+        "unit preview has a distinct remappable binding");
     const std::string body(pan_right_d);
     expect(input::parse_binding_table(table_with(body)).has_value(), "minimal table parses");
     expect_code(table_with(body, R"("schema": "eawr-camera-bindings", "version": 3,
@@ -535,7 +546,7 @@ void test_input_default_ledger() {
            "original binding source is stated as unresolved");
     // A table cannot claim an original provenance class it has no evidence for.
     for (const std::string_view claim : {"original", "original-xml", "retail"}) {
-        std::ifstream file(EAWR_CAMERA_BINDINGS_PATH, std::ios::binary);
+        std::ifstream file(eawr::testing::runtime_path("EAWR_TEST_SOURCE_ROOT", "apps/viewer/project/config/camera-bindings.json", EAWR_CAMERA_BINDINGS_PATH), std::ios::binary);
         std::string text{std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>()};
         const auto at = text.find("\"project-authored\"");
         expect(at != std::string::npos, "provenance anchor exists");

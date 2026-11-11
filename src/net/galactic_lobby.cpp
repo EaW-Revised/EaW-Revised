@@ -62,11 +62,12 @@ core::Result<LobbyGame> encode_galactic_lobby_game(const GalacticLobbyOptions& o
     if (options.seed > std::numeric_limits<std::uint32_t>::max())
         return refuse<LobbyGame>(std::string(galactic_seed_too_wide));
     if (options.campaign.empty() || options.difficulty.empty() || options.input_delay == 0 || options.input_delay > max_input_delay
-        || options.rows.size() < 2 || options.rows.size() > gc::galactic_max_players || options.auto_resolve > galactic_lobby_max_auto_resolve)
+        || options.rows.size() < 2 || options.rows.size() > gc::galactic_max_players || options.auto_resolve > galactic_lobby_max_auto_resolve
+        || options.vote_timeout > gc::mp_roster_max_vote_timeout_seconds)
         return refuse<LobbyGame>("Incomplete Galactic Conquest staging options.");
     std::ostringstream out; out.imbue(std::locale::classic());
     out << galactic_lobby_options_tag << galactic_lobby_options_version << ' ' << options.input_delay << ' ' << options.seed
-        << ' ' << options.auto_resolve << ' ' << options.custom << ' ' << options.credits << ' ' << options.starting_tech
+        << ' ' << options.auto_resolve << ' ' << options.vote_timeout << ' ' << options.custom << ' ' << options.credits << ' ' << options.starting_tech
         << ' ' << options.maximum_tech << ' ' << options.allow_heroes << ' ' << std::quoted(options.difficulty)
         << ' ' << options.rows.size();
     for (const auto& row : options.rows)
@@ -94,7 +95,7 @@ core::Result<GalacticLobbyOptions> decode_galactic_lobby_game(const LobbyGame& g
     GalacticLobbyOptions result;
     result.campaign = game.map;
     std::size_t count{};
-    if (!(in >> result.input_delay >> result.seed >> result.auto_resolve >> result.custom >> result.credits >> result.starting_tech
+    if (!(in >> result.input_delay >> result.seed >> result.auto_resolve >> result.vote_timeout >> result.custom >> result.credits >> result.starting_tech
         >> result.maximum_tech >> result.allow_heroes >> std::quoted(result.difficulty) >> count)
         || count < 2 || count > gc::galactic_max_players) return bad();
     if (result.seed > std::numeric_limits<std::uint32_t>::max()) return refuse<GalacticLobbyOptions>(std::string(galactic_seed_too_wide));
@@ -139,6 +140,8 @@ core::Result<GalacticLobbyOptions> default_galactic_lobby_options(const gc::MpLo
     options.campaign = campaign.name;
     options.difficulty = gc::lobby_difficulty_offered(campaign, difficulty) ? std::string(difficulty) : gc::lobby_default_difficulty(campaign, difficulty);
     options.seed = seed; options.input_delay = input_delay;
+    // The campaign's own constant stays the default when it states one; the host range bounds what a new room offers.
+    if (campaign.vote_timeout_seconds) options.vote_timeout = galactic_lobby_clamp_vote_timeout(*campaign.vote_timeout_seconds);
     std::size_t humans{};
     for (const auto& faction : campaign.factions) {
         GalacticLobbyRow row{faction.player, faction.faction_id, faction.flags, faction.name, false, galactic_lobby_default_dropout};
@@ -211,6 +214,56 @@ core::Result<void> check_seats(const LobbySnapshot& snapshot, const GalacticLobb
 }
 } // namespace
 
+std::optional<GalacticLobbyOptions> galactic_lobby_options_with_seat_on(const GalacticLobbyOptions& options,
+    const gc::MpLobbyCampaign& campaign, const LobbySnapshot& before, const PeerIndex peer, const gc::PlayerId slot) {
+    if (options.rows.size() != campaign.factions.size()) return std::nullopt;
+    const auto target = std::find_if(options.rows.begin(), options.rows.end(), [&](const auto& row) { return row.player == slot; });
+    if (target == options.rows.end()) return std::nullopt;
+    const auto index = static_cast<std::size_t>(target - options.rows.begin());
+    if (target->human) return options;
+    if (!campaign.factions[index].playable) return std::nullopt;
+    auto moved = options;
+    moved.rows[index].human = true;
+    const auto own = std::find_if(before.seats.begin(), before.seats.end(), [&](const auto& seat) { return seat.peer == peer; });
+    if (own != before.seats.end() && own->selection.slot != slot) {
+        const bool shared = std::any_of(before.seats.begin(), before.seats.end(), [&](const auto& seat) {
+            return seat.peer != peer && seat.selection.slot == own->selection.slot; });
+        if (!shared) for (auto& row : moved.rows) if (row.player == own->selection.slot) row.human = false;
+    }
+    const auto humans = static_cast<std::size_t>(std::count_if(moved.rows.begin(), moved.rows.end(), [](const auto& row) { return row.human; }));
+    if (humans > galactic_lobby_max_human_sides || (campaign.single_player_rules && humans != 1)) return std::nullopt;
+    return moved;
+}
+
+core::Result<void> follow_galactic_choice(const LobbySnapshot& before, LobbySnapshot& candidate, const PeerIndex peer,
+    std::span<const gc::MpLobbyCampaign> catalog) {
+    if (lobby_game_mode(candidate.game) != LobbyGameMode::galactic) return core::Result<void>::success();
+    auto decoded = decode_galactic_lobby_game(candidate.game);
+    const auto* campaign = find_campaign(catalog, candidate.game.map);
+    if (!decoded || !campaign) return core::Result<void>::success(); // the validator names it
+    const auto seat = std::find_if(candidate.seats.begin(), candidate.seats.end(), [&](const auto& value) { return value.peer == peer; });
+    if (seat == candidate.seats.end()) return core::Result<void>::success();
+    const auto& options = decoded.value();
+    const auto row = std::find_if(options.rows.begin(), options.rows.end(), [&](const auto& value) { return value.player == seat->selection.slot; });
+    if (row == options.rows.end() || row->human) return core::Result<void>::success();
+    const auto index = static_cast<std::size_t>(row - options.rows.begin());
+    if (index >= campaign->factions.size() || !campaign->factions[index].playable) return core::Result<void>::success(); // the validator names it
+    const auto moved = galactic_lobby_options_with_seat_on(options, *campaign, before, peer, seat->selection.slot);
+    if (!moved) return refuse("A campaign game has at most two human sides. Choose one of the open factions, or ask the host to close a row first.");
+    auto encoded = encode_galactic_lobby_game(*moved);
+    if (!encoded) return core::Result<void>::failure(encoded.error());
+    candidate.game = std::move(encoded).value();
+    // Sides are the host's planned rows in player order, so a new row can renumber every seat's side.
+    const auto sides = sides_of(*moved);
+    for (auto& value : candidate.seats) {
+        const auto side = sides.find(value.selection.slot);
+        const auto held = std::find_if(moved->rows.begin(), moved->rows.end(), [&](const auto& r) { return r.player == value.selection.slot; });
+        if (side == sides.end() || held == moved->rows.end()) continue; // the validator names it
+        value.selection.team = side->second; value.selection.faction = held->faction;
+    }
+    return core::Result<void>::success();
+}
+
 core::Result<void> validate_galactic_lobby(const LobbySnapshot& snapshot, bool starting, std::span<const gc::MpLobbyCampaign> catalog) {
     auto options = decode_galactic_lobby_game(snapshot.game);
     if (!options) return core::Result<void>::failure(options.error());
@@ -238,7 +291,7 @@ core::Result<gc::MpRoster> galactic_roster_draft(const LobbySnapshot& snapshot, 
     gc::MpRoster roster;
     roster.campaign = value.campaign; roster.difficulty = value.difficulty; roster.custom = value.custom;
     roster.credits = value.credits; roster.starting_tech = value.starting_tech; roster.maximum_tech = value.maximum_tech;
-    roster.allow_heroes = value.allow_heroes;
+    roster.allow_heroes = value.allow_heroes; roster.vote_timeout_seconds = value.vote_timeout;
     for (const auto& row : value.rows) {
         gc::MpRosterPlayer player;
         player.player = row.player; player.faction_id = row.faction_id; player.flags = row.flags; player.faction = row.faction;

@@ -48,6 +48,8 @@ struct Frames final {
 // A land table loads this object through load_land_body: a ground class or movement class, or an object that
 // authors the land model and no space model. Schema classes and tags only, no FoC name lists.
 [[nodiscard]] bool land_ground_object(Object& object);
+// LE-LOADER: a land object that is a build pad or a construction child (TACTICAL_BUILD_OBJECTS / TACTICAL_UNDER_CONSTRUCTION).
+[[nodiscard]] bool land_pad_object(Object& object);
 
 struct AbilityFields final {
     const data::XmlNode& node;
@@ -116,6 +118,7 @@ private:
     bool load_special_ability(UnitType& unit, const std::string& name, const AbilityFields& child_text);
     void load_bonus_abilities(Object& object, UnitType& unit, const std::string& name, const AbilityFields& child_text);
     void load_nested_abilities(Object& object, UnitType& unit);
+    void load_land_income_abilities(Object& object, UnitType& unit);
 
     // #530 (docs/behaviour/space-purchasing.md PU-10 to PU-21, PU-31): what a station builds for
     // each faction, and what a type costs, takes and counts in a skirmish.
@@ -135,9 +138,17 @@ private:
     // L2a (#1450): a land company object into tables_.land_companies; land loads only.
     void load_land_company(Object& object);
     LandCompanyMember land_member(Object& object);
+    LandGarrisonData land_garrison(Object& object);
     LandLocomotionData land_locomotion(Object& object);
     void load_land_movement_classes();
     void load_land_static(Object& object);
+    // LE-LOADER: a land build pad or construction child (TACTICAL_BUILD_OBJECTS / TACTICAL_UNDER_CONSTRUCTION): the pad
+    // behaviours, the capture inputs, the constructed type, the menu rows, price and time, and the build attachment. It reads
+    // the same tags as the space path. The space decode is deliberately not shared: its enqueue order is the type-table order
+    // that the space content identity and the replay pins rest on, so it stays byte-identical.
+    void load_land_pad(Object& object, UnitType& unit);
+    // LC-86 (#6183): the fog inputs shared by a land body and a placed static row.
+    LandRevealInputs read_land_reveal(Object& object);
 
     // CategoryMask and Property_Flags, as names and as enum bits (#270). Returns the categories.
     const std::vector<std::string>& mask_flags(Object& object, UnitType& unit);

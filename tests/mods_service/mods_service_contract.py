@@ -187,6 +187,9 @@ class ServiceContract(unittest.TestCase):
         self.assertEqual(result["capabilities"], ["chain.check", "chain.resolve", "files.page", "game.find", "hello", "loadcheck.cancel", "loadcheck.result", "loadcheck.start", "loadnotes.read", "mods.changes", "mods.discover", "profile.delete", "profile.list", "profile.load", "profile.locks", "profile.save", "records.cancel", "records.get", "records.index", "settings.set_builtin_layer", "shutdown"])
         self.assertEqual(result["capabilities"], sorted(result["capabilities"]))
         self.assertRegex(result["service_version"], r"^\d+\.\d+\.\d+$")
+        # The one release version (config/release-version.json) is what the service reports.
+        self.assertEqual(result["service_version"], json.loads(
+            (pathlib.Path(__file__).resolve().parents[2] / "config" / "release-version.json").read_text(encoding="utf-8-sig"))["version"])
         self.assertEqual(result["game_release"], result["service_version"])
         self.assertRegex(result["engine_build"], r"^[A-Za-z0-9_.+-]+$")
         # The player-facing form of engine_build: "<label> (<short sha>)" plus " dirty" for a modified tree.
@@ -793,6 +796,53 @@ class ServiceContract(unittest.TestCase):
             committed = TRANSCRIPTS / "model_methods.jsonl"
             if UPDATE: committed.write_text(data, encoding="utf-8", newline="\n")
             else: self.assertEqual(data, committed.read_text(encoding="utf-8"))
+
+    def test_digest_waits_while_a_game_runs_and_finishes_once(self):
+        """#6588: the manager's content digest reads nothing while a game instance runs, then finishes and is cached."""
+        with tempfile.TemporaryDirectory() as temporary:
+            base = pathlib.Path(temporary).resolve()
+            game, user = base / "game", base / "user"
+            (game / "GameData" / "Data").mkdir(parents=True)
+            (game / "corruption" / "Data").mkdir(parents=True)
+            (game / "corruption" / "StarWarsG.exe").write_bytes(b"")
+            leaf = game / "corruption" / "Mods" / "Leaf"
+            for index in range(5):
+                write_state(leaf / "Data" / f"file{index}.txt", "x" * (1000 + index))
+            write_state(user / "launcher" / "game-running.json", json.dumps({"profile": "p", "pid": os.getpid()}))
+            cache = user / "mods" / "cache" / "content"
+            service = Interactive(args=["--user-data", str(user)])
+            counter = 1
+            def call(method, **params):
+                nonlocal counter
+                counter += 1
+                service.send(request(counter, method, **params))
+                return service.receive()["result"]
+            def content():
+                rows = call("chain.resolve", leaf="mods:Leaf", edges=[], known_chains={"format": "eawr-known-chains", "version": 1, "chains": []})["rows"]
+                return next(row for row in rows if row["key"] == "mods:Leaf")["content"]
+            try:
+                service.send(hello())
+                service.receive()
+                call("game.find", hint=str(game))
+                call("mods.discover", steam_roots=[], steam_libraries=[], manual_folders=[], walk_trees=True)
+                self.assertEqual(content()["state"], "pending")
+                time.sleep(4)   # longer than the service's pause poll: a running digest would be done by now
+                self.assertEqual(content()["state"], "pending")
+                self.assertEqual(list(cache.glob("content-*.json")) if cache.exists() else [], [])
+                (user / "launcher" / "game-running.json").unlink()   # the game exits
+                deadline = time.time() + 30
+                state = "pending"
+                while state == "pending" and time.time() < deadline:
+                    time.sleep(0.5)
+                    state = content()["state"]
+                self.assertEqual(state, "ready")
+                self.assertEqual(content()["files"], 5)
+                self.assertEqual(len([p for p in cache.glob("content-*.json") if not p.name.endswith(".partial.json")]), 1)
+                call("shutdown")
+                self.assertEqual(service.wait(), 0)
+            finally:
+                service.close()
+                service.kill()
 
     def test_player_order_transcripts(self):
         with tempfile.TemporaryDirectory() as temporary:

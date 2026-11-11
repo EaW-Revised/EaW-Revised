@@ -1,19 +1,11 @@
 #pragma once
-// Per-mod CONTENT digest (ModRecord::content): a SHA-256 of the mod's file bytes, made on one low-priority
-// background thread and cached, so a save can tell that a mod kept its name but changed its files.
-// The material is documented at ContentDigest (record.hpp); in short, one line
-// "<relative path>\t<size>\t<sha256 of the file bytes>\n" per regular file, sorted by the relative path's UTF-8
-// bytes, hashed again. Symbolic links and junctions are not followed (list_tree in fingerprint.hpp).
-//
-// Cost model. The digest reads every byte of the mod once, in 1 MiB chunks (memory O(1 MiB), no whole-file reads),
-// so a cold run is limited by the disk's read speed. It happens at most once per tree state:
-//  - the cache is keyed by the mod key plus the tree fingerprint (`tree` + `tree_files`); an unchanged tree is a
-//    cache lookup with zero reads of mod files, a changed fingerprint invalidates it;
-//  - a cancelled, failed or interrupted run keeps the per-file hashes it finished (relative path + size + mtime) in
-//    a partial cache file, so the next run skips those files; a file whose size or mtime changed is hashed again;
-//  - nothing here runs on the caller's thread: lookup() answers from memory and queues a job on a miss.
-// A missing, corrupt or old-format cache file means "compute again", never an error. Nothing here throws to the
-// caller; every failure is state `unavailable` with a note (and EAWR-MODS-0020 on the record, see apply()).
+// Per-mod content identity: XXH3-128 per file, combined in sorted path order with a
+// versioned domain and two seeded XXH3-128 hashes. The 64-hex result retains the
+// existing serialized field width. Per-file size/mtime entries are persisted in user
+// data and reused across tree changes; invalid caches are misses.
+// This deliberately trusts path, size and mtime: same-size replacements with the
+// same mtime, including edits within a coarse filesystem timestamp tick, can
+// reuse a stale digest. This cache is not an integrity or anti-cheat check.
 #include "eawr/mods/fingerprint.hpp"
 #include "eawr/mods/record.hpp"
 
@@ -32,18 +24,32 @@
 
 namespace eawr::mods {
 
+namespace detail { class DigestPool; }
+
 inline constexpr std::size_t kContentChunkBytes = 1024 * 1024;
 
 struct ContentDigestOptions {
     // Where the digest and partial cache files live (user data: mods/cache/content). Empty: memory only.
     steam::fs::path cache_folder;
     std::uint64_t entry_cap = kDefaultTreeEntryCap;
-    // After this many bytes hashed the worker sleeps `yield_for`, so a game that is loading still gets the disk.
+    // Background reads pause after this many bytes.
     std::uint64_t yield_every_bytes = 64ull * 1024 * 1024;
     std::chrono::milliseconds yield_for{20};
-    // The partial cache is rewritten at most this often while a job runs (and always on cancel, failure, shutdown).
+    // Maximum interval between partial saves while files are completing.
     std::chrono::milliseconds partial_every{10'000};
-    bool lower_priority = true;      // below-normal thread priority and background I/O
+    std::size_t worker_count = 0; // zero selects hardware count, capped at eight
+    bool lower_priority = true;       // background priority for every hashing thread
+    // background_io false (with lower_priority) lowers only the CPU priority and keeps I/O and memory priority normal. Windows
+    // background I/O mode read a cold 7.6 GB mod in 248 s and 43.5 CPU-s, normal I/O priority in 40 s and 11.6 CPU-s
+    // (same 2 threads, cache evicted between runs), so the mods service, which also pauses while a game runs, turns it off.
+    bool background_io = true;
+    // Polled between files by the hashing threads (about every pause_poll, never under a lock): while it answers true
+    // nothing is read and the job stays pending. While paused the job also looks for a finished digest another
+    // process wrote to the same cache folder, and takes it (same key, root, tree) without reading the mod. The mods
+    // service pauses while a game runs: that game hashes the layers it mounts itself, and two readers of one
+    // 25 GB mod only slow each other. A screen waiting for a digest (screen_wait_lease) ignores the pause.
+    std::function<bool()> pause_while;
+    std::chrono::milliseconds pause_poll{2000};
     // Test hooks, called on the worker thread. on_open: a mod file is about to be opened (relative path).
     // on_read: one chunk of that many bytes was read.
     std::function<void(std::string_view)> on_open;
@@ -59,6 +65,8 @@ struct ContentJobStats {
     std::uint64_t files_hashed = 0;   // files whose bytes this run read
     std::uint64_t files_reused = 0;   // files taken from the partial cache
     std::uint64_t bytes_read = 0;
+    bool paused = false;              // waiting on ContentDigestOptions::pause_while right now
+    bool adopted = false;             // finished by taking a digest another process cached; no file was read for it
 };
 
 class ContentDigests {
@@ -85,6 +93,11 @@ public:
     // For tests and for the save path ("the digest if it is ready").
     [[nodiscard]] ContentDigest wait(const ModRecord& record, std::chrono::milliseconds timeout);
 
+    // Keep this lease only while a screen is waiting for a digest. All digest
+    // workers can then run at normal priority until the final lease is released.
+    [[nodiscard]] static std::shared_ptr<void> screen_wait_lease();
+    [[nodiscard]] static unsigned screen_waiter_count(); // diagnostic for lease tests
+
     // Synchronous reference path for tools and tests: list, hash and return in the caller's thread, no cache.
     [[nodiscard]] static ContentDigest compute_now(const steam::fs::path& root, std::uint64_t entry_cap = kDefaultTreeEntryCap);
 
@@ -105,6 +118,7 @@ private:
     std::deque<std::shared_ptr<Job>> queue_;
     std::map<std::string, std::unique_ptr<CacheEntry>> cache_;
     std::thread thread_;
+    std::shared_ptr<detail::DigestPool> pool_; // shared private blocking-I/O workers
     bool stop_ = false;
 };
 

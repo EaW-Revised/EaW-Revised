@@ -44,6 +44,7 @@ public:
         bool attract{true};
         // With `test`: press Start on the setup screen, report the attract stopped, and exit.
         bool start_battle{};
+        bool load_battle_test{};
         // `--eawr-front-end-test-campaign start`: with `test`, walk the single-player menu to the campaign
         // staging screen, pick the first campaign and start it.
         std::string campaign_test;
@@ -76,6 +77,7 @@ public:
     // A battle or campaign the player left from the in-game menu is gone: the shell shows its main menu
     // again, whichever screen started the game (the setup screen is left, the campaign shell restored).
     void return_to_main_menu();
+    void show_load_failure(const std::string& reason);
     // A campaign the host started itself (a multiplayer lobby's launch, which never passes through the shell's
     // own campaign launcher) owns the frame: the demo battle stops and the menus leave it, as for a launcher start.
     void campaign_started_by_host();

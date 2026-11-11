@@ -41,7 +41,10 @@ target_compile_features(mods_content_digest_tests PRIVATE cxx_std_20)
 eawr_target_project_warnings(mods_content_digest_tests)
 target_compile_definitions(mods_content_digest_tests PRIVATE EAWR_CONTENT_DIGEST_SCRATCH="${CMAKE_CURRENT_BINARY_DIR}")
 add_test(NAME mods_content_digest_contracts COMMAND mods_content_digest_tests)
+add_test(NAME mods_content_digest_vector COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/content_digest_vector.py" "${CMAKE_CURRENT_SOURCE_DIR}/content_digest_tests.cpp")
+add_test(NAME mods_content_digest_startup COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_digest_startup.py")
 set_tests_properties(mods_content_digest_contracts PROPERTIES TIMEOUT 300)
+set_tests_properties(mods_content_digest_vector PROPERTIES SKIP_RETURN_CODE 77)
 
 # Measurement tool, not part of the normal build: cmake --build <dir> --target mods_content_digest_tool
 # then: mods_content_digest_tool <mod folder> [cache folder] (reads the folder, writes only the cache folder).

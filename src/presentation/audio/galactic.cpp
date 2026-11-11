@@ -74,6 +74,7 @@ std::optional<GalacticSound> galactic_event_sound(const sim::galactic::GalacticE
         case Kind::enemy_approaching: return GalacticSound::enemy_approaching;
         case Kind::planet_corrupted: return GalacticSound::planet_corrupted;
         case Kind::corruption_removed: return GalacticSound::corruption_removed;
+        case Kind::planet_destroyed: return std::nullopt; // WGP-193: the source ability supplies its authored target cue.
         }
         return std::nullopt;
     }

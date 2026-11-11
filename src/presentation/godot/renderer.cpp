@@ -126,6 +126,7 @@ GodotRenderer::Impl::~Impl() {
     disable_fog();
     RenderingServer* rendering = RenderingServer::get_singleton();
     if (!rendering) return;
+    batch_shutdown(*rendering);
     for (const auto& [unit, quad] : diagnostic_quads_) {
         static_cast<void>(unit);
         if (quad.rid.is_valid()) rendering->free_rid(quad.rid);
@@ -138,7 +139,7 @@ GodotRenderer::Impl::~Impl() {
         if (instance.rid.is_valid()) render_churn::record(render_churn::owner(instance.category_role), render_churn::Event::freed);
         if (instance.skeleton.is_valid()) render_churn::record(render_churn::owner(instance.category_role, true), render_churn::Event::freed);
         if (instance.rid.is_valid()) rendering->free_rid(instance.rid);
-        if (instance.skeleton.is_valid()) rendering->free_rid(instance.skeleton);
+        if (instance.skeleton.is_valid() && !instance.shared_idle_skeleton) rendering->free_rid(instance.skeleton);
     }
     for (const auto& [asset, resource] : resources_) {
         static_cast<void>(asset);
@@ -326,9 +327,11 @@ void GodotRenderer::Impl::set_shadows_enabled(const bool enabled) {
 void GodotRenderer::Impl::set_casts_shadows(const sim::AssetId asset_id, const bool casts) {
     if (casts) non_casting_.erase(asset_id);
     else non_casting_.insert(asset_id);
+    batch_mark_asset(asset_id);
 }
 
 void GodotRenderer::Impl::set_camera(const FixedCamera& camera) {
+    if (translation_) set_translation_camera(camera);
     RenderingServer* rendering = RenderingServer::get_singleton();
     if (!rendering || !camera_.is_valid()) return;
     rendering->camera_set_perspective(
@@ -526,7 +529,9 @@ core::Result<void> GodotRenderer::retain(const sim::AssetId asset_id) {
 }
 
 core::Result<void> GodotRenderer::release(const sim::AssetId asset_id) {
-    return impl_->release(asset_id);
+    auto result = impl_->release(asset_id);
+    if (impl_->translation_ && !impl_->resources_.contains(asset_id)) impl_->retire_translation(asset_id);
+    return result;
 }
 
 std::vector<ResourceReference> GodotRenderer::resources() const { return impl_->resources(); }
@@ -545,12 +550,17 @@ GodotRenderer::PreparedSkinPose GodotRenderer::prepare_skin_pose(
 }
 
 core::Result<void> GodotRenderer::set_prepared_skin_pose(const sim::EntityId entity_id,
-    const sim::AssetId asset_id, const PreparedSkinPose& pose) {
-    return impl_->set_prepared_skin_pose(entity_id, asset_id, pose.data_ ? pose.data_->palette : nullptr);
+    const sim::AssetId asset_id, const PreparedSkinPose& pose, const std::uint64_t shared_idle_group) {
+    return impl_->set_prepared_skin_pose(entity_id, asset_id, pose.data_ ? pose.data_->palette : nullptr, shared_idle_group);
 }
 
 void GodotRenderer::begin_skin_batch(const bool enabled) {
     impl_->begin_skin_batch(enabled);
+}
+
+void GodotRenderer::prepare_shared_idle_surface(const std::uint64_t group,
+    const sim::EntityId entity, const sim::AssetId asset) {
+    impl_->prepare_shared_idle_surface(group, entity, asset);
 }
 
 SkinPoseWork GodotRenderer::end_skin_batch() {
@@ -636,6 +646,10 @@ std::vector<GodotRenderer::InstanceEvidence> GodotRenderer::instance_evidence() 
 
 std::optional<std::array<float, 12>> GodotRenderer::bone_evidence(const sim::EntityId entity, const std::int32_t bone) const {
     return impl_->bone_evidence(entity, bone);
+}
+
+void GodotRenderer::flush_instance_changes() {
+    if (auto* rendering = RenderingServer::get_singleton()) impl_->batch_update(*rendering, false);
 }
 
 void GodotRenderer::set_instance_visible(const sim::EntityId entity, const bool visible) {

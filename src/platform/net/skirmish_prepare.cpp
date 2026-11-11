@@ -35,6 +35,17 @@ core::Result<std::vector<std::uint32_t>> skirmish_player_ids(std::string_view te
     return Result::success(std::move(ids));
 }
 
+namespace {
+std::atomic<std::uint64_t> default_table_builds{0};
+std::atomic<std::uint64_t> extended_table_builds{0};
+std::atomic<std::uint64_t> identity_builds{0};
+} // namespace
+
+PrepareBuildCounts prepare_build_counts() noexcept {
+    return {default_table_builds.load(std::memory_order_relaxed), extended_table_builds.load(std::memory_order_relaxed),
+        identity_builds.load(std::memory_order_relaxed)};
+}
+
 // The mounted FoC view's unit tables (the M2 types), or nothing with `failure` set.
 [[nodiscard]] std::optional<units::UnitTables> load_start_tables(const vfs::Vfs& filesystem, const data::Catalog& catalog,
                                                            std::string& failure, const std::string& space_map,
@@ -42,6 +53,7 @@ core::Result<std::vector<std::uint32_t>> skirmish_player_ids(std::string_view te
                                                            scene::ModelPrefetch* prefetch,
                                                            const std::atomic<bool>* cancel) {
     core::load_profile::Scope load_scope(core::load_profile::Phase::unit_tables);
+    (additional_types.empty() ? default_table_builds : extended_table_builds).fetch_add(1, std::memory_order_relaxed);
     scene::VfsAssetCache cache(filesystem);
     units::LoadInput input;
     input.catalog = &catalog;
@@ -68,27 +80,46 @@ core::Result<std::vector<std::uint32_t>> skirmish_player_ids(std::string_view te
     return std::move(tables).value();
 }
 
+namespace {
+core::Result<skirmish::DataIdentity> read_counted_identity(const vfs::Vfs& filesystem) {
+    identity_builds.fetch_add(1, std::memory_order_relaxed);
+    return skirmish::read_data_identity(filesystem);
+}
+core::Result<PreparedSkirmish> tables_failure(const std::string& failure) {
+    core::Diagnostic error; error.code = "EAWR-NET-0600"; error.message = failure;
+    return core::Result<PreparedSkirmish>::failure(std::move(error));
+}
+} // namespace
+
 core::Result<PreparedSkirmish> prepare_skirmish(const skirmish::Fixture& fixture,
     const vfs::Vfs& filesystem, const data::Catalog& catalog) {
     std::string failure;
     auto tables = load_start_tables(filesystem, catalog, failure, fixture.map);
-    if (!tables) { core::Diagnostic error; error.code = "EAWR-NET-0600"; error.message = failure;
-        return core::Result<PreparedSkirmish>::failure(std::move(error)); }
-    auto inputs = skirmish::read_start_inputs(fixture, filesystem, catalog, *tables);
+    if (!tables) return tables_failure(failure);
+    auto identity = read_counted_identity(filesystem);
+    if (!identity) {
+        auto error = identity.error(); error.message = "live session start inputs: " + core::format_diagnostic(error);
+        return core::Result<PreparedSkirmish>::failure(std::move(error));
+    }
+    return prepare_skirmish(fixture, filesystem, catalog, std::move(*tables), identity.value());
+}
+core::Result<PreparedSkirmish> prepare_skirmish(const skirmish::Fixture& fixture, const vfs::Vfs& filesystem,
+    const data::Catalog& catalog, units::UnitTables tables, const skirmish::DataIdentity& identity) {
+    std::string failure;
+    auto inputs = skirmish::read_start_inputs(fixture, filesystem, catalog, tables, identity);
     if (!inputs) {
         auto error = inputs.error(); error.message = "live session start inputs: " + core::format_diagnostic(error);
         return core::Result<PreparedSkirmish>::failure(std::move(error));
     }
     // SC-01: follow the selected starting types' craft, hangar, hardpoint and projectile references.
     // Keep the existing closure when every selected type is already loaded.
-    const auto missing = missing_start_types(fixture, inputs.value(), *tables);
+    const auto missing = missing_start_types(fixture, inputs.value(), tables);
     if (!missing.empty()) {
-        tables = load_start_tables(filesystem, catalog, failure, fixture.map, missing);
-        if (!tables) { core::Diagnostic error; error.code = "EAWR-NET-0600"; error.message = failure;
-            return core::Result<PreparedSkirmish>::failure(std::move(error)); }
-        inputs.value().tables = &*tables;
+        auto extended = load_start_tables(filesystem, catalog, failure, fixture.map, missing);
+        if (!extended) return tables_failure(failure);
+        tables = std::move(*extended);
     }
-    return prepare_skirmish(fixture, std::move(*tables), std::move(inputs).value());
+    return prepare_skirmish(fixture, std::move(tables), std::move(inputs).value());
 }
 core::Result<PreparedSkirmish> prepare_skirmish(const skirmish::Fixture& fixture, units::UnitTables tables, skirmish::StartInputs inputs) {
     inputs.tables = &tables;
@@ -98,6 +129,39 @@ core::Result<PreparedSkirmish> prepare_skirmish(const skirmish::Fixture& fixture
         return core::Result<PreparedSkirmish>::failure(std::move(error));
     }
     return core::Result<PreparedSkirmish>::success({std::move(tables), std::move(inputs), std::move(start).value()});
+}
+core::Result<SavedBattlePreparation> prepare_saved_battle(const vfs::Vfs& filesystem, const data::Catalog& catalog,
+    const sim::tactical::TacticalSetup& setup) {
+    using Result = core::Result<SavedBattlePreparation>;
+    if (!setup.skirmish) {
+        core::Diagnostic error; error.code = "EAWR-SAVE-0101"; error.message = "The save has no skirmish setup.";
+        return Result::failure(std::move(error));
+    }
+    skirmish::FixtureOptions options;
+    options.map = setup.skirmish->map;
+    auto fixture = skirmish::fixture_from_options(options, filesystem, catalog);
+    if (!fixture) return Result::failure(fixture.error());
+    // The default tables and the data identity are built once here and shared by both reads of the start inputs: the first
+    // (of the options fixture) only supplies the lobby facts replay_fixture records, the second (of the recorded fixture)
+    // is the battle's own.
+    std::string failure;
+    auto tables = load_start_tables(filesystem, catalog, failure, fixture.value().map);
+    if (!tables) {
+        core::Diagnostic error; error.code = "EAWR-NET-0600"; error.message = failure;
+        return Result::failure(std::move(error));
+    }
+    auto identity = read_counted_identity(filesystem);
+    if (!identity) return Result::failure(identity.error());
+    auto recorded = [&]() -> core::Result<skirmish::Fixture> {
+        // The options fixture's inputs end with this scope: their pointer into `tables` must not outlive the move below.
+        auto inputs = skirmish::read_start_inputs(fixture.value(), filesystem, catalog, *tables, identity.value());
+        if (!inputs) return core::Result<skirmish::Fixture>::failure(inputs.error());
+        return skirmish::replay_fixture(fixture.value(), inputs.value(), setup, false);
+    }();
+    if (!recorded) return Result::failure(recorded.error());
+    auto prepared = prepare_skirmish(recorded.value(), filesystem, catalog, std::move(*tables), identity.value());
+    if (!prepared) return Result::failure(prepared.error());
+    return Result::success(SavedBattlePreparation(std::move(recorded).value(), std::move(prepared).value(), filesystem, catalog));
 }
 bool lan_map_supports_rows(const skirmish::SetupMap& map, std::span<const skirmish::LobbySlot> occupied) {
     const auto rows = skirmish::setup_row_count(map, false);

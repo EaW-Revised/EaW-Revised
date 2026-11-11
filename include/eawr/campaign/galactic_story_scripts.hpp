@@ -83,6 +83,37 @@ private:
     bool uses_immediate_effects_{};
 };
 
+// What the story scripts reach in the plot engine while a campaign runs (WST-37, WST-49, WST-55, WST-56): Get_Story_Plot
+// and the event edits, Story_Event, and the TRIGGER_AI flags Check_Story_Flag reads. The scheduler is built before the
+// game session exists, so the scripts hold this empty link and `bind` fills it at install, before the first step. A
+// link that was never bound answers "no plot engine" to the plot calls and "not set" to every flag.
+class GalacticStorySink {
+public:
+    virtual ~GalacticStorySink() = default;
+    // Commits one plot edit, a broadcast notification and a flag clear to the plot engine; the flag read.
+    [[nodiscard]] virtual core::Result<void> plot(const sim::galactic::story::PlotCommand&) = 0;
+    [[nodiscard]] virtual core::Result<void> notify(const sim::galactic::story::TextNotice&) = 0;
+    virtual void clear_flag(sim::galactic::story::Player, std::uint64_t planet, std::string_view name) = 0;
+    [[nodiscard]] virtual bool flag(sim::galactic::story::Player, std::uint64_t planet, std::string_view name) const = 0;
+};
+
+class GalacticStoryLink final {
+public:
+    GalacticStoryLink();
+    ~GalacticStoryLink();
+    GalacticStoryLink(const GalacticStoryLink&) = delete;
+    GalacticStoryLink& operator=(const GalacticStoryLink&) = delete;
+    // Before the first step only: the scripts read the link from the service threads without a lock.
+    void bind(std::span<const sim::galactic::story::SubPlotDef> definitions, std::unique_ptr<GalacticStorySink> sink);
+    // The ordered commit of the commands the scripts staged in one service (see ScriptedGalacticSession::
+    // set_story_command_committer). Consumes the story verbs it commits, in command order.
+    [[nodiscard]] core::Result<void> commit(script::authoritative::ServiceReport&) const;
+    struct Impl;
+    [[nodiscard]] Impl& impl() const noexcept { return *impl_; }
+private:
+    std::unique_ptr<Impl> impl_;
+};
+
 // The story scheduler of a galactic campaign: the content's modules pinned, the Library and Story directories on
 // the script path, Find_Player (WST-90..94), DiscreteDistribution, GameRandom and GameRandom.Free_Random (RGC-190..199) bound, and every other
 // galactic engine function this host does not implement bound to a named EAWR-SCRIPT-0215 fault. `base` supplies seed
@@ -90,7 +121,7 @@ private:
 [[nodiscard]] core::Result<script::authoritative::ScriptScheduler> create_galactic_story_scheduler(
     const GalacticStoryScripts&, script::authoritative::SessionConfig base, bool multiplayer = false,
     const GalacticStoryPlayers& players = {}, script::authoritative::GalacticSnapshotReader = {},
-    script::authoritative::GlobalValueReader = {});
+    script::authoritative::GlobalValueReader = {}, const std::shared_ptr<GalacticStoryLink>& link = {});
 
 // A fresh campaign start: one instance per bound sub-plot, then the engine's initialization events
 // (`Base_Definitions`, then the `main` thread) for the first service. A script whose chunk fails is left out and

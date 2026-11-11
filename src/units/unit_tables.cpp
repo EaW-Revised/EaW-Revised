@@ -197,6 +197,9 @@ void Loader::link() {
             if (unit.spawner) {
                 for (auto& entry : unit.spawner->starting) entry.squadron_index = unit_index(entry.squadron);
                 for (auto& entry : unit.spawner->reserves) entry.squadron_index = unit_index(entry.squadron);
+                for (auto* tiers : {&unit.spawner->campaign_starting, &unit.spawner->campaign_reserves})
+                    for (auto& tier : *tiers)
+                        for (auto& entry : tier) entry.squadron_index = unit_index(entry.squadron);
             }
             if (unit.weapon) unit.weapon->projectile_index = projectile_index(unit.weapon->projectile);
             for (auto* list : {&unit.abilities, &unit.team_abilities}) {

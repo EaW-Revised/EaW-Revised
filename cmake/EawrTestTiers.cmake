@@ -32,9 +32,13 @@ set(EAWR_SLOW_TESTS
     foc_schedule_957
     foc_soak_615
     foc_soak_664
+    galactic_coop_native_ai_restore_stock
+    galactic_native_ai_restore_matrix_stock
+    galactic_coop_native_ai_restore_live_stock
     inventory_contracts
     lua_numeric_sequences
     math_evidence_comparator_contracts
+    net_gns_checkpoint_slow_frame
     online_test_loopback
     online_test_pin_loopback
     online_test_package
@@ -54,7 +58,7 @@ set(EAWR_SLOW_TESTS
 )
 set(EAWR_GPU_TESTS
 
-    python_presentation_space_environment_effect_graphical
+
     python_presentation_renderer_atlas_overlay
     python_presentation_renderer_batchmesh_alpha
     python_presentation_renderer_batchmesh_alpha_fog
@@ -87,9 +91,9 @@ set(EAWR_GPU_TESTS
 
     python_presentation_renderer_space_camera
     python_presentation_renderer_space_fog
-    python_presentation_renderer_space_map_mode
-    python_presentation_renderer_space_meshadditive_sky
-    python_presentation_renderer_space_meshgloss_sky
+
+
+
 
     python_presentation_renderer_tactical_hud
     python_presentation_renderer_ui_gallery
@@ -102,6 +106,25 @@ set(EAWR_GPU_TESTS
     lighting_renderer_probe_contracts
     renderer_fault_runtime
     renderer_resource_churn_runtime
+)
+
+# Tests whose selected CTest command requires a host mod installation.
+set(EAWR_MOD_DATA_TESTS
+    galactic_remake_save_probe
+    tactical_deploy_squad_mod
+    unit_remake_combat_guard
+    unit_remake_ally_shipyard
+    animation_real_unit_samples
+    hull_asset_shadow_probe_contracts
+    python_presentation_renderer_effect_mode
+    python_presentation_renderer_effect_mode_capture
+    python_presentation_renderer_front_end
+    python_presentation_renderer_hull_preview
+    python_presentation_renderer_menu_mod_layouts
+
+
+    python_presentation_renderer_ui_gallery
+    skirmish_setup_gpu_contract
 )
 
 # Labels every test of the calling directory with its tier (appended to labels it already has).
@@ -120,6 +143,9 @@ function(eawr_label_tests)
             set(tier gpu)
         endif()
         set_property(TEST "${test}" APPEND PROPERTY LABELS "${tier}")
+        if(test IN_LIST EAWR_MOD_DATA_TESTS)
+            set_property(TEST "${test}" APPEND PROPERTY LABELS mod-data)
+        endif()
     endforeach()
     set_property(DIRECTORY PROPERTY EAWR_TEST_TIERS_APPLIED TRUE)
 endfunction()

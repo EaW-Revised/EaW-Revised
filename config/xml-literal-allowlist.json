@@ -1,6 +1,6 @@
 {
  "comment": "Existing findings of tools/inventory/xml_literal_check.py, each with its ticket. May only shrink: fix the site (read the XML, or mark `// xml-fallback: <Tag>`) and delete the entry. ticket \"false-positive\" needs a reason.",
- "max_entries": 37,
+ "max_entries": 43,
  "entries": [
   {
    "file": "src/presentation/godot/ui/minimap_view.cpp",
@@ -219,10 +219,46 @@
    "text": "const auto exchange = fallback(\"EnergyToShieldExchangeRate\", raw(5), damage_message);",
    "ticket": 5331,
    "reason": "GameConstants fallback (LSA-P5 stock value) reported via EAWR-LOAD-0120 in durability_table; the gate does not recognise the local fallback helper"
+  },
+  {
+   "file": "src/script/foc/ai_data.hpp",
+   "text": "Real threat_range_cap{real(1000)}; // AI_SpaceThreatRangeCap (engine default)",
+   "ticket": 6215,
+   "reason": "Existing engine-default initialization; authored tag override is read separately. Review its fallback diagnostic under the expanded tag universe."
+  },
+  {
+   "file": "src/skirmish/economy.cpp",
+   "text": "rules.max_queue = 5; // PU-14: FoC's built-in Max_Build_Queue; its data does not set it",
+   "ticket": 6215,
+   "reason": "Existing documented built-in queue limit (PU-14), not a copied stock XML value; review applicability of the newly catalogued tag."
+  },
+  {
+   "file": "src/units/unit_tables_abilities_special.cpp",
+   "text": "read(\"Target_Light_Effect_Pulse_Count\", Fixed::from_raw(Fixed::scale)).raw() / Fixed::scale, 1, 65535));",
+   "ticket": 6215,
+   "reason": "Existing pulse-count numeric support bound next to an XML read, not a copied XML value; source clamp/diagnostics need their own review."
+  },
+  {
+   "file": "src/units/unit_tables_abilities_special.cpp",
+   "text": "read(\"Owner_Light_Effect_Pulse_Count\", Fixed::from_raw(Fixed::scale)).raw() / Fixed::scale, 1, 65535));",
+   "ticket": 6215,
+   "reason": "Existing pulse-count numeric support bound next to an XML read, not a copied XML value; source clamp/diagnostics need their own review."
+  },
+  {
+   "file": "src/units/unit_tables_decode.cpp",
+   "text": "projectile.blast.max_victims = signed_count(\"Projectile_Blast_Area_Max_Victims\", 5000);",
+   "ticket": 6215,
+   "reason": "Existing projectile victim-count fallback (WAD-01), newly visible to the expanded tag list; review missing-value diagnostics."
+  },
+  {
+   "file": "include/eawr/presentation/audio/sfx.hpp",
+   "text": "double pan{0.5}; // Min_Pan2D..Max_Pan2D / 100",
+   "ticket": 6215,
+   "reason": "Existing neutral result initialization and pan-unit comment, not the loaded XML pan-range value."
   }
  ],
  "growth_override": {
-  "ticket": 5331,
-  "reason": "0.3.1 cut: main red after #5273 (durability LSA-P5 fallbacks via a local helper the gate does not recognise) and #5286 (planet_economy corruption default); entries are removed when #5331 restructures the helper and GC marks its site"
+  "ticket": 6215,
+  "reason": "Reviewed expansion of the coverage universe reveals nine unchanged source sites: engine defaults, diagnostic numeric bounds and structural/comment matches; retain exact findings pending their source/guard classification without exempting new sites."
  }
 }

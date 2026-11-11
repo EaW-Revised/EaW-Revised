@@ -55,6 +55,7 @@ private:
     // none. It records provenance only: the public matrices stay writable, so
     // it does not make a pose tamper-proof. It does not keep the player alive.
     std::weak_ptr<const void> origin_;
+    std::vector<BonePose> blend_scratch_;
 };
 
 enum class AttachmentSpace : std::uint8_t { model, world };
@@ -110,6 +111,13 @@ public:
     // sampling performs no allocation; errors leave the previous pose intact.
     [[nodiscard]] core::Result<void> sample_position(std::uint64_t position, std::uint32_t subdivisions,
         Pose& output) const;
+    // Blend two positions on players bound to the same model; weight is the second clip's contribution.
+    [[nodiscard]] core::Result<Pose> sample_blend(std::uint64_t position, const Player& other,
+        std::uint64_t other_position, std::uint32_t subdivisions, float weight) const;
+    // Check once when binding clips; required before the reusable blend overload.
+    [[nodiscard]] bool blend_compatible(const Player& other) const noexcept;
+    [[nodiscard]] core::Result<void> sample_blend(std::uint64_t position, const Player& other,
+        std::uint64_t other_position, std::uint32_t subdivisions, float weight, Pose& output) const;
     [[nodiscard]] std::uint32_t playable_frames() const noexcept;
     [[nodiscard]] float frames_per_second() const noexcept;
 

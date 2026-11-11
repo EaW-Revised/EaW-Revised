@@ -7,6 +7,15 @@
   },
   "configurePresets": [
     {
+      "name": "windows-clang-ninja-relay",
+      "displayName": "Optional TLS relay / windows-clang-ninja-relay",
+      "inherits": ["gns-enabled", "windows-clang-ninja"],
+      "cacheVariables": {
+        "EAWR_ENABLE_RELAY": "ON",
+        "CMAKE_LINKER": "lld-link"
+      }
+    },
+    {
       "name": "windows-msvc-ninja-relay",
       "displayName": "Optional TLS relay / windows-msvc-ninja-relay",
       "inherits": "windows-msvc-ninja-gns",
@@ -177,6 +186,11 @@
   ],
   "buildPresets": [
     {
+      "name": "windows-clang-ninja-relay",
+      "inherits": "windows-msvc-ninja-relay",
+      "configurePreset": "windows-clang-ninja-relay"
+    },
+    {
       "name": "windows-msvc-ninja-relay",
       "configurePreset": "windows-msvc-ninja-relay",
       "targets": [
@@ -304,6 +318,11 @@
     }
   ],
   "testPresets": [
+    {
+      "name": "windows-clang-ninja-relay",
+      "inherits": "windows-msvc-ninja-relay",
+      "configurePreset": "windows-clang-ninja-relay"
+    },
     {
       "name": "windows-msvc-ninja-relay",
       "configurePreset": "windows-msvc-ninja-relay",

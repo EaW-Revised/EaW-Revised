@@ -281,6 +281,85 @@ class TacticalHudGraphical(unittest.TestCase):
     def tearDownClass(cls):
         shutil.rmtree(cls.cache, ignore_errors=True)
 
+    def test_tactical_beacon_overlay_fills_button_in_each_state(self):
+        # The GC natural-size opt-in must leave the shared tactical button's
+        # existing full-control overlay geometry intact in every state.
+        driver = self.directory / "tactical-beacon-geometry.gd"
+        driver.write_text('''extends SceneTree
+var frame = 0
+var button
+var overlay
+var states = ["normal", "hover", "pressed", "disabled"]
+func _initialize():
+    call_deferred("start")
+func start():
+    var instance = load(ProjectSettings.get_setting("application/run/main_scene")).instantiate()
+    root.add_child(instance)
+    current_scene = instance
+func motion(point):
+    var event = InputEventMouseMotion.new()
+    event.position = point
+    event.global_position = point
+    Input.parse_input_event(event)
+func _process(_delta):
+    frame += 1
+    if frame == 60:
+        button = root.find_child("b_special_weapon2", true, false)
+        assert(button != null, "tactical beacon button absent")
+        var layers = button.get_children().filter(func(child): return child is TextureRect)
+        assert(layers.size() >= 2, "tactical beacon overlay absent")
+        overlay = layers[1]
+        var canvas = CanvasLayer.new()
+        canvas.layer = 100
+        root.add_child(canvas)
+        button.reparent(canvas)
+        button.show()
+        button.position = Vector2(100, 100)
+        button.size = Vector2(80, 40)
+        current_scene.process_mode = Node.PROCESS_MODE_DISABLED
+    if frame >= 70 and frame < 350:
+        var state = "normal" if frame < 90 else "hover" if frame < 310 else "pressed" if frame < 330 else "disabled"
+        var phase = frame - (70 if state == "normal" else 90 if state == "hover" else 310 if state == "pressed" else 330)
+        if phase == 0:
+            button.disabled = false
+            button.set_pressed_no_signal(false)
+            button.emit_signal("button_up")
+            motion(Vector2(1100, 100))
+        if phase == 3:
+            if state == "pressed":
+                button.set_pressed_no_signal(true)
+                button.emit_signal("button_down")
+            if state == "disabled":
+                button.disabled = true
+                button.emit_signal("mouse_exited")
+        if state == "hover" and phase >= 3 and phase < 203 and not button.is_hovered():
+            var cell = phase - 3
+            motion(button.global_position + Vector2(2 + 4 * (cell % 20), 2 + 4 * int(cell / 20)))
+        if phase == (210 if state == "hover" else 10):
+            if state == "hover": assert(button.is_hovered(), "beacon did not receive hover")
+            assert(overlay.position.is_equal_approx(Vector2.ZERO), state + " overlay moved")
+            assert(overlay.size.is_equal_approx(button.size), state + " overlay no longer fills button")
+            print("TACTICAL BEACON ", state, " ", overlay.get_rect())
+    if frame == 350:
+        print("TACTICAL BEACON GEOMETRY OK")
+        current_scene.propagate_notification(Node.NOTIFICATION_WM_CLOSE_REQUEST)
+        quit()
+    return false
+''', encoding="utf-8")
+        result = subprocess.run([os.environ["EAWR_GODOT_EXECUTABLE"], "--resolution", "1280x720",
+            "--path", str(ROOT / "apps/viewer/project"), "--script", str(driver), "--",
+            "--eawr-game-root", GAME_ROOT, "--eawr-map", CORUSCANT, "--eawr-populate",
+            "--eawr-map-camera-config", str(CAMERA), "--eawr-font-cache", str(self.cache),
+            "--eawr-hud", "tactical", "--eawr-hud-faction", "rebel"],
+            cwd=ROOT, capture_output=True, text=True, timeout=180)
+        log = result.stdout + result.stderr
+        (self.directory / "tactical-beacon-geometry.log").write_text(log, encoding="utf-8")
+        print(log)
+        self.assertEqual(result.returncode, 0, log)
+        self.assertNotIn("Assertion failed", log)
+        self.assertNotIn("SCRIPT ERROR", log)
+        self.assertIn("TACTICAL BEACON GEOMETRY OK", log)
+
     def assert_hud_diagnostics(self, hud):
         self.assertEqual(hud["diagnostics"], [])
 

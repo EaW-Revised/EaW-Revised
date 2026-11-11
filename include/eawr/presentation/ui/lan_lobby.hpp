@@ -81,6 +81,25 @@ struct OnlineJoinResult {
 // Safe player-facing text only; no backend diagnostics or invitation material.
 [[nodiscard]] std::string_view online_join_notice(OnlineJoinStatus status) noexcept;
 [[nodiscard]] std::string_view private_online_empty_notice() noexcept;
+
+// Why a Campaign room's Create / Load Game press still waits (#6349). The campaign list loads on a worker for every press.
+// The mounted mods' content digests (a SHA-256 of every file, minutes for a big mod the first time) only gate Load Game,
+// which compares a save's mod list with the mounted one. A fresh host opens at once: its mod list is display only, and
+// an unsettled digest leaves that mod's entry without a checksum, which guests see as an unchecked mod list.
+enum class GalacticContentGate : std::uint8_t { open, loading_content, checking_mod_files };
+enum class GalacticPress : std::uint8_t { host, load_game };
+// The one decision the lobby screen's prefetch makes. `mod_digests_settled` is asked only for Load Game and only once the
+// campaign list is in, so a fresh host never touches (let alone waits for) the digests.
+template <class DigestsSettled>
+[[nodiscard]] GalacticContentGate galactic_press_gate(const bool content_ready, const GalacticPress press,
+                                                      DigestsSettled&& mod_digests_settled) {
+    if (!content_ready) return GalacticContentGate::loading_content;
+    if (press == GalacticPress::load_game && !mod_digests_settled()) return GalacticContentGate::checking_mod_files;
+    return GalacticContentGate::open;
+}
+// The line shown while the gate is closed; the file counts (0 when unknown) go into the mod-files line.
+[[nodiscard]] std::string galactic_content_gate_text(GalacticContentGate gate, std::uint64_t files_done,
+                                                     std::uint64_t files_total);
 // The optional four-letter-or-digit room code: trimmed, upper-cased, nothing else accepted.
 [[nodiscard]] std::optional<std::string> normalize_short_code(std::string_view typed);
 

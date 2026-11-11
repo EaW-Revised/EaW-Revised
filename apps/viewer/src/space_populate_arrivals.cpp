@@ -189,7 +189,7 @@ void SpacePopulation::prepare_compose_slots(bool appending) {
         bind_players_.clear();
         live_decisions_.clear(); hull_surface_assets_.clear(); live_models_.clear(); live_shown_.clear();
         live_defend_.clear(); live_stealth_.clear(); live_blast_charging_.clear(); live_blast_charged_.clear();
-        live_clips_.clear(); turret_bindings_.clear(); live_alternate_clips_.clear(); live_retired_.clear();
+        live_clips_.clear(); land_clips_.clear(); land_idle_.clear(); land_clip_bindings_.clear(); turret_bindings_.clear(); live_alternate_clips_.clear(); live_retired_.clear();
         hardpoint_turret_bindings_.clear();
         parent_hardpoint_turret_bindings_.clear();
         live_death_clone_.clear(); live_alternates_.clear(); live_alternate_counts_.clear();
@@ -206,6 +206,8 @@ void SpacePopulation::prepare_compose_slots(bool appending) {
     live_blast_charging_.resize(options_.placed_ships.size(), false);
     live_blast_charged_.resize(options_.placed_ships.size(), false);
     live_clips_.resize(options_.placed_ships.size(), std::nullopt);
+    land_clips_.resize(options_.placed_ships.size());
+    land_idle_.resize(options_.placed_ships.size());
     contact_bones_.resize(options_.placed_ships.size());
     turret_bindings_.resize(options_.placed_ships.size(), std::nullopt);
     hardpoint_turret_bindings_.resize(options_.placed_ships.size());
@@ -602,7 +604,8 @@ void SpacePopulation::compose_hull_pieces(ComposeContext& context, ComposeBatch&
             const auto& charge_mesh = model->meshes[mesh_index];
             const auto& submesh = charge_mesh.submeshes[submesh_index];
             const bool effect_missing = scene::missing_material_effect(cache.access(), submesh.shader);
-            const auto* selector = scene::material_selector(submesh.shader, effect_missing);
+            const auto* selector = scene::material_selector(submesh.shader, effect_missing,
+                !effect_missing && !scene::find_legacy_selector(submesh.shader) && context.renderer.usable_shader(submesh));
             if (selector == nullptr) {
                 decision.missing.push_back("charge mesh " + charge_mesh.name + " unsupported shader " + submesh.shader);
                 return;
@@ -712,7 +715,34 @@ void SpacePopulation::compose_piece_animation(ComposeContext& context, ComposeBa
             [](const Piece& piece) { return piece.upload->pose.has_value(); })) {
         const std::string live_clip_path = live_ship ? options_.placed_ships[*live_ship].clip : std::string{};
         const auto clip = live_clip_path.empty() ? bind_composed_idle(context, batch, placement, *model) : std::nullopt;
-        if (!live_clip_path.empty()) {
+        if (live_ship && options_.placed_ships[*live_ship].land_motion) {
+            auto& land = land_clips_[*live_ship];
+            land[animation::clip_types::idle] = clip;
+            if (clip) land_idle_[*live_ship] = composed_idle_placement(context, placement, *clip);
+            const auto object = resolve(placement.object_id, data::Category::game_object);
+            const auto* override_tag = object ? object->value("Land_Model_Anim_Override_Name") : nullptr;
+            const std::string override_name = override_tag
+                ? std::string(core::trim_view(override_tag->value.raw_text, core::xml_whitespace)) : std::string{};
+            const auto exists = [&](const std::string& path) { return static_cast<bool>(context.filesystem.stat(path)); };
+            constexpr std::array<std::size_t, 18> types{2, 3, 4, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 66, 67};
+            for (const auto type : types) {
+                const auto paths = animation::model_clip_paths(placement.model_path, type, exists, override_name);
+                if (paths.empty()) continue;
+                const auto key = std::make_pair(placement.model_path, paths.front());
+                auto found = land_clip_bindings_.find(key);
+                if (found == land_clip_bindings_.end()) {
+                    const auto bound = bind_composed_clip(context, placement, *model, paths.front());
+                    if (!bound) continue;
+                    found = land_clip_bindings_.emplace(key, *bound).first;
+                }
+                // All clips admitted for one placement must share a skeleton.
+                const auto existing = std::find_if(land.begin(), land.end(), [](const auto& item) { return item.has_value(); });
+                if (existing != land.end() && !clips_[**existing]->blend_compatible(*clips_[found->second])) continue;
+                land[type] = found->second;
+            }
+            for (std::size_t index = first_piece; index < pieces.size(); ++index)
+                if (pieces[index].upload->pose) pieces[index].live_clip = true;
+        } else if (!live_clip_path.empty()) {
             if (const auto bound = bind_composed_clip(context, placement, *model, live_clip_path)) {
                 live_clips_[*live_ship] = *bound;
                 if (const std::string& alternate = options_.placed_ships[*live_ship].alternate_clip; !alternate.empty()) {
@@ -910,7 +940,8 @@ void SpacePopulation::compose_hardpoint_pieces(ComposeContext& context, ComposeB
                 const assets::Submesh& submesh = mesh.submeshes[submesh_index];
                 if (scene::is_shadow_volume_shader(submesh.shader)) continue;
                 const bool effect_missing = scene::missing_material_effect(cache.access(), submesh.shader);
-                const scene::LegacySelector* selector = scene::material_selector(submesh.shader, effect_missing);
+                const scene::LegacySelector* selector = scene::material_selector(submesh.shader, effect_missing,
+                    !effect_missing && !scene::find_legacy_selector(submesh.shader) && context.renderer.usable_shader(submesh));
                 if (selector == nullptr) {
                     decision.missing.push_back(who + "shader_unsupported " + submesh.shader);
                     continue;
@@ -987,7 +1018,7 @@ void SpacePopulation::compose_draw_pieces(ComposeContext& context, ComposeBatch&
         {
             core::load_profile::Scope scope(core::load_profile::Phase::compose_hull);
             const core::load_profile::DetailModelScope compose_timer(placement.model_path,
-                &core::load_profile::ModelCost::compose_ms);
+                core::load_profile::ModelField::compose);
             core::load_profile::detail_composed(placement.model_path);
             compose_hull_pieces(context, batch, decision, decision_index, placement, model, live_ship, colour, cloak_ship);
         }
@@ -1244,7 +1275,7 @@ bool SpacePopulation::enqueue_compose_range(std::shared_ptr<ComposeOwner> owner,
                 {
                     core::load_profile::Scope scope(core::load_profile::Phase::compose_hull);
                     const core::load_profile::DetailModelScope compose_timer(placement.model_path,
-                        &core::load_profile::ModelCost::compose_ms);
+                        core::load_profile::ModelField::compose);
                     core::load_profile::detail_composed(placement.model_path);
                     compose_hull_pieces(context, batch, decision, decision_index, placement, model, live_ship, colour, cloak_ship,
                         &enqueue, range);
@@ -1413,8 +1444,15 @@ GodotRenderer::ProxyResult SpacePopulation::append_model_proxies(GodotRenderer& 
     using Outcome = GodotRenderer::ProxyOutcome;
     if (ships.empty()) return {};
     if (!composed_ || !scene_ || recipe_ship >= live_decisions_.size() || !live_decisions_[recipe_ship]
-        || !options_.placed_ships[recipe_ship].projectile_slot)
-        return {Outcome::invalid_recipe, 0, "projectile_recipe_unavailable"};
+        || !(options_.placed_ships[recipe_ship].projectile_slot || options_.placed_ships[recipe_ship].launch_slot
+            || options_.placed_ships[recipe_ship].death_clone))
+        return {Outcome::invalid_recipe, 0, "model_recipe_unavailable"};
+    for (const auto& ship : ships) {
+        const auto& recipe = options_.placed_ships[recipe_ship];
+        if (ship.object_id != recipe.object_id || ship.projectile_slot != recipe.projectile_slot
+            || ship.launch_slot != recipe.launch_slot || ship.death_clone != recipe.death_clone)
+            return {Outcome::invalid_recipe, 0, "model_recipe_mismatch"};
+    }
     const auto first_ship = options_.placed_ships.size();
     const auto first_piece = pieces_.size();
     const auto first_clip = live_clip_instances_.size();
@@ -1422,10 +1460,13 @@ GodotRenderer::ProxyResult SpacePopulation::append_model_proxies(GodotRenderer& 
     const auto first_decision = decisions_.size();
     const auto first_placement = scene_->placements.size();
     const auto recipe_decision = *live_decisions_[recipe_ship];
+    const auto first_idle = idle_placements_.size();
+    const auto first_player = clips_.size();
     std::vector<GodotRenderer::ProxyInstance> proxies;
     std::vector<GatedInstance> pieces;
     std::vector<LiveClipInstance> clips;
     std::vector<AnimatedInstance> animated;
+    std::vector<std::map<std::size_t, std::size_t>> idle_maps;
     std::vector<Options::PlacedShip> placements;
     std::vector<scene::Placement> scenes;
     std::vector<scene::SpacePlacementDecision> decisions;
@@ -1443,6 +1484,9 @@ GodotRenderer::ProxyResult SpacePopulation::append_model_proxies(GodotRenderer& 
         animated_instances_.resize(first_animated);
         decisions_.resize(first_decision);
         hardpoint_states_.resize(first_decision);
+        idle_placements_.resize(first_idle);
+        clips_.resize(first_player);
+        std::erase_if(idle_live_ships_, [&](const auto& entry) { return entry.first >= first_idle; });
         scene_->placements.resize(first_placement);
         options_.placed_ships.resize(first_ship);
         prepare_compose_slots(true);
@@ -1452,18 +1496,33 @@ GodotRenderer::ProxyResult SpacePopulation::append_model_proxies(GodotRenderer& 
     try {
         staged_state = true;
         placements.assign(ships.begin(), ships.end());
+        idle_maps.resize(ships.size());
         for (std::size_t offset = 0; offset < ships.size(); ++offset) {
-            if (!ships[offset].projectile_slot || ships[offset].object_id != options_.placed_ships[recipe_ship].object_id)
-                return {Outcome::invalid_recipe, 0, "projectile_recipe_mismatch"};
+            auto& idles = idle_maps[offset];
+            const auto copy_idle = [&](const std::size_t source) {
+                auto [found, inserted] = idles.emplace(source, idle_placements_.size());
+                if (inserted) {
+                    auto idle = idle_placements_[source];
+                    if (!options_.placed_ships[recipe_ship].projectile_slot)
+                        idle.start_frame = placement_start_frame(scenes.back(), clips_[idle.clip]->playable_frames());
+                    idle_placements_.push_back(idle);
+                    if (idle_live_ships_.contains(source)) idle_live_ships_.emplace(found->second, first_ship + offset);
+                }
+                return found->second;
+            };
             scenes.push_back(scene_->placements[decisions_[recipe_decision].scene_ordinal]);
             scenes.back().scene_ordinal = first_placement + offset;
             scenes.back().entity_id = static_cast<sim::EntityId>(first_placement + offset + 1);
+            if (!options_.placed_ships[recipe_ship].projectile_slot)
+                scenes.back().record_ordinal = static_cast<std::uint32_t>(map_placements_ + first_ship + offset);
             decisions.push_back(decisions_[recipe_decision]);
             decisions.back().scene_ordinal = first_placement + offset;
             for (const auto index : piece_index_.pieces(recipe_ship)) {
                 auto piece = pieces_[index];
-                if (next_entity == std::numeric_limits<sim::EntityId>::max())
+                if (next_entity == std::numeric_limits<sim::EntityId>::max()) {
+                    rollback();
                     return {Outcome::allocation_failed, 0, "proxy_identity_overflow"};
+                }
                 const auto source_entity = piece.instance.entity_id;
                 piece.instance.entity_id = next_entity++;
                 piece.live = first_ship + offset;
@@ -1472,8 +1531,17 @@ GodotRenderer::ProxyResult SpacePopulation::append_model_proxies(GodotRenderer& 
                 for (const auto& entry : live_clip_instances_) if (entry.entity == source_entity)
                     clips.push_back({first_ship + offset, piece.instance.entity_id, entry.asset});
                 for (const auto& entry : animated_instances_) if (entry.entity == source_entity)
-                    animated.push_back({piece.instance.entity_id, entry.asset, entry.idle});
+                    animated.push_back({piece.instance.entity_id, entry.asset, copy_idle(entry.idle)});
                 pieces.push_back(std::move(piece));
+            }
+            const auto map_binding_idle = [&](const auto& binding) {
+                if (binding && binding->idle) static_cast<void>(copy_idle(*binding->idle));
+            };
+            map_binding_idle(turret_bindings_[recipe_ship]);
+            map_binding_idle(parent_hardpoint_turret_bindings_[recipe_ship]);
+            for (const auto& [index, binding] : hardpoint_turret_bindings_[recipe_ship]) {
+                static_cast<void>(index);
+                if (binding.idle) static_cast<void>(copy_idle(*binding.idle));
             }
         }
         // Everything mutable is staged; uploaded assets and immutable clips are shared.
@@ -1492,10 +1560,37 @@ GodotRenderer::ProxyResult SpacePopulation::append_model_proxies(GodotRenderer& 
             live_decisions_[ship] = first_decision + offset;
             hull_surface_assets_[ship] = hull_surface_assets_[recipe_ship];
             live_models_[ship] = live_models_[recipe_ship];
-            live_clips_[ship] = live_clips_[recipe_ship];
-            live_alternate_clips_[ship] = live_alternate_clips_[recipe_ship];
+            // Retirement clears a ship's clip indices. Give each copy its own
+            // shared owner so retiring one never clears a sibling's animation.
+            const auto copy_clip = [&](const auto index) -> std::optional<std::size_t> {
+                if (!index) return std::nullopt;
+                const auto player = clips_[*index];
+                const auto copied = clips_.size();
+                clips_.push_back(player);
+                return copied;
+            };
+            live_clips_[ship] = copy_clip(live_clips_[recipe_ship]);
+            live_alternate_clips_[ship] = copy_clip(live_alternate_clips_[recipe_ship]);
             live_bounds_[ship] = live_bounds_[recipe_ship];
             live_alternate_counts_[ship] = live_alternate_counts_[recipe_ship];
+            live_death_clone_[ship] = options_.placed_ships[ship].death_clone;
+            backdrop_ships_[ship] = backdrop_ships_[recipe_ship];
+            contact_bones_[ship] = contact_bones_[recipe_ship];
+            const auto copy_binding = [&](auto binding) {
+                if (binding) {
+                    binding->applied.reset();
+                    if (binding->idle) binding->idle = idle_maps[offset].at(*binding->idle);
+                }
+                return binding;
+            };
+            turret_bindings_[ship] = copy_binding(turret_bindings_[recipe_ship]);
+            parent_hardpoint_turret_bindings_[ship] = copy_binding(parent_hardpoint_turret_bindings_[recipe_ship]);
+            hardpoint_turret_bindings_[ship] = hardpoint_turret_bindings_[recipe_ship];
+            for (auto& [index, binding] : hardpoint_turret_bindings_[ship]) {
+                static_cast<void>(index);
+                binding.applied.reset();
+                if (binding.idle) binding.idle = idle_maps[offset].at(*binding.idle);
+            }
             decisions_.push_back(std::move(decisions[offset]));
             scene_->placements.push_back(std::move(scenes[offset]));
             hardpoint_states_.push_back(hardpoint_states_[recipe_decision]);
@@ -1542,6 +1637,7 @@ bool SpacePopulation::append_live_ships(GodotRenderer& renderer, const vfs::Vfs&
     map.source = compose_source_;
     map.kind = domain() == sim::tactical::BattleDomain::land ? assets::MapKind::land : assets::MapKind::space;
     scene::VfsAssetCache cache(filesystem);
+    admit_scene_shaders(cache, renderer);
     scene::BuildInput input{&map, options_.map_sha256, options_.catalog, cache.access()};
     const scene::ObjectResolver resolve = [&](const std::string_view id, const data::Category category)
         -> std::optional<data::EffectiveObject> {

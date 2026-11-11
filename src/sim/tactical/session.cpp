@@ -179,11 +179,24 @@ core::Result<AdmittedSeatCommand> TacticalSession::submit_human(const SeatBindin
 }
 
 core::Result<void> TacticalSession::submit(const PlayerCommand& command) {
+    // G-02/G-07: garrison and unload orders belong to the land garrison service (session_land_garrison.cpp).
+    if (!impl_->land && (std::holds_alternative<LandGarrisonPayload>(command.payload)
+        || std::holds_alternative<LandUnloadPayload>(command.payload)))
+        return core::Result<void>::failure(detail::diagnostic(diagnostic_codes::invalid_command,
+            "land garrison commands need a land session"));
+    // LC-57, LC-42..51: the economy routes and the reinforcement route share the space command path.
     if (impl_->land && (!std::holds_alternative<MovePayload>(command.payload)
         && !std::holds_alternative<StopPayload>(command.payload)
-        && !std::holds_alternative<AttackPayload>(command.payload)))
+        && !std::holds_alternative<AttackPayload>(command.payload)
+        && !std::holds_alternative<BuyPayload>(command.payload)
+        && !std::holds_alternative<CancelPayload>(command.payload)
+        && !std::holds_alternative<PadBuildPayload>(command.payload)
+        && !std::holds_alternative<PadSellPayload>(command.payload)
+        && !std::holds_alternative<ReinforcePayload>(command.payload)
+        && !std::holds_alternative<LandGarrisonPayload>(command.payload)
+        && !std::holds_alternative<LandUnloadPayload>(command.payload)))
         return core::Result<void>::failure(detail::diagnostic(diagnostic_codes::invalid_command,
-            "land sessions accept move, stop and attack only; attack-move and guard are not supported"));
+            "land sessions accept move, stop, attack, garrison, unload and the buy, cancel, pad and reinforce routes only; attack-move and guard are not supported"));
     if (impl_->land) if (const auto* move = std::get_if<MovePayload>(&command.payload); move && (move->append || move->through_hazards))
         return core::Result<void>::failure(detail::diagnostic(diagnostic_codes::invalid_command,
             "land move does not support waypoints or hazard overrides"));
@@ -484,6 +497,19 @@ std::shared_ptr<const TacticalSnapshot> TacticalSession::snapshot() const noexce
 
 TacticalReplay TacticalSession::record() const {
     return TacticalReplay{initial_setup(), impl_->completed_tick, impl_->executed, impl_->object_turns_executed};
+}
+
+TacticalReplay TacticalSession::record_last_tick() const {
+    TacticalReplay replay{initial_setup(), impl_->completed_tick, {}, {}};
+    if (impl_->completed_tick == 0) return replay;
+    const auto tick = impl_->completed_tick - 1;
+    const auto commands = std::lower_bound(impl_->executed.begin(), impl_->executed.end(), tick,
+        [](const auto& command, const auto value) { return command.key.tick < value; });
+    const auto turns = std::lower_bound(impl_->object_turns_executed.begin(), impl_->object_turns_executed.end(), tick,
+        [](const auto& turn, const auto value) { return turn.tick < value; });
+    replay.commands.assign(commands, impl_->executed.end());
+    replay.object_turns.assign(turns, impl_->object_turns_executed.end());
+    return replay;
 }
 
 TacticalReplay TacticalSession::record_through_next_tick() const {

@@ -19,6 +19,7 @@ public:
     ~BattleCursor();
     void prepare(const vfs::Vfs& filesystem);
     void update(std::string_view id, double delta);
+    void suspend();
     void write_report(std::ostream& output) const;
     void composite(godot::Ref<godot::Image> image, godot::Vector2 point) const;
     void capture_overlay(godot::Node& host, godot::Vector2 point, bool enabled);

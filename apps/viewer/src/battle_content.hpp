@@ -9,7 +9,10 @@
 #include <string>
 #include <vector>
 
+namespace eawr::presentation::shader_activation { struct Generation; }
+
 namespace eawr::presentation::godot_backend {
+struct ShaderActivationReceipt;
 
 // One setup screen's installed-content snapshot, immutable apart from the
 // filesystem and catalog's mutex-guarded caches. Session data stays per battle.
@@ -20,6 +23,10 @@ struct BattleContent final {
     std::vector<std::string> layers;
     std::filesystem::path game_root{};
     std::filesystem::path mod_root{};
+    // Empty while translation is disabled. Readers pin an immutable admitted
+    // generation; no compiler/job or mutable cache enters battle content.
+    std::shared_ptr<const shader_activation::Generation> shader_generation{};
+    std::shared_ptr<const ShaderActivationReceipt> shader_receipt{};
 
     [[nodiscard]] bool matches_chain(const std::filesystem::path& requested_game_root,
         const std::filesystem::path& requested_mod_root, const std::string& requested_profile,

@@ -29,12 +29,16 @@
 #include <string>
 #include <vector>
 
+namespace eawr::battle { struct BattleStart; }
+
 namespace eawr::data {
 class Catalog;
 } // namespace eawr::data
+namespace eawr::presentation::shader_activation { struct Generation; }
 
 namespace eawr::presentation::godot_backend {
 
+struct ShaderActivationReceipt;
 class FogMode;
 class GodotRenderer;
 class GodotShaderCache;
@@ -118,6 +122,9 @@ public:
         std::string profile;
         std::vector<std::string> layers;
         std::shared_ptr<GodotShaderCache> shaders;
+        std::shared_ptr<const shader_activation::Generation> shader_generation{};
+        std::shared_ptr<const ShaderActivationReceipt> shader_receipt{};
+        std::shared_ptr<const vfs::Vfs> shader_filesystem;
         std::filesystem::path report_path;
         std::filesystem::path capture_path;
         std::uint32_t warmup_frames{30};
@@ -178,6 +185,7 @@ public:
         std::filesystem::path fog_paint_evidence;
         // #32: the populated scene, composed by the default environment view
         // only. Empty composes the environment alone.
+        const battle::BattleStart* battle_start{};
         SpacePopulateHook populate;
         SpaceEffectsHook effects;
         // P2-20a (#83): writes the report's "hud" line when a HUD is drawn.
@@ -207,6 +215,9 @@ public:
     void camera_pointer_left();
     void camera_sample_pointer(float x, float y);
     void camera_clear_pointer_sample();
+    // #5990: where a held middle-button drag keeps the pointer; empty otherwise.
+    [[nodiscard]] std::optional<std::array<float, 2>> camera_pointer_hold() const;
+    [[nodiscard]] std::optional<std::array<float, 2>> camera_take_pointer_hold_warp();
     void camera_viewport(float width, float height);
     // The attract's locked view (Options::saved_camera) keeps its field of view, window size and
     // clip planes and takes this eye and look-at (render basis) from the next frame on. Inert for
@@ -223,6 +234,9 @@ public:
     [[nodiscard]] std::optional<presentation::camera::TacticalFrame> live_effects_camera_frame() const;
     [[nodiscard]] std::pair<bool, bool> live_camera_pointer_mode(bool ctrl) const;
     void live_camera_focus(float source_x, float source_y);
+    // #6448 J1: see EnvironmentView::set_finalize_camera.
+    // Returns false while the populated view does not exist yet (nothing installed).
+    bool set_live_finalize_camera(std::function<bool()> hook);
     // #455: the space map camera's target bounds (source X/Y), which the minimap spans; nothing
     // without the populated view's map camera.
     [[nodiscard]] std::optional<presentation::camera::SourceTargetBounds> live_camera_bounds() const;
@@ -234,6 +248,10 @@ public:
     [[nodiscard]] std::uint64_t live_submit_sent() const;
     void live_camera_overview_key();
     void live_camera_movie(bool on, const std::array<float, 3>& render_target);
+    void live_camera_movie_eye(const std::array<float, 3>& eye);
+    void live_camera_movie_fov(std::optional<float> fov);
+    [[nodiscard]] bool battlecam_key(const viewer::camera_input::RawEvent& event) const;
+    [[nodiscard]] bool preview_key(const viewer::camera_input::RawEvent& event) const;
     [[nodiscard]] bool live_camera_movie() const;
     [[nodiscard]] std::string live_camera_overview() const;
     void owner_census(diagnostics::OwnerCensus& output) const;

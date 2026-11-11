@@ -1,13 +1,16 @@
 # Validation tiers
 
-Before a PR merges, it runs the gate for its **tier**, not the whole four-compiler matrix every
+Before a PR merges, it runs the gate for its **tier**, not the whole three-compiler CI matrix every
 time. The owner chose this on 2026-10-02. The compilers a tier leaves out still run every night
 on `main` (`.github/workflows/ci.yml`, 01:00 UTC). Pushes to `main` do not start CI;
 the coordinator also runs batch checks on merged changes. A red nightly
-opens an issue labelled `ci-nightly`. The nightly covers the four x64 compilers only: macOS and
+opens an issue labelled `ci-nightly`. The nightly covers the three x64 compiler targets only: macOS and
 arm64 run in the public repository's cloud CI (`tools/oss/public/.github/workflows/ci.yml`).
 In this repository, native Linux arm64 runs only when someone dispatches the CI workflow by hand
 with `arm64` set (a GitHub-hosted runner); no pull request, push or nightly runs it.
+
+The weekly Visual Studio generator workflow uses clang-cl. A separate nightly MSVC
+compile-only watch outside CI covers MSVC warnings.
 
 ## Which tier
 
@@ -114,9 +117,9 @@ Record their results with the line.
 
 ## Nightly coverage
 
-The nightly runs the four x64 compilers (MSVC, clang-cl, GCC 14, Clang 18) with CTest and the
+GitHub nightly CI runs three x64 compiler targets (clang-cl, GCC 14, Clang 18) with CTest and the
 warnings probe. It also runs the determinism comparators, the Linux software-render viewer, and
-the Windows viewer extension (built in the MSVC job of every full run). Everything runs on the
+the Windows viewer extension (built in the clang-cl job of every full run). Everything runs on the
 self-hosted guests; GitHub-hosted minutes stay at zero, and ARM64 runs only when a dispatch asks
 for it. The build jobs run CTest without FoC game data, so the game-data CTest stays in the per-PR gate of
 the `data`, `sim` and `full` tiers and of every change to Markdown, tool data or Python.
@@ -133,7 +136,7 @@ The nightly also runs every `galactic_*` and `net_galactic_*` test except the se
 guest (CTest regex from the batch runners; the `galactic` area label is wider and does not select the same set).
 It is nightly-only (a manual dispatch needs `galactic: true`) and obeys the same "main unchanged" skip. The job
 waits for the build jobs, pauses the build pool on its guest with `pool.disabled` while it runs, builds its own
-MSVC tree (the build jobs delete theirs), reads the pool's verified game data mirror in place, and runs CTest two at
+clang-cl tree (the build jobs delete theirs), reads the pool's verified game data mirror in place, and runs CTest two at
 a time with a stop time of 3 h 45 min. It needs about 4 to 5 hours.
 
 The job starts after the Windows build jobs (about 04:10 local). With about 40 minutes of build and up to 3 h 45 min of

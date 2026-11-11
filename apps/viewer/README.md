@@ -755,7 +755,7 @@ scene and image hashes. Original assets and generated captures remain ignored ou
 `common/`; generated `out/` evidence is excluded. After building the extension, the
 cross-platform helper exports one package, validates its sidecars/PCK allowlist and can
 run the packaged headless probe. Before export it runs a bounded `--version` probe and
-requires the pinned Godot build (the EAWR fork `4.7.2.stable.eawr.fad06b579` or the stock `4.7.2.stable.official.ed1daf0bf`), a matching
+requires the pinned Godot build (the EAWR fork `4.7.2.stable.eawr.5b733a90f` or the stock `4.7.2.stable.official.ed1daf0bf`), a matching
 `export-templates.json` `godot_version`, and package/receipt roots that resolve inside
 the repository's ignored `out/` tree. If a smoke receipt reports an engine version, it
 must also match the pin. The matching template is selected from `export-templates.json`:

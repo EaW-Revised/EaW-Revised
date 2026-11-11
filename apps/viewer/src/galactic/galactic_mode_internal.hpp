@@ -1,5 +1,7 @@
 #pragma once
 #include "galactic_memory.hpp"
+#include "../camera_pointer_hold.hpp"
+#include "../battle_cursor.hpp"
 #include <iosfwd>
 #include <unordered_map>
 #include "eawr/platform/campaign_battle_view.hpp"
@@ -21,6 +23,7 @@
 #include "route_lines.hpp"
 #include "planet_hud.hpp"
 #include "command_control_state.hpp"
+#include "command_press.hpp"
 #include "hud_retained.hpp"
 #include "fleet_stacks.hpp"
 #include "fleet_panels.hpp"
@@ -224,6 +227,8 @@ struct GalacticMode::State final {
     galactic_view::CorruptionIndex<galactic_view::CorruptionPlanetFact> corruption_fact_index;
     std::map<std::string, std::size_t, std::less<>> corruption_particle_layers;
     std::array<std::unique_ptr<CorruptionParticles>, 4> corruption_particles;
+    std::map<sim::galactic::TypeId, galactic_view::DestructionEffectArt> destruction_effect_art;
+    std::uint64_t effect_event_cursor{}, destruction_effect_events{};
     std::unique_ptr<CorruptionParticles> corruption_lines;
     std::unique_ptr<galactic_detail::RouteGeometry> corruption_paths;
     std::vector<galactic_detail::RouteGeometry::Quad> corruption_quads, corruption_uploaded_quads;
@@ -268,7 +273,9 @@ struct GalacticMode::State final {
     std::uint64_t begin_wait_frames{}, begin_wait_last_tick{};
     std::uint64_t submitted_orders{};
     galactic_view::PauseToggleGuard pause_guard;
+    galactic_view::SpeedToggleGuard speed_guard; // #5355: one LAN speed request in flight
     galactic_view::LanNoticeModel lan_notice_model;
+    galactic_view::LanPaceMeter lan_pace_meter; // #5355: the agreed galactic speed that really runs
     std::string lan_notice_text;
     std::uint64_t lan_clock_refusal_seen{};
     godot::Label* lan_notice_label{};
@@ -302,6 +309,7 @@ struct GalacticMode::State final {
     std::set<std::string> missing_pip_textures;
     galactic_view::PlayerHudView player_hud;
     std::string cycle_label;
+    std::string technology_label;
     std::string account_text;
     std::string income_tooltip;
     std::shared_ptr<const sim::galactic::GalacticSnapshot> economy_hud_snapshot;
@@ -421,11 +429,16 @@ struct GalacticMode::State final {
     std::optional<sim::math::Fixed> submitted_strategic_speed;
     std::shared_ptr<const sim::galactic::GalacticSnapshot> submitted_speed_snapshot;
     sim::math::Fixed strategic_speed_now() const;
+    // The fast-forward button's pressed state: the in-flight LAN request while it waits, else the agreed speed (#5355).
+    bool fast_forward_shown_pressed(const sim::galactic::GalacticClock& clock) const;
     void submit_strategic_speed(sim::math::Fixed factor);
     std::size_t command_meshes{};
     presentation::ui::EncyclopediaTiming encyclopedia_timing;
     presentation::ui::EncyclopediaConstants encyclopedia_globals;
     EawrEncyclopediaPopup* encyclopedia_panel{};
+    EawrUnitCards* queue_encyclopedia{};
+    presentation::ui::ProductionHoverCache queue_hover;
+    sim::galactic::PlanetId queue_hover_planet{};
     assets::Vec2f encyclopedia_anchor{};
     std::uint64_t encyclopedia_wall_time{};
     sim::galactic::TypeId encyclopedia_type{};
@@ -502,7 +515,8 @@ struct GalacticMode::State final {
     [[nodiscard]] godot::Ref<godot::Texture2D> command_texture_optional(std::string_view name);
     [[nodiscard]] godot::Ref<godot::Texture2D> command_texture_lookup(std::string_view name, bool warn_if_missing);
     void configure_command_bar_text(const presentation::ui::ShellPlacement& placement, EawrHudText& label,
-        const data::ui::CommandBarComponent& component, const data::ui::ShellAnchor& anchor);
+        const data::ui::CommandBarComponent& component, const data::ui::ShellAnchor& anchor,
+        bool second_text = false);
     bool configure_command_bar_constants(const pugi::xml_document& document);
     bool configure_command_bar_encyclopedia();
     void build_command_bar_tooltip();
@@ -781,6 +795,8 @@ struct GalacticMode::State final {
     std::array<godot::TextureRect*, 2> radar_view_icons{};
     std::shared_ptr<const sim::galactic::GalacticSnapshot> radar_publication;
     galactic_view::ObjectId radar_selection{};
+    galactic_view::RadarExtents radar_frame;
+    bool radar_fit{};
     // #5508: planet of the pending tactical battle the local player is told about (radar blip flash).
     galactic_view::ObjectId pending_battle_planet{}, radar_pending_planet{};
     godot::Vector2 radar_viewport;
@@ -899,6 +915,7 @@ struct GalacticMode::State final {
     galactic_view::OrbitCamera overview;
     FixedCamera camera;
     std::shared_ptr<const vfs::Vfs> filesystem;
+    std::unique_ptr<BattleCursor> mouse_cursor;
     std::shared_ptr<const data::Catalog> audio_catalog;
     std::unique_ptr<GodotRenderer> renderer;
     struct Layer final {
@@ -1059,7 +1076,8 @@ struct GalacticMode::State final {
     bool orbiting{};
     std::array<float, 2> orbit_travel{}; // #5601: net middle-drag travel in viewport fractions (click-reset test)
     bool scrolling{};
-    std::optional<std::array<float, 2>> pointer_warp;
+    // #5990: the right-button scroll (retail's map scrolling mode) keeps the pointer at its press point.
+    ::eawr::viewer::camera_input::PointerHold scroll_hold;
 
     [[nodiscard]] bool build_view();
     [[nodiscard]] bool start_game(platform::LiveGameSession::Options live_options);
@@ -1071,11 +1089,11 @@ struct GalacticMode::State final {
     // One press of a command-bar control by a human or a FORCE_CLICK_GUI reward (#5857); press state of the controls
     // a mod authors is kept in authored_controls (command_control_state.hpp), and forced requests are drained per frame.
     void press_command_control(const std::string& name);
+    void command_control_action(const std::string& name);
     void service_forced_clicks();
     galactic_view::ControlStates authored_controls;
     std::uint64_t forced_click_cursor{};
-    std::set<std::string> forced_click_reported; // (control, reason) pairs already warned about; diagnostics only
-    bool forced_click_busy{};
+    galactic_view::CommandPresses command_presses; // the press path, and the (control, reason) pairs already warned about
     [[nodiscard]] bool prepare_handoff();
     // True while the loading or tactical scene owns the frame.
     [[nodiscard]] bool process_handoff(double delta);

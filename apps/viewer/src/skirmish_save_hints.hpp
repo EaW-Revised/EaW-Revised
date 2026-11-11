@@ -3,13 +3,13 @@
 // #3989: the viewer's presentation hints in a skirmish battle save (checkpoint section 0x8000,
 // docs/checkpoint-format.md "Skirmish battle saves"). The battle itself, its lobby setup included,
 // is in the save's tactical sections; the hints hold only what the view needs to look the same
-// after a load: the camera, and a label for the save list. They never decide the simulation, so a
+// after a load: the camera, a label and the results-screen scoring state. They never decide the simulation, so a
 // load whose hints are missing or unreadable keeps the battle and uses the map's own camera.
 //
-// Encoding: "EAWRSKH" and the version byte 1, a u32 flag word (bit 0: camera present), then, when
+// Encoding: "EAWRSKH" and version byte 2, a u32 flag word (bit 0: camera present), then, when
 // the camera is present, five IEEE-754 binary32 bit patterns as u32 (render target x, y, z, zoom,
-// yaw in degrees), then the label as a u32 byte count and UTF-8 bytes (at most 256). All integers
-// are little-endian. Any other byte string decodes to nothing.
+// yaw in degrees), the label as a u32 byte count and UTF-8 bytes (at most 256), then the scoring
+// as a u32 byte count and bytes. Version 1 omits the scoring. All integers are little-endian.
 
 #include <algorithm>
 #include <array>
@@ -33,10 +33,11 @@ struct SkirmishSaveCamera final {
 struct SkirmishSaveHints final {
     std::optional<SkirmishSaveCamera> camera;
     std::string label; // shown in the save list; the map's name
+    std::string scoring; // the viewer's results-screen scoring state
     friend bool operator==(const SkirmishSaveHints&, const SkirmishSaveHints&) = default;
 };
 
-inline constexpr std::array<std::uint8_t, 8> skirmish_save_hints_magic{'E', 'A', 'W', 'R', 'S', 'K', 'H', 1};
+inline constexpr std::array<std::uint8_t, 8> skirmish_save_hints_magic{'E', 'A', 'W', 'R', 'S', 'K', 'H', 2};
 inline constexpr std::size_t skirmish_save_hints_label_limit = 256;
 
 [[nodiscard]] inline std::vector<std::uint8_t> encode_skirmish_save_hints(const SkirmishSaveHints& hints) {
@@ -54,15 +55,19 @@ inline constexpr std::size_t skirmish_save_hints_label_limit = 256;
     const std::size_t size = std::min(hints.label.size(), skirmish_save_hints_label_limit);
     put(static_cast<std::uint32_t>(size));
     bytes.insert(bytes.end(), hints.label.begin(), hints.label.begin() + static_cast<std::ptrdiff_t>(size));
+    put(static_cast<std::uint32_t>(hints.scoring.size()));
+    bytes.insert(bytes.end(), hints.scoring.begin(), hints.scoring.end());
     return bytes;
 }
 
 [[nodiscard]] inline std::optional<SkirmishSaveHints> decode_skirmish_save_hints(const std::vector<std::uint8_t>& bytes) {
     std::size_t at = skirmish_save_hints_magic.size();
     if (bytes.size() < at) return std::nullopt;
-    for (std::size_t index = 0; index < at; ++index) {
+    for (std::size_t index = 0; index + 1 < at; ++index) {
         if (bytes[index] != skirmish_save_hints_magic[index]) return std::nullopt;
     }
+    const auto version = bytes[7];
+    if (version != 1 && version != 2) return std::nullopt;
     const auto take = [&](std::uint32_t& value) {
         if (bytes.size() - at < 4U) return false;
         value = 0;
@@ -83,8 +88,15 @@ inline constexpr std::size_t skirmish_save_hints_label_limit = 256;
         hints.camera = SkirmishSaveCamera{{values[0], values[1], values[2]}, values[3], values[4]};
     }
     std::uint32_t size{};
-    if (!take(size) || size > skirmish_save_hints_label_limit || bytes.size() - at != size) return std::nullopt;
-    hints.label.assign(bytes.begin() + static_cast<std::ptrdiff_t>(at), bytes.end());
+    if (!take(size) || size > skirmish_save_hints_label_limit || bytes.size() - at < size) return std::nullopt;
+    hints.label.assign(bytes.begin() + static_cast<std::ptrdiff_t>(at), bytes.begin() + static_cast<std::ptrdiff_t>(at + size));
+    at += size;
+    if (version == 2) {
+        if (!take(size) || bytes.size() - at != size) return std::nullopt;
+        hints.scoring.assign(bytes.begin() + static_cast<std::ptrdiff_t>(at), bytes.end());
+        at += size;
+    }
+    if (at != bytes.size()) return std::nullopt;
     return hints;
 }
 

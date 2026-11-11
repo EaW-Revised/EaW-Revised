@@ -119,6 +119,7 @@ void BattleAudio::release() {
     released_ = true;
     // The worker owns its VFS and private resources; join before player/node teardown.
     audio_loader_.reset();
+    async_prepare_.reset(); // an unfinished preload: stops and joins its readers
     pending_audio_.clear();
     pending_music_.reset();
     const auto backend = event_backend();

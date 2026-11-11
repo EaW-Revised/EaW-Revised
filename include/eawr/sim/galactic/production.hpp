@@ -82,6 +82,8 @@ struct ObservedProductionOffer {
     ProductionDomain domain{};
     ProductionKind kind{};
     ProductionAdmission admission{ProductionAdmission::unavailable};
+    // WGUI-170: the separate menu query is not masked by an earlier credits denial.
+    ProductionAdmission capability{ProductionAdmission::unavailable};
     std::optional<math::Fixed> price, seconds;
     // The authored Build_Cost_Credits before every multiplier: presentation compares it with `price` (GHUD-S57).
     std::optional<math::Fixed> base_price;

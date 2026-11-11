@@ -35,6 +35,7 @@ bool Adapter::eligible() const noexcept {
 void Adapter::cancel() noexcept {
     reducer_.clear();
     pressed_.clear();
+    hold_.end();
     pointer_valid_ = false;
     clear_pending();
     ++counters_.cancellations;
@@ -64,6 +65,7 @@ void Adapter::sample_pointer(const float x, const float y) noexcept {
 
 void Adapter::pointer_left() {
     pointer_valid_ = false;
+    hold_.end();
     for (auto held = pressed_.begin(); held != pressed_.end();) {
         if (held->first.device != Device::mouse_button) {
             ++held;
@@ -213,6 +215,7 @@ core::Result<void> Adapter::handle_button(const Device device, const RawEvent& e
                 <= click_travel_screen_fraction) {
             ++view_reset_requests_;
         }
+        if (binding.action == Action::rotate_grab) hold_.end();
         pressed_.erase(held);
         ++counters_.routed;
         return core::Result<void>::success();
@@ -232,7 +235,11 @@ core::Result<void> Adapter::handle_button(const Device device, const RawEvent& e
         ++counters_.ignored_ineligible;
         return core::Result<void>::success();
     }
-    const auto index = find_binding(device, event.code, event.modifiers);
+    auto index = find_binding(device, event.code, event.modifiers);
+    // Retail reads only Ctrl for the middle-button camera drag: Shift, Alt and Meta do not change it (#5990).
+    if (!index && device == Device::mouse_button && event.code == mouse_code::middle) {
+        index = find_binding(device, event.code, event.modifiers & modifier::ctrl);
+    }
     if (!index) {
         ++counters_.ignored_unbound;
         return core::Result<void>::success();
@@ -246,6 +253,9 @@ core::Result<void> Adapter::handle_button(const Device device, const RawEvent& e
     if (binding.action == Action::rotate_grab) {
         grab_travel_x_ = 0.0F;
         grab_travel_y_ = 0.0F;
+        if (pointer_hold_supported && device == Device::mouse_button && event.has_position) {
+            hold_.begin(event.position_x, event.position_y);
+        }
     }
     if (binding.trigger == Trigger::pressed) {
         if (binding.action == Action::zoom) zoom_detents_ += binding.scale;
@@ -306,6 +316,15 @@ core::Result<void> Adapter::handle(const RawEvent& event) {
             pointer_y_ = event.position_y;
             pointer_valid_ = true;
         }
+        // #5990: while the pointer is held the drag is the position's distance
+        // from where it was last known, not Godot's relative (see PointerHold).
+        float relative_x = event.relative_x;
+        float relative_y = event.relative_y;
+        if (hold_.active() && event.has_position) {
+            const auto moved = hold_.delta(event.position_x, event.position_y);
+            relative_x = moved[0];
+            relative_y = moved[1];
+        }
         // Relative rotation or look only while a grab started in this
         // generation is held; the grab itself was cancelled by any lifecycle
         // change, including entering or leaving free flight.
@@ -315,12 +334,14 @@ core::Result<void> Adapter::handle(const RawEvent& event) {
         const bool panning = context_ != Context::free;
         if (!rotating && !looking && !panning) return core::Result<void>::success();
         if (rotating) {
-            grab_travel_x_ += event.relative_x;
-            grab_travel_y_ += event.relative_y;
+            grab_travel_x_ += relative_x;
+            grab_travel_y_ += relative_y;
         }
         bool routed = false;
         const auto route_axis = [&](const std::uint32_t axis, const float relative) {
-            const auto index = find_binding(Device::mouse_motion, axis, event.modifiers);
+            // While a grab is held only Ctrl picks translate or rotate; Shift, Alt and Meta are ignored (#5990).
+            const auto index = find_binding(Device::mouse_motion, axis,
+                rotating ? static_cast<std::uint8_t>(event.modifiers & modifier::ctrl) : event.modifiers);
             if (!index) return;
             const Binding& binding = table_->bindings[*index];
             if (binding.action == Action::rotate && rotating) {
@@ -349,8 +370,8 @@ core::Result<void> Adapter::handle(const RawEvent& event) {
                 routed = true;
             }
         };
-        route_axis(mouse_code::motion_x, event.relative_x);
-        route_axis(mouse_code::motion_y, event.relative_y);
+        route_axis(mouse_code::motion_x, relative_x);
+        route_axis(mouse_code::motion_y, relative_y);
         if (routed) ++counters_.routed;
         return core::Result<void>::success();
     }
@@ -383,7 +404,8 @@ core::Result<StepIntent> Adapter::take_step(const camera::Constants& constants) 
     intent.free_move_y = held(Action::free_rise) - held(Action::free_descend);
     intent.free_move_z = held(Action::free_move_forward) - held(Action::free_move_back);
     // Edge scrolling is a tactical pan; free flight never edge scrolls.
-    if (context_ != Context::free && table_->edge_scroll && pointer_valid_) {
+    // A held pointer is the drag's, not an edge: no edge sample while it holds.
+    if (context_ != Context::free && table_->edge_scroll && pointer_valid_ && !hold_.active()) {
         auto edge = camera::edge_scroll(
             constants, pointer_x_, pointer_y_, viewport_width_, viewport_height_);
         if (!edge) return core::Result<StepIntent>::failure(edge.error());

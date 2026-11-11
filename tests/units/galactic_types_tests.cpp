@@ -475,6 +475,37 @@ void synthetic() {
     expect(identity != eawr::units::galactic_content_identity(changed), "WGEP-78 static transport link contributes to GC content identity");
     changed = table; changed.types[0].initial_stealth.front().initially_enabled = true;
     expect(identity != eawr::units::galactic_content_identity(changed), "nonempty authored stealth inputs contribute to identity");
+
+    // WGM-215: validation clears despawn for every style. Perturb real XML inputs,
+    // including inherited abilities, without adding a state-bearing ignored flag.
+    for (const auto style : {"Global_Automatic", "Space_Automatic", "Ground_Automatic", "Ground_Activated", "Galactic_Automatic",
+            "User_Input", "Skirmish_Automatic", "Unknown"}) {
+        const std::array style_override{eawr::data::ValueOverride{"Carrier",
+            "Abilities/Galactic_Stealth_Ability/Activation_Style", {style}}};
+        const auto authored = eawr::data::with_overrides(catalog.value().catalog, style_override);
+        expect(bool(authored), "stealth activation-style perturbation loads");
+        if (!authored) continue;
+        const auto baseline = eawr::units::galactic_type_table(authored.value());
+        for (const auto value : {"No", "Yes"}) {
+            const std::array despawn_override{eawr::data::ValueOverride{"Carrier",
+                "Abilities/Galactic_Stealth_Ability/Causes_Despawn", {value}}};
+            const auto perturbed = eawr::data::with_overrides(authored.value(), despawn_override);
+            expect(bool(perturbed), "stealth despawn perturbation loads");
+            if (!perturbed) continue;
+            const auto parsed = eawr::units::galactic_type_table(perturbed.value());
+            expect(eawr::units::galactic_content_identity(parsed) == eawr::units::galactic_content_identity(baseline),
+                "WGM-215 omitted, false and true despawn have identical galactic constructor state");
+            for (const auto name : {"Carrier", "Variant"}) {
+                const auto* actual = parsed.find(name);
+                const auto* original = baseline.find(name);
+                expect(actual && original && actual->initial_stealth.size() == 1 && original->initial_stealth.size() == 1
+                    && actual->initial_stealth[0].initially_enabled == original->initial_stealth[0].initially_enabled
+                    && actual->initial_stealth[0].activation_style == original->initial_stealth[0].activation_style
+                    && actual->initial_stealth[0].evade_chance == original->initial_stealth[0].evade_chance,
+                    "WGM-215 direct and inherited stealth retain identical enabled, style and evade inputs");
+            }
+        }
+    }
 }
 
 // WGEP-163: the credit-halt sabotage profile follows the authored ability data; the stock files

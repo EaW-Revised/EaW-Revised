@@ -2,10 +2,12 @@
 #include "galactic_mode_internal.hpp"
 #include "ui/battle_overlay.hpp"
 #include "ui/theme_builder.hpp"
+#include "ui/kit.hpp"
 #include "options_screen.hpp"
 #include <godot_cpp/classes/viewport.hpp>
 #include <godot_cpp/classes/property_tweener.hpp>
 #include <godot_cpp/classes/v_scroll_bar.hpp>
+#include <godot_cpp/classes/rich_text_label.hpp>
 #include <godot_cpp/variant/callable_method_pointer.hpp>
 #include <algorithm>
 #include <ctime>
@@ -296,20 +298,43 @@ void GalacticSaveControls::observe_world_selection() {
 void GalacticSaveControls::show_modal(Modal modal, std::string text) {
     if (modal_dialog_) { modal_dialog_->frame->hide(); modal_dialog_->frame->queue_free(); }
     modal_ = modal; ++modal_admissions_; message(std::move(text));
-    const bool progress = modal == Modal::progress_save || modal == Modal::progress_load;
-    const bool confirmation = modal == Modal::overwrite || modal == Modal::erase || modal == Modal::quit;
-    modal_dialog_ = build_(progress ? "IDD_DIALOG_BOX_SMALL" : confirmation ? "IDD_DIALOG_BOX2" : "IDD_DIALOG_BOX1");
+    const bool checking = modal == Modal::checking_mods;
+    const bool progress = modal == Modal::progress_save || modal == Modal::progress_load || checking;
+    const bool confirmation = modal == Modal::overwrite || modal == Modal::erase || modal == Modal::quit || modal == Modal::mod_confirmation;
+    modal_dialog_ = build_(progress && !checking ? "IDD_DIALOG_BOX_SMALL" : confirmation ? "IDD_DIALOG_BOX2" : "IDD_DIALOG_BOX1");
     if (!modal_dialog_->frame) { widget_failure_ = "Save result dialog unavailable."; modal_ = Modal::none; return; }
     modal_root_->add_child(modal_dialog_->frame); modal_root_->show();
     for (auto& gadget : modal_dialog_->gadgets) {
         if (!gadget.control) continue;
         if (gadget.id == "IDC_CAPTION") { caption(gadget.control, text_); gadget.control->set_meta("save_caption", String::utf8(text_.c_str())); }
         else if (gadget.id == "IDC_DIALOG_BOX_BUTTON_LEFT") {
-            caption(gadget.control, localized(confirmation ? "TEXT_BUTTON_YES" : "TEXT_BUTTON_OK"));
+            caption(gadget.control, localized(checking ? "TEXT_BUTTON_CANCEL" : confirmation ? "TEXT_BUTTON_YES" : "TEXT_BUTTON_OK"));
             action(gadget.control, [this, confirmation] { dismiss_modal(confirmation); });
         } else if (gadget.id == "IDC_DIALOG_BOX_BUTTON_RIGHT") {
             caption(gadget.control, localized("TEXT_BUTTON_NO")); action(gadget.control, [this] { dismiss_modal(); });
         } else gadget.control->hide();
+    }
+    if (modal == Modal::mod_confirmation) {
+        Control* first{}; Control* left{};
+        for (auto& gadget : modal_dialog_->gadgets) {
+            if (gadget.id == "IDC_USER_TEXT_STRING_1") first = gadget.control;
+            if (gadget.id == "IDC_DIALOG_BOX_BUTTON_LEFT") left = gadget.control;
+            if (gadget.id == "IDC_CAPTION" && gadget.control) caption(gadget.control, localized("TEXT_BUTTON_LOAD_GAME"));
+        }
+        if (left) {
+            auto* content = memnew(RichTextLabel);
+            const auto size = modal_dialog_->frame->get_size();
+            const auto position = first ? first->get_position() : Vector2(size.x * 0.05F, size.y * 0.28F);
+            content->set_position(position);
+            content->set_size(Vector2(first ? first->get_size().x : size.x * 0.9F,
+                std::max(0.0F, left->get_position().y - position.y)));
+            content->set_text(String::utf8(text_.c_str()));
+            modal_dialog_->frame->add_child(content);
+            const auto style = kit_text_style(first ? *first : *modal_dialog_->frame, "Global_Default");
+            if (style.font.is_valid()) content->add_theme_font_override("normal_font", style.font);
+            if (style.size > 0) content->add_theme_font_size_override("normal_font_size", style.size);
+            content->add_theme_color_override("default_color", style.top);
+        }
     }
     if (progress) {
         // Project fade duration; WGS-158/162 source ordering, not milliseconds.
@@ -321,6 +346,17 @@ void GalacticSaveControls::show_modal(Modal modal, std::string text) {
 void GalacticSaveControls::dismiss_modal(bool yes) {
     if (modal_ == Modal::progress_save || modal_ == Modal::progress_load) return;
     const auto previous = modal_; modal_ = Modal::none; modal_root_->hide();
+    if (previous == Modal::checking_mods) {
+        if (fade_.is_valid()) { fade_->kill(); fade_.unref(); }
+        static_cast<void>(mod_review_.answer(false));
+        quick_route_ = false; queued_quick_load_ = false; pending_quick_load_ = false;
+        show_screen(Screen::load); message("Load cancelled."); return;
+    }
+    if (previous == Modal::mod_confirmation) {
+        if (auto request = mod_review_.answer(yes)) prepare_reviewed_load(std::move(*request));
+        else { quick_route_ = false; queued_quick_load_ = false; pending_quick_load_ = false; show_screen(Screen::load); message("Load cancelled."); }
+        return;
+    }
     if (previous == Modal::quit && yes) { begin_quit(); return; }
     if (previous == Modal::overwrite && yes) { begin_progress(true, pending_name_, true); return; }
     if (previous == Modal::erase && yes) {
@@ -345,7 +381,8 @@ void GalacticSaveControls::begin_quit() {
 }
 void GalacticSaveControls::begin_progress(bool saving, std::string name, bool overwrite, bool quick) {
     pending_name_ = std::move(name); pending_overwrite_ = overwrite; pending_quick_ = quick;
-    show_modal(saving ? Modal::progress_save : Modal::progress_load,
-        localized(saving ? "TEXT_SAVELOAD_SAVING_MSG" : "TEXT_SAVELOAD_LOADING_MSG"));
+    if (!saving) mod_review_.wait({save_directory(state_.options), pending_name_});
+    show_modal(saving ? Modal::progress_save : Modal::checking_mods,
+        saving ? localized("TEXT_SAVELOAD_SAVING_MSG") : "Checking saved mods. A large mod can take a while the first time.");
 }
 } // namespace eawr::presentation::godot_backend

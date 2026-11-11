@@ -44,6 +44,9 @@ public:
     [[nodiscard]] virtual LiveSession::SnapshotHistory history_copy() const = 0;
     // Debug overlay copy of the land movement state (null for feeds without a land world, or when the session is busy).
     [[nodiscard]] virtual std::shared_ptr<const sim::tactical::LandOverlayData> land_overlay() const { return nullptr; }
+    [[nodiscard]] virtual std::optional<LiveLandMotion> land_motion() const { return {}; }
+    [[nodiscard]] virtual std::vector<LiveLandMotion> land_motion_after(std::uint64_t) const { return {}; }
+    virtual std::size_t land_motion_through(std::uint64_t, std::uint64_t, std::vector<LiveLandMotion>&) const { return 0; }
     [[nodiscard]] virtual std::shared_ptr<const LiveFog> fog_at(std::uint64_t tick) const = 0;
     [[nodiscard]] virtual LiveEvents events_after(std::uint64_t after, std::uint64_t through) const = 0;
     [[nodiscard]] virtual std::vector<LiveTickCost> tick_costs_after(std::uint64_t after) const = 0;
@@ -92,6 +95,9 @@ public:
     std::shared_ptr<const sim::tactical::TacticalSnapshot> snapshot_at(std::uint64_t tick) const override { return session_->snapshot_at(tick); }
     LiveSession::SnapshotHistory history_copy() const override { return session_->history_copy(); }
     std::shared_ptr<const sim::tactical::LandOverlayData> land_overlay() const override { return session_->land_overlay(); }
+    std::optional<LiveLandMotion> land_motion() const override { return session_->land_motion(); }
+    std::vector<LiveLandMotion> land_motion_after(std::uint64_t tick) const override { return session_->land_motion_after(tick); }
+    std::size_t land_motion_through(std::uint64_t after, std::uint64_t through, std::vector<LiveLandMotion>& output) const override { return session_->land_motion_through(after, through, output); }
     std::shared_ptr<const LiveFog> fog_at(std::uint64_t tick) const override { return session_->fog_at(tick); }
     LiveEvents events_after(std::uint64_t after, std::uint64_t through) const override { return session_->events_after(after, through); }
     std::vector<LiveTickCost> tick_costs_after(std::uint64_t after) const override { return session_->tick_costs_after(after); }

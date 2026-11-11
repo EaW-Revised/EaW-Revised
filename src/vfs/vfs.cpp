@@ -3,11 +3,14 @@
 #include "eawr/vfs/vfs.hpp"
 
 #include "eawr/core/diagnostic.hpp"
+#include "eawr/core/prepared_content.hpp"
+#include "eawr/core/sha256.hpp"
 
 #include <pugixml.hpp>
 
 #include <algorithm>
 #include <array>
+#include <condition_variable>
 #include <fstream>
 #include <iostream>
 #include <limits>
@@ -554,14 +557,134 @@ struct Vfs::Impl {
     mutable std::map<std::filesystem::path, std::map<std::pair<std::uint64_t, std::uint64_t>, std::set<std::string>>> archive_names;
 };
 
+struct Vfs::ContentReads {
+    mutable std::mutex mutex;
+    bool sealed{}, closing{};
+    std::size_t active_prefetch{};
+    std::condition_variable prefetch_done;
+    std::map<std::pair<std::string, std::string>, core::ContentInputReceipt> inputs;
+    std::optional<core::Diagnostic> failed;
+    ModelRefreshCost model_refresh;
+
+    core::Result<void> remember(std::span<const core::ContentInputReceipt> receipts) {
+        const std::lock_guard lock(mutex);
+        for (const auto& receipt : receipts) {
+            auto path = canonicalize(receipt.logical_path);
+            const bool valid_hash = receipt.sha256.size() == 64 && std::all_of(receipt.sha256.begin(), receipt.sha256.end(), [](char c) {
+                return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
+            });
+            auto refuse = [&](std::string message) {
+                auto diagnostic = error(diagnostic_codes::content_unagreed, std::move(message), receipt.logical_path, receipt.layer_id);
+                if (!sealed && !failed) failed = diagnostic;
+                return core::Result<void>::failure(std::move(diagnostic));
+            };
+            if (!path || receipt.layer_id.empty() || !valid_hash) return refuse("invalid consumed-content receipt");
+            const auto key = std::pair{path.value(), receipt.layer_id};
+            const auto found = inputs.find(key);
+            if (found == inputs.end()) {
+                if (sealed) return refuse("read outside the agreed content closure: " + path.value());
+                inputs.emplace(key, core::ContentInputReceipt{path.value(), receipt.layer_id, receipt.sha256});
+            } else if (found->second.sha256 != receipt.sha256) {
+                return refuse("content differs from the agreed bytes: " + path.value());
+            }
+        }
+        return core::Result<void>::success();
+    }
+    bool allows(const AssetRecord& record) const {
+        const std::lock_guard lock(mutex);
+        return !sealed || inputs.contains({record.canonical_path, record.layer_id});
+    }
+    bool allows_path(std::string_view path) const {
+        const auto canonical = canonicalize(path);
+        if (!canonical) return false;
+        const std::lock_guard lock(mutex);
+        const auto found = inputs.lower_bound({canonical.value(), {}});
+        return !sealed || (found != inputs.end() && found->first.first == canonical.value());
+    }
+    bool is_sealed() const { const std::lock_guard lock(mutex); return sealed; }
+};
+
 Vfs::Vfs() = default;
 Vfs::~Vfs() = default;
 Vfs::Vfs(Vfs&&) noexcept = default;
 Vfs& Vfs::operator=(Vfs&&) noexcept = default;
 Vfs::Vfs(std::unique_ptr<Impl> impl) : impl_(std::move(impl)) {}
 
+core::Result<Vfs> Vfs::preparation_view(std::shared_ptr<const Vfs> source,
+    std::span<const core::ContentInputReceipt> known_inputs) {
+    using Result = core::Result<Vfs>;
+    if (!source || !source->impl_ || source->source_)
+        return Result::failure(error(diagnostic_codes::mount_invalid, "content preparation requires an unrestricted mounted VFS"));
+    Vfs view;
+    view.source_ = std::move(source);
+    view.content_reads_ = std::make_shared<ContentReads>();
+    auto known = view.remember_content_inputs(known_inputs);
+    if (!known) return Result::failure(known.error());
+    return Result::success(std::move(view));
+}
+
+bool Vfs::has_content_contract() const noexcept { return static_cast<bool>(content_reads_); }
+
+void Vfs::record_model_refresh(const std::uint64_t elapsed_ns) const {
+    if (!content_reads_) return;
+    const std::lock_guard lock(content_reads_->mutex);
+    ++content_reads_->model_refresh.entries;
+    content_reads_->model_refresh.elapsed_ns += elapsed_ns;
+}
+
+Vfs::ModelRefreshCost Vfs::model_refresh_cost() const {
+    if (!content_reads_) return {};
+    const std::lock_guard lock(content_reads_->mutex);
+    return content_reads_->model_refresh;
+}
+
+core::Result<void> Vfs::remember_content_inputs(std::span<const core::ContentInputReceipt> inputs) const {
+    if (!content_reads_) return core::Result<void>::success();
+    for (const auto& input : inputs) {
+        const auto records = source_->candidates(input.logical_path);
+        if (!records || std::none_of(records.value().begin(), records.value().end(), [&](const auto& record) { return record.layer_id == input.layer_id; }))
+            return core::Result<void>::failure(error(diagnostic_codes::content_unagreed, "consumed input is outside this mount set: " + input.logical_path));
+    }
+    return content_reads_->remember(inputs);
+}
+
+core::Result<std::vector<core::ContentInputReceipt>> Vfs::seal_content() const {
+    using Result = core::Result<std::vector<core::ContentInputReceipt>>;
+    if (!content_reads_) return Result::failure(error(diagnostic_codes::mount_invalid, "no preparation content contract"));
+    std::unique_lock lock(content_reads_->mutex);
+    content_reads_->closing = true;
+    content_reads_->prefetch_done.wait(lock, [&] { return content_reads_->active_prefetch == 0; });
+    if (content_reads_->failed) return Result::failure(*content_reads_->failed);
+    content_reads_->sealed = true;
+    std::vector<core::ContentInputReceipt> result;
+    for (const auto& [key, receipt] : content_reads_->inputs) { static_cast<void>(key); result.push_back(receipt); }
+    return Result::success(std::move(result));
+}
+
+core::Result<std::vector<std::byte>> Vfs::open_for_prefetch(std::string_view logical_path) const {
+    if (!content_reads_) return open(logical_path);
+    {
+        std::unique_lock lock(content_reads_->mutex);
+        if (content_reads_->sealed) { lock.unlock(); return open(logical_path); }
+        if (content_reads_->closing) return core::Result<std::vector<std::byte>>::failure(error(
+            diagnostic_codes::content_unagreed, "speculative read after preparation was closed: " + std::string(logical_path)));
+        ++content_reads_->active_prefetch;
+    }
+    // Seal waits for admitted speculative I/O without serializing independent reads. An ordered consumer still has
+    // to supply its original-byte receipt before using a decoded result; an unused hint never enters the agreement.
+    struct PendingRead {
+        ContentReads& target;
+        ~PendingRead() {
+            const std::lock_guard lock(target.mutex);
+            --target.active_prefetch; target.prefetch_done.notify_all();
+        }
+    } pending{*content_reads_};
+    return source_->open(logical_path);
+}
+
 std::shared_ptr<void> Vfs::attachment(const std::type_index type,
     std::shared_ptr<void> (*create)()) const {
+    if (source_) return source_->attachment(type, create);
     if (!impl_) return create();
     std::lock_guard lock(impl_->attachments_mutex);
     auto& slot = impl_->attachments[type];
@@ -570,6 +693,7 @@ std::shared_ptr<void> Vfs::attachment(const std::type_index type,
 }
 
 std::span<const std::string> Vfs::layer_ids() const noexcept {
+    if (source_) return source_->layer_ids();
     return impl_ ? std::span<const std::string>(impl_->layer_ids) : std::span<const std::string>{};
 }
 
@@ -706,6 +830,17 @@ core::Result<Vfs> Vfs::mount(const std::span<const MountSpec> ordered_layers) {
 }
 
 core::Result<std::vector<AssetRecord>> Vfs::candidates(const std::string_view logical_path) const {
+    if (source_) {
+        if (!content_reads_->allows_path(logical_path)) return core::Result<std::vector<AssetRecord>>::failure(error(
+            diagnostic_codes::content_unagreed, "path is outside the agreed content closure: " + std::string(logical_path)));
+        auto records = source_->candidates(logical_path);
+        if (!records) return records;
+        auto& rows = records.value();
+        std::erase_if(rows, [&](const auto& record) { return !content_reads_->allows(record); });
+        if (rows.empty()) return core::Result<std::vector<AssetRecord>>::failure(error(
+            diagnostic_codes::content_unagreed, "path is outside the agreed content closure: " + std::string(logical_path)));
+        return records;
+    }
     auto canonical = canonicalize(logical_path);
     if (!canonical) return core::Result<std::vector<AssetRecord>>::failure(canonical.error());
     if (!impl_) return core::Result<std::vector<AssetRecord>>::failure(error(
@@ -722,6 +857,9 @@ core::Result<std::vector<AssetRecord>> Vfs::candidates(const std::string_view lo
 }
 
 std::optional<ReadLocation> Vfs::read_location(const AssetRecord& candidate) const {
+    // A native location would let a caller reopen changed bytes without verification. Presentation streaming keeps
+    // using the unrestricted source; simulation consumers must use this view's checked byte-reading APIs.
+    if (source_) return std::nullopt;
     if (!impl_) return std::nullopt;
     const auto found = impl_->by_path.find(candidate.canonical_path);
     if (found == impl_->by_path.end()) return std::nullopt;
@@ -739,6 +877,11 @@ core::Result<AssetRecord> Vfs::stat(const std::string_view logical_path) const {
 }
 
 core::Result<std::vector<std::byte>> Vfs::open(const std::string_view logical_path) const {
+    if (source_) {
+        auto record = stat(logical_path);
+        if (!record) return core::Result<std::vector<std::byte>>::failure(record.error());
+        return open(record.value());
+    }
     auto canonical = canonicalize(logical_path);
     if (!canonical) return core::Result<std::vector<std::byte>>::failure(canonical.error());
     if (!impl_) return core::Result<std::vector<std::byte>>::failure(error(
@@ -770,6 +913,11 @@ core::Result<std::vector<std::byte>> Vfs::open(const std::string_view logical_pa
 
 core::Result<std::vector<std::byte>> Vfs::open_prefix(const std::string_view logical_path,
                                                      const std::uint64_t max_bytes) const {
+    if (source_) {
+        auto bytes = open(logical_path); // Verify the complete committed file before exposing even a prefix.
+        if (bytes) bytes.value().resize(static_cast<std::size_t>(std::min<std::uint64_t>(bytes.value().size(), max_bytes)));
+        return bytes;
+    }
     auto canonical = canonicalize(logical_path);
     if (!canonical) return core::Result<std::vector<std::byte>>::failure(canonical.error());
     if (!impl_) return core::Result<std::vector<std::byte>>::failure(error(
@@ -800,6 +948,18 @@ core::Result<std::vector<std::byte>> Vfs::open_prefix(const std::string_view log
 }
 
 core::Result<std::vector<std::byte>> Vfs::open(const AssetRecord& candidate, const std::string_view archive_name) const {
+    if (source_) {
+        using Result = core::Result<std::vector<std::byte>>;
+        if (!content_reads_->allows(candidate)) return Result::failure(error(diagnostic_codes::content_unagreed,
+            "read outside the agreed content closure: " + candidate.canonical_path, candidate.canonical_path, candidate.layer_id));
+        auto bytes = source_->open(candidate, archive_name);
+        if (!bytes) return bytes;
+        const core::ContentInputReceipt receipt{candidate.canonical_path, candidate.layer_id,
+            core::sha256_hex(std::span(reinterpret_cast<const std::uint8_t*>(bytes.value().data()), bytes.value().size()))};
+        auto accepted = content_reads_->remember(std::span(&receipt, 1));
+        if (!accepted) return Result::failure(accepted.error());
+        return bytes;
+    }
     if (!impl_) return core::Result<std::vector<std::byte>>::failure(error(
         diagnostic_codes::mount_invalid, "VFS is not mounted", candidate.canonical_path));
     const auto found = impl_->by_path.find(candidate.canonical_path);
@@ -850,6 +1010,18 @@ core::Result<std::vector<std::byte>> Vfs::open(const AssetRecord& candidate, con
 
 core::Result<void> Vfs::read_chunks(const AssetRecord& candidate, const std::span<std::byte> buffer,
     const std::function<void(std::span<const std::byte>)>& consume) const {
+    if (source_) {
+        if (buffer.empty() || !consume) return core::Result<void>::failure(error(
+            diagnostic_codes::mount_invalid, "chunked read requires a buffer and consumer", candidate.canonical_path));
+        auto bytes = open(candidate); // Do not deliver any unverified partial bytes to the simulation.
+        if (!bytes) return core::Result<void>::failure(bytes.error());
+        for (std::size_t offset = 0; offset < bytes.value().size();) {
+            const auto count = std::min(buffer.size(), bytes.value().size() - offset);
+            std::copy_n(bytes.value().data() + offset, count, buffer.data());
+            consume(buffer.first(count)); offset += count;
+        }
+        return core::Result<void>::success();
+    }
     if (!impl_ || buffer.empty() || !consume) return core::Result<void>::failure(error(
         diagnostic_codes::mount_invalid, "chunked read requires a mounted VFS, buffer and consumer", candidate.canonical_path));
     const auto found = impl_->by_path.find(candidate.canonical_path);
@@ -885,6 +1057,11 @@ core::Result<std::vector<AssetRecord>> Vfs::enumerate_raw(
     const std::string_view prefix,
     const std::string_view extension
 ) const {
+    if (source_) {
+        auto records = source_->enumerate_raw(prefix, extension);
+        if (records) std::erase_if(records.value(), [&](const auto& record) { return !content_reads_->allows(record); });
+        return records;
+    }
     if (!impl_) return core::Result<std::vector<AssetRecord>>::failure(error(
         diagnostic_codes::mount_invalid, "VFS is not mounted"));
     std::string canonical_prefix;
@@ -911,6 +1088,21 @@ core::Result<std::vector<AssetRecord>> Vfs::enumerate(
     const std::string_view prefix,
     const std::string_view extension
 ) const {
+    if (source_) {
+        if (!content_reads_->is_sealed()) return source_->enumerate(prefix, extension);
+        auto records = enumerate_raw(prefix, extension);
+        if (!records) return records;
+        std::vector<AssetRecord> winners;
+        std::set<std::string> emitted;
+        for (const auto& record : records.value()) if (emitted.insert(record.canonical_path).second) {
+            // Keep the original source precedence among agreed candidates, including an explicitly agreed lower
+            // presentation-override candidate. Raw enumeration's label sort must never choose the winner.
+            auto agreed = candidates(record.canonical_path);
+            if (!agreed) return core::Result<std::vector<AssetRecord>>::failure(agreed.error());
+            winners.push_back(agreed.value().front());
+        }
+        return core::Result<std::vector<AssetRecord>>::success(std::move(winners));
+    }
     auto raw = enumerate_raw(prefix, extension);
     if (!raw) return raw;
     std::string canonical_prefix;

@@ -784,10 +784,17 @@ core::Result<void> install_live_conflict_adapters(GameSession& game, const vfs::
     const units::GalacticTypeTable& types, const CampaignSetupPlan& plan, GameSession::ContentResolver content,
     AutoResolveTimeProvider time, std::shared_ptr<const StockSpaceEntry> space) {
     if (plan.mode() == CampaignSetupMode::multiplayer) {
-        const auto* authored = data.constant("Battle_Pending_Timeout_Seconds");
-        if (!authored) return fail<void>("missing multiplayer battle vote timeout");
-        // LSA-40: signed atoi seconds; a negative timeout is already elapsed.
-        const auto seconds = std::max<std::int64_t>(0, data::retail::integer_constant(authored->text));
+        // The lobby host's agreed seconds win (#6156): every peer carries the same value in the roster, and a resumed save
+        // carries the value it recorded. Without one (a setup that did not come from a lobby) the campaign's own constant applies.
+        std::int64_t seconds{};
+        if (plan.vote_timeout_seconds()) {
+            seconds = *plan.vote_timeout_seconds();
+        } else {
+            const auto* authored = data.constant("Battle_Pending_Timeout_Seconds");
+            if (!authored) return fail<void>("missing multiplayer battle vote timeout");
+            // LSA-40: signed atoi seconds; a negative timeout is already elapsed.
+            seconds = std::max<std::int64_t>(0, data::retail::integer_constant(authored->text));
+        }
         // A timeout beyond the campaign's entire representable lifetime cannot expire.
         const auto ticks = std::min<std::uint64_t>(static_cast<std::uint64_t>(seconds) * gc::galactic_frames_per_second,
             gc::galactic_max_ticks - 1);
@@ -799,7 +806,27 @@ core::Result<void> install_live_conflict_adapters(GameSession& game, const vfs::
     // restore fills the saved plot state afterwards). Missing files only log (the loader's notes).
     auto plots = load_story_plots(filesystem, data, plan);
     if (!plots) return core::Result<void>::failure(plots.error());
-    if (auto installed = game.install_story({plan.rules_flavour() == CampaignRulesFlavour::single_player}, std::move(plots.value().plots),
+    sim::galactic::story::Config story_config;
+    story_config.solo = plan.rules_flavour() == CampaignRulesFlavour::single_player;
+    {
+        // TRIGGER_AI names its faction and planet by text (the debug build's TRIGGER_AI reward, WST-49): the first active player of
+        // the faction (lowest id, WST-91) and the first instance of the planet type (WST-40).
+        const auto upper_name = [](std::string text) {
+            for (auto& c : text) if (c >= 'a' && c <= 'z') c = static_cast<char>(c - ('a' - 'A'));
+            return text;
+        };
+        for (const auto& row : plan.player_bindings()) {
+            if (!row.active) continue;
+            const auto at = story_config.factions.try_emplace(upper_name(row.faction), row.player.player_id);
+            if (!at.second && row.player.player_id < at.first->second) at.first->second = row.player.player_id;
+        }
+        for (const auto& location : plan.locations()) {
+            if (!location.planet) continue;
+            const auto at = story_config.planets.try_emplace(upper_name(location.original_type), location.planet->id);
+            if (!at.second && location.planet->id < at.first->second) at.first->second = location.planet->id;
+        }
+    }
+    if (auto installed = game.install_story(std::move(story_config), std::move(plots.value().plots),
         std::move(plots.value().subplots), std::move(plots.value().notes)); !installed) return installed;
     // #683 part 2: the galaxy-changing rewards of those plots (WST-40/41/64) and their journal replayer.
     if (auto bound = bind_story_rewards(game, plan, data); !bound) return bound;

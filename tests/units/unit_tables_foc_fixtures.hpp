@@ -33,5 +33,6 @@ void foc_corrupt_systems(eawr::units::LoadInput input);
 void foc_planetary_sources(const eawr::units::UnitTables& tables, eawr::units::LoadInput input);
 void foc_hardpoint_ranks(eawr::units::LoadInput input);
 void foc_land_companies(eawr::units::LoadInput input);
+void foc_priority_sets(eawr::units::LoadInput input);
 
 } // namespace unit_tables_test_support

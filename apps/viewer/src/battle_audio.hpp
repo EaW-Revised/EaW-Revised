@@ -35,6 +35,7 @@
 #include <godot_cpp/classes/sub_viewport.hpp>
 
 #include <array>
+#include <chrono>
 #include <cstdint>
 #include <map>
 #include <memory>
@@ -102,6 +103,15 @@ public:
     // RP-05: the local player pressed the retreat button and the request was refused.
     void retreat_refused(sim::tactical::RetreatRefusal refusal);
     void loading_complete();
+    // The preload's file reads run on their own threads from prepare() on (no `queue`): the loading code calls
+    // pump_loading() often (it publishes finished buffers on this thread, in the order the files were requested,
+    // within a small time budget) and finish_loading() once, before the battle can start (it publishes the rest and
+    // ends the preload). Both are no-ops when no preload is running.
+    void pump_loading();
+    void finish_loading();
+    // A load that failed or was refused after prepare(): stops and joins the readers and drops their buffers
+    // without publishing them. No-op when no preload is running.
+    void cancel_loading();
     [[nodiscard]] bool briefing_queue_empty() const { return speech_queue_.size() == 0; }
     [[nodiscard]] bool contains_speech(std::string_view name) const {
         return speech_queue_.contains([name](const auto& event) { return core::iequals(event.name, name); });
@@ -173,6 +183,7 @@ private:
         std::map<std::uint32_t, const audio::SfxEvent*> fire;          // by weapon slot key
         std::map<std::uint32_t, const audio::SfxEvent*> detonate;      // Projectile_SFXEvent_Detonate
         std::map<std::uint32_t, const audio::SfxEvent*> detonate_armor; // ..._Reduced_By_Armor
+        std::map<sim::tactical::TypeId, std::map<std::uint32_t, const audio::SfxEvent*>> lucky_detonate, lucky_detonate_armor;
         std::map<std::uint32_t, const audio::SfxEvent*> ability_detonate;
         std::map<std::uint32_t, const audio::SfxEvent*> ability_detonate_armor;
         std::map<std::uint32_t, const audio::SfxEvent*> barrage_detonate;
@@ -241,7 +252,8 @@ private:
         };
         std::map<sim::tactical::AbilityKind, AbilityVoice> ability_voices;
         std::map<sim::tactical::AbilityKind, const audio::SfxEvent*> ability_targets;
-        const audio::SfxEvent* leech_loop{};
+        std::map<sim::tactical::AbilityKind, const audio::SfxEvent*> ability_loops;
+        std::uint32_t super_laser_fire_delay{};
         const audio::SfxEvent* corrupt_activate{};
         // WLD-12: LASER_DEFENSE's Zap_SFXEvent, started on the Crusader at each shot it shoots down.
         const audio::SfxEvent* point_defence_zap{};
@@ -275,10 +287,12 @@ private:
     [[nodiscard]] static PreparedAudio prepare_audio(const std::shared_ptr<const vfs::Vfs>& filesystem,
                                                     const LoadKey& key);
     static void order_by_disk_position(const vfs::Vfs& filesystem, std::vector<LoadKey>& keys);
-    void prepare_audio_batch(const std::set<LoadKey>& keys);
     void prepare_audio_chunk(platform::ThreadWorkerAdapter& pool, const std::vector<LoadKey>& ordered, std::size_t at,
                              std::size_t batch_size);
     void enqueue_audio_batches(const std::set<LoadKey>& keys, const EnqueueLoadStep& queue);
+    // The preload without `queue`: readers start here and prepare() returns; see pump_loading / finish_loading.
+    void start_audio_readers(const std::set<LoadKey>& keys);
+    void publish_audio(std::chrono::steady_clock::duration budget, bool wait_for_all);
     void finish_prepare();
     void commit_audio(const LoadKey& key, PreparedAudio prepared, bool runtime);
     [[nodiscard]] bool audio_ready(const LoadKey& key);
@@ -335,7 +349,11 @@ private:
     std::array<const audio::SfxEvent*, 4> reinforcement_sounds_{};
     std::array<const audio::SfxEvent*, static_cast<std::size_t>(audio::CommandCue::count)> command_cues_{};
     std::map<sim::EntityId, audio::EventQueue::Handle> pad_loops_;
-    std::map<sim::EntityId, audio::EventQueue::Handle> leech_loops_;
+    struct AbilityLoop final {
+        const audio::SfxEvent* event{};
+        std::optional<audio::EventQueue::Handle> handle;
+    };
+    std::map<sim::EntityId, AbilityLoop> leech_loops_;
     // WSD-02/WSD-08: each running countdown's start sound; it stops when the countdown stops (a cancel
     // or the unit's end), as the debug build's disable path does.
     std::map<sim::EntityId, audio::EventQueue::Handle> self_destruct_sounds_;
@@ -509,6 +527,10 @@ private:
     };
     std::vector<AudioLoadRow> audio_load_rows_;
     double audio_prepare_wall_ms_{};
+    // Main-thread time spent publishing the preload's buffers and waiting for its readers (async preload only).
+    double audio_publish_ms_{}, audio_blocked_ms_{};
+    struct AsyncPrepare;
+    std::shared_ptr<AsyncPrepare> async_prepare_;
     std::uint64_t audio_worker_count_{}, deferred_audio_requests_{}, audio_queue_retries_{};
 
     std::vector<audio::MusicEvent> music_events_;

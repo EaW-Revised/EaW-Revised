@@ -14,6 +14,7 @@
 #include <cmath>
 #include <algorithm>
 #include <fstream>
+#include <limits>
 #include <sstream>
 
 namespace eawr::presentation::godot_backend {
@@ -248,11 +249,13 @@ void GalacticMode::State::write_report_phases(std::ostringstream& output) const 
 
 void GalacticMode::State::write_report_corruption(std::ostringstream& output) const {
     std::size_t corruption_effects{}, corruption_resources{}, corruption_reserved{}, corruption_refused{};
-    std::uint64_t corruption_particle_count{};
+    std::uint64_t corruption_particle_count{}, one_shots_started{};
+    std::size_t one_shots{};
     for (const auto& particles : corruption_particles) if (particles) {
         corruption_effects += particles->live_effects(); corruption_resources += particles->resources();
         corruption_particle_count += particles->particle_count();
         corruption_reserved += particles->reserved_particles(); corruption_refused += particles->refused_effects();
+        one_shots += particles->one_shots(); one_shots_started += particles->one_shots_started();
     }
     output << ",\n  \"corruption\": {\"attachments\": " << corruption_visuals.attachments.size()
            << ", \"connections\": " << corruption_visuals.connections.size()
@@ -261,6 +264,8 @@ void GalacticMode::State::write_report_corruption(std::ostringstream& output) co
            << ", \"adjacency_rebuilds\": " << corruption_visuals.work().adjacency_rebuilds
            << ", \"effects\": " << corruption_effects << ", \"resources\": " << corruption_resources
            << ", \"particles\": " << corruption_particle_count
+           << ", \"one_shots\": " << one_shots << ", \"one_shots_started\": " << one_shots_started
+           << ", \"destruction_effect_events\": " << destruction_effect_events
            << ", \"reserved_particles\": " << corruption_reserved << ", \"refused_effects\": " << corruption_refused
            << ", \"budget_per_owner\": 262144"
            << ", \"line_effects\": " << (corruption_lines ? corruption_lines->live_effects() : 0)
@@ -458,6 +463,8 @@ void GalacticMode::State::write_report_command_bar(std::ostringstream& output) c
 }
 
 void GalacticMode::State::write_report_panels(std::ostringstream& output) const {
+    output << ",\n  \"queue_encyclopedia\": " << (queue_encyclopedia ? queue_encyclopedia->report_json() : "null")
+        << ",\n  \"queue_hover_publications\": " << queue_hover.publications();
     const auto encyclopedia_rect = encyclopedia_panel ? encyclopedia_panel->get_global_rect() : Rect2{};
     std::string encyclopedia_body = encyclopedia_panel ? encyclopedia_panel->get_content().description : std::string{};
     if (encyclopedia_panel && !encyclopedia_panel->get_status().disabled_reason.empty())
@@ -693,6 +700,8 @@ void GalacticMode::State::write_report_galaxy(std::ostringstream& output) const 
 }
 
 void GalacticMode::State::write_report_planet_hud(std::ostringstream& output) const {
+    // Preserve float coordinates when the report compares positions with their anchors.
+    const auto previous_precision = output.precision(std::numeric_limits<double>::max_digits10);
     output << ",\n  \"hud\": {\"template\": \"g_planet_name\", \"planet_source\": \"GalacticSnapshot\", "
            << "\"observer_facts\": " << hud_facts.size()
            << ", \"production_source\": \"unavailable\", \"selected\": " << selected_hud.selected
@@ -731,6 +740,7 @@ void GalacticMode::State::write_report_planet_hud(std::ostringstream& output) co
             output << "}";
         }
     }
+    output.precision(previous_precision);
     output << "], \"intelligence\": [";
     const auto optional_number = [](const auto& value) { return value ? std::to_string(*value) : std::string("null"); };
     std::size_t facts_written = 0;

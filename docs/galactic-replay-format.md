@@ -1,8 +1,9 @@
-# Galactic replay format v12 (EAWRGCR)
+# Galactic replay format v14 (EAWRGCR)
 
-Current compatibility identities are replay format 12, galactic rules 7 and state
-encoding 18 (hash domain `eawr-galactic-state-v11`); published snapshot encoding is 9.
-Checkpoint galaxy section version 52 retains the arrival landing request, as well as spy enabled/cancelled facts and registered
+Current compatibility identities are replay format 14, galactic rules 7 and state
+encoding 21 (hash domain `eawr-galactic-state-v13`); published snapshot encoding is 10.
+Market item records retain ordered ability names for the campaign-to-tactical purchase gate (WGEP-145).
+Checkpoint galaxy section version 56 retains those names and the arrival landing request, as well as spy enabled/cancelled facts and registered
 spy targets in the ability host. Ability setup/state encoding 9 adds authored ground
 spy profiles and runtime fields; ability setup encoding 10 adds each profile's initially enabled Galactic_Automatic spies
 (`u8` count, then per spy a text identity, `u64` identity, `i64` duration, `i64` influence range, `u32` mask), which the
@@ -68,7 +69,9 @@ values where the field is a position. There is no padding or floating value; ext
 uses length-prefixed strings.
 Unknown versions, flags, layers and opcodes, malformed lengths and trailing bytes fail. Counts
 are checked against the bytes left before anything is allocated; the whole input is at most
-256 MiB.
+1 GiB.
+
+Native effect kind **22** (`story_ai_usage`) records a world actor ID (`u64`) and two `u8` values for the prevent and ground-preference writes: 0 means absent, 1 means false, and 2 means true. At least one write is present. These world facts enter the census state hash and seed a pool created later.
 
 Native effect kind **21** (`identity_reservation`, GFS-A22) reserves identity frontiers before
 a player's actual admissions. Its fixed 32-byte payload contains four uint64 values: entity
@@ -78,12 +81,18 @@ reservation, zero invasion identity, or an exhausted uint64 sentinel before eith
 changes. Two unchanged frontiers emit no effect. The existing native-effect framing carries
 this kind; replay header and checkpoint layouts are unchanged.
 
+One backward form exists (format 13, asynchronous AI): an entity `next` below `expected` with the invasion pair
+unchanged and `next` non-zero rewinds the entity counter into the range the AI lane reserved for a pending
+decision; the counter may then only come back up to exactly the value it left (a later reservation above that
+value, or a second rewind before it returns, is refused). The world's own allocations never run between the
+rewind and the return. A recording therefore replays the same identities as the live run.
+
 ## Header: 96 bytes
 
 | Offset | Width | Field | Rule |
 |---:|---:|---|---|
 | 0 | 8 | magic | ASCII `EAWRGCR` followed by zero |
-| 8 | 2 | format_version | 12 |
+| 8 | 2 | format_version | 14 |
 | 10 | 2 | flags | bit 0: debug commands; bit 1: header extensions; bit 2: explicit transport; bit 3: networked transport (requires bit 2); other bits zero |
 | 12 | 4 | rules_version | the galactic rules version of the build, 7 |
 | 16 | 32 | content_identity | identity of the content tables the galaxy was built from |
@@ -143,7 +152,7 @@ Sequences are consecutive from one. Frontiers are nondecreasing and at most the 
 phase zero (barrier admission) precedes phase one (world-service callback) at each frontier.
 World-service effects require a following tick. Counts share the command limit and each typed
 payload is at most 64 KiB; empty extensions, unknown kinds/phases, reordered effects and
-trailing bytes fail. The aggregate replay limit remains 256 MiB.
+trailing bytes fail. The aggregate replay limit remains 1 GiB.
 
 Barrier effects replay after the preceding world commit and before the next world service.
 World-service consumers read their recorded payment/outcome facts at the actual callback,
@@ -490,7 +499,8 @@ Tag 6 optionally appends a uint8 version **1**, int64 Q24 maximum alignment
 bonus/penalty, then four uint32-counted tables: political curve pairs (int64 Q24
 x/y), player alignment (uint32 player, uint8 enum), planet alignment (uint64
 planet, uint8 enum, int64 Q24 strength), and route factors (uint64 route, int64
-Q24 factor). Alignment enums are neutral=0, light=1, dark=2. Player, planet and
+Q24 factor). Alignment enums are neutral=0, light=1, dark=2; the planet table also
+accepts invalid=3 (a planet type that authors no alignment; never a player value). Player, planet and
 route tables exactly follow setup order; curve points have strictly increasing
 x. Bounds, unsupported versions/enums, missing rows, truncation and trailing
 bytes fail admission. No tail means the recorded legacy base-income payload;
@@ -531,6 +541,11 @@ Player and planet rows exactly match the primary setup tables. Offers are strict
 ascending TypeId; initial objects have distinct ascending nonzero identities.
 Setup queues are empty. Runtime queues preserve admission order, independently
 for ground and space. Structures share their domain's unit queue (WGEP-36).
+
+The payload starts with a marker byte: **7** for this inline form, which every replay file uses. A galaxy checkpoint
+(section version 56) stores its embedded recording in a pooled form with marker **9**, where each planet's offer rows are
+one uint32 index into the checkpoint's offer pool; see the checkpoint format's Offer pool. A reader accepts the marker that
+matches whether it was given a pool, and refuses the other. The pooled form exists only inside a checkpoint.
 
 Opcode 7 has a 22-byte base payload: uint64 planet, uint64 type, uint8 action
 (0 buy, 1 indexed cancel, 2 last-matching-type cancel, 3 bulk stop), uint8 domain

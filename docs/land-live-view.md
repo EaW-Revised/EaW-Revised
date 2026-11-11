@@ -85,7 +85,7 @@ beside F3, the performance overlay) to toggle it. It draws, for every squad, ove
   than rear extent + 2, the WLPA-30 slow-down), **blue** a member on a detour, **green** moving, **grey** idle.
 
 The overlay reads a read-only copy (`LiveSession::land_overlay`, built by `build_land_overlay` in
-`include/eawr/sim/tactical/land_debug_overlay.hpp`) under a try-lock; nothing flows back into the simulation.
+`include/eawr/platform/land_debug_overlay.hpp`) under a try-lock; nothing flows back into the simulation.
 
 The same patch writes one stderr line (godot.log) per rows re-map and per turn-in-place change, with no effect on state, hash
 or replay (`set_land_move_trace_sink`; the commit only reads values and calls the sink):

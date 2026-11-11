@@ -392,6 +392,19 @@ void test_online_settings() {
     expect(ui::parse_settings(ui::serialize_settings(stored)).settings.network.allow_upnp, "service text cannot inject settings lines");
 }
 
+void test_fit_radar_settings() {
+    expect(!ui::PlayerSettings{}.gameplay.fit_radar_to_galaxy, "radar fit defaults off");
+    expect(!ui::parse_settings("eawr-settings 1\n").settings.gameplay.fit_radar_to_galaxy,
+           "absent radar setting keeps retail extents");
+    for (const bool enabled : {false, true}) {
+        ui::PlayerSettings value;
+        value.gameplay.fit_radar_to_galaxy = enabled;
+        expect(ui::parse_settings(ui::serialize_settings(value)).settings == value, "radar fit round trips");
+    }
+    expect(!ui::parse_settings("eawr-settings 1\ngameplay.fit_radar_to_galaxy=invalid\n").settings.gameplay.fit_radar_to_galaxy,
+           "invalid radar setting keeps retail extents");
+}
+
 void test_animated_loading_background_settings() {
     expect(!ui::PlayerSettings{}.gameplay.animated_loading_background, "loading animation defaults off");
     expect(!ui::parse_settings("eawr-settings 1\n").settings.gameplay.animated_loading_background,
@@ -573,8 +586,49 @@ void test_frame_pacing() {
     expect(ui::frame_rate_cap(video, 144, false, true) == 144, "vsync limits an otherwise uncapped battle");
     video.frame_rate_limit = 120;
     expect(ui::frame_rate_cap(video, 60, false, true) == 60, "vsync and explicit limit combine lower wins");
+    // Fractional modes: the derived limiter is rounded up, never below the real refresh (59.94 / 119.88 / 143.98 Hz).
+    video.vsync = true;
+    video.frame_rate_limit = -1;
+    expect(ui::frame_rate_cap(video, 59.94, false, true) == 60, "vsync, refresh selection at 59.94 Hz is 60, not 59");
+    expect(ui::frame_rate_cap(video, 119.88, false, true) == 120, "vsync, refresh selection at 119.88 Hz is 120, not 119");
+    expect(ui::frame_rate_cap(video, 143.98, false, true) == 144, "vsync, refresh selection at 143.98 Hz is 144, not 143");
+    video.frame_rate_limit = 120;
+    expect(ui::frame_rate_cap(video, 119.88, false, true) == 120, "vsync, cap 120 at 119.88 Hz is not lowered to 119");
+    expect(ui::frame_rate_cap(video, 143.98, false, true) == 120, "a cap clearly below the refresh stays the player's cap");
+    video.frame_rate_limit = 144;
+    expect(ui::frame_rate_cap(video, 143.98, false, true) == 144, "vsync, cap 144 at 143.98 Hz is 144");
+    video.frame_rate_limit = 60;
+    expect(ui::frame_rate_cap(video, 59.94, false, true) == 60, "vsync, cap 60 at 59.94 Hz is 60");
+    video.frame_rate_limit = 0;
+    expect(ui::frame_rate_cap(video, 119.88, false, true) == 120, "vsync with Off limits to the rounded-up refresh");
+    expect(ui::frame_rate_cap(video, 119.88, true, true) == 60, "menus still use 60 under vsync");
+    expect(ui::frame_rate_cap(video, 119.88, false, false) == 30, "unfocused still uses 30 under vsync");
+    video.frame_rate_limit = 120;
+    expect(ui::frame_rate_cap(video, -1, false, true) == 120, "vsync with an unknown refresh keeps an explicit cap");
+    video.frame_rate_limit = 0;
+    expect(ui::frame_rate_cap(video, -1, false, true) == 60, "vsync, Off and an unknown refresh keep the 60 FPS limiter");
+    expect(ui::frame_rate_cap(video, 29.9, false, true) == 60 && ui::frame_rate_cap(video, 1001.0, false, true) == 60,
+           "an out-of-range refresh is unknown");
+    video.frame_rate_limit = -1;
+    expect(ui::frame_rate_cap(video, -1, false, true) == 60, "vsync, refresh selection and an unknown refresh use 60 FPS");
+    // Integer modes and the 3% band edges under vsync.
+    for (const int hz : {75, 120, 165, 240}) {
+        video.frame_rate_limit = -1;
+        expect(ui::frame_rate_cap(video, hz, false, true) == hz, "vsync, refresh selection at an integer mode");
+        video.frame_rate_limit = 0;
+        expect(ui::frame_rate_cap(video, hz, false, true) == hz, "vsync with Off at an integer mode");
+    }
+    video.frame_rate_limit = 116;
+    expect(ui::frame_rate_cap(video, 119.88, false, true) == 116, "vsync, cap 116 at 119.88 Hz is below the 3% band and stays");
+    video.frame_rate_limit = 117;
+    expect(ui::frame_rate_cap(video, 119.88, false, true) == 120, "vsync, cap 117 at 119.88 Hz is inside the band and rounds up");
+    video.frame_rate_limit = 58;
+    expect(ui::frame_rate_cap(video, 59.94, false, true) == 58, "vsync, cap 58 at 59.94 Hz stays");
+    video.frame_rate_limit = 59;
+    expect(ui::frame_rate_cap(video, 59.94, false, true) == 60, "vsync, cap 59 at 59.94 Hz rounds up");
     video.vsync = false;
     video.frame_rate_limit = -1;
+    expect(ui::frame_rate_cap(video, 119.88, false, true) == 120, "vsync off, refresh selection at 119.88 Hz is 120");
     expect(ui::frame_rate_cap(video, 165, false, true) == 165, "refresh selection follows the current display");
     expect(ui::frame_rate_cap(video, -1, false, true) == 60, "unknown refresh safely uses 60 FPS");
     video.frame_rate_limit = 1;
@@ -735,6 +789,69 @@ void test_option_status() {
            "ST-K2: the keyboard page shows the project's keys, blank where there is none");
 }
 
+void test_particle_detail_setting() {
+    // #6560: the Advanced page's particle slider and heat check are honoured; the other detail controls stay refused.
+    for (const char* control : {"IDC_PARTICLE_DETAIL_SLIDER", "IDC_HEAT_DISTORTIONS"}) {
+        const ui::OptionStatus* status = ui::find_option_status(control);
+        expect(status != nullptr && status->honoured && status->reason.empty(), std::string("#6560: ") + control + " is honoured");
+    }
+    for (const char* control : {"IDC_MESH_DETAIL_SLIDER", "IDC_TEXTURE_MIP_DETAIL_SLIDER", "IDC_WATER_DETAIL_SLIDER",
+                                "IDC_SHADER_DETAIL_SLIDER", "IDC_SHADOW_DETAIL_SLIDER", "IDC_ENVIRONMENT_DETAIL_SLIDER",
+                                "IDC_SOFT_SHADOWS", "IDC_BLOOM", "IDC_DETAIL_LEVEL_SLIDER", "IDC_AUTO_DETECT"}) {
+        const ui::OptionStatus* status = ui::find_option_status(control);
+        expect(status != nullptr && !status->honoured, std::string("#6560: ") + control + " stays refused");
+    }
+    expect(ui::detail_slot_particle == 7 && ui::detail_slot_heat == 5, "#6560: the slider is detail slot 7, the heat check slot 5");
+
+    // Automatic is 1.0 whatever the basic level, so the default look is unchanged.
+    ui::VideoSettings video;
+    expect(video.detail[ui::detail_slot_particle] == ui::detail_automatic && video.detail[ui::detail_slot_heat] == ui::detail_automatic,
+           "#6560: both controls default to automatic");
+    expect(ui::particle_global_detail(video) == 1.0F && ui::particle_heat_enabled(video), "#6560: automatic = full look");
+    for (const int basic : {0, 1, 2, 3}) {
+        video.detail_level = basic;
+        expect(ui::particle_global_detail(video) == 1.0F && ui::particle_heat_enabled(video),
+               "#6560: automatic ignores the basic detail level");
+    }
+    // Our scale: level 0..3 -> 0.4, 0.6, 0.8, 1.0.
+    const float expected[] = {0.4F, 0.6F, 0.8F, 1.0F};
+    for (int level = 0; level <= ui::detail_level_maximum; ++level) {
+        video.detail[ui::detail_slot_particle] = level;
+        expect(ui::particle_global_detail(video) == expected[level], "#6560: level " + std::to_string(level) + " maps to our scale");
+    }
+    video.detail[ui::detail_slot_heat] = 0;
+    expect(!ui::particle_heat_enabled(video), "#6560: heat stored 0 is off");
+    video.detail[ui::detail_slot_heat] = 1;
+    expect(ui::particle_heat_enabled(video), "#6560: heat stored 1 is on");
+
+    // Settings round-trip through the file, with the other detail slots untouched.
+    ui::PlayerSettings saved;
+    saved.video.detail[ui::detail_slot_particle] = 0;
+    saved.video.detail[ui::detail_slot_heat] = 0;
+    const ui::SettingsLoad loaded = ui::parse_settings(ui::serialize_settings(saved));
+    expect(loaded.notes.empty() && loaded.settings == saved, "#6560: the two slots round-trip");
+    expect(loaded.settings.video.detail[ui::detail_slot_particle] == 0 && loaded.settings.video.detail[ui::detail_slot_heat] == 0
+               && loaded.settings.video.detail[8] == ui::detail_automatic,
+           "#6560: only slots 5 and 7 changed");
+    expect(ui::particle_global_detail(loaded.settings.video) == 0.4F && !ui::particle_heat_enabled(loaded.settings.video),
+           "#6560: the loaded record gives 0.4 with heat off");
+
+    // The launch argument wins over the setting; without one the setting decides.
+    ui::VideoSettings low;
+    low.detail[ui::detail_slot_particle] = 0;
+    low.detail[ui::detail_slot_heat] = 0;
+    ui::ParticleSettingValues values = ui::resolve_particle_values(low, std::nullopt, std::nullopt);
+    expect(values.global == 0.4F && !values.heat, "#6560: no launch argument: the setting decides");
+    values = ui::resolve_particle_values(low, 0.9F, std::nullopt);
+    expect(values.global == 0.9F && !values.heat, "#6560: --eawr-live-particle-detail wins, heat follows the setting");
+    values = ui::resolve_particle_values(low, std::nullopt, true);
+    expect(values.global == 0.4F && values.heat, "#6560: --eawr-live-particle-heat wins, detail follows the setting");
+    values = ui::resolve_particle_values(low, 1.0F, true);
+    expect(values.global == 1.0F && values.heat, "#6560: both launch arguments win");
+    values = ui::resolve_particle_values(ui::VideoSettings{}, std::nullopt, std::nullopt);
+    expect(values.global == 1.0F && values.heat, "#6560: untouched settings give today's look");
+}
+
 void test_resolution_choices() {
     // ST-V2: the common sizes that fit, the screen's own, and the extras, each once, ascending.
     const ui::DisplaySize extras[] = {{1280, 720}, {1366, 700}, {100, 100}, {99999, 99999}};
@@ -789,6 +906,7 @@ int main() {
     test_online_settings();
     test_performance_thread_settings();
     test_render_thread_settings();
+    test_fit_radar_settings();
     test_animated_loading_background_settings();
     test_reinforcement_area_settings();
     test_defaults();
@@ -810,6 +928,7 @@ int main() {
     test_garbage();
     test_clamping();
     test_option_status();
+    test_particle_detail_setting();
     test_resolution_choices();
     test_session_values();
     if (test::ui::failures() != 0) {

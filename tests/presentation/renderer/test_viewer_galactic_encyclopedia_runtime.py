@@ -25,7 +25,10 @@ class GalacticEncyclopediaRuntime(unittest.TestCase):
         report = directory / "report.json"
         driver = directory / "input.gd"
         driver.write_text('''extends SceneTree
-var frame = 0
+var action_index = 0
+var release_pending = false
+var next_action_time = -1.0
+var finish_time = -1.0
 var actions = JSON.parse_string(''' + repr(json.dumps(actions)) + ''')
 var hovered_income = false
 var capture_path = ''' + json.dumps((directory / "native.png").as_posix()) + '''
@@ -61,11 +64,19 @@ func click(name, down):
     event.global_position = position
     Input.parse_input_event(event)
 func _process(_delta):
-    frame += 1
-    for index in range(actions.size()):
-        if frame == 40 + index * 240: click(actions[index], true)
-        if frame == 41 + index * 240: click(actions[index], false)
-    if frame == 320 + actions.size() * 240:
+    var now = Time.get_ticks_msec() / 1000.0
+    if next_action_time < 0.0: next_action_time = now + 1.0
+    if release_pending:
+        click(actions[action_index], false)
+        release_pending = false
+        action_index += 1
+        next_action_time = now + 2.0
+        if action_index == actions.size(): finish_time = now + 3.0
+    elif action_index < actions.size() and now >= next_action_time:
+        click(actions[action_index], true)
+        release_pending = true
+    # CARD-18 is a wall-clock delay, independent of frame rate and campaign pause.
+    if finish_time >= 0.0 and now >= finish_time:
         if actions.has("hover:Text_Day_Credits"): assert(hovered_income)
         root.get_texture().get_image().save_png(capture_path)
         current_scene.propagate_notification(Node.NOTIFICATION_WM_CLOSE_REQUEST)
@@ -82,6 +93,7 @@ func _process(_delta):
         self.assertTrue(report.is_file(), result.stdout + result.stderr)
         data = json.loads(report.read_text(encoding="utf-8"))
         self.assertEqual(result.returncode, 0, data.get("failure") or result.stdout + result.stderr)
+        self.assertNotIn("SCRIPT ERROR:", result.stdout + result.stderr)
         self.assertEqual(data["map_input"]["selected"], 101)
         self.assertEqual(data["map_input"]["selection_invalidations"], 0)
         popup = data["encyclopedia"]
@@ -107,7 +119,7 @@ func _process(_delta):
         self.assertNotIn("TEXT_", popup["title"])
         self.assertEqual(popup["price"], 100)
         self.assertTrue(popup["icon"])
-        self.assertEqual(data["live_session"]["submitted_orders"], 1)
+        self.assertEqual(data["live_session"]["submitted_orders"], initial["live_session"]["submitted_orders"])
 
     def test_disabled_starbase_hover_uses_prepared_price_and_denial(self):
         initial, _ = self.capture(3, "production")
@@ -119,7 +131,7 @@ func _process(_delta):
         self.assertEqual(popup["price"], 100)
         self.assertIn("No available slot", popup["body"])
         self.assertEqual(data["command_bar"]["account"], "900")
-        self.assertEqual(data["live_session"]["submitted_orders"], 2)
+        self.assertEqual(data["live_session"]["submitted_orders"], initial["live_session"]["submitted_orders"] + 1)
 
     def test_unknown_preview_has_no_object_details(self):
         data, _ = self.capture(1)
@@ -130,12 +142,43 @@ func _process(_delta):
         initial, _ = self.capture(3, "production")
         button = next(row["button"] for row in initial["command_bar"]["production_choices"] if row["type_id"] == 1000)
         production = self.native_run(["hover:" + button])["encyclopedia"]
-        queued = self.native_run([button, "hover:queue00"])["encyclopedia"]
-        self.assertTrue(queued["visible"])
-        self.assertEqual(queued["type"], 1000)
-        self.assertEqual(queued["title"], production["title"])
-        self.assertNotEqual(queued["title"], "TIE_Fighter_Squadron")
-        self.assertNotIn("TEXT_", queued["title"])
+        data = self.native_run([button, "hover:queue00"])
+        cards = data["queue_encyclopedia"]
+        queued = cards["tooltip"]
+        self.assertIsNotNone(queued)
+        self.assertTrue(queued["external"])
+        self.assertGreater(queued["alpha"], 0)
+        self.assertEqual(queued["text"], production["title"])
+        self.assertEqual(queued["price"], 100)
+        self.assertNotIn("TEXT_", queued["text"])
+        self.assertEqual(cards["popup_content_builds"], 1,
+                         "stationary queue hover must retain its full details")
+        self.assertEqual(data["queue_hover_publications"], 1)
+
+    def test_technology_queue_hover_uses_queued_type_and_galactic_cost(self):
+        initial, _ = self.capture(3, "production")
+        # This fixture's type 1002 is a technology offer, priced at 200.
+        button = next(row["button"] for row in initial["command_bar"]["production_choices"] if row["type_id"] == 1002)
+        production = self.native_run(["hover:" + button])["encyclopedia"]
+        data = self.native_run([button, "hover:queue00"])
+        cards = data["queue_encyclopedia"]
+        queued = cards["tooltip"]
+        self.assertIsNotNone(queued)
+        self.assertEqual(queued["text"], production["title"])
+        self.assertEqual(queued["description"], production["body"])
+        self.assertEqual(queued["price"], 200)
+        self.assertEqual(cards["popup_content_builds"], 1)
+        self.assertEqual(data["queue_hover_publications"], 1)
+
+    def test_removing_hovered_queue_entry_clears_shared_tooltip(self):
+        initial, _ = self.capture(3, "production")
+        button = next(row["button"] for row in initial["command_bar"]["production_choices"] if row["type_id"] == 1000)
+        data = self.native_run([button, "hover:queue00", "right:queue00"])
+        self.assertIsNone(data["queue_encyclopedia"]["tooltip"])
+        self.assertEqual(data["queue_hover_publications"], 2)
+        self.assertFalse(data["encyclopedia"]["visible"])
+        self.assertFalse(data["production_queues"])
+        self.assertEqual(data["live_session"]["submitted_orders"], initial["live_session"]["submitted_orders"] + 2)
 
 
 if __name__ == "__main__":

@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <map>
 #include <span>
 #include <vector>
 
@@ -78,10 +79,11 @@ struct HeroCollectInput {
     std::span<const sim::EntityId> visible;
     const HeroTypeTable* types{};
     const sim::tactical::DurabilityTable* durability{};
+    const std::map<sim::EntityId, sim::EntityId>* squadron_of{};
 };
 
-// Fills `out` (cleared first, capacity kept) from one snapshot. A hero appears once (a duplicate hero id is
-// dropped). Each side is ordered newest first (descending hero id: slot 0 is next to the screen edge,
+// Fills `out` (cleared first, capacity kept) from one snapshot. A hero and its squadron appear once.
+// Each side is ordered newest first (descending hero id: slot 0 is next to the screen edge,
 // WHE-72) and cut to the policy capacity, which leaves the oldest out.
 void collect_heroes(const HeroCollectInput& input, const HeroTrayPolicy& policy, HeroRoster& out);
 

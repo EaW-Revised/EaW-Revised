@@ -33,8 +33,12 @@ public:
         friend class GoalStateContributor;
     };
     [[nodiscard]] core::Result<std::unique_ptr<PhaseSavepoint>> begin_phase();
-    GoalStateContributor(std::shared_ptr<Engine> engine, std::string content_identity)
-        : engine_(std::move(engine)), content_identity_(std::move(content_identity)) { if (engine_) engine_->enable_native_records(); }
+    // `identity_detail` is the digests of the groups the identity is made of. It is saved after the identity so a later
+    // load that refuses can name the groups that changed; it never decides whether a save loads.
+    GoalStateContributor(std::shared_ptr<Engine> engine, std::string content_identity, std::string identity_detail = {})
+        : engine_(std::move(engine)), content_identity_(std::move(content_identity)), identity_detail_(std::move(identity_detail)) {
+        if (engine_) engine_->enable_native_records();
+    }
     [[nodiscard]] core::Result<galactic_ai::NativeState> capture() const override;
     [[nodiscard]] core::Result<void> restore(const galactic_ai::NativeState&) override;
     [[nodiscard]] core::Result<std::string> state_hash() const override;
@@ -49,6 +53,6 @@ private:
     [[nodiscard]] core::Result<std::vector<std::uint8_t>> encode(Engine&) const;
     [[nodiscard]] core::Result<void> validate(const Engine&, const detail::WorldView* completed_view = nullptr) const;
     std::shared_ptr<Engine> engine_;
-    std::string content_identity_;
+    std::string content_identity_, identity_detail_;
 };
 } // namespace eawr::script::foc::ai

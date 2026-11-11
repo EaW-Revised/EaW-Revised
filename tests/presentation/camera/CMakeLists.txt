@@ -106,6 +106,19 @@ else()
     target_link_libraries(camera_controller_tests PRIVATE eawr::presentation)
     eawr_target_project_warnings(camera_controller_tests)
 endif()
+# #6448 J1: engine-free harness for the camera side of the presentation instant (header-only).
+add_executable(camera_instant_tests camera_instant_main.cpp)
+target_compile_features(camera_instant_tests PRIVATE cxx_std_20)
+if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+    if(MSVC)
+        target_compile_options(camera_instant_tests PRIVATE /W4 /WX /permissive-)
+    else()
+        target_compile_options(camera_instant_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+    endif()
+else()
+    eawr_target_project_warnings(camera_instant_tests)
+endif()
+
 target_compile_definitions(camera_bindings_tests PRIVATE
     EAWR_CAMERA_BINDINGS_PATH="${EAWR_ROOT}/apps/viewer/project/config/camera-bindings.json")
 
@@ -158,6 +171,7 @@ add_test(NAME free_camera_contracts COMMAND free_camera_tests)
 add_test(NAME camera_bindings_contracts COMMAND camera_bindings_tests)
 add_test(NAME camera_constants_source_contracts COMMAND camera_constants_source_tests)
 add_test(NAME camera_controller_contracts COMMAND camera_controller_tests)
+add_test(NAME camera_instant_contracts COMMAND camera_instant_tests)
 add_test(NAME map_camera_bridge_contracts COMMAND map_camera_bridge_tests)
 
 # Tier labels (cmake/EawrTestTiers.cmake).

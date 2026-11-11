@@ -751,7 +751,11 @@ def analyse_scene(directory: pathlib.Path, name: str, scene: dict) -> dict:
     floor_receipt = directory / f"{name}.floor.json"
     if floor_receipt.exists():
         row["floor_stop"] = json.loads(floor_receipt.read_text(encoding="utf-8-sig"))
-        row["measurement_error"] = "4 GiB free-RAM floor reached; see floor_stop for the memory result"
+        if row["floor_stop"].get("result") == "guard-failed":
+            row["measurement_error"] = "free-RAM floor guard could not start and the run was stopped; see floor_stop for the reason"
+        else:
+            gib = row["floor_stop"].get("floor_bytes", 0) / 2**30
+            row["measurement_error"] = f"{gib:g} GiB free-RAM floor reached; see floor_stop for the memory result"
     return row
 
 
@@ -1126,13 +1130,15 @@ def load_preparations(directory: pathlib.Path, names: list[str]) -> dict:
 
 
 def remote_rig_hosts() -> set[str]:
-    """Names and aliases of the remote GPU hosts in the host table (never the local workstation)."""
+    """Names and aliases of the remote GPU hosts in the host table (never the local workstation, never an AMD host:
+    this harness measures uncapped pacing, which the frame-cap guard refuses there)."""
     root = pathlib.Path(__file__).resolve().parents[2]
     config = pathlib.Path(os.environ.get("EAWR_GPU_HOSTS") or root / "config/gpu-hosts.local.json")
     if not config.is_file():
         config = root / "config/gpu-hosts.json"
     hosts = json.loads(config.read_text(encoding="utf-8-sig"))["hosts"]
     return {name.casefold() for host in hosts if host.get("connection") != "local"
+            and not str(host.get("gpuProfile", "")).casefold().startswith("amd")
             for name in [host["name"], *host.get("aliases", [])]}
 
 

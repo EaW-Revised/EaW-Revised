@@ -63,6 +63,8 @@ public:
         std::function<std::optional<ui::PickRay>(std::array<float, 2>)> ray;
         const LiveSessionView* live{};
         const ui::AbilityState* abilities{}; // the same provider as the unit cards
+        struct AreaPreview final { std::array<float, 3> position; float radius; };
+        std::optional<AreaPreview> area_preview;
         // #848 V-5d: false while either overview level is on: no unit bracket (health and shield
         // bars) draws. Circles, squadron icons and reticles do not read it (V-5e).
         bool waypoints{};
@@ -148,6 +150,13 @@ private:
         bool hero_head{}; // WU-47: named identity or Show_Hero_Head
         float layer_z{};   // Layer_Z_Adjust: the height of a combat cell point of this craft type (WU-26)
         float max_thrust{}; // WSU-34: the leader type accelerates the icon's world anchor
+        struct HealingBlob final {
+            godot::Ref<godot::PlaneMesh> mesh;
+            float diameter{};
+            std::string material;
+            std::array<std::uint8_t, 4> colour{};
+        };
+        std::vector<HealingBlob> healing_blobs;
         std::vector<HardpointUi> hardpoints;
         std::array<std::uint32_t, 2> abilities{};
         std::array<std::optional<godot::Rect2>, 2> ability_regions{};
@@ -195,6 +204,7 @@ private:
     [[nodiscard]] godot::Ref<godot::ImageTexture> standalone(const vfs::Vfs& filesystem, const std::string& stem);
     [[nodiscard]] std::optional<godot::Rect2> atlas_region(const std::string& name) const;
     void place_circles(const Frame& frame);
+    void place_healing_blobs(const Frame& frame);
     void draw_bars(const Frame& frame, godot::RID canvas_item, float ui_scale);
     void draw_icons(const Frame& frame, godot::RID canvas_item, float ui_scale);
     void draw_identity(const Frame& frame, godot::RID canvas_item, sim::EntityId entity,
@@ -216,7 +226,15 @@ private:
     ui::Rgb ring_tint_{0, 255, 0};
     godot::Ref<godot::StandardMaterial3D> ring_material_;
     godot::Ref<godot::PlaneMesh> ring_mesh_;
+    godot::Ref<godot::PlaneMesh> area_preview_mesh_;
+    godot::Ref<godot::StandardMaterial3D> area_preview_material_;
+    godot::RID area_preview_instance_;
+    float area_preview_scale_{1.0F};
+    std::optional<float> area_preview_side_drawn_;
     godot::RID scenario_;
+    std::size_t healing_blobs_drawn_{};
+    std::vector<TypeUi::HealingBlob> healing_blobs_last_;
+    std::vector<godot::RID> healing_blob_instances_;
     std::vector<godot::RID> circles_;  // RenderingServer instances of ring_mesh_
     godot::Ref<godot::ImageTexture> atlas_;
     std::map<std::string, godot::Rect2> atlas_regions_;

@@ -187,6 +187,7 @@ public:
 class LoadTransportPump final {
 public:
     explicit LoadTransportPump(BufferedTransport& transport) : transport_(transport) {
+        if (transport_.tcp) transport_.tcp->stop_checkpoint();
         worker_ = std::jthread([this](std::stop_token stop) {
         // A steady mesh peer sends one 63-byte report per second to the host.
         // Eight peers over 30 minutes use 907,200 payload bytes; allow 64 MiB
@@ -399,6 +400,9 @@ public:
     }
     net::MatchPauseClock clock;
     net::MatchPauseReplay recording;
+    // #5355: the seat whose agreed options input last changed the shared speed, and the session tick it applied at.
+    std::optional<sim::SeatId> options_actor;
+    std::uint64_t options_changed_at{};
     std::optional<sim::SeatId> clock_refused;
     // The last installed tick answered a pause request of this seat: it carried one of its pause inputs, or the hold flipped.
     bool pause_answered(sim::SeatId own) const {
@@ -463,7 +467,7 @@ public:
             if (net::is_match_options(input.bytes)) {
                 auto decoded = net::decode_match_options(input.bytes);
                 if (!decoded) return core::Result<void>::failure(decoded.error());
-                pending_options_ = decoded.value();
+                pending_options_ = decoded.value(); pending_options_seat_ = input.key.seat;
                 continue;
             }
             auto decoded = net::decode_tactical_input(input, *bound);
@@ -530,7 +534,12 @@ public:
         }
         if (pending_options_) {
             if (context->set_target_rate) context->set_target_rate(presentation::ui::speed_step_rates[pending_options_->tactical_speed]);
-            if (!staging && options_applied) options_applied(*pending_options_, clock.completed);
+            // #5355 (d): a restored peer replays every options input while staging; its view must end on the agreed
+            // speed too (the pace already does: the staged session takes the rate), so the view is updated here as well.
+            if (options_applied) options_applied(*pending_options_, clock.completed);
+            // #5355: who changed the shared speed, for every peer's notice. Presentation only: not in control_state or a hash.
+            if (!staging && *pending_options_ != applied_options_) { options_actor = pending_options_seat_; options_changed_at = clock.completed; }
+            applied_options_ = *pending_options_;
             pending_options_.reset();
         }
         for (const auto& [key, kind] : trace_commands_) trace_->executed(key, kind, context->completed_tick());
@@ -580,6 +589,8 @@ private:
     std::set<sim::SeatId> departed_;
     std::map<tactical::PlayerId, std::uint64_t> sequences_;
     std::optional<net::MatchOptions> pending_options_;
+    sim::SeatId pending_options_seat_{};
+    net::MatchOptions applied_options_{};
     std::shared_ptr<LanTrace> trace_;
     std::vector<std::pair<sim::SeatCommandKey, std::string_view>> trace_commands_;
 };
@@ -650,6 +661,7 @@ public:
     bool lobby_galactic_checkpoint(const net::GalacticLobbyOptions&, const std::vector<net::SetupSeat>&) override;
     bool galactic_room() const override;
     std::optional<GalacticLobbyStart> galactic_start() const override;
+    void cancel_galactic_start() override;
     std::shared_ptr<GalacticLaunch> take_galactic_launch() override;
 private:
     bool lobby_mutable() const;
@@ -690,8 +702,17 @@ private:
     std::optional<GalacticLobbyStart> galactic_start_;
     std::optional<std::uint64_t> galactic_flush_started_;
     std::uint64_t galactic_selection_epoch_{};
+    // #6130: the staging checkpoint transfer is logged once per selection epoch, when this seat has it all.
+    std::uint64_t galactic_transfer_logged_epoch_{};
+    std::int64_t transfer_blocked_peer_{-1}; // the guest whose missing mod review last blocked the transfer pump (log once)
+    void log_checkpoint_transfer();
     core::Result<void> validate_galactic_lobby(const net::LobbySnapshot& state, bool starting) const;
     void start_galactic_lobby();
+    // The host's Start waits on the campaign derivation: the options it will publish with (#6045).
+    std::optional<net::GalacticLobbyOptions> galactic_pending_start_;
+    void finish_galactic_start(net::GalacticLobbyOptions options);
+    void settle_galactic_start();
+    [[nodiscard]] std::string galactic_prepare_status() const;
     void pump_galactic_start();
 public:
 

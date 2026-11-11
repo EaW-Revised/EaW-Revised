@@ -51,6 +51,12 @@ int main() {
         if (!stepped) { std::cerr << "FAIL: " << name << ": " << stepped.error().message << '\n'; return 1; }
         const auto roster = view::ground_roster(*session.snapshot(), 1, 101);
         const std::string_view fixture = name;
+        if (fixture == "ground-contents") {
+            // Base Layout text: a planet whose ground contents are visible shows the caption alone.
+            galactic_test::expect(roster.contents_known && roster.size_known && !roster.destroyed
+                && view::base_layout_text(roster) == view::BaseLayoutText{true, false},
+                "visible ground force: BASE LAYOUT caption without the UNKNOWN line");
+        }
         if (fixture == "ground-launch-move") {
             const auto submitted = session.submit({{1, gc::SeatId{1}, 1}, gc::LaunchFleet{{8001}, {101, 102}, {}}});
             if (!submitted) { std::cerr << "FAIL: " << submitted.error().message << '\n'; return 1; }
@@ -119,6 +125,17 @@ int main() {
             galactic_test::expect(roster.structure_capacity == 0 && roster.structures.empty(),
                 "a fixture without a production table has no structure capacity");
         }
+    }
+    // The Base Layout text lines: caption unless the planet is destroyed; UNKNOWN while the force size is unseen.
+    {
+        view::GroundRoster seen, unseen, destroyed;
+        seen.size_known = true;
+        destroyed.destroyed = true; destroyed.size_known = false;
+        galactic_test::expect(view::base_layout_text(seen) == view::BaseLayoutText{true, false}, "size seen: caption only");
+        galactic_test::expect(view::base_layout_text(unseen) == view::BaseLayoutText{true, true}, "size unseen: caption and UNKNOWN");
+        galactic_test::expect(view::base_layout_text(destroyed) == view::BaseLayoutText{false, false},
+            "destroyed planet: no text at all, whatever the knowledge");
+        galactic_test::expect(view::base_layout_text({}) == view::BaseLayoutText{true, true}, "empty roster reads as unknown");
     }
     // GHUD-S69: pad placement after the debug build's slot cleanup.
     {

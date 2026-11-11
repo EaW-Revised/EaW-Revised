@@ -104,13 +104,25 @@ void WorldUiView::write_report(std::ostream& output) const {
            << ", \"waypoint_stubs_omitted\": " << waypoint_stubs_omitted_
            << ", \"max_waypoint_paths\": " << max_waypoint_paths_ << ", \"max_waypoint_flags\": " << max_waypoint_flags_
            << ", \"waypoint_surfaces\": " << waypoint_assets_.size()
-           << ", \"circles\": " << circles_drawn_ << ", \"max_circles\": " << max_circles_
+           << ", \"healing_blobs\": " << healing_blobs_drawn_
+           << ", \"healing_blob_art\": [";
+    for (std::size_t i = 0; i < healing_blobs_last_.size(); ++i) {
+        const auto& blob = healing_blobs_last_[i];
+        output << (i ? "," : "") << "{\"material\":" << eawr::viewer::camera_input::json_string_literal(blob.material)
+               << ",\"diameter\":" << blob.diameter << ",\"colour\":["
+               << static_cast<unsigned>(blob.colour[0]) << "," << static_cast<unsigned>(blob.colour[1]) << ","
+               << static_cast<unsigned>(blob.colour[2]) << "," << static_cast<unsigned>(blob.colour[3]) << "]}";
+    }
+    output << "]" << ", \"circles\": " << circles_drawn_ << ", \"max_circles\": " << max_circles_
            << ", \"health_bars\": " << health_bars_ << ", \"shield_bars\": " << shield_bars_
            << ", \"max_health_bars\": " << max_health_bars_ << ", \"reticles\": " << reticles_drawn_
            << ", \"reticle_flashes\": " << flashes_started_
            << ", \"tracked_reticles\": " << tracked_reticles_ << ", \"max_reticles\": " << max_reticles_
            << ", \"reticle_size\": [" << reticle_size_[0] << ", " << reticle_size_[1] << "]"
-           << ", \"hardpoint_tooltip\": ";
+           << ", \"area_preview_side\": ";
+    if (area_preview_side_drawn_) output << *area_preview_side_drawn_;
+    else output << "null";
+    output << ", \"hardpoint_tooltip\": ";
     if (tooltip_hit_) {
         output << "{\"entity\": " << tooltip_hit_->entity << ", \"hardpoint\": " << tooltip_hit_->hardpoint
                << ", \"text\": " << eawr::viewer::camera_input::json_string_literal(tooltip_text_)

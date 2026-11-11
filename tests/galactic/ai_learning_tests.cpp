@@ -14,6 +14,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -30,7 +31,9 @@ struct MovementFixture {
     std::map<std::uint64_t, Movement> rows;
     std::uint64_t refuse_request{};
     const auto& movements() const { return rows; }
-    eawr::core::Result<void> movement_conflict(std::uint64_t request, std::uint64_t location, bool begin) {
+    eawr::core::Result<void> movement_conflict(std::uint64_t request, std::uint64_t location, bool begin,
+        std::span<const eawr::sim::EntityId> orbiting) {
+        static_cast<void>(orbiting);
         if (request == refuse_request) {
             eawr::core::Diagnostic error; error.code = "TEST-BATTLE"; error.message = "unavailable native movement";
             return eawr::core::Result<void>::failure(std::move(error));
@@ -152,8 +155,8 @@ void battle_contracts() {
         movements->rows = {{1, {1, 50, 0, false}}, {2, {1, 60, 0, false}}, {3, {2, 50, 0, false}}, {4, {1, 50, 0, true}}, {5, {1, 50, 0, true}}};
         std::uint64_t delivered{}, sequence{};
         cp::GalacticAiServices services;
-        services.battle = ga::movement_battle_listener(movements, [](std::uint64_t request) { return request != 5; }, [&](std::uint64_t request, bool begin, const cp::GalacticAiBattleNotice& notice) {
-            require((request == 1 || request == 4) && &notice.world == snapshot.get(), "battle delivery keeps exact retained request and current world");
+        const auto listener = ga::movement_battle_listener(movements, [](std::uint64_t request) { return request != 5; }, [&](std::uint64_t request, bool begin, const cp::GalacticAiBattleFacts& notice) {
+            require((request == 1 || request == 4) && notice.conflict.id == 100, "battle delivery keeps exact retained request and its conflict");
             ++delivered;
             if (begin) return eawr::core::Result<void>::success();
             auth::ScriptEvent event; event.key = {scripts.completed_tick() + 1, 16, 100000, sequence++};
@@ -161,8 +164,34 @@ void battle_contracts() {
             event.arguments = {auth::Value::number(eawr::script::foc::ai::real(notice.result->winner))};
             return scripts.submit_event(std::move(event));
         });
+        // The production listener reads the owned facts of the notice (A2.1); the services hook builds them as the runtime does.
+        services.battle = [&listener](const cp::GalacticAiBattleNotice& notice) { return listener(cp::galactic_ai_battle_facts(notice)); };
         cp::ConflictRecord conflict; conflict.id = 100; conflict.planet = 10; conflict.layer = cp::BattleLayer::space;
         cp::ConflictForce force; force.id = 51; force.owner = 1; force.parent = 50; conflict.forces = {force};
+        {
+            // A2.1: a queued notice owns its facts; its borrowed view reads the same conflict, world and a copy of the result.
+            cp::BattleResult queued_result; queued_result.conflict = 100; queued_result.winner = 2;
+            const cp::OwnedGalacticAiBattleNotice owned{cp::GalacticAiBattleKind::returned, 1200, conflict, snapshot, queued_result, true};
+            const auto view = owned.view();
+            require(view.kind == cp::GalacticAiBattleKind::returned && view.synchronization_tick == 1200 && view.auto_resolve
+                && view.conflict.id == 100 && view.conflict.forces.size() == 1 && &view.world == snapshot.get()
+                && view.result && view.result != &queued_result && view.result->winner == 2,
+                "an owned battle notice keeps the conflict, world and a copy of the result");
+            const cp::OwnedGalacticAiBattleNotice entered{cp::GalacticAiBattleKind::entered, 900, conflict, snapshot, std::nullopt, false};
+            require(entered.view().result == nullptr, "an owned entry notice has no result");
+            // The AI listener's facts keep what it reads and nothing else; no fleet of this world is named by a force.
+            auto wider = conflict; wider.invader = 7; wider.forces.front().hero = true;
+            auto wider_result = queued_result; wider_result.retreat_player = 1; wider_result.forces = {{51, cp::ForceDisposition::retreated, 2, true}};
+            const auto facts = cp::galactic_ai_battle_facts({cp::GalacticAiBattleKind::returned, 1200, wider, *snapshot, &wider_result, true});
+            require(facts.kind == cp::GalacticAiBattleKind::returned && facts.synchronization_tick == 1200 && facts.auto_resolve
+                && facts.conflict.id == 100 && facts.conflict.planet == 10 && facts.conflict.invader == 0
+                && facts.conflict.forces.size() == 1 && facts.conflict.forces.front().id == 51 && facts.conflict.forces.front().parent == 50
+                && facts.conflict.forces.front().owner == 1 && !facts.conflict.forces.front().hero
+                && facts.result && facts.result->winner == 2 && facts.result->retreat_player == std::optional<gc::PlayerId>{1}
+                && facts.result->forces.size() == 1 && facts.result->forces.front().disposition == cp::ForceDisposition::retreated
+                && facts.result->forces.front().final_blow_player == 0 && facts.fleets.empty(),
+                "battle facts keep the listener's fields only");
+        }
         must(services.battle({cp::GalacticAiBattleKind::entered, 900, conflict, *snapshot}));
         require(delivered == 2 && movements->rows.at(1).conflict_location == 10 && !movements->rows.at(2).conflict_location,
             "battle entry requires actor participation rather than destination or another player's actor");
@@ -210,7 +239,7 @@ void battle_contracts() {
             unavailable->rows = {{1, {1, 50, 0, false}}, {2, {1, 50, 0, false}}};
             unavailable->refuse_request = refuse_movement ? 1 : 0;
             std::vector<std::uint64_t> delivered_requests, degraded_requests;
-            const auto listener = ga::movement_battle_listener(unavailable, [](auto) { return true; },
+            const auto unavailable_listener = ga::movement_battle_listener(unavailable, [](auto) { return true; },
                 [&](std::uint64_t request, bool, const auto&) {
                     delivered_requests.push_back(request);
                     if (request == 1) {
@@ -219,7 +248,7 @@ void battle_contracts() {
                     }
                     return eawr::core::Result<void>::success();
                 }, [&](std::uint64_t request, const auto&) { degraded_requests.push_back(request); });
-            must(listener({cp::GalacticAiBattleKind::entered, 1300, conflict, *snapshot}));
+            must(unavailable_listener(cp::galactic_ai_battle_facts({cp::GalacticAiBattleKind::entered, 1300, conflict, *snapshot})));
             require(degraded_requests == std::vector<std::uint64_t>{1} && delivered_requests.back() == 2
                 && unavailable->rows.at(2).conflict_location == 10,
                 "unavailable movement, freestore or script callback cannot abort the battle or suppress the next listener");

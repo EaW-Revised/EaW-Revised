@@ -3,13 +3,14 @@
 #include "eawr/campaign/mp_agreement.hpp"
 #include "eawr/campaign/mp_lobby_catalog.hpp"
 #include "eawr/net/galactic_lobby.hpp"
-#include "eawr/net/galactic_checkpoint_transfer.hpp"
+#include "eawr/net/galactic_checkpoint_worker.hpp"
 #include "eawr/net/galactic_recovery.hpp"
 #include "eawr/net/galactic_clock_policy.hpp"
 
 #include "eawr/platform/live_game_session.hpp"
 
 #include <atomic>
+#include <chrono>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -80,12 +81,35 @@ public:
     // Qualification only, set before opening a room. The ordinary offer retains its default cap.
     void acceptance_final_tick(std::uint64_t tick) { acceptance_final_tick_ = tick; }
     [[nodiscard]] std::uint64_t final_tick_count() const noexcept {
-        return acceptance_final_tick_ ? acceptance_final_tick_ : net::max_session_ticks;
+        return acceptance_final_tick_ ? acceptance_final_tick_ : sim::galactic::galactic_max_ticks;
     }
 
     // Lobby hooks (net::LobbyHooks::validate / offer) for a room in Galactic Conquest mode.
     [[nodiscard]] core::Result<void> validate(const net::LobbySnapshot&, bool starting) const;
     [[nodiscard]] core::Result<net::SetupOffer> offer(const net::LobbySnapshot&, const std::vector<net::SetupSeat>&) const;
+    [[nodiscard]] core::Result<std::vector<sim::IdentityDomain>> preparation_inputs(
+        const net::LobbySnapshot&, const std::vector<net::SetupSeat>&) const;
+    [[nodiscard]] core::Result<std::vector<sim::IdentityDomain>> preparation_domains(const net::SetupOffer&) const;
+    [[nodiscard]] core::Result<std::vector<core::ContentLayerIdentity>> preparation_mounts(
+        const net::LobbySnapshot&, const net::SetupOffer*) const;
+    // #6045: the same offer, derived on a worker thread so the window and the lobby keep running for the 10-20 minutes a
+    // large mod chain needs. Answers net::start_pending_diagnostic until the derivation has finished, then the offer (or its
+    // failure) exactly once. Call it again with the same arguments every pump. A call whose inputs differ from the running
+    // derivation's waits for that derivation to end (one derivation runs per process at a time); `prepare_progress()` says so.
+    // Nonce-bound Start requires the exact frozen snapshot; serial Start retains its readiness/revision memo rules. The worker reads the loaded
+    // content (immutable after the load) and writes only its own job record; this backend is the only owner of the result.
+    // The derivation has no stop point: it cannot be interrupted. Abandoned nonce-bound results never seed a retry.
+    [[nodiscard]] static core::Result<net::SetupOffer> offer_async(const std::shared_ptr<GalacticLobbyBackend>&,
+        const net::LobbySnapshot&, const std::vector<net::SetupSeat>&);
+    struct PrepareProgress {
+        enum class State : std::uint8_t { idle, running, waiting_for_earlier };
+        State state{State::idle};
+        std::chrono::seconds elapsed{};   // of the running derivation (the earlier one while waiting)
+    };
+    [[nodiscard]] PrepareProgress prepare_progress() const;
+    // Nobody waits any more (Start cancelled): progress reads idle; an in-flight worker finishes only to release its result.
+    void abandon_prepare() noexcept;
+    void release_prepare() noexcept;
     // Setup providers (net::SetupProviders::identify / build) on every peer, including the host.
     [[nodiscard]] core::Result<sim::MatchAgreement> identify(const net::SetupOffer&);
     [[nodiscard]] core::Result<std::unique_ptr<net::SessionAdapter>> build(const net::SetupOffer&);
@@ -133,11 +157,13 @@ public:
     // Small read-only facts from the staging manifest, available before private restore completes.
     [[nodiscard]] std::optional<CheckpointView> checkpoint_view() const;
     void clear_checkpoint();
-    [[nodiscard]] net::SaveTransferView checkpoint_progress() const { return transfer_.view(); }
-    [[nodiscard]] const net::SaveManifest* checkpoint_manifest() const { return transfer_.manifest(); }
+    [[nodiscard]] net::SaveTransferView checkpoint_progress() const { return transfer_->view(); }
+    // The lobby log observer (#6178 follow-up): transfer events from the net layer plus this backend's own select/receive failures.
+    void set_checkpoint_trace(net::GalacticCheckpointTransfer::Trace trace);
+    [[nodiscard]] std::shared_ptr<const net::SaveManifest> checkpoint_manifest() const { return transfer_->manifest(); }
     [[nodiscard]] std::uint64_t selection_epoch() const noexcept { return selection_epoch_; }
     [[nodiscard]] std::shared_ptr<const std::vector<std::uint8_t>> checkpoint_bytes() const noexcept {
-        return resume_ ? (resume_->bytes ? resume_->bytes : transfer_.restored_bytes()) : nullptr;
+        return resume_ ? (resume_->bytes ? resume_->bytes : transfer_->restored_bytes()) : nullptr;
     }
     [[nodiscard]] net::GalacticRecoveryWorker::Restore recovery_factory(
         const net::SetupOffer&, std::size_t workers, net::GalacticClockPolicy = net::GalacticClockPolicy::limited) const;
@@ -145,6 +171,7 @@ public:
     [[nodiscard]] std::map<sim::SeatId, std::uint64_t> producer_sequences() const;
     [[nodiscard]] core::Result<std::vector<net::SetupSeat>> bind_setup_seats(const net::LobbySnapshot&,
         const std::vector<net::SetupSeat>&) const;
+    [[nodiscard]] std::shared_ptr<net::GalacticCheckpointWorker> checkpoint_worker() const { return transfer_; }
     void pump_transfer(net::MessageTransport&, const net::LobbySnapshot&, std::uint64_t now);
     void receive_transfer(net::MessageTransport&, const net::LobbySnapshot&, const net::Received&, std::uint64_t now);
 
@@ -172,18 +199,46 @@ private:
         net::SetupOffer offer;
         std::shared_ptr<campaign::MpAgreement> agreement;
         std::string state_hash;
+        std::vector<sim::IdentityDomain> domains{};
     };
     mutable std::mutex preparation_mutex_;
     mutable std::optional<Preparation> preparation_;
+    // The derivation of one frozen attempt without touching `preparation_` (offer() and the worker both call it).
+    [[nodiscard]] core::Result<Preparation> derive_preparation(const net::LobbySnapshot&, const std::vector<net::SetupSeat>&) const;
+    // #6045 asynchronous derivation. `job_` is the one job this backend asked for; the process runs at most one job.
+    struct PrepareJob;
+    [[nodiscard]] static std::mutex& prepare_registry_mutex();
+    [[nodiscard]] static PrepareJob*& prepare_registry_running();
+    mutable std::mutex job_mutex_;
+    std::shared_ptr<PrepareJob> job_;
+    std::atomic<bool> wanted_{}, waiting_{}, release_{};
     mutable std::mutex mutex_;
     std::shared_ptr<campaign::MpAgreement> agreement_;
+    bool nonce_bound_agreement_{};
     using ResumeSelection = PreparedCheckpoint;
-    net::GalacticCheckpointTransfer transfer_;
+    std::shared_ptr<net::GalacticCheckpointWorker> transfer_{std::make_shared<net::GalacticCheckpointWorker>()};
+    net::GalacticCheckpointTransfer::Trace checkpoint_trace_;
+    void trace_checkpoint(std::string_view event, const std::string& detail) const { if (checkpoint_trace_) checkpoint_trace_(event, detail); }
+    // A failure that persists across frames (a select that keeps failing, a room that stays changed) is traced once per key.
+    void trace_checkpoint_once(std::string_view event, const std::string& key, const std::string& detail) const {
+        auto& last = traced_once_[std::string(event)];
+        if (last == key) return;
+        last = key; trace_checkpoint(event, detail);
+    }
+    mutable std::map<std::string, std::string> traced_once_;
     std::optional<ResumeSelection> resume_;
     std::uint64_t selection_epoch_{};
     bool cancel_transfer_{};
     [[nodiscard]] core::Result<void> restore_transfer(const net::SaveManifest&,
         const net::LobbySnapshot&, std::span<const std::uint8_t>);
+    // #6130: the guest's restore of the received file runs on its own thread, so the lobby keeps drawing. The transfer owner
+    // polls this from pump: false while the worker runs, true once the selection is installed (on the polling thread),
+    // a diagnostic on refusal. `pumping_snapshot_` is the room as the current receive/pump call saw it.
+    struct RestoreJob;
+    std::shared_ptr<RestoreJob> restore_job_;
+    const net::LobbySnapshot* pumping_snapshot_{};
+    [[nodiscard]] core::Result<bool> restore_transfer_async(const net::SaveManifest&,
+        std::shared_ptr<const std::vector<std::uint8_t>>);
 };
 
 } // namespace eawr::presentation::godot_backend

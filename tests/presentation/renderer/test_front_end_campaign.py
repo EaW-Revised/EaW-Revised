@@ -100,6 +100,57 @@ class CampaignEntryContracts(unittest.TestCase):
 
 @unittest.skipUnless(RUNTIME and GAME_ROOT, "requires the viewer GPU lane and installed game data")
 class CampaignFromMenuGpu(unittest.TestCase):
+    def test_faction_combo_keeps_resource_width_for_long_names(self):
+        # Exercise the real staging control after it opens, including Godot's minimum-size propagation.
+        output = pathlib.Path(tempfile.mkdtemp(prefix="front-end-campaign-combo-"))
+        driver = output / "combo.gd"
+        driver.write_text(r'''extends SceneTree
+func _initialize(): call_deferred("run")
+func run():
+    var scene = load("res://main.tscn").instantiate()
+    root.add_child(scene)
+    current_scene = scene
+    var combo = null
+    for i in range(1200):
+        await process_frame
+        combo = root.find_child("IDC_FACTION_COMBO", true, false)
+        if combo != null and combo.is_visible_in_tree(): break
+    if combo == null or not combo.is_visible_in_tree():
+        print("CAMPAIGN COMBO missing")
+        quit(2)
+        return
+    await RenderingServer.frame_post_draw
+    for arg in OS.get_cmdline_user_args():
+        if arg.begins_with("--combo-shot="):
+            root.get_texture().get_image().save_png(arg.trim_prefix("--combo-shot=").get_base_dir().path_join("initial.png"))
+    combo.clear()
+    combo.add_item("A")
+    combo.size = Vector2(160, combo.size.y)
+    await process_frame
+    var before = combo.size.x
+    combo.add_item("A deliberately very long faction display name that must not enlarge the control")
+    combo.select(1)
+    await process_frame
+    await RenderingServer.frame_post_draw
+    var after = combo.size.x
+    var args = OS.get_cmdline_user_args()
+    for arg in args:
+        if arg.begins_with("--combo-shot="):
+            root.get_texture().get_image().save_png(arg.trim_prefix("--combo-shot="))
+    print("CAMPAIGN COMBO width ", before, " ", after)
+    quit(0 if abs(after - before) < 0.1 else 3)
+''', encoding="utf-8")
+        result, _ = front.run_front_end(output, "combo", (
+            "--eawr-front-end-test-campaign", "start", "--eawr-attract", "off", "--eawr-audio", "off",
+            "--combo-shot=" + str(output / "combo.png"),
+            *(("--eawr-mod-root", os.environ["EAWR_REMAKE_MOD_ROOT"]) if os.environ.get("EAWR_JOB_GC_COMBO_TEST_MOD") else ())),
+            engine=("--script", str(driver)),
+            scripted=True, with_capture=False)
+        self.assertEqual(result.returncode, 0, result.stdout[-6000:])
+        self.assertIn("CAMPAIGN COMBO width", result.stdout)
+        self.assertTrue((output / "combo.png").is_file())
+        self.assertTrue((output / "initial.png").is_file())
+
     def test_named_campaign_starts_without_editing_technology(self):
         with tempfile.TemporaryDirectory(prefix="front-end-named-campaign-") as temporary:
             output = pathlib.Path(temporary)

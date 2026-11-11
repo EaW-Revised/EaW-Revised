@@ -1,5 +1,6 @@
 #include "eawr/core/load_profile.hpp"
 #include "renderer_upload_internal.hpp"
+#include "renderer_prewarm_arrays.hpp"
 #include "eawr/presentation/shader_activation.hpp"
 #include <cstring>
 
@@ -25,47 +26,7 @@ struct ProgramPin final : shader_activation::Artifact {
 
 } // namespace
 
-core::Result<std::shared_ptr<const shader_activation::Artifact>> GodotRenderer::prewarm_shader_material(
-    const MaterialDescription& material) {
-    using Result = core::Result<std::shared_ptr<const shader_activation::Artifact>>;
-    const auto refuse = []() { return Result::failure({.code = std::string(diagnostic_codes::shader_compile_failed),
-        .message = "translated material admission or offscreen program prewarm failed", .logical_path = std::nullopt, .line = std::nullopt, .column = std::nullopt, .source_id = std::nullopt}); };
-    auto* rendering = RenderingServer::get_singleton();
-    if (!rendering || !impl_ || material.route != MaterialRoute::modern_spatial || !validate_material(material)) return refuse();
-    if (!impl_->shader_cache_) impl_->shader_cache_ = std::make_shared<GodotShaderCache>();
-    Impl::Resource resource;
-    struct Temporary final {
-        RenderingServer& rendering;
-        std::array<RID, 10U> rids{};
-        ~Temporary() { for (const auto& rid : rids) if (rid.is_valid()) rendering.free_rid(rid); }
-    } temporary{*rendering, {}};
-    // This is an offscreen compiler exercise texture only. It is never
-    // retained as an effect resource or substituted into a visible material.
-    assets::Texture texture;
-    texture.width = texture.height = 1U;
-    texture.mips.push_back({1U, 1U, 4U, std::vector<std::byte>(4U, std::byte{255U})});
-    resource.texture = Impl::create_texture(*rendering, texture);
-    temporary.rids[0U] = resource.texture;
-    if (!resource.texture.is_valid()) return refuse();
-    Impl::MaterialRefusal refusal;
-    const auto uploaded = impl_->upload_material(*rendering, material, resource, refusal);
-    temporary.rids[1U] = resource.material;
-    // CachedShader owns its shader; an uncached failure is ours to free.
-    if (!resource.shared_shader && resource.shader.is_valid()) {
-        rendering->free_rid(resource.shader);
-        resource.shader = RID();
-    }
-    if (uploaded != Impl::MaterialUpload::success || !resource.shared_shader) return refuse();
-    const auto mesh = rendering->mesh_create(); temporary.rids[2U] = mesh;
-    const auto scenario = rendering->scenario_create(); temporary.rids[3U] = scenario;
-    const auto camera = rendering->camera_create(); temporary.rids[4U] = camera;
-    const auto viewport = rendering->viewport_create(); temporary.rids[5U] = viewport;
-    const auto instance = rendering->instance_create(); temporary.rids[6U] = instance;
-    const auto skinned_mesh = rendering->mesh_create(); temporary.rids[7U] = skinned_mesh;
-    const auto skinned_instance = rendering->instance_create(); temporary.rids[8U] = skinned_instance;
-    const auto skeleton = rendering->skeleton_create(); temporary.rids[9U] = skeleton;
-    if (!mesh.is_valid() || !scenario.is_valid() || !camera.is_valid() || !viewport.is_valid() || !instance.is_valid()
-        || !skinned_mesh.is_valid() || !skinned_instance.is_valid() || !skeleton.is_valid()) return refuse();
+Array prewarm_mesh_arrays(const bool skinned) {
     Array arrays; arrays.resize(RenderingServer::ARRAY_MAX);
     PackedVector3Array positions, normals;
     PackedVector2Array uv;
@@ -81,19 +42,82 @@ core::Result<std::shared_ptr<const shader_activation::Artifact>> GodotRenderer::
     arrays[RenderingServer::ARRAY_TANGENT] = tangents; arrays[RenderingServer::ARRAY_COLOR] = colors;
     arrays[RenderingServer::ARRAY_TEX_UV] = uv; arrays[RenderingServer::ARRAY_TEX_UV2] = uv;
     const std::array<float, 9U> coefficients{0, 0, 1, 0, 0, 1, 0, 0, 1};
-    PackedByteArray binormals; binormals.resize(sizeof(coefficients));
+    PackedFloat32Array binormals; binormals.resize(static_cast<int64_t>(coefficients.size()));
     std::memcpy(binormals.ptrw(), coefficients.data(), sizeof(coefficients));
     arrays[RenderingServer::ARRAY_CUSTOM0] = binormals;
-    const BitField<RenderingServer::ArrayFormat> format(static_cast<int64_t>(RenderingServer::ARRAY_CUSTOM_RGB_FLOAT)
+    if (skinned) {
+        PackedInt32Array bones; PackedFloat32Array weights;
+        for (unsigned i = 0U; i < 12U; ++i) { bones.push_back(0); weights.push_back(i % 4U == 0U ? 1.0F : 0.0F); }
+        arrays[RenderingServer::ARRAY_BONES] = bones; arrays[RenderingServer::ARRAY_WEIGHTS] = weights;
+    }
+    return arrays;
+}
+
+BitField<RenderingServer::ArrayFormat> prewarm_mesh_format() {
+    return BitField<RenderingServer::ArrayFormat>(static_cast<int64_t>(RenderingServer::ARRAY_CUSTOM_RGB_FLOAT)
         << RenderingServer::ARRAY_FORMAT_CUSTOM0_SHIFT);
+}
+
+core::Result<std::shared_ptr<const shader_activation::Artifact>> GodotRenderer::prewarm_shader_material(
+    const MaterialDescription& material) {
+    using Result = core::Result<std::shared_ptr<const shader_activation::Artifact>>;
+    const auto refuse = [](std::string reason) { return Result::failure({.code = std::string(diagnostic_codes::shader_compile_failed),
+        .message = "translated material prewarm: " + std::move(reason), .logical_path = std::nullopt, .line = std::nullopt, .column = std::nullopt, .source_id = std::nullopt}); };
+    auto* rendering = RenderingServer::get_singleton();
+    if (!rendering || !impl_) return refuse("renderer unavailable");
+    if (material.route != MaterialRoute::modern_spatial) return refuse("material route is not modern spatial");
+    if (auto valid = validate_material(material); !valid) return Result::failure(valid.error());
+    if (!impl_->shader_cache_) impl_->shader_cache_ = std::make_shared<GodotShaderCache>();
+    Impl::Resource resource;
+    struct Temporary final {
+        RenderingServer& rendering;
+        std::array<RID, 10U> rids{};
+        ~Temporary() {
+            // Instances/viewport release their references before the meshes,
+            // skeleton, camera/scenario, material and texture they depend on.
+            for (const auto index : std::array<std::size_t, 10U>{6U, 8U, 5U, 2U, 7U, 9U, 4U, 3U, 1U, 0U})
+                if (rids[index].is_valid()) rendering.free_rid(rids[index]);
+        }
+    } temporary{*rendering, {}};
+    // This is an offscreen compiler exercise texture only. It is never
+    // retained as an effect resource or substituted into a visible material.
+    assets::Texture texture;
+    texture.width = texture.height = 1U;
+    texture.mips.push_back({1U, 1U, 4U, std::vector<std::byte>(4U, std::byte{255U})});
+    resource.texture = Impl::create_texture(*rendering, texture);
+    temporary.rids[0U] = resource.texture;
+    if (!resource.texture.is_valid()) return refuse("offscreen texture allocation failed");
+    Impl::MaterialRefusal refusal;
+    const auto uploaded = impl_->upload_material(*rendering, material, resource, refusal);
+    temporary.rids[1U] = resource.material;
+    // CachedShader owns its shader; an uncached failure is ours to free.
+    if (!resource.shared_shader && resource.shader.is_valid()) {
+        rendering->free_rid(resource.shader);
+        resource.shader = RID();
+    }
+    if (uploaded == Impl::MaterialUpload::shader_compile_failed) return refuse("shader compile probe failed");
+    if (uploaded == Impl::MaterialUpload::refused) return refuse("material admission refused: " + refusal.reason);
+    if (uploaded != Impl::MaterialUpload::success) return refuse("material upload allocation failed");
+    if (!resource.shared_shader) return refuse("shader cache could not retain the admitted program");
+    const auto mesh = rendering->mesh_create(); temporary.rids[2U] = mesh;
+    const auto scenario = rendering->scenario_create(); temporary.rids[3U] = scenario;
+    const auto camera = rendering->camera_create(); temporary.rids[4U] = camera;
+    const auto viewport = rendering->viewport_create(); temporary.rids[5U] = viewport;
+    const auto instance = rendering->instance_create(); temporary.rids[6U] = instance;
+    const auto skinned_mesh = rendering->mesh_create(); temporary.rids[7U] = skinned_mesh;
+    const auto skinned_instance = rendering->instance_create(); temporary.rids[8U] = skinned_instance;
+    const auto skeleton = rendering->skeleton_create(); temporary.rids[9U] = skeleton;
+    if (!mesh.is_valid() || !scenario.is_valid() || !camera.is_valid() || !viewport.is_valid() || !instance.is_valid()
+        || !skinned_mesh.is_valid() || !skinned_instance.is_valid() || !skeleton.is_valid())
+        return refuse("offscreen mesh/scenario/camera/viewport/instance/skeleton allocation failed");
+    const auto format = prewarm_mesh_format();
+    const auto arrays = prewarm_mesh_arrays(false);
     rendering->mesh_add_surface_from_arrays(mesh, RenderingServer::PRIMITIVE_TRIANGLES, arrays, {}, {}, format);
-    // Source palette shaders remain outside the wrapper's scope. Ordinary
-    // Godot-pre-skinned inputs still need their distinct vertex format warmed.
-    PackedInt32Array bones; PackedFloat32Array weights;
-    for (unsigned i = 0U; i < 12U; ++i) { bones.push_back(0); weights.push_back(i % 4U == 0U ? 1.0F : 0.0F); }
-    arrays[RenderingServer::ARRAY_BONES] = bones; arrays[RenderingServer::ARRAY_WEIGHTS] = weights;
-    rendering->mesh_add_surface_from_arrays(skinned_mesh, RenderingServer::PRIMITIVE_TRIANGLES, arrays, {}, {}, format);
-    if (rendering->mesh_get_surface_count(mesh) != 1 || rendering->mesh_get_surface_count(skinned_mesh) != 1) return refuse();
+    // Exercise the distinct ordinary pre-skinned vertex layout as well.
+    const auto skinned_arrays = prewarm_mesh_arrays(true);
+    rendering->mesh_add_surface_from_arrays(skinned_mesh, RenderingServer::PRIMITIVE_TRIANGLES, skinned_arrays, {}, {}, format);
+    if (rendering->mesh_get_surface_count(mesh) != 1 || rendering->mesh_get_surface_count(skinned_mesh) != 1)
+        return refuse("offscreen rigid/skinned vertex layout upload failed");
     rendering->mesh_surface_set_material(mesh, 0, resource.material);
     rendering->mesh_surface_set_material(skinned_mesh, 0, resource.material);
     rendering->instance_set_base(instance, mesh); rendering->instance_set_scenario(instance, scenario);
@@ -106,13 +130,15 @@ core::Result<std::shared_ptr<const shader_activation::Artifact>> GodotRenderer::
     rendering->viewport_attach_camera(viewport, camera); rendering->viewport_set_update_mode(viewport, RenderingServer::VIEWPORT_UPDATE_ALWAYS);
     rendering->viewport_set_active(viewport, true);
     bool drawn{};
+    int64_t draw_calls{};
     for (unsigned attempt = 0U; attempt < 2U && !drawn; ++attempt) {
         rendering->force_sync(); rendering->force_draw(false, 0.0); rendering->force_sync();
-        drawn = rendering->viewport_get_render_info(viewport, RenderingServer::VIEWPORT_RENDER_INFO_TYPE_VISIBLE,
-            RenderingServer::VIEWPORT_RENDER_INFO_DRAW_CALLS_IN_FRAME) >= 2;
+        draw_calls = rendering->viewport_get_render_info(viewport, RenderingServer::VIEWPORT_RENDER_INFO_TYPE_VISIBLE,
+            RenderingServer::VIEWPORT_RENDER_INFO_DRAW_CALLS_IN_FRAME);
+        drawn = draw_calls >= 2;
     }
     rendering->viewport_set_active(viewport, false);
-    if (!drawn) return refuse();
+    if (!drawn) return refuse("offscreen rigid/skinned draw coverage incomplete; draw_calls=" + std::to_string(draw_calls));
     auto pin = std::make_shared<ProgramPin>(); pin->shader = std::move(resource.shared_shader);
     return Result::success(std::move(pin));
 }
@@ -129,6 +155,10 @@ core::Result<void> GodotRenderer::set_translated_parameters(const sim::EntityId 
     for (const auto& parameter : parameters) if (std::holds_alternative<std::string>(parameter.value))
         return core::Result<void>::failure({.code = std::string(diagnostic_codes::invalid_material),
             .message = "translated instance parameters must be numeric", .logical_path = std::nullopt, .line = std::nullopt, .column = std::nullopt, .source_id = std::nullopt});
+    if (!parameters.empty()) {
+        found->second.translated_parameters = true;
+        impl_->batch_mark(entity);
+    }
     for (const auto& parameter : parameters) {
         Variant value;
         std::visit([&](const auto& item) {

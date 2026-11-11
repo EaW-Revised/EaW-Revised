@@ -271,7 +271,16 @@ private:
 };
 
 // WGUI-90: centred radar-local coordinates, independent of camera bounds.
-[[nodiscard]] std::optional<Vec3> radar_to_world(Vec3 local, float width, float height);
-[[nodiscard]] std::optional<Vec3> world_to_radar(Vec3 world, float width, float height);
+struct RadarExtents final {
+    float x{380.0F};
+    float y{460.0F};
+    friend bool operator==(const RadarExtents&, const RadarExtents&) = default;
+};
+// WGUI-177: optional expansion from loaded planet positions; the retail frame stays centred.
+[[nodiscard]] RadarExtents radar_extents(const GalaxyView& galaxy, bool fit) noexcept;
+// WGUI-178: axis-aligned camera footprint in normalized radar coordinates (-1..1, Y up).
+[[nodiscard]] std::optional<Bounds> radar_camera_bounds(const presentation::FixedCamera& camera, RadarExtents extents = {});
+[[nodiscard]] std::optional<Vec3> radar_to_world(Vec3 local, float width, float height, RadarExtents extents = {});
+[[nodiscard]] std::optional<Vec3> world_to_radar(Vec3 world, float width, float height, RadarExtents extents = {});
 
 } // namespace eawr::viewer::galactic

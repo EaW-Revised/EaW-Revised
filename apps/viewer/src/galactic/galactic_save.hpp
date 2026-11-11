@@ -4,6 +4,7 @@
 #include <future>
 #include "ui/dialog_builder.hpp"
 #include "save_dialog_model.hpp"
+#include "eawr/presentation/ui/load_game.hpp"
 #include <godot_cpp/classes/tween.hpp>
 
 namespace godot { class CanvasLayer; class Control; class ItemList; class LineEdit; class Label; class BaseButton; }
@@ -41,7 +42,7 @@ private:
     bool accept_loaded(std::unique_ptr<platform::PreparedLiveRestore>, bool at_start = false);
     bool refuse_load(std::string text, bool at_start);
     enum class Screen { escape, save, load };
-    enum class Modal { none, overwrite, erase, progress_save, progress_load, acknowledgement, quit };
+    enum class Modal { none, overwrite, erase, progress_save, progress_load, acknowledgement, quit, mod_confirmation, checking_mods };
     void show_screen(Screen);
     void open_options();
     bool build_widgets();
@@ -50,6 +51,7 @@ private:
     void dismiss_modal(bool yes = false);
     void begin_progress(bool save, std::string name, bool overwrite = false, bool quick = false);
     void publish_save();
+    void prepare_reviewed_load(presentation::ui::SavedGameRequest);
     void begin_quit();
     void populate_slots();
     void position_dates();
@@ -66,6 +68,7 @@ private:
     godot::Ref<godot::Tween> fade_;
     Screen screen_{Screen::escape};
     Modal modal_{Modal::none};
+    std::shared_ptr<void> digest_wait_;
     std::string pending_name_;
     bool pending_overwrite_{}, pending_quick_{}, quick_route_{}, pending_autosave_quit_{};
     std::optional<platform::LiveSavePhase> quit_autosave_phase_; // reported, never gating
@@ -86,6 +89,9 @@ private:
     std::vector<platform::LiveSaveSlot> listed_;
     std::future<core::Result<std::vector<platform::LiveSaveSlot>>> listing_;
     std::future<core::Result<std::unique_ptr<platform::PreparedLiveRestore>>> loading_;
+    std::future<core::Result<std::string>> mod_check_;
+    presentation::ui::SavedLoadReview mod_review_;
+    std::optional<presentation::ui::SavedGameRequest> approved_load_;
     std::uint64_t token_{}, completed_saves_{}, completed_loads_{}, restored_tick_{};
     std::string restored_hash_;
     bool started_from_save_{};

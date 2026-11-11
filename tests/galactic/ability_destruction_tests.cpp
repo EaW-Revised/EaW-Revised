@@ -48,7 +48,17 @@ void destroyed(const eawr::sim::PartitionExecutor& pool, std::vector<std::string
     // Stealthy nonallied presence and allied presence never refuse (WGCH-158).
     stealth_fleet(config); // player 1's orbital fleet skips combat: it cannot block
     auto game = take(eawr::campaign::GameSession::create(config));
+    auto silent = take(eawr::campaign::GameSession::create(config));
+    std::vector<gc::GalacticFeedbackNotice> effects;
+    game.set_feedback_notice_handler([&](const auto& notice) {
+        if (notice.kind == gc::GalacticFeedbackNotice::Kind::planet_destroyed) effects.push_back(notice);
+    });
     order(game, 1, gc::ExecutePreparedAbility{direct(config)}); hashes.push_back(take(game.step(pool)).state_hash.get());
+    order(silent, 1, gc::ExecutePreparedAbility{direct(config)});
+    expect(take(silent.step(pool)).state_hash.get() == hashes.back(), "authored effect subscription leaves destruction state hashes unchanged");
+    expect(effects.size() == 1 && effects[0].player == 2 && effects[0].planet == config.planets[0].id
+        && effects[0].source_type == weapon_type && effects[0].logical_frame == 0,
+        "successful destruction publishes one exact source-type/target notice for the observer");
     const auto& world = game.galaxy(); const auto snapshot = world.snapshot();
     expect(snapshot->control()->planets[0].destroyed && snapshot->economy_corruption()->planets[0].destroyed,
         "strategic destruction applies the shared ruins request");
@@ -64,6 +74,7 @@ void destroyed(const eawr::sim::PartitionExecutor& pool, std::vector<std::string
     const auto first = world.ability_state()->results.at(0); const auto next_request = world.ability_state()->next_request;
     order(game, 2, gc::ExecutePreparedAbility{direct(config)});
     const auto second = take(game.step(pool)); hashes.push_back(second.state_hash.get());
+    expect(effects.size() == 1, "refused repeat never replays the planet explosion");
     const auto after = game.galaxy().snapshot(); const auto events = after->events();
     expect(game.galaxy().ability_state()->results.size() == 1 && game.galaxy().ability_state()->results.at(0) == first
         && game.galaxy().ability_state()->next_request == next_request && game.return_state().heroes.size() == 1
@@ -160,12 +171,18 @@ void transport_container(const eawr::sim::PartitionExecutor& pool, std::vector<s
     // The fixture's landed transport carries the hero; give the hero's type the destruction ability instead.
     config.ability_host->profiles[0].destruction = gc::DestructionAbilityProfile{"DESTROY", true};
     auto game = take(eawr::campaign::GameSession::create(config));
+    std::vector<gc::GalacticFeedbackNotice> effects;
+    game.set_feedback_notice_handler([&](const auto& notice) {
+        if (notice.kind == gc::GalacticFeedbackNotice::Kind::planet_destroyed) effects.push_back(notice);
+    });
     gc::PreparedAbility request; request.actor = transport; request.planet = config.planets[0].id;
     request.kind = gc::AbilityKind::planet_destruction;
     take(game.submit({{game.completed_tick(), {2}, 1}, gc::ExecutePreparedAbility{request}}));
     hashes.push_back(take(game.step(pool)).state_hash.get());
     expect(game.galaxy().snapshot()->control()->planets[0].destroyed,
         "a transport supplies its first contained ability bearer in stored order");
+    expect(effects.size() == 1 && effects[0].source_type == 1000,
+        "effect metadata comes from the contained bearer, never the supplied transport");
 }
 } // namespace
 int case_galactic_ability_destruction_tests() {

@@ -1,6 +1,7 @@
 cmake_minimum_required(VERSION 3.25)
 
-project(EawrViewer VERSION 0.3.2 LANGUAGES CXX)
+include("${CMAKE_CURRENT_LIST_DIR}/../../cmake/EawrReleaseVersion.cmake")
+project(EawrViewer VERSION ${EAWR_RELEASE_VERSION} LANGUAGES CXX)
 include("${CMAKE_CURRENT_LIST_DIR}/../../cmake/EawrSymbols.cmake")
 find_package(Threads REQUIRED)
 

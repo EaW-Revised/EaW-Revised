@@ -10,6 +10,8 @@ namespace eawr::campaign {
 namespace {
 namespace gc = sim::galactic;
 using sim::math::Fixed;
+// WGCH-189: planet-type constructor default, replaced by authored XML/inheritance.
+constexpr auto retail_removal_base_cost = Fixed::from_raw(2000 * Fixed::scale);
 std::string key(std::string_view text) {
     std::string result(text); for (auto& c : result) if (c >= 'a' && c <= 'z') c = static_cast<char>(c - 'a' + 'A'); return result;
 }
@@ -28,8 +30,8 @@ std::vector<const data::Definition*> layers(const data::Catalog& catalog, std::s
 core::Result<void> invalid(const char* message) {
     core::Diagnostic d; d.code = std::string(gc::diagnostic_codes::invalid_setup); d.message = message; return core::Result<void>::failure(d);
 }
-bool number(const data::XmlNode* node, Fixed& value) {
-    if (!node || data::retail::is_placeholder(node->raw_text)) { value = {}; return true; } // WGCH-172
+bool number(const data::XmlNode* node, Fixed& value, Fixed fallback = {}) {
+    if (!node || data::retail::is_placeholder(node->raw_text)) { value = fallback; return true; } // WGCH-172/189
     data::tag_trace::used(node); const auto parsed = data::retail::leading_number(node->raw_text);
     if (!parsed) return false;
     value = parsed->value;
@@ -80,6 +82,8 @@ core::Result<void> prepare_corruption_host(const data::Catalog& catalog, const C
         if (source == plan.locations().end() || political == setup.control->planets.end() || political->planet != planet.id) return invalid("unbound corruption planet");
         const auto original = layers(catalog, source->original_type, data::Category::game_object);
         gc::CorruptionPlanet p; p.planet = planet.id; p.type = political->type; p.retains_influence = political->retains_residual;
+        if (!number(data::retail::single(original, "Planet_Corruption_Removal_Base_Cost"), p.removal_base_cost, retail_removal_base_cost))
+            return invalid("invalid planet corruption removal base cost");
         for (std::size_t index = 0; index < p.slots.size(); ++index) {
             auto& c = p.slots[index]; const auto prefix = "Corruption_" + std::to_string(index + 1) + "_";
             const auto node = [&](std::string_view suffix) { return data::retail::single(original, prefix + std::string(suffix)); };

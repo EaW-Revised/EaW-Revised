@@ -15,6 +15,7 @@ HARNESS = r'''
 #include <set>
 #include <span>
 #include <string>
+#include <stdexcept>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -137,13 +138,15 @@ struct GodotRenderer {
     };
     static inline std::atomic<unsigned> builds{};
     std::vector<Upload> uploads;
+    bool throw_on_upload{}, batch_open{}; unsigned batch_ends{};
     static PreparedSkinPose prepare_skin_pose(std::span<const animation::BonePose> bones,SkinPoseWork* work=nullptr) {
         ++builds;
         if(work) { ++work->validations; ++work->builds; }
         return {std::make_shared<const std::vector<animation::BonePose>>(bones.begin(),bones.end())};
     }
-    core::Result<int> set_prepared_skin_pose(sim::EntityId entity,sim::AssetId asset,const PreparedSkinPose& pose) {
+    core::Result<int> set_prepared_skin_pose(sim::EntityId entity,sim::AssetId asset,const PreparedSkinPose& pose,std::uint64_t = 0) {
         assert(std::this_thread::get_id()==caller && pose);
+        if (throw_on_upload) throw std::runtime_error("injected publication failure");
         uploads.push_back({entity,asset,bytes(*pose.bones)}); return {0};
     }
     core::Result<int> set_skin_pose(sim::EntityId entity,sim::AssetId asset,
@@ -154,8 +157,9 @@ struct GodotRenderer {
     core::Result<int> set_material_scalar(sim::AssetId,const char*,float) {
         assert(std::this_thread::get_id()==caller); return {0};
     }
-    void begin_skin_batch(bool) { assert(std::this_thread::get_id()==caller); }
-    SkinPoseWork end_skin_batch() { return {}; }
+    void prepare_shared_idle_surface(std::uint64_t, sim::EntityId, sim::AssetId) { assert(std::this_thread::get_id()==caller); }
+    void begin_skin_batch(bool) { assert(std::this_thread::get_id()==caller && !batch_open); batch_open=true; }
+    SkinPoseWork end_skin_batch() { assert(batch_open); batch_open=false; ++batch_ends; return {}; }
 };
 namespace scene {
 enum class HardpointState { intact,damaged,destroyed };
@@ -323,6 +327,14 @@ void same_visibility(const SpacePopulation& a,const SpacePopulation& b) {
     assert(a.blast_meshes_shown_==b.blast_meshes_shown_ && a.attachment_marks_.values==b.attachment_marks_.values);
 }
 int main() {
+    // A publication exception still ends the active batch exactly once.
+    auto throwing=idle_population(); GodotRenderer throwing_renderer; Executor throwing_executor(1);
+    throwing_renderer.throw_on_upload=true;
+    bool caught=false;
+    try { throwing.pose_units(throwing_renderer,12,&throwing_executor); }
+    catch (const std::runtime_error&) { caught=true; }
+    assert(caught && !throwing_renderer.batch_open && throwing_renderer.batch_ends==1);
+    GodotRenderer::builds=0;
     auto idle=idle_population(); GodotRenderer idle_renderer; idle.pose_units(idle_renderer,12,nullptr);
     auto turret=turret_population(); GodotRenderer turret_renderer; const auto poses=requests();
     assert(turret.pose_live_turrets(turret_renderer,poses,{},nullptr));

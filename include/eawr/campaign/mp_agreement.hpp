@@ -4,6 +4,7 @@
 #include "eawr/campaign/setup.hpp"
 #include "eawr/checkpoint/game.hpp"
 #include "eawr/core/result.hpp"
+#include "eawr/core/prepared_content.hpp"
 #include "eawr/data/galactic/galactic_data.hpp"
 #include "eawr/sim/galactic/mp_roster.hpp"
 #include "eawr/sim/match_identity.hpp"
@@ -37,6 +38,7 @@ struct MpPreparedSession {
     // Opaque platform services belonging to this exact prepared owner. Not simulation state.
     std::shared_ptr<const void> runtime_services;
     std::vector<core::LoadNote> load_notes{};
+    core::PreparedContentIdentity provider_identity{}; // Immutable future simulation inputs retained by runtime_services.
 };
 
 struct MpLocalContent {
@@ -45,6 +47,11 @@ struct MpLocalContent {
     // Hex digests of the mounted content closure: every Lua script (story plots and AI scripts) and every XML
     // file (AI data included), as skirmish::read_data_identity computes them for the same mounts.
     std::string script_manifest_digest, xml_digest;
+    // Complete loaded catalog input commitment, including authored includes outside the conventional XML prefix.
+    std::string catalog_digest;
+    std::string mounted_chain_digest; // Ordered checksums of the verified consumed simulation closure.
+    std::vector<core::ContentLayerIdentity> mounted_layers; // Labels never enter agreement.
+    std::function<core::Result<void>()> verify_preparation_content;
     // The difficulty entries each AI player type maps its levels to; the lobby's campaign list reads it. Absent: no campaign
     // states a difficulty list.
     std::function<std::array<std::string, 3>(std::string_view player_type)> ai_levels;
@@ -67,6 +74,8 @@ struct MpLocalContent {
     // Production prepares the stock placement services so tick zero includes the starting forces; absent, tick
     // zero is the session built from the planned galaxy alone.
     std::function<core::Result<CampaignSetupServices>(const CampaignSetupPlan&)> services;
+    // A custom services callback declares its complete immutable runtime inputs for concurrent Start.
+    std::array<std::uint8_t, 32> service_identity{};
 };
 
 struct MpSessionTerms {
@@ -86,7 +95,13 @@ struct MpAgreement {
     std::shared_ptr<GameSession> session;      // at tick zero, never stepped here; the adapter takes it over
     std::shared_ptr<const void> runtime_services{}; // travels with that owner across re-offers
     std::vector<core::LoadNote> load_notes; // local diagnostics only; never sent to peers
+    core::PreparedContentIdentity provider_identity{};
+    bool provider_identity_required{};
 };
+
+// New-campaign preparation only. Supplements existing tick-zero domains with complete owner archives and the
+// immutable provider closure; checkpoint Start does not call this or change its saved identity domains.
+[[nodiscard]] core::Result<std::vector<sim::IdentityDomain>> prepared_mp_domains(const MpAgreement&);
 
 // Fills the host's claims from local content: the AI controller configuration of every non-human faction and
 // the tick-zero digest. Everything else in the draft is the lobby's choice and is validated, not changed.

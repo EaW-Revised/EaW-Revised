@@ -281,6 +281,7 @@ bool GodotRenderer::Impl::apply_texture_drop(RenderingServer& rendering, const s
     target.category_triangles = 0;
     target.diagnostic_surface_names.clear();
     target.diagnostic_bounds.reset();
+    target.batch_bounds.reset();
     if (render_categories::ablation == "hull-census") {
         target.diagnostic_model_meshes = source.original.meshes.size();
         target.diagnostic_model_submeshes = 0;
@@ -390,6 +391,11 @@ bool GodotRenderer::Impl::apply_texture_drop(RenderingServer& rendering, const s
                 const Vector3 tangent = axis_convert(vertex.tangent).normalized();
                 const Vector3 binormal = axis_convert(vertex.binormal).normalized();
                 vertices.set(static_cast<int64_t>(index), axis_convert(vertex.position));
+                {
+                    const auto point = axis_convert(vertex.position);
+                    if (!target.batch_bounds) target.batch_bounds = AABB(point, Vector3());
+                    else target.batch_bounds->expand_to(point);
+                }
                 normals.set(static_cast<int64_t>(index), normal);
                 uv.set(static_cast<int64_t>(index),
                     Vector2(vertex.texcoord[0].x, vertex.texcoord[0].y));

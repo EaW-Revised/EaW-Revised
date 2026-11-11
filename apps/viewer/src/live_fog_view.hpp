@@ -52,6 +52,7 @@ public:
     void frame(const LiveSessionView& live, const std::optional<camera::SourceTargetBounds>& bounds,
         bool pane_open = false, bool dragging = false);
     void release();
+    void set_movie_hidden(bool hidden);
     // The report's "live_fog" member, followed by ",\n".
     [[nodiscard]] diagnostics::MemoryCapacity memory_capacity() const;
     void write_report(std::ostream& output) const;
@@ -63,6 +64,7 @@ private:
     space::FogLooks looks_;
     std::optional<space::FogField> field_;
     bool revealed_{};
+    bool movie_hidden_{};
     bool prepared_{};
     std::string status_{"not prepared"};
     std::string grid_source_;

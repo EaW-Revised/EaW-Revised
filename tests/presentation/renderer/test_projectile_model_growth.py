@@ -18,6 +18,8 @@ POPULATION = r'''
 #include <limits>
 #include <memory>
 #include <new>
+#include <map>
+#include <memory>
 #include <optional>
 #include <span>
 #include <string>
@@ -26,7 +28,7 @@ POPULATION = r'''
 using namespace eawr::presentation;
 namespace sim { using EntityId = std::uint64_t; using AssetId = std::uint64_t; }
 namespace scene {
-struct Placement { std::size_t scene_ordinal{}; sim::EntityId entity_id{}; };
+struct Placement { std::size_t scene_ordinal{}; sim::EntityId entity_id{}; std::uint32_t record_ordinal{}; };
 struct SpacePlacementDecision { std::size_t scene_ordinal{}; };
 struct Scene { std::vector<Placement> placements; };
 }
@@ -43,6 +45,9 @@ struct AttachmentMarks {
     std::size_t decisions() const { return size; }
     void truncate(std::size_t decisions) { if (size > decisions) size = decisions; }
 };
+}
+std::uint32_t placement_start_frame(const scene::Placement& placement, const std::uint32_t frames) {
+    return placement.record_ordinal % frames;
 }
 template<class Vector> void reserve_geometric(Vector& values, const std::size_t wanted) {
     if (wanted > values.capacity()) values.reserve(std::max(wanted, values.capacity() * 2));
@@ -63,7 +68,8 @@ struct GodotRenderer {
     }
 };
 struct SpacePopulation {
-    struct Ship { std::string object_id; bool projectile_slot{}; sim::EntityId live_entity{}; };
+    struct Ship { std::string object_id; bool projectile_slot{}; sim::EntityId live_entity{};
+        bool launch_slot{}, death_clone{}; };
     struct Options { using PlacedShip = Ship; std::vector<Ship> placed_ships; } options_;
     struct Piece { struct { sim::EntityId entity_id{}; sim::AssetId asset_id{}; } instance;
         std::optional<std::size_t> live; struct Gate { std::size_t decision{}; }; std::optional<Gate> gate; };
@@ -73,6 +79,17 @@ struct SpacePopulation {
     std::vector<Piece> pieces_;
     std::vector<LiveClipInstance> live_clip_instances_;
     std::vector<AnimatedInstance> animated_instances_;
+    struct IdlePlacement { std::size_t clip{}; std::uint32_t start_frame{}; };
+    std::vector<IdlePlacement> idle_placements_;
+    struct Clip { int value{}; std::uint32_t playable_frames() const { return 90; } };
+    std::vector<std::shared_ptr<const Clip>> clips_;
+    std::size_t map_placements_{};
+    std::map<std::size_t, std::size_t> idle_live_ships_;
+    struct TurretBinding { std::optional<std::size_t> idle, applied; };
+    std::vector<std::optional<TurretBinding>> turret_bindings_, parent_hardpoint_turret_bindings_;
+    std::vector<std::map<std::uint32_t, TurretBinding>> hardpoint_turret_bindings_;
+    std::vector<std::vector<int>> contact_bones_;
+    std::vector<bool> live_death_clone_, backdrop_ships_;
     std::vector<scene::SpacePlacementDecision> decisions_;
     std::vector<std::vector<int>> hardpoint_states_;
     std::vector<std::vector<sim::AssetId>> hull_surface_assets_;
@@ -88,6 +105,8 @@ struct SpacePopulation {
         const auto size = options_.placed_ships.size();
         live_decisions_.resize(size); hull_surface_assets_.resize(size); live_models_.resize(size);
         live_clips_.resize(size); live_alternate_clips_.resize(size); live_bounds_.resize(size); live_alternate_counts_.resize(size);
+        turret_bindings_.resize(size); parent_hardpoint_turret_bindings_.resize(size); hardpoint_turret_bindings_.resize(size);
+        contact_bones_.resize(size); live_death_clone_.resize(size); backdrop_ships_.resize(size);
     }
     void rebuild_piece_index() {
         piece_index_.rows.assign(options_.placed_ships.size(), {});
@@ -113,6 +132,8 @@ int main() {
     population.pieces_.push_back({{10,77},0,{}});
     population.live_clip_instances_.push_back({0,10,77});
     population.animated_instances_.push_back({10,77,9});
+    population.idle_placements_.resize(10);
+    population.idle_live_ships_.emplace(9, 0);
     population.rebuild_piece_index();
     std::vector<SpacePopulation::Ship> ships(32, {"authored_missile", true, 101});
     for (const auto failure : {ProxyOutcome::refused_budget, ProxyOutcome::allocation_failed}) {
@@ -134,7 +155,7 @@ int main() {
         assert(population.pieces_[index].instance.asset_id == 77);
         assert(population.pieces_[index].instance.entity_id == 499 + index && population.pieces_[index].live == index);
         assert(population.live_clip_instances_[index].ship == index);
-        assert(population.animated_instances_[index].idle == 9);
+        assert(population.animated_instances_[index].idle == 9 + index);
         assert(population.hull_surface_assets_[index][0] == 77);
         assert(renderer.live[index - 1].source == 10);
     }
@@ -189,7 +210,7 @@ def function(source, signature):
 
 
 class ProjectileProxyGrowth(unittest.TestCase):
-    def run_fixture(self, harness):
+    def run_fixture(self, harness, expected_success=True):
         toolchain = select_toolchain()
         if toolchain is None:
             if os.name == 'nt':
@@ -205,11 +226,106 @@ class ProjectileProxyGrowth(unittest.TestCase):
             toolchain.environment[include_key] = str(ROOT / 'include') + os.pathsep + toolchain.environment.get(include_key, '')
             compile_fixture(toolchain, cpp, exe)
             run = subprocess.run([str(exe)], capture_output=True, text=True, timeout=30)
-            self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+            if expected_success:
+                self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+            else:
+                self.assertNotEqual(run.returncode, 0, "mutant unexpectedly passed")
+
+    def test_shared_idle_detach_restores_exact_bones(self):
+        source = (ROOT / 'src/presentation/godot/renderer_instances.cpp').read_text()
+        harness = Path(__file__).with_name('shared_idle_skeleton_harness.hpp').read_text()
+        header = (ROOT / 'src/presentation/godot/renderer_internal.hpp').read_text()
+        start = header.index('    static void apply_visibility(')
+        harness = harness.replace('__VISIBILITY__', header[start:header.index('\n    }', start) + 6])
+        harness = harness.replace('__FUNCTIONS__', '\n'.join(function(source, signature) for signature in (
+            'GodotRenderer::Impl::SharedIdleSkeleton::~SharedIdleSkeleton(',
+            'void GodotRenderer::Impl::prepare_shared_idle_surface(',
+            'void GodotRenderer::Impl::release_instance_skeleton(',
+            'void GodotRenderer::Impl::detach_shared_idle(',
+            'core::Result<void> GodotRenderer::Impl::bind_skin_pose(',
+            '[[nodiscard]] bool GodotRenderer::Impl::apply_skin_pose(',
+            'void GodotRenderer::Impl::bind_instance_skin(',
+            'void GodotRenderer::Impl::clear_skin_pose(',
+            'void GodotRenderer::Impl::set_instance_visible(',
+            'GodotRenderer::Impl::InstanceMap::iterator GodotRenderer::Impl::remove_instance(')))
+        self.run_fixture(harness)
+        self.run_fixture("#define NDEBUG 1\n" + harness)
+        mutants = {
+            "last_owner_free": "if (auto* rendering = RenderingServer::get_singleton(); rendering && rid.is_valid()) rendering->free_rid(rid);",
+            "detach_attach": "rendering.instance_attach_skeleton(instance.rid, replacement);",
+            "join_attach": "shared_rendering->instance_attach_skeleton(existing->second.rid, shared->second->rid);",
+        }
+        for name, statement in mutants.items():
+            with self.subTest(mutant=name):
+                self.assertEqual(harness.count(statement), 1)
+                self.run_fixture(harness.replace(statement, "/* mutant */", 1), expected_success=False)
 
     def test_33_population_proxies_share_recipe_and_failure_keeps_old_visuals(self):
         source = (ROOT / 'apps/viewer/src/space_populate_arrivals.cpp').read_text()
         self.run_fixture(POPULATION.replace('__FUNCTIONS__', function(source,
+                         'GodotRenderer::ProxyResult SpacePopulation::append_model_proxies(')))
+
+    def test_launch_and_clone_copies_preserve_private_animation_and_rollback(self):
+        source = (ROOT / 'apps/viewer/src/space_populate_arrivals.cpp').read_text()
+        harness = POPULATION[:POPULATION.index('int main() {')] + r'''int main() {
+    GodotRenderer renderer;
+    SpacePopulation population;
+    population.options_.placed_ships.push_back({"mod_hangar_member", false, 100, true, false});
+    population.prepare_compose_slots(true);
+    population.live_decisions_[0] = 0;
+    population.scene_->placements.push_back({0, 1});
+    population.decisions_.push_back({0});
+    population.hardpoint_states_.push_back({3});
+    population.pieces_.push_back({{10, 77}, 0, {{0}}});
+    population.live_clip_instances_.push_back({0, 10, 77});
+    population.animated_instances_.push_back({10, 77, 0});
+    population.idle_placements_.push_back({0});
+    population.idle_live_ships_.emplace(0, 0);
+    population.contact_bones_[0] = {6, 7};
+    population.clips_ = {std::make_shared<const SpacePopulation::Clip>(SpacePopulation::Clip{77}),
+        std::make_shared<const SpacePopulation::Clip>(SpacePopulation::Clip{88})};
+    population.live_clips_[0] = 0;
+    population.live_alternate_clips_[0] = 1;
+    population.turret_bindings_[0] = SpacePopulation::TurretBinding{0, 9};
+    population.parent_hardpoint_turret_bindings_[0] = SpacePopulation::TurretBinding{0, 9};
+    population.hardpoint_turret_bindings_[0].emplace(2, SpacePopulation::TurretBinding{0, 9});
+    population.rebuild_piece_index();
+    std::vector<SpacePopulation::Ship> ships(2, {"mod_hangar_member", false, 101, true, false});
+    renderer.outcome = ProxyOutcome::allocation_failed;
+    auto failed = population.append_model_proxies(renderer, 0, ships);
+    assert(failed.outcome == ProxyOutcome::allocation_failed);
+    assert(population.idle_placements_.size() == 1 && population.idle_live_ships_.size() == 1);
+    assert(population.options_.placed_ships.size() == 1 && population.contact_bones_.size() == 1);
+    renderer.outcome = ProxyOutcome::reserved;
+    auto result = population.append_model_proxies(renderer, 0, ships);
+    assert(result.outcome == ProxyOutcome::reserved && result.first_slot == 1);
+    for (std::size_t ship = 1; ship < 3; ++ship) {
+        assert(population.animated_instances_[ship].idle == ship);
+        assert(population.idle_live_ships_.at(ship) == ship);
+        assert(population.scene_->placements[ship].record_ordinal == ship);
+        assert(population.idle_placements_[ship].start_frame == ship);
+        assert(population.turret_bindings_[ship]->idle == ship && !population.turret_bindings_[ship]->applied);
+        assert(population.parent_hardpoint_turret_bindings_[ship]->idle == ship);
+        assert(population.hardpoint_turret_bindings_[ship].at(2).idle == ship);
+        assert(population.pieces_[ship].gate->decision == ship);
+        assert(population.live_clip_instances_[ship].ship == ship);
+        assert(population.contact_bones_[ship] == population.contact_bones_[0]);
+        assert(population.live_clips_[ship] != population.live_clips_[0]);
+        assert(population.live_alternate_clips_[ship] != population.live_alternate_clips_[0]);
+        assert(population.clips_[*population.live_clips_[ship]]->value == 77);
+    }
+    population.clips_[*population.live_clips_[1]].reset();
+    assert(population.clips_[*population.live_clips_[2]]->value == 77 && population.clips_[0]->value == 77);
+    population.contact_bones_[1][0] = 99;
+    assert(population.contact_bones_[0][0] == 6);
+    population.options_.placed_ships[0].launch_slot = false;
+    population.options_.placed_ships[0].death_clone = true;
+    std::vector<SpacePopulation::Ship> wrecks{{"mod_hangar_member", false, 999, false, true}};
+    result = population.append_model_proxies(renderer, 0, wrecks);
+    assert(result.outcome == ProxyOutcome::reserved && population.live_death_clone_[result.first_slot]);
+}
+'''
+        self.run_fixture(harness.replace('__FUNCTIONS__', function(source,
                          'GodotRenderer::ProxyResult SpacePopulation::append_model_proxies(')))
 
     def test_fog_delay_and_ended_flights_do_not_request_slots(self):

@@ -1,3 +1,4 @@
+#include "../../support/runtime_path.hpp"
 // Synthetic contracts of the declaration probe (corpus_declarations.hpp).  No
 // private asset is used: every catalog is written to a temporary tree and
 // loaded through the real VFS and XML catalog.
@@ -547,8 +548,8 @@ void test_frozen_and_current_identity() {
 // The tracked pair list authenticates against its pin and the tracked frozen
 // manifest, with exactly 63 pairs of which 58 are priority rows.
 void test_tracked_inputs() {
-    const auto pairs_bytes = read_file(EAWR_DECLARATION_PAIRS);
-    const auto metadata_bytes = read_file(EAWR_ASSOCIATION_FROZEN_MANIFEST);
+    const auto pairs_bytes = read_file(eawr::testing::runtime_path("EAWR_TEST_SOURCE_ROOT", "tests/presentation/animation/corpus_declaration_pairs.tsv", EAWR_DECLARATION_PAIRS));
+    const auto metadata_bytes = read_file(eawr::testing::runtime_path("EAWR_TEST_SOURCE_ROOT", "tests/presentation/animation/corpus_association_frozen.tsv", EAWR_ASSOCIATION_FROZEN_MANIFEST));
     expect(pairs_bytes.has_value() && metadata_bytes.has_value(), "tracked inputs are readable");
     if (!pairs_bytes || !metadata_bytes) return;
     const auto pinned = probe::load_pinned_pairs(pairs_bytes, sha256(*pairs_bytes));

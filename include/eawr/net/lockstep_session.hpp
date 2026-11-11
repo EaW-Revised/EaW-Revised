@@ -127,6 +127,8 @@ struct CompletedTick {
 class SessionAdapter {
 public:
     virtual ~SessionAdapter() = default;
+    // Mode limit is enforced at session admission; wire codecs accept the largest supported mode.
+    virtual std::uint64_t tick_limit() const { return max_session_ticks; }
     virtual std::uint64_t completed_tick() const = 0;
     virtual std::string state_hash() const = 0;
     virtual std::vector<std::uint8_t> canonical_state() const = 0;

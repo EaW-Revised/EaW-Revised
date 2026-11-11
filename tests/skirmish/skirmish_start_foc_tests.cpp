@@ -899,6 +899,85 @@ void foc_start(const std::filesystem::path& fixtures) {
         auto identity = skirmish::read_data_identity(filesystem.value());
         expect(static_cast<bool>(identity), "load-local data identity reads");
         if (identity) {
+            const auto object_types = eawr::assets::object_type_catalog(catalog.value().catalog);
+            skirmish::CampaignStartInputsCache common;
+            common.object_types = &object_types;
+            auto first = skirmish::read_start_inputs(fixture, filesystem.value(), catalog.value().catalog,
+                tables.value(), identity.value(), common);
+            auto second = skirmish::read_start_inputs(fixture, filesystem.value(), catalog.value().catalog,
+                tables.value(), identity.value(), common);
+            expect(first && second && common.common.has_value(), "campaign start inputs reuse common facts");
+            if (second) {
+                const auto cached_start = skirmish::build_start(fixture, second.value());
+                expect(cached_start && cached_start.value().setup == start.setup,
+                    "cached campaign inputs preserve the installed tactical setup");
+                expect(setup_map_golden::digest(second.value()) == setup_map_golden::digest(inputs.value())
+                    && eawr::core::load_notes_json(second.value().placement_load_notes)
+                        == eawr::core::load_notes_json(inputs.value().placement_load_notes)
+                    && second.value().new_markers == inputs.value().new_markers
+                    && second.value().land_victory_condition == inputs.value().land_victory_condition
+                    && second.value().land_fog_cell_size == inputs.value().land_fog_cell_size
+                    && second.value().land_fog_regrow_seconds == inputs.value().land_fog_regrow_seconds
+                    && second.value().fog_cell_size == inputs.value().fog_cell_size
+                    && second.value().fog_regrow_seconds == inputs.value().fog_regrow_seconds
+                    && second.value().map_sha256 == inputs.value().map_sha256
+                    && second.value().map_extents == inputs.value().map_extents
+                    && skirmish::match_identity(second.value()) == skirmish::match_identity(inputs.value()),
+                    "cached campaign inputs preserve map and match identity");
+            }
+            auto other_map = fixture;
+            other_map.map = "data/art/maps/_mp_space_kuat.ted";
+            const auto other_fresh = skirmish::read_start_inputs(other_map, filesystem.value(), catalog.value().catalog,
+                tables.value(), identity.value());
+            const auto other_cached = skirmish::read_start_inputs(other_map, filesystem.value(), catalog.value().catalog,
+                tables.value(), identity.value(), common);
+            expect(other_fresh && other_cached
+                && setup_map_golden::digest(other_fresh.value()) == setup_map_golden::digest(other_cached.value())
+                && eawr::core::load_notes_json(other_fresh.value().placement_load_notes)
+                    == eawr::core::load_notes_json(other_cached.value().placement_load_notes)
+                && other_fresh.value().new_markers == other_cached.value().new_markers,
+                "cached campaign inputs preserve a different map and its notes");
+            {
+                // Every installed map, read through one shared cache the way a campaign Start does, must match the
+                // ordinary reader: same inputs when it loads, same refusal when it does not.
+                const auto records = filesystem.value().enumerate("data/art/maps/", ".ted");
+                expect(static_cast<bool>(records), "installed maps enumerate");
+                skirmish::CampaignStartInputsCache all_maps;
+                all_maps.object_types = &object_types;
+                std::size_t loaded = 0, refused = 0, mismatched = 0;
+                if (records) {
+                    for (const auto& record : records.value()) {
+                        auto each = fixture;
+                        each.map = record.canonical_path;
+                        const auto plain = skirmish::read_start_inputs(each, filesystem.value(), catalog.value().catalog,
+                            tables.value(), identity.value());
+                        const auto shared = skirmish::read_start_inputs(each, filesystem.value(), catalog.value().catalog,
+                            tables.value(), identity.value(), all_maps);
+                        if (static_cast<bool>(plain) != static_cast<bool>(shared)) { ++mismatched; continue; }
+                        if (!plain) {
+                            ++refused;
+                            if (eawr::core::format_diagnostic(plain.error()) != eawr::core::format_diagnostic(shared.error())) ++mismatched;
+                            continue;
+                        }
+                        ++loaded;
+                        const auto& a = plain.value();
+                        const auto& b = shared.value();
+                        if (setup_map_golden::digest(a) != setup_map_golden::digest(b)
+                            || eawr::core::load_notes_json(a.placement_load_notes) != eawr::core::load_notes_json(b.placement_load_notes)
+                            || a.new_markers != b.new_markers || a.map_sha256 != b.map_sha256 || a.map_extents != b.map_extents
+                            || a.land_victory_condition != b.land_victory_condition
+                            || a.space_victory_condition != b.space_victory_condition
+                            || a.fog_cell_size != b.fog_cell_size || a.fog_regrow_seconds != b.fog_regrow_seconds
+                            || a.land_fog_cell_size != b.land_fog_cell_size || a.land_fog_regrow_seconds != b.land_fog_regrow_seconds
+                            || skirmish::match_identity(a) != skirmish::match_identity(b))
+                            ++mismatched;
+                    }
+                }
+                std::cerr << "cached start inputs over installed maps: loaded " << loaded << ", refused " << refused
+                          << ", mismatched " << mismatched << '\n';
+                expect(loaded >= 78 && mismatched == 0,
+                    "cached campaign inputs equal the ordinary reader on every installed map");
+            }
             auto reused = skirmish::read_start_inputs(fixture, filesystem.value(), catalog.value().catalog,
                 tables.value(), identity.value());
             expect(static_cast<bool>(reused), "start inputs accept the same mounted identity");
@@ -914,9 +993,14 @@ void foc_start(const std::filesystem::path& fixtures) {
             const auto fresh_error = skirmish::read_start_inputs(missing, filesystem.value(), catalog.value().catalog, tables.value());
             const auto reused_error = skirmish::read_start_inputs(missing, filesystem.value(), catalog.value().catalog,
                 tables.value(), identity.value());
+            const auto cached_error = skirmish::read_start_inputs(missing, filesystem.value(), catalog.value().catalog,
+                tables.value(), identity.value(), common);
             expect(!fresh_error && !reused_error
                 && eawr::core::format_diagnostic(fresh_error.error()) == eawr::core::format_diagnostic(reused_error.error()),
                 "load-local identity preserves the first strict per-map refusal");
+            expect(!fresh_error && !cached_error
+                && eawr::core::format_diagnostic(fresh_error.error()) == eawr::core::format_diagnostic(cached_error.error()),
+                "cached campaign inputs preserve the first per-map refusal");
         }
     }
 

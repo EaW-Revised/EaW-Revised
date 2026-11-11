@@ -177,9 +177,10 @@ void speed_is_pacing_only() {
     }
     // The coop seat (3) only changes the speeds in the paced run.
     const auto coop = setup.seats[2].seat_id;
-    expect(static_cast<bool>(paced.submit(speed(5, coop, 100, false, 3 << 24))), "strategic speed 3");
+    // Two active humans: 2x is the shared maximum (#5355), so this pacing run uses it.
+    expect(static_cast<bool>(paced.submit(speed(5, coop, 100, false, 2 << 24))), "strategic speed 2");
     expect(static_cast<bool>(paced.submit(speed(9, coop, 101, true, 1 << 23))), "tactical speed 0.5");
-    expect(static_cast<bool>(paced.submit(speed(9, coop, 102, false, 3 << 24))), "the same speed again");
+    expect(static_cast<bool>(paced.submit(speed(9, coop, 102, false, 2 << 24))), "the same speed again");
     expect(has_code(paced.submit(speed(10, coop, 103, false, 0)), codes::invalid_command), "speed 0 is refused");
     expect(has_code(paced.submit(speed(10, coop, 104, false, (std::int64_t{16} << 24) + 1)), codes::invalid_command),
         "speed over 16 is refused");
@@ -193,7 +194,7 @@ void speed_is_pacing_only() {
             expect(changes == 1, "an unchanged speed raises no speed event");
         }
     }
-    expect(paced.clock().strategic_speed.raw() == (3 << 24) && paced.clock().tactical_speed.raw() == (1 << 23),
+    expect(paced.clock().strategic_speed.raw() == (2 << 24) && paced.clock().tactical_speed.raw() == (1 << 23),
         "the speeds are session state, published in the snapshot clock");
     expect(paced.snapshot()->clock().strategic_speed == paced.clock().strategic_speed, "snapshot clock = session clock");
 }
@@ -267,6 +268,31 @@ void fast_forward() {
             [](const galactic::GalacticEvent& event) { return event.kind == Kind::command_rejected
                 && event.reason == galactic::GalacticRejectReason::not_authorized; });
         expect(rejected == 1 && session.clock().strategic_speed.raw() == (1 << 24), "two humans: fast forward is refused");
+        // #5355 / MP-06: the shared speed goes up to 2x from either human; anything above 2x is refused like 4x.
+        const auto host = setup.seats[0].seat_id;
+        expect(static_cast<bool>(session.submit(speed(1, coop, 2, false, galactic::multiplayer_speed_max_raw))), "2x");
+        expect(static_cast<bool>(session.submit(speed(1, host, 1, false, (std::int64_t{5} << 24) / 2))), "2.5x, same tick");
+        const auto shared = session.step(executor).value();
+        const auto refused = std::count_if(shared.snapshot->events().begin(), shared.snapshot->events().end(),
+            [](const galactic::GalacticEvent& event) { return event.kind == Kind::command_rejected
+                && event.reason == galactic::GalacticRejectReason::not_authorized; });
+        const auto changed = std::count_if(shared.snapshot->events().begin(), shared.snapshot->events().end(),
+            [](const galactic::GalacticEvent& event) { return event.kind == Kind::speed_changed && event.subject == 0U
+                && event.value == static_cast<std::uint64_t>(galactic::multiplayer_speed_max_raw); });
+        expect(refused == 1 && changed == 1 && session.clock().strategic_speed.raw() == galactic::multiplayer_speed_max_raw,
+            "two humans: 2x applies, 2.5x is refused, in canonical order at one tick");
+        expect(static_cast<bool>(session.submit(speed(2, host, 2, false, 1 << 24))), "back to 1x");
+        (void)session.step(executor).value();
+        expect(session.clock().strategic_speed.raw() == (1 << 24), "either human may set 1x again");
+        // #5355 (e): the battle child's tactical speed has the same 2x maximum with two humans.
+        expect(static_cast<bool>(session.submit(speed(3, coop, 3, true, galactic::multiplayer_speed_max_raw))), "tactical 2x");
+        expect(static_cast<bool>(session.submit(speed(3, host, 3, true, raw))), "tactical 4x, same tick");
+        const auto battle = session.step(executor).value();
+        const auto tactical_refused = std::count_if(battle.snapshot->events().begin(), battle.snapshot->events().end(),
+            [](const galactic::GalacticEvent& event) { return event.kind == Kind::command_rejected
+                && event.reason == galactic::GalacticRejectReason::not_authorized; });
+        expect(tactical_refused == 1 && session.clock().tactical_speed.raw() == galactic::multiplayer_speed_max_raw,
+            "two humans: tactical 2x applies, tactical 4x is refused, in canonical order at one tick");
     }
 }
 

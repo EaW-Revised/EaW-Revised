@@ -12,6 +12,7 @@
 #include "lan_lobby_screen.hpp"
 #include "lan_broadcast_source.hpp"
 #include "battle_content.hpp"
+#include "shader_activation_owner.hpp"
 #include "lan_match.hpp"
 #include "lobby_retry.hpp"
 #include "galactic_lobby_backend.hpp"
@@ -27,12 +28,14 @@
 #include "ui/kit.hpp"
 #include "ui/theme_builder.hpp"
 #include "eawr/data/ui/dialog_catalog.hpp"
+#include "eawr/data/xml.hpp"
 #include "eawr/data/ui/text_database.hpp"
 #include "eawr/presentation/ui/fonts.hpp"
 #include "eawr/presentation/ui/faction_display.hpp"
 #include "eawr/presentation/ui/layout.hpp"
 #include "eawr/presentation/ui/player_profile.hpp"
 #include "eawr/presentation/ui/skirmish_setup.hpp"
+#include "eawr/presentation/ui/startup_splash.hpp"
 #include "eawr/presentation/godot/renderer.hpp"
 
 #include <godot_cpp/classes/canvas_layer.hpp>
@@ -47,6 +50,7 @@
 #include <godot_cpp/classes/project_settings.hpp>
 #include <godot_cpp/classes/scene_tree.hpp>
 #include <godot_cpp/classes/texture_rect.hpp>
+#include <godot_cpp/classes/translation_server.hpp>
 #include <godot_cpp/classes/style_box_flat.hpp>
 #include <godot_cpp/classes/viewport.hpp>
 #include <godot_cpp/classes/viewport_texture.hpp>
@@ -60,6 +64,7 @@
 #include <initializer_list>
 #include <set>
 #include <sstream>
+#include <tuple>
 #include <utility>
 
 namespace eawr::presentation::godot_backend {
@@ -116,6 +121,8 @@ struct SkirmishSetupMode::State final {
     Options options;
     Node3D* host{};
     CanvasLayer* layer{};
+    CanvasLayer* startup_layer{};
+    std::vector<core::LoadNote> startup_notes;
     ColorRect* background{};
     bool scene_running{};
     Control* root{};
@@ -178,9 +185,15 @@ struct SkirmishSetupMode::State final {
     std::array<EawrUiCombo*, skirmish::local_setup_rows> faction{}, team{}, controller{}, colour{};
     std::size_t authored_rows{};
     std::shared_ptr<const vfs::Vfs> filesystem;
+    std::optional<data::XmlDocument> startup_constants;
+    std::string startup_constants_failure;
+    std::string mounted_profile;
+    std::vector<std::string> mounted_layers;
     std::shared_ptr<const data::Catalog> catalog;
     std::shared_ptr<const BattleContent> content;
     std::shared_ptr<GodotShaderCache> shaders;
+    std::unique_ptr<ShaderActivationOwner> shader_owner;
+    std::vector<vfs::LayerRoot> mounted_roots;
     std::optional<data::ui::DialogCatalog> dialogs;
     std::optional<assets::MegaTextureAtlas> atlas;
     std::unique_ptr<FontProvider> fonts;
@@ -248,6 +261,8 @@ struct SkirmishSetupMode::State final {
     void refresh_options();
     void process_options();
     void process_back(bool was_editing);
+    bool mount();
+    void show_startup();
     bool load();
     bool build();
 };
@@ -285,7 +300,11 @@ void SkirmishSetupMode::State::resolve_factions() {
     if (local_name.empty()) local_name = lookup(model::skirmish_setup_text_key(model::SetupText::host_player));
 }
 
-bool SkirmishSetupMode::State::load() {
+bool SkirmishSetupMode::State::mount() {
+    filesystem.reset();
+    startup_constants.reset();
+    startup_constants_failure.clear();
+    mounted_layers.clear();
     const auto base = options.game_root / "GameData" / "Data";
     const auto expansion = options.game_root / "corruption" / "Data";
     std::vector<vfs::LayerRoot> roots;
@@ -294,6 +313,7 @@ bool SkirmishSetupMode::State::load() {
         return false;
     }
     const std::string profile = options.profile.empty() ? (options.mod_root.empty() ? "foc" : "remake") : options.profile;
+    mounted_profile = profile;
     if (profile != "foc" && profile != "remake") { failure = "Skirmish setup requires the FoC or mod profile."; return false; }
     if (profile == "remake") {
         if (options.mod_root.empty()) { failure = "The mod profile requires a mod root."; return false; }
@@ -303,38 +323,118 @@ bool SkirmishSetupMode::State::load() {
     roots.emplace_back("base", base);
     MenuTimeline::mark("setup_load_begin");
     mount_revised_layer(roots);
+    mounted_roots = roots;
     auto chain = vfs::resolve_manifest_chain(roots);
     if (!chain) { failure = core::format_diagnostic(chain.error()); return false; }
     MenuTimeline::mark("manifest_chain_resolved");
     std::vector<vfs::MountSpec> specs;
-    std::vector<std::string> layers;
     for (auto& manifest : chain.value()) {
-        layers.push_back(manifest.mount.layer_id);
+        mounted_layers.push_back(manifest.mount.layer_id);
         specs.push_back(std::move(manifest.mount));
     }
     auto mounted = vfs::Vfs::mount(specs);
     if (!mounted) { failure = core::format_diagnostic(mounted.error()); return false; }
     filesystem = std::make_shared<const vfs::Vfs>(std::move(mounted).value());
     MenuTimeline::mark("vfs_mounted");
+    auto constants = model::startup_constants(*filesystem);
+    if (constants) startup_constants.emplace(std::move(constants).value());
+    else startup_constants_failure = constants.error().message;
+    return true;
+}
+
+void SkirmishSetupMode::State::show_startup() {
+    // SPL-01/02: select from constants, then draw the resolved still over the window.
+    startup_layer = memnew(CanvasLayer);
+    startup_layer->set_layer(1000);
+    host->add_child(startup_layer);
+    auto* black = memnew(ColorRect);
+    startup_layer->add_child(black);
+    black->set_color(Color(0, 0, 0, 1));
+    black->set_anchors_and_offsets_preset(Control::PRESET_FULL_RECT);
+    black->set_mouse_filter(Control::MOUSE_FILTER_IGNORE);
+    if (!startup_constants) return;
+    const auto locale = core::to_lower(utf8(TranslationServer::get_singleton()->get_locale()));
+    const bool uk = locale == "en_gb" || locale.starts_with("en_gb_");
+    const std::string name = model::startup_splash_name(startup_constants->root, model::skirmish_setup_language, uk);
+    Ref<Image> image;
+    std::set<std::tuple<std::string, std::string, std::string>> rejected;
+    static_cast<void>(model::select_startup_splash(filesystem->layer_ids(), name,
+        [&](const std::string& layer_id, const std::string& path) {
+            auto records = filesystem->candidates(path);
+            if (!records) return false;
+            for (const auto& record : records.value()) {
+                if (record.layer_id != layer_id) continue;
+                if (rejected.contains({record.layer_id, record.source_id, record.canonical_path})) continue;
+                auto bytes = filesystem->open(record);
+                if (bytes) {
+                    auto texture = assets::load_texture(bytes.value(), assets::source_from(record));
+                    if (texture) {
+                        std::string problem;
+                        image = texture_image(texture.value(), problem);
+                        if (image.is_valid()) return true;
+                    }
+                }
+                core::LoadNote note;
+                note.code = "EAWR-LOAD-5460";
+                note.file = path;
+                note.tag = uk ? "Localized_UK_English_Splash_Screen" : "Localized_Splash_Screen";
+                note.authored_value = name;
+                note.action = core::LoadAction::skipped_object;
+                note.message = "Unreadable startup splash; trying the next candidate";
+                startup_notes.push_back(std::move(note));
+                rejected.emplace(record.layer_id, record.source_id, record.canonical_path);
+            }
+            return false;
+        }));
+    if (image.is_null()) return;
+    auto* rect = memnew(TextureRect);
+    startup_layer->add_child(rect);
+    rect->set_texture(ImageTexture::create_from_image(image));
+    rect->set_expand_mode(TextureRect::EXPAND_IGNORE_SIZE);
+    rect->set_stretch_mode(TextureRect::STRETCH_SCALE);
+    rect->set_anchors_and_offsets_preset(Control::PRESET_FULL_RECT);
+    rect->set_mouse_filter(Control::MOUSE_FILTER_IGNORE);
+}
+
+bool SkirmishSetupMode::State::load() {
     data::LoadOptions load_options;
     load_options.parse_unregistered_xml = false;
-    auto objects = data::load_catalog_strict(*filesystem, profile == "foc" ? data::Profile::foc : data::Profile::remake, load_options);
+    auto objects = data::load_catalog_strict(*filesystem, mounted_profile == "foc" ? data::Profile::foc : data::Profile::remake, load_options);
     if (!objects) { failure = core::format_diagnostic(objects.error()); return false; }
-    publish_viewer_load_notes(std::move(objects.value().notes), layers);
+    publish_viewer_load_notes(std::move(objects.value().notes), mounted_layers);
+    if (!startup_notes.empty()) publish_viewer_load_notes(std::move(startup_notes), {}, true);
     if (!objects.value().health.clean()) {
         UtilityFunctions::printerr(text("EAWR catalog load: " + data::describe_load_health(objects.value().health)));
     }
     catalog = std::make_shared<const data::Catalog>(std::move(objects.value().catalog));
     MenuTimeline::mark("catalog_loaded");
-    content = std::make_shared<const BattleContent>(BattleContent{filesystem, catalog, profile, std::move(layers), options.game_root, options.mod_root});
-    auto colours = skirmish::read_lobby_colours(*filesystem);
+    std::shared_ptr<const shader_activation::Generation> shader_generation;
+    std::shared_ptr<const ShaderActivationReceipt> shader_receipt;
+    if (OS::get_singleton()->get_cmdline_user_args().has("--eawr-shader-translation")) {
+        // Explicit experimental opt-in only. No extra inventory, mod metadata,
+        // package, cache or renderer work is done on the ordinary OFF path.
+        if (!shaders) shaders = std::make_shared<GodotShaderCache>();
+        if (!shader_owner) shader_owner = std::make_unique<ShaderActivationOwner>();
+        auto started = begin_mod_shaders(*shader_owner, *filesystem, mounted_roots, mounted_profile, *host, shaders);
+        if (!started) UtilityFunctions::printerr(text(core::format_diagnostic(started.error())));
+        else {
+            while (!shader_owner->step(1U)) {}
+            shader_generation = shader_owner->generation();
+            shader_receipt = shader_owner->receipt();
+            if (const auto& report = shader_owner->report(); report && report->note)
+                UtilityFunctions::printerr(text(report->note->text));
+        }
+    }
+    content = std::make_shared<const BattleContent>(BattleContent{filesystem, catalog, mounted_profile, std::move(mounted_layers), options.game_root, options.mod_root, std::move(shader_generation), std::move(shader_receipt)});
+    if (!startup_constants) { failure = startup_constants_failure; return false; }
+    auto colours = skirmish::read_lobby_colours(startup_constants->root);
     if (!colours) { failure = colours.error().message; return false; }
     palette = std::move(colours).value();
-    auto match_defaults = skirmish::read_match_defaults(*filesystem);
+    auto match_defaults = skirmish::read_match_defaults(startup_constants->root);
     if (!match_defaults) { failure = match_defaults.error().message; return false; }
     defaults = std::move(match_defaults).value();
     // A mod's constants without the slider bounds keep the slider off rather than the screen closed.
-    if (auto bounds = skirmish::read_credits_bounds(*filesystem)) credits_bounds = bounds.value();
+    if (auto bounds = skirmish::read_credits_bounds(startup_constants->root)) credits_bounds = bounds.value();
     else UtilityFunctions::printerr(text("EAWR setup credits bounds: " + core::format_diagnostic(bounds.error())));
     selection.match = defaults;
     MenuTimeline::mark("lobby_defaults_read");
@@ -713,6 +813,7 @@ bool SkirmishSetupMode::State::build() {
             combo->set_fit_to_longest_item(false);
             combo->set_clip_text(true);
             combo->set_retail_list(true);
+            combo->set_list_height(static_cast<const EawrUiCombo*>(previous->control)->get_list_height());
             combo->set_position(previous->control->get_position()
                 + Vector2(0, static_cast<float>(added.rect.y - previous->rect.y)));
             combo->set_size(previous->control->get_size());
@@ -1509,8 +1610,23 @@ void SkirmishSetupMode::State::process_back(const bool was_editing) {
 SkirmishSetupMode::SkirmishSetupMode(Options options) : state_(std::make_unique<State>(std::move(options))) {}
 SkirmishSetupMode::~SkirmishSetupMode() = default;
 const std::string& SkirmishSetupMode::failure() const { return state_->failure; }
+bool SkirmishSetupMode::prepare_startup(Node3D& host) {
+    state_->host = &host;
+    if (!state_->mount()) return false;
+    state_->show_startup();
+    return true;
+}
+
+void SkirmishSetupMode::dismiss_startup() {
+    if (state_->startup_layer) {
+        state_->startup_layer->queue_free();
+        state_->startup_layer = nullptr;
+    }
+}
+
 bool SkirmishSetupMode::ready(Node3D& host) {
     state_->host = &host;
+    if (!state_->filesystem && !state_->mount()) { UtilityFunctions::printerr(text(state_->failure)); return false; }
     if (!state_->load()) { UtilityFunctions::printerr(text(state_->failure)); return false; }
     MenuTimeline::mark("setup_loaded");
     if (state_->test) host.get_viewport()->set_embedding_subwindows(true);
@@ -1915,6 +2031,7 @@ SkirmishSetupMode::UiResources SkirmishSetupMode::ui_resources() const {
     UiResources resources;
     resources.filesystem = state.filesystem.get();
     resources.catalog = state.catalog.get();
+    resources.game_constants = state.startup_constants ? &state.startup_constants->root : nullptr;
     resources.dialogs = state.dialogs ? &*state.dialogs : nullptr;
     resources.theme_model = state.theme_model ? &*state.theme_model : nullptr;
     resources.theme = state.theme;

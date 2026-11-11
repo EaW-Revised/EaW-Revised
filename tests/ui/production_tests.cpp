@@ -272,6 +272,50 @@ void test_campaign_pool() {
     expect(!view.solver_dialog_allowed(), "published native solver unavailability remains authoritative");
 }
 
+void test_retained_hover_work() {
+    const std::string long_type(512, 'u');
+    const std::string replacement_type(513, 'v');
+    for (const bool queue : {false, true}) {
+        ui::ProductionHoverCache cache;
+        cache.publish(7, long_type, queue);
+        const auto* retained = cache.get();
+        std::size_t stable_reads{};
+        allocation_probe::count = 0;
+        allocation_probe::armed = true;
+        for (std::size_t frame = 0; frame < 10000; ++frame) {
+            const auto* hovered = cache.get();
+            if (hovered && hovered == retained && hovered->type == long_type) ++stable_reads;
+            cache.publish(7, long_type, queue); // unchanged motion admission
+            cache.invalidate_unless([&](const ui::ProductionHover& active) {
+                return active.identity == 7 && active.type == long_type && active.queue == queue;
+            }); // progress/credit publication retains the same entry
+        }
+        allocation_probe::armed = false;
+        expect(allocation_probe::count == 0 && stable_reads == 10000 && cache.publications() == 1,
+            "PU-73: stationary pool/queue hover borrows long text without allocation or republication");
+
+        cache.clear();
+        std::size_t entry_visits{};
+        allocation_probe::count = 0;
+        allocation_probe::armed = true;
+        for (std::size_t frame = 0; frame < 10000; ++frame) {
+            cache.invalidate_unless([&](const ui::ProductionHover&) { ++entry_visits; return false; });
+            cache.clear();
+        }
+        allocation_probe::armed = false;
+        expect(!cache.get() && entry_visits == 0 && allocation_probe::count == 0 && cache.publications() == 2,
+            "PU-73: no-hover publication never visits pool/queue entries, allocates or republishes");
+
+        cache.publish(7, long_type, queue);
+        cache.publish(7, replacement_type, queue);
+        expect(cache.get() && cache.get()->type == replacement_type && cache.publications() == 4,
+            "PU-73: changed type under the same slot publishes exactly once");
+        cache.invalidate_unless([](const ui::ProductionHover&) { return false; });
+        expect(!cache.get() && cache.publications() == 5,
+            "PU-73: removed/replaced publication invalidates retained hover once");
+    }
+}
+
 void test_texts() {
     expect(ui::credits_text(Fixed::from_raw(credits(6050).raw() - 1)) == "6049", "PU-07: rounded down");
     expect(ui::credits_text(credits(6000)) == "6000", "PU-07: whole credits");
@@ -547,6 +591,7 @@ int main() {
     test_pool();
     test_campaign_pool();
     test_texts();
+    test_retained_hover_work();
     test_pool_notifications();
     test_warmed_pool_allocations();
     test_warmed_pad_allocations();

@@ -192,7 +192,7 @@ struct Owner {
         std::vector<gc::GalacticSession::NativeActorChange> births;
         for (const auto& actor : snapshot->actor_records())
             births.push_back({gc::GalacticSession::NativeActorChange::Kind::created, actor.id,
-                actor.generated_source, actor.dead, actor.delete_pending, {}});
+                actor.generated_source, actor.dead, actor.delete_pending, {}, {}, {}});
         must(cp::apply_galactic_ai_actor_changes(actions->qualified_freestore(), births,
             [content = selection_content, members, snapshot](auto actor) {
                 return cp::read_stock_galactic_ai_actor_facts(*content, members, *snapshot, actor);

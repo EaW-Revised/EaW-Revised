@@ -1,5 +1,7 @@
 #include "eawr/scene/scene.hpp"
 #include "space_environment_internal.hpp"
+#include "space_removed_records.hpp"
+#include "shader_activation_owner.hpp"
 #include "startup_trace.hpp"
 #include "menu_timeline.hpp"
 #include "settings_store.hpp"
@@ -247,6 +249,7 @@ bool EnvironmentView::prepare_head(Node3D& host, const assets::Map& map, const v
             frame.height = static_cast<std::uint32_t>(camera_input::whole_viewport_extent(viewport.y));
         }
         locked_frame_ = frame;
+        locked_default_fov_ = frame.vertical_fov_degrees;
         camera_ = fixed_camera(frame);
         camera_status_ = std::string(space::to_string(space::validate_camera(camera_)));
         if (space::validate_camera(camera_) != space::CameraStatus::valid) {
@@ -270,6 +273,7 @@ bool EnvironmentView::prepare_head(Node3D& host, const assets::Map& map, const v
 
 void EnvironmentView::prepare_renderer(Node3D& host, const vfs::Vfs& filesystem) {
     renderer_ = std::make_unique<GodotRenderer>(host, options_.shaders);
+    install_mod_shaders(*renderer_, options_.shader_generation, options_.shader_filesystem);
     renderer_->set_texture_loader([&filesystem](const assets::Source& source) -> std::optional<assets::Texture> {
         auto loaded = assets::load_texture(filesystem, source.logical_path);
         if (!loaded) return std::nullopt;
@@ -332,7 +336,9 @@ void EnvironmentView::prepare_sky(const bool secondary, const assets::Map& map, 
                 const scene::AssetAccess access{.exists = [this](const std::string_view path) {
                     return static_cast<bool>(filesystem_->stat(path)); }, .model = {}, .sha256 = {}, .particle_system = {}};
                 return scene::missing_material_effect(access, program);
-            });
+            }, renderer_->shader_translation_enabled()
+                ? std::function<bool(const assets::Submesh&)>{[this](const assets::Submesh& value) { return renderer_->usable_shader(value); }}
+                : std::function<bool(const assets::Submesh&)>{});
         const float radius = space::surface_radius(surfaces);
         Placed placed;
         placed.role = role;
@@ -365,6 +371,7 @@ void EnvironmentView::prepare_scene(const assets::Map& map, const vfs::Vfs& file
 
 bool EnvironmentView::prepare_placement(const assets::Map& map, const vfs::Vfs& filesystem,
                                         const scene::Placement& placement, ReadyScratch& scratch) {
+    if (removed_space_record(options_.battle_start, placement.record_ordinal)) return true;
     scene::VfsAssetCache& cache = *scratch.cache;
     {
             // #3077: a catalog marker is never drawn in game, whatever model it names
@@ -422,7 +429,9 @@ bool EnvironmentView::prepare_placement(const assets::Map& map, const vfs::Vfs& 
                     const scene::AssetAccess access{.exists = [this](const std::string_view path) {
                         return static_cast<bool>(filesystem_->stat(path)); }, .model = {}, .sha256 = {}, .particle_system = {}};
                     return scene::missing_material_effect(access, program);
-                });
+                }, renderer_->shader_translation_enabled()
+                    ? std::function<bool(const assets::Submesh&)>{[this](const assets::Submesh& value) { return renderer_->usable_shader(value); }}
+                    : std::function<bool(const assets::Submesh&)>{});
             placed.radius = space::surface_radius(surfaces) * placed.scale;
             if (!bind_idle(placement, *model, filesystem, placed)) return false;
             compose_object(placed, surfaces);
@@ -520,6 +529,8 @@ bool EnvironmentView::write_report() const {
         << ", \"kind\": \"space\", \"semantic_complete\": " << (options_.semantic_complete ? "true" : "false") << "},\n"
         << "  \"terrain\": {\"chunks\": 0, \"status\": \"not_applicable\", \"cause\": \"a kind-2 map has no terrain\"},\n";
     if (options_.write_hud_report) options_.write_hud_report(output);
+    write_shader_activation_report(output, options_.shader_receipt.get());
+    write_shader_route_report(output, renderer_.get());
     output << "  \"cpu_recipe_memory\":{\"phase\":\"report\",\"scope\":\"vector_capacity_excluding_strings_allocator_gpu\",\"retained\":";
     assets::write_retained_payload(output, renderer_ ? renderer_->recipe_memory() : assets::RetainedPayload{});
     output << "},\n";
@@ -686,6 +697,7 @@ void EnvironmentView::movie(const bool on, const std::array<float, 3>& target) {
         }
     }
     movie_ = on && bridge_ && bridge_->active();
+    if (!movie_) movie_fov_.reset();
     movie_target_ = target;
 }
 
@@ -709,6 +721,14 @@ void EnvironmentView::camera_sample_pointer(const float x, const float y) {
 
 void EnvironmentView::camera_clear_pointer_sample() {
     if (bridge_) bridge_->clear_pointer_sample();
+}
+
+std::optional<std::array<float, 2>> EnvironmentView::camera_pointer_hold() const {
+    return bridge_ ? bridge_->pointer_hold() : std::nullopt;
+}
+
+std::optional<std::array<float, 2>> EnvironmentView::camera_take_pointer_hold_warp() {
+    return bridge_ ? bridge_->take_pointer_hold_warp() : std::nullopt;
 }
 
 void EnvironmentView::camera_pointer_left() {
@@ -751,21 +771,30 @@ std::optional<int> EnvironmentView::process(const double delta) {
         static_cast<void>(fail(failure_));
         return 2;
     }
-    if (bridge_) {
+    // The drawn camera, composed in two passes. The first pass is the ordinary one before the live step: it steps
+    // the controller and sets the camera the live step receives. A subject-attached camera (battlecam pose, follow
+    // focus) read the subject from the previous frame's live step; when the owner's hook reports that it moved
+    // the camera inputs, the second pass (after the live step has composed this frame's poses, before submit)
+    // recomposes the same frame from them, so the camera and the mesh are drawn from the same pose (#6448 J1).
+    // The second pass takes no input, steps nothing and advances no clock.
+    const auto present_camera = [&](const bool first_pass, const bool rebuild_snapshot) -> std::optional<int> {
+        if (!bridge_) return std::nullopt;
         // Pan follows the overview's drawn yaw; the tactical yaw is kept for its return.
-        if (overview_ && bridge_->active()) {
+        if (first_pass && overview_ && bridge_->active()) {
             bridge_->set_overview_view_yaw(overview_->view_yaw(bridge_->controller().yaw_degrees()));
         }
-        if (!movie_) {
+        if (first_pass && !movie_) {
             if (auto stepped = bridge_->step(static_cast<float>(delta)); !stepped) {
                 static_cast<void>(fail(core::format_diagnostic(stepped.error())));
                 completed_ = true;
                 return 2;
             }
         }
+        // BCAM-04: the controller is not stepped in movie mode, and the drawn
+        // pose is changed on a copy, so exiting exposes the unchanged tactical frame.
         tactical::TacticalFrame frame = bridge_->frame();
         if (overview_ && !movie_) {
-            overview_->advance(delta);
+            if (first_pass) overview_->advance(delta);
             const auto& bounds = bridge_->controller().render_bounds();
             // The map overview fits the larger half extent of the camera's target bounds, the
             // project's stand-in for the retail map box.
@@ -779,10 +808,11 @@ std::optional<int> EnvironmentView::process(const double delta) {
             frame = shown.value();
         }
         if (movie_) {
-            movie_seconds_ += std::max(delta, 0.0);
-            auto shot = tactical::movie_frame(frame, movie_target_, movie_seconds_);
-            if (shot) frame = shot.value();
-            else movie_ = false;
+            if (first_pass) movie_seconds_ += std::max(delta, 0.0);
+            frame.eye = movie_eye_;
+            frame.target = movie_target_;
+            frame.up = {0.0F, 1.0F, 0.0F};
+            if (movie_fov_) frame.vertical_fov_degrees = *movie_fov_;
         }
         camera_ = space::environment_view_camera(fixed_camera(frame));
         renderer_->set_camera(camera_);
@@ -796,10 +826,14 @@ std::optional<int> EnvironmentView::process(const double delta) {
             }
             instances_[index].fixed_transform = *matrix;
         }
-        const auto sky_start = SubmitClock::now();
-        snapshot_ = std::make_shared<const sim::RenderSnapshot>(0, instances_);
-        submit_since(sky_start);
-    }
+        if (rebuild_snapshot) {
+            const auto sky_start = SubmitClock::now();
+            snapshot_ = std::make_shared<const sim::RenderSnapshot>(0, instances_);
+            submit_since(sky_start);
+        }
+        return std::nullopt;
+    };
+    if (const auto failed = present_camera(true, true)) return failed;
     if (attract_pose_pending_) {
         // The attract's camera moved: the same view at the new eye. The skies are camera-centred,
         // so they follow the eye as a map camera's do.
@@ -867,6 +901,12 @@ std::optional<int> EnvironmentView::process(const double delta) {
                 static_cast<void>(fail("live population: " + *live.error));
                 return 2;
             }
+        }
+        // #6448 J1: the live step has composed this frame's poses. A subject-attached camera reads them now, so the
+        // drawn camera and the meshes share one pose. The snapshot is rebuilt just below when the live step produced
+        // instances; otherwise here (the sky moved with the eye).
+        if (finalize_camera_ && finalize_camera_()) {
+            if (const auto failed = present_camera(false, !live.instances)) return failed;
         }
         if (live.instances) {
             const auto instances_start = SubmitClock::now();
@@ -995,6 +1035,12 @@ void SpaceEnvironment::live_camera_focus(const float source_x, const float sourc
     if (state_->view) state_->view->focus(source_x, source_y);
 }
 
+bool SpaceEnvironment::set_live_finalize_camera(std::function<bool()> hook) {
+    if (!state_->view) return false;
+    state_->view->set_finalize_camera(std::move(hook));
+    return true;
+}
+
 std::optional<presentation::camera::SourceTargetBounds> SpaceEnvironment::live_camera_bounds() const {
     return state_->view ? state_->view->camera_bounds() : std::nullopt;
 }
@@ -1013,6 +1059,20 @@ void SpaceEnvironment::live_camera_overview_key() {
 
 void SpaceEnvironment::live_camera_movie(const bool on, const std::array<float, 3>& target) {
     if (state_->view) state_->view->movie(on, target);
+}
+
+void SpaceEnvironment::live_camera_movie_eye(const std::array<float, 3>& eye) {
+    if (state_->view) state_->view->movie_eye(eye);
+}
+void SpaceEnvironment::live_camera_movie_fov(const std::optional<float> fov) {
+    if (state_->view) state_->view->movie_fov(fov);
+}
+
+bool SpaceEnvironment::battlecam_key(const viewer::camera_input::RawEvent& event) const {
+    return state_->view && state_->view->battlecam_key(event);
+}
+bool SpaceEnvironment::preview_key(const viewer::camera_input::RawEvent& event) const {
+    return state_->view && state_->view->preview_key(event);
 }
 
 bool SpaceEnvironment::live_camera_movie() const { return state_->view && state_->view->movie(); }

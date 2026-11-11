@@ -32,6 +32,7 @@
 #include <string>
 #include <vector>
 
+namespace eawr::presentation::ui { struct SavedGameRequest; }
 namespace eawr::presentation::godot_backend {
 
 class EawrOptionsScreen final : public godot::CanvasLayer {
@@ -66,9 +67,11 @@ public:
         // #3989: the game menu's Save, for a battle that can be saved (a local single-player skirmish).
         // `save_names` lists the saves the Save page shows; `save_game` saves under the chosen name
         // (`overwrite` once the player confirmed replacing a save) and is false when it refused. Unset:
-        // Save stays disabled. Load stays disabled either way (loading a skirmish save is not built yet).
+        // Save stays disabled. The optional Load callback supplies the solo battle handoff.
         std::function<std::vector<std::string>()> save_names;
         std::function<bool(const std::string& name, bool overwrite)> save_game;
+        std::filesystem::path load_directory;
+        std::function<std::string(const presentation::ui::SavedGameRequest&)> load_game;
     };
 
     // One state a control showed, for the report and the GPU case.
@@ -144,6 +147,7 @@ private:
     void apply_preview();
     void update_tweaks_dirty();
     void update_performance_dirty();
+    void update_advanced_dirty();
 
     // Signal sinks, bound with the gadget id.
     void on_pressed(godot::String id);
@@ -162,6 +166,8 @@ private:
     // The hub's Back (and Esc on it): the game menu when that opened the screen, else closes it.
     void leave_hub();
     void ask_quit();
+    void open_load_game();
+    void on_load_closed();
     // #3989: the Save page's Save: a new name saves at once, an existing one asks first (TEXT_SAVE_CONFIRM).
     void save_named(const std::string& name, bool overwrite);
     void ask_overwrite(std::string name);
@@ -192,6 +198,7 @@ private:
     float built_width_{};
     float built_height_{};
     bool resize_connected_{};
+    int64_t load_screen_id_{};
     int64_t confirm_id_{};
     // What the open confirmation box answers: Quit Game, or replacing the save named `overwrite_name_`.
     enum class Confirm : std::uint8_t { quit, overwrite };

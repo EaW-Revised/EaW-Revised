@@ -19,7 +19,7 @@ bool numbers(Reader& in, std::vector<math::Fixed>& rows) {
 }
 } // namespace
 void encode_economy_corruption(std::vector<std::uint8_t>& bytes, const EconomyCorruptionState& s) {
-    put_u8(bytes, 2);
+    put_u8(bytes, 3);
     for (auto n : s.income_factors) put_i64(bytes, n.raw());
     put_i64(bytes, s.factor_min.raw()); put_i64(bytes, s.factor_max.raw());
     put_u8(bytes, s.tutorial); put_u8(bytes, s.multiplayer); put_u64(bytes, s.random_draws);
@@ -48,6 +48,11 @@ void encode_economy_corruption(std::vector<std::uint8_t>& bytes, const EconomyCo
     for (const auto& item : s.items) {
         put_u32(bytes, item.id); put_u32(bytes, item.faction); put_i64(bytes, item.tech); put_i64(bytes, item.tutorial_tech);
         for (auto n : {item.base_cost, item.tutorial_base_cost, item.uncommon_multiplier}) put_i64(bytes, n.raw());
+        put_u32(bytes, static_cast<std::uint32_t>(item.ability_names.size()));
+        for (const auto& name : item.ability_names) {
+            put_u32(bytes, static_cast<std::uint32_t>(name.size()));
+            bytes.insert(bytes.end(), name.begin(), name.end());
+        }
     }
     put_u32(bytes, static_cast<std::uint32_t>(s.buyers.size()));
     for (const auto& b : s.buyers) {
@@ -64,7 +69,7 @@ void encode_economy_corruption(std::vector<std::uint8_t>& bytes, const EconomyCo
 }
 std::optional<EconomyCorruptionState> decode_economy_corruption(std::span<const std::uint8_t> bytes) {
     Reader in(bytes); EconomyCorruptionState s; std::uint8_t version{}; std::uint32_t n{};
-    if (!in.read_u8(version) || version != 2) return std::nullopt;
+    if (!in.read_u8(version) || version != 3) return std::nullopt;
     for (auto& v : s.income_factors) if (!fixed(in, v)) return std::nullopt;
     if (!fixed(in, s.factor_min) || !fixed(in, s.factor_max) || !flag(in, s.tutorial) || !flag(in, s.multiplayer)
         || !in.read_u64(s.random_draws) || !count(in, n, 55) || n > galactic_max_players) return std::nullopt;
@@ -106,7 +111,16 @@ std::optional<EconomyCorruptionState> decode_economy_corruption(std::span<const 
             || tech < std::numeric_limits<int>::min() || tech > std::numeric_limits<int>::max()
             || tutorial < std::numeric_limits<int>::min() || tutorial > std::numeric_limits<int>::max()
             || !fixed(in, item.base_cost) || !fixed(in, item.tutorial_base_cost) || !fixed(in, item.uncommon_multiplier)) return std::nullopt;
-        item.tech = static_cast<int>(tech); item.tutorial_tech = static_cast<int>(tutorial); s.items.push_back(item);
+        std::uint32_t names{};
+        if (!count(in, names, 4)) return std::nullopt;
+        for (std::uint32_t j = 0; j < names; ++j) {
+            std::uint32_t size{};
+            if (!in.read_u32(size) || size > in.remaining()) return std::nullopt;
+            std::string name(size, '\0');
+            if (!in.read_bytes(std::span(reinterpret_cast<std::uint8_t*>(name.data()), name.size()))) return std::nullopt;
+            item.ability_names.push_back(std::move(name));
+        }
+        item.tech = static_cast<int>(tech); item.tutorial_tech = static_cast<int>(tutorial); s.items.push_back(std::move(item));
     }
     if (!count(in, n, 40)) return std::nullopt;
     for (std::uint32_t i = 0; i < n; ++i) {

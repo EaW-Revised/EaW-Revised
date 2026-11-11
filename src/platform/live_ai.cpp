@@ -126,6 +126,21 @@ core::Result<LiveAi> live_ai(const battle::BattleStart& start, const skirmish::S
     return mount(skirmish::ai_setup(start, inputs, tables), files, std::move(scoring), std::move(journal), trace_proposals);
 }
 
+core::Result<void> validate_live_ai_save(const skirmish::SkirmishStart& start, const skirmish::StartInputs& inputs,
+    const units::UnitTables& tables, const vfs::Vfs& files, const std::span<const std::uint8_t> bytes) {
+    auto container = checkpoint::parse_checkpoint(bytes);
+    if (!container) return core::Result<void>::failure(container.error());
+    auto setup = skirmish::ai_setup(start, inputs, tables);
+    if (auto enabled = skirmish::enable_goal_system(files, setup); !enabled) return core::Result<void>::failure(enabled.error());
+    auto modules = skirmish::ai_modules(files, setup, false);
+    if (!modules) return core::Result<void>::failure(modules.error());
+    auto prepared = script::foc::prepare_session(setup, modules.value());
+    if (!prepared) return core::Result<void>::failure(prepared.error());
+    if (container.value().header.identities.lua_save != checkpoint::script_closure_digest(prepared.value().closure_sha256))
+        return core::Result<void>::failure(save_error("the save was made with different AI scripts"));
+    return core::Result<void>::success();
+}
+
 // #3207 G1-b: the land twin. Same host, the land mode: ai_setup carries the domain, so the goal mode, template,
 // plan directory, freestore tag and difficulty fields all follow from the mounted land data.
 core::Result<LiveAi> live_land_ai(const skirmish::LandStart& start, const skirmish::LandStartInputs& inputs,

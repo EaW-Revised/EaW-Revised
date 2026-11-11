@@ -8,6 +8,7 @@
 #include <map>
 
 namespace eawr::presentation::godot_backend {
+class EawrHudText;
 // GUI-owned ground selection lifetime. WGUI-52's box threshold is separate
 // from the unqualified widget-drag activation binding (WGUI-U04).
 class EawrGroundInput final : public godot::Control {
@@ -38,7 +39,10 @@ struct GroundHudState {
     std::shared_ptr<const sim::galactic::GalacticSnapshot> command_publication;
     std::shared_ptr<const sim::galactic::GalacticSnapshot> publication;
     EawrGroundInput* input{};
-    godot::Label* count{};
+    // Text_Land_Fleet: the first text (TEXT_BASE_LAYOUT) and the second (TEXT_UNKNOWN), each at its own offset.
+    EawrHudText* caption{};
+    EawrHudText* unknown{};
+    std::string caption_text, unknown_text;
     godot::TextureButton* sale{};
     godot::Label* sale_label{};
     viewer::galactic::ObjectId sale_object{}, sale_planet{};

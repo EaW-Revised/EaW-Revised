@@ -2080,6 +2080,19 @@ function EaWR_Stage_Step()
 				end
 			end
 		end
+	elseif d.scenario == "repair_range" then
+		if not d.repair_staged then
+			local localp = Find_Player("local")
+			local units = EaWR_Stage_Spawn("Rebel_Defense_Satellite_Repair", localp, Create_Position(-2200, 1500, 0))
+			if units and units[1] then
+				d.ship = units[1]
+				local selected = pcall(function() return localp.Select_Object(d.ship) end)
+				if selected and EaWR_Stage_Camera(d.ship, true) then
+					d.repair_staged = true
+					d.line = "REPAIR RANGE selected"
+				end
+			end
+		end
 	elseif d.scenario == "bank" then
 		EaWR_Stage_Bank()
 	elseif d.scenario == "deaths" then

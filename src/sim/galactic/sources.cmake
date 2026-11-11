@@ -35,6 +35,7 @@ set(EAWR_SIM_GALACTIC_SOURCES
     "${CMAKE_CURRENT_LIST_DIR}/native_action_shadow.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/production_encoding.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/replay.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/restore_validation.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/scoring.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/session.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/session_state.cpp"

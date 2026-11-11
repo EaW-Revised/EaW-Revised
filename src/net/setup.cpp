@@ -69,7 +69,7 @@ core::Result<void> validate_offer(const SetupOffer& offer) {
     const bool galactic = offer.domain == galactic_setup_domain;
     if ((offer.domain != tactical_setup_domain && !galactic) || offer.setup.empty() || offer.setup.size() > max_setup_bytes
         || offer.input_delay == 0 || offer.input_delay > max_input_delay || offer.seats.size() < 2
-        || offer.final_tick_count == 0 || offer.final_tick_count > max_session_ticks
+        || offer.final_tick_count == 0 || offer.final_tick_count > (galactic ? sim::galactic::galactic_max_ticks : max_session_ticks)
         || offer.seats.size() > max_match_seats || offer.identity.build.empty() || offer.identity.build.size() > 256
         || sanitize_lan_text(offer.identity.build, 256) != offer.identity.build)
         return error<void>(SetupReason::options, "unsupported setup domain, size, delay, roster or build identity");
@@ -194,7 +194,7 @@ core::Result<sim::tactical::TacticalSetup> decode_skirmish_setup(std::span<const
 core::Result<Bytes> encode_setup_offer(const SetupOffer& offer) {
     if (auto valid = validate_offer(offer); !valid) return core::Result<Bytes>::failure(valid.error());
     Bytes bytes{setup_offer_kind};
-    word(bytes, 3, 4); word(bytes, offer.seed, 8); word(bytes, offer.input_delay, 8); word(bytes, offer.final_tick_count, 8);
+    word(bytes, offer.domain == galactic_setup_domain ? 4 : 3, 4); word(bytes, offer.seed, 8); word(bytes, offer.input_delay, 8); word(bytes, offer.final_tick_count, 8);
     text(bytes, offer.domain); blob(bytes, offer.setup); word(bytes, offer.seats.size(), 4);
     for (const auto& seat : offer.seats) {
         word(bytes, seat.peer, 4); word(bytes, seat.seat.value, 4); word(bytes, seat.player, 4);
@@ -223,10 +223,12 @@ core::Result<SetupOffer> decode_setup_offer(std::span<const std::uint8_t> frame)
     SetupOffer offer;
     std::uint64_t version{}, count{};
     std::span<const std::uint8_t> setup, identity;
-    if (!reader.word(version, 4) || version != 3 || !reader.word(offer.seed, 8)
+    if (!reader.word(version, 4) || (version != 3 && version != 4) || !reader.word(offer.seed, 8)
         || !reader.word(offer.input_delay, 8) || !reader.word(offer.final_tick_count, 8) || !reader.text(offer.domain, 128)
         || !reader.blob(setup, max_setup_bytes) || !reader.word(count, 4) || count < 2 || count > max_match_seats)
         return error<SetupOffer>(SetupReason::malformed, "truncated offer or unsupported version/count");
+    if (version != (offer.domain == galactic_setup_domain ? 4U : 3U))
+        return error<SetupOffer>(SetupReason::malformed, "unsupported setup offer version for this mode; use matching builds");
     offer.setup.assign(setup.begin(), setup.end());
     for (std::uint64_t i = 0; i < count; ++i) {
         std::uint64_t peer{}, seat{}, player{};

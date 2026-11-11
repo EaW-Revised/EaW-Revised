@@ -502,9 +502,11 @@ core::Result<void> plan_fiscal_setup(const data::galactic::GalacticData& data, c
             const auto named = std::find_if(model.value().names.begin(), model.value().names.end(),
                 [&](const auto& row) { return row.id == planet.id; });
             const auto* source = data.planet(named->name);
-            const auto value = alignment(source->force_alignment);
-            if (!value || !source->force_strength) return invalid<void>("invalid or absent planet alignment/strength", source->file);
-            rules.planets.push_back({planet.id, *value, *source->force_strength});
+            // CGS-16: a planet type that authors no alignment keeps the type default (invalid alignment, strength 0);
+            // the data owns the refusal only for an authored name that is not Light/Neutral/Dark.
+            const auto value = source->force_alignment.empty() ? std::optional{gc::IncomeAlignment::invalid} : alignment(source->force_alignment);
+            if (!value) return invalid<void>("unknown planet alignment name", source->file);
+            rules.planets.push_back({planet.id, *value, source->force_strength.value_or(sim::math::Fixed{})});
         }
         for (const auto& route : model.value().routes) {
             const auto named = std::find_if(model.value().names.begin(), model.value().names.end(),
@@ -854,6 +856,7 @@ core::Result<CampaignSetupPlan> plan_campaign_setup(const data::galactic::Galact
     if (plan.human_observers_.empty() && plan.solo_reference_human_) plan.human_observers_.push_back(*plan.solo_reference_human_);
     plan.mode_ = options.mode;
     plan.rules_flavour_ = options.resolved_rules_flavour();
+    plan.vote_timeout_seconds_ = options.vote_timeout_seconds;
     // GOBS-01 / WGS-04: campaign definition construction defaults auto-reveal true.
     plan.observer_auto_reveal_ = campaign->planet_auto_reveal.value_or(true);
     if (const auto* delay = data.constant("Planet_Reveal_Delay_Time")) plan.observer_reveal_delay_ = delay->number;
@@ -1142,7 +1145,7 @@ core::Result<CampaignRoot> CampaignRoot::create(CampaignSetupPlan plan, const Ca
         placement_context = std::move(prepared).value();
         auto omitted = normalize_campaign_census(placement_context->census, load_buffer, plan.campaign_name());
         placement_context->omitted_templates.insert(omitted.begin(), omitted.end());
-        auto nested = prepare_nested_creation(*services.stock_starting_forces, &load_buffer, &placement_context->omitted_templates);
+        auto nested = prepare_initial_nested_creation(*services.stock_starting_forces, &load_buffer, &placement_context->omitted_templates);
         if (!nested) return core::Result<CampaignRoot>::failure(nested.error());
         placement_context->production.nested_creation = std::move(nested).value();
         // An unusable company is a construction limitation, not a reason to

@@ -21,6 +21,7 @@ struct DescriptionEntry {
     std::string name;
     std::optional<std::string> version;
     std::optional<std::array<std::uint8_t, 32>> checksum;
+    std::optional<std::array<std::uint8_t, 32>> portable_tree{};
     friend bool operator==(const DescriptionEntry&, const DescriptionEntry&) = default;
 };
 struct ModDescription {
@@ -29,7 +30,7 @@ struct ModDescription {
     friend bool operator==(const ModDescription&, const ModDescription&) = default;
 };
 
-// Version 1, little endian. Both operations reject invalid or unrepresentable descriptions.
+// Version 3, little endian. Both operations reject invalid or unrepresentable descriptions.
 [[nodiscard]] std::optional<std::vector<std::uint8_t>> encode_description(const ModDescription& description);
 [[nodiscard]] std::optional<ModDescription> decode_description(std::span<const std::uint8_t> bytes);
 [[nodiscard]] ModDescription describe_chain(const Chain& chain, std::span<const ModRecord> records);
@@ -37,6 +38,8 @@ struct ModDescription {
 // resolved against `records`. Entries carry the portable key (incl. "#variant:"), name, authored version and, only for
 // records whose content digest is ready, the 32-byte checksum. Paths and aliases never enter the result.
 [[nodiscard]] ModDescription describe_mounted_profile(const Profile& profile, std::span<const ModRecord> records);
+
+[[nodiscard]] bool matching_portable_trees(const ModDescription& host, const ModDescription& local);
 
 enum class FindingKind { missing, extra, reordered, version_changed, content_changed, checksum_unavailable, unknown_identity, unknown_version, incomplete };
 struct DescriptionFinding {

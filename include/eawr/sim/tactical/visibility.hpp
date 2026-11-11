@@ -30,6 +30,7 @@ struct SensorProfile {
     math::Vec2 box_offset{};   // V-21: unscaled authored offset, yaw oriented
     math::Vec3 flash_offset{}; // V-19: model box centre, added without unit yaw
     math::Fixed flash_radius{};
+    bool hide_when_fogged{}; // land static presentation input; visibility mask remains sensor contact
     friend constexpr bool operator==(const SensorProfile&, const SensorProfile&) noexcept = default;
 };
 

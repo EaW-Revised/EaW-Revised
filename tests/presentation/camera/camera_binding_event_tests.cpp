@@ -704,4 +704,208 @@ void test_orbit_cancellation() {
                  "a fresh press after pointer exit orbits");
 }
 
+// #5990: a middle-button drag holds the pointer where it started.
+void test_pointer_hold() {
+    constexpr std::uint8_t ctrl = input::modifier::ctrl;
+    const auto press_at = [](const float x, const float y, const std::uint8_t modifiers, const bool pressed) {
+        auto event = with_modifiers(button(input::mouse_code::middle, pressed), modifiers);
+        event.has_position = true;
+        event.position_x = x;
+        event.position_y = y;
+        return event;
+    };
+    input::Adapter adapter(input::Context::land, true);
+    expect(adapter.activate(table_with(orbit_bindings, law_head)).has_value(), "hold table activates");
+    expect(adapter.set_viewport(1280.0F, 720.0F).has_value(), "hold viewport publishes");
+    expect(!adapter.pointer_hold(), "no hold before a press");
+
+    // The host's frame decision, including every reason the pointer feed ends.
+    expect(input::hold_step(false, true) == input::HoldStep::none, "no hold, feed on: nothing to do");
+    expect(input::hold_step(false, false) == input::HoldStep::none, "no hold, feed off: nothing to do");
+    expect(input::hold_step(true, true) == input::HoldStep::warp, "hold with feed on warps back");
+    expect(input::hold_step(true, false) == input::HoldStep::release,
+           "hold with the feed off (focus, minimize, menu, modal) releases");
+
+    if (!input::pointer_hold_supported) {
+        // Without a warp the pointer is not held, so edge scrolling must not be skipped either.
+        send(adapter, press_at(1.0F, 360.0F, 0U, true), "press at the left edge, no warp platform");
+        expect(!adapter.pointer_hold(), "no hold where the host cannot warp");
+        send(adapter, motion(1.0F, 360.0F, 0.0F, 0.0F), "motion at the left edge");
+        expect_close(step(adapter).pan_x, -1.0F, "edge scrolling stays on without a hold");
+        return;
+    }
+
+    // Plain drag and Ctrl drag both hold, at the press position.
+    send(adapter, press_at(300.0F, 200.0F, 0U, true), "plain middle press");
+    expect(adapter.pointer_hold() && (*adapter.pointer_hold())[0] == 300.0F
+               && (*adapter.pointer_hold())[1] == 200.0F, "plain middle press holds at the press point");
+    // Relative motion still drives the camera while held, wherever the pointer reports.
+    send(adapter, motion(320.0F, 200.0F, 20.0F, 0.0F), "held drag");
+    expect_close(step(adapter).translate_x, 20.0F * 4.0F * 100.0F / 1280.0F, "held drag still translates");
+    expect(adapter.pointer_hold().has_value(), "the hold survives motion");
+    send(adapter, press_at(300.0F, 200.0F, 0U, false), "release");
+    expect(!adapter.pointer_hold(), "release ends the hold");
+
+    send(adapter, press_at(640.0F, 360.0F, ctrl, true), "Ctrl middle press");
+    expect(adapter.pointer_hold().has_value(), "Ctrl middle press holds");
+    // Ctrl released mid-drag: the grab is still held, so is the pointer; the
+    // release of the button ends it whatever the modifiers are.
+    send(adapter, press_at(660.0F, 360.0F, 0U, false), "release after Ctrl was let go");
+    expect(!adapter.pointer_hold(), "release without Ctrl ends the hold");
+
+    // While held the drag is position minus the last known position, never
+    // Godot's relative: the warp's own move and a merged frame cannot flip it.
+    constexpr float per_pixel = 4.0F * 100.0F / 1280.0F;
+    send(adapter, press_at(300.0F, 200.0F, 0U, true), "press for the warp cases");
+    send(adapter, motion(310.0F, 200.0F, 10.0F, 0.0F), "user motion before the warp");
+    const auto warp = adapter.take_pointer_hold_warp();
+    expect(warp && (*warp)[0] == 300.0F && (*warp)[1] == 200.0F, "the warp target is the press point");
+    send(adapter, motion(300.0F, 200.0F, -10.0F, 0.0F), "warp echo alone");
+    send(adapter, motion(305.0F, 200.0F, 5.0F, 0.0F), "user motion after the warp");
+    expect_close(step(adapter).translate_x, 15.0F * per_pixel, "an echo alone adds nothing: +10 and +5");
+
+    // Coalesced frame: the echo (-10) merged with real motion (+5) arrives as one
+    // event at position 305 with relative -5. The real motion is +5, not -5.
+    static_cast<void>(adapter.take_pointer_hold_warp());
+    send(adapter, motion(305.0F, 200.0F, -5.0F, 0.0F), "echo merged with real motion");
+    expect_close(step(adapter).translate_x, 5.0F * per_pixel, "merged echo plus motion gives the real motion");
+    // Several busy frames in a row keep the sign and the sum.
+    float sum = 0.0F;
+    for (const float real : {3.0F, 7.0F, 2.0F}) {
+        static_cast<void>(adapter.take_pointer_hold_warp());
+        send(adapter, motion(300.0F + real, 200.0F, real - 9.0F, 0.0F), "merged frame");
+        sum += real;
+    }
+    expect_close(step(adapter).translate_x, sum * per_pixel, "a run of merged frames sums the real motion");
+
+    // No motion at all: the pointer stays on the anchor, whatever relative says.
+    static_cast<void>(adapter.take_pointer_hold_warp());
+    send(adapter, motion(300.0F, 200.0F, 0.0F, 0.0F), "no motion");
+    send(adapter, motion(300.0F, 200.0F, -9.0F, 0.0F), "echo with no real motion");
+    expect_close(step(adapter).translate_x, 0.0F, "zero motion gives zero");
+
+    // Without a warp the delta continues from the last position seen.
+    send(adapter, motion(320.0F, 200.0F, 0.0F, 0.0F), "motion, relative ignored");
+    send(adapter, motion(330.0F, 200.0F, 0.0F, 0.0F), "motion, relative ignored");
+    expect_close(step(adapter).translate_x, 30.0F * per_pixel, "positions chain without a warp");
+    // A warp request with nothing held asks for nothing.
+    send(adapter, press_at(300.0F, 200.0F, 0U, false), "release after the warp cases");
+    expect(!adapter.take_pointer_hold_warp(), "no hold, no warp");
+
+    // No edge sample while held: a press at the left edge must not scroll.
+    auto edge = press_at(1.0F, 360.0F, 0U, true);
+    send(adapter, edge, "press at the left edge");
+    send(adapter, motion(1.0F, 360.0F, 0.0F, 0.0F), "motion at the left edge");
+    expect_close(step(adapter).pan_x, 0.0F, "a held pointer at the edge does not edge-scroll");
+    send(adapter, press_at(1.0F, 360.0F, 0U, false), "release at the edge");
+    send(adapter, motion(1.0F, 360.0F, 0.0F, 0.0F), "motion at the edge after release");
+    expect_close(step(adapter).pan_x, -1.0F, "the edge scrolls again after release");
+
+    // Every other exit ends the hold.
+    const auto held = [&] {
+        send(adapter, press_at(300.0F, 200.0F, 0U, true), "press for exit case");
+        return adapter.pointer_hold().has_value();
+    };
+    expect(held(), "hold for focus loss");
+    adapter.set_focus(false);
+    expect(!adapter.pointer_hold(), "focus loss ends the hold");
+    adapter.set_focus(true);
+    expect(held(), "hold for pointer exit");
+    adapter.pointer_left();
+    expect(!adapter.pointer_hold(), "pointer exit (menu, modal, minimize) ends the hold");
+    expect(held(), "hold for viewport change");
+    expect(adapter.set_viewport(1024.0F, 768.0F).has_value(), "viewport republish");
+    expect(!adapter.pointer_hold(), "viewport change ends the hold");
+    expect(held(), "hold for capture lock");
+    adapter.set_capture_locked(true);
+    expect(!adapter.pointer_hold(), "capture lock ends the hold");
+    adapter.set_capture_locked(false);
+    expect(held(), "hold for context change");
+    adapter.set_context(input::Context::space);
+    expect(!adapter.pointer_hold(), "context change ends the hold");
+
+    // A press without a position, or with a non-finite one, holds nothing.
+    adapter.set_context(input::Context::land);
+    send(adapter, button(input::mouse_code::middle, true), "press without a position");
+    expect(!adapter.pointer_hold(), "no position, no hold");
+}
+
+// #5990: the hold object alone, as the galactic scroll uses it: positions in, drag out.
+void test_pointer_hold_object() {
+    input::PointerHold hold;
+    expect(!hold.active(), "a new hold is inactive");
+    hold.begin(std::numeric_limits<float>::quiet_NaN(), 10.0F);
+    expect(!hold.active(), "a non-finite press holds nothing");
+    hold.begin(500.0F, 300.0F);
+    expect(hold.active(), "a press holds");
+    auto d = hold.delta(510.0F, 300.0F);
+    expect_close(d[0], 10.0F, "first motion is its distance from the press");
+    hold.note_warp();
+    d = hold.delta(500.0F, 300.0F);
+    expect_close(d[0], 0.0F, "the warp's own move is zero");
+    hold.note_warp();
+    d = hold.delta(505.0F, 302.0F);
+    expect_close(d[0], 5.0F, "echo merged with real motion is the real motion");
+    expect_close(d[1], 2.0F, "and on y");
+    d = hold.delta(505.0F, 302.0F);
+    expect_close(d[0] + d[1], 0.0F, "no movement is zero");
+    hold.end();
+    expect(!hold.active(), "end releases");
+    expect(input::hold_step(true, false) == input::HoldStep::release, "feed off releases");
+}
+
+// #5990: retail reads only Ctrl for the middle-button drag; Shift, Alt and Meta neither block it nor change it.
+void test_middle_drag_ignores_other_modifiers() {
+    constexpr std::uint8_t ctrl = input::modifier::ctrl;
+    constexpr float per_pixel_x = 4.0F * 100.0F / 1280.0F;
+    const auto press_at = [](const std::uint8_t modifiers, const bool pressed) {
+        auto event = with_modifiers(button(input::mouse_code::middle, pressed), modifiers);
+        event.has_position = true;
+        event.position_x = 300.0F;
+        event.position_y = 200.0F;
+        return event;
+    };
+    for (const std::uint8_t extra : {input::modifier::shift, input::modifier::alt, input::modifier::meta,
+                                     static_cast<std::uint8_t>(input::modifier::shift | input::modifier::alt)}) {
+        input::Adapter adapter(input::Context::land, true);
+        expect(adapter.activate(table_with(orbit_bindings, law_head)).has_value(), "modifier table activates");
+        expect(adapter.set_viewport(1280.0F, 720.0F).has_value(), "modifier viewport publishes");
+        send(adapter, press_at(extra, true), "modified middle press");
+        expect(adapter.is_held(input::Action::rotate_grab), "a modified middle press still grabs");
+        expect(!input::pointer_hold_supported || adapter.pointer_hold().has_value(), "and holds the pointer");
+        send(adapter, with_modifiers(motion(310.0F, 200.0F, 10.0F, 0.0F), extra), "modified drag");
+        const auto plain = step(adapter);
+        expect_close(plain.translate_x, 10.0F * per_pixel_x, "Shift, Alt or Meta plus middle translates like a plain drag");
+        expect_close(plain.rotate_units, 0.0F, "and does not rotate");
+        expect_close(plain.drag_x, 0.0F, "and Alt does not also pan the pointer");
+        send(adapter, with_modifiers(motion(320.0F, 206.0F, 10.0F, 6.0F), static_cast<std::uint8_t>(extra | ctrl)),
+             "Ctrl added mid-drag");
+        const auto turned = step(adapter);
+        expect(turned.rotate_units != 0.0F || turned.orbit_pitch_units != 0.0F, "Ctrl still picks rotate and tilt");
+        expect_close(turned.translate_x, 0.0F, "and stops the translate");
+        send(adapter, press_at(0U, false), "release");
+        expect(!adapter.pointer_hold(), "release ends the hold");
+    }
+}
+
+// #5990: the galaxy's shared drag hold. Esc/F5/F6 (save menu), dialogs and panels clear the drag flags without
+// touching the hold; the hold must then end so the next press anchors afresh.
+void test_galaxy_drag_hold_step() {
+    using input::DragHold;
+    using input::drag_hold_step;
+    // A press in the overview begins; a second button during the drag keeps the first anchor.
+    expect(drag_hold_step(true, false, true, true, true) == DragHold::begin, "an overview press begins a hold");
+    expect(drag_hold_step(true, true, true, true, true) == DragHold::keep, "a second button keeps the anchor");
+    // The save menu opens mid-drag and clears the flags: the stale hold ends, then the next press begins again.
+    expect(drag_hold_step(false, true, false, true, true) == DragHold::end, "a stale hold with no drag flag ends");
+    expect(drag_hold_step(false, false, false, true, true) == DragHold::keep, "no flags and no hold: nothing to do");
+    expect(drag_hold_step(true, false, true, true, true) == DragHold::begin, "the next press anchors afresh");
+    // Planet and focused views: no hold, so the cursor is not frozen where nothing can move.
+    expect(drag_hold_step(true, false, true, false, true) == DragHold::keep, "a press outside the overview holds nothing");
+    // Where the host cannot warp: no hold.
+    expect(drag_hold_step(true, false, true, true, false) == DragHold::keep, "no hold without a warp");
+    // The last release ends it.
+    expect(drag_hold_step(false, true, false, true, true) == DragHold::end, "the last release ends the hold");
+}
+
 } // namespace eawr_camera_binding_test

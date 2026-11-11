@@ -207,7 +207,8 @@ core::Result<tactical::CommandPayload> command_payload(const TacticalIntent& int
                 || intent.unit_ability == tactical::AbilityKind::energy_weapon
                 || intent.unit_ability == tactical::AbilityKind::tractor_beam
                 || intent.unit_ability == tactical::AbilityKind::leech_shields
-                || intent.unit_ability == tactical::AbilityKind::super_laser)
+                || intent.unit_ability == tactical::AbilityKind::super_laser
+                || intent.unit_ability == tactical::AbilityKind::lucky_shot)
                 && intent.ability_action == tactical::AbilityAction::activate) {
                 if (intent.target == sim::invalid_entity_id) {
                     return Payload::failure(failure(diagnostic_codes::invalid_intent, "this ability needs a target unit"));

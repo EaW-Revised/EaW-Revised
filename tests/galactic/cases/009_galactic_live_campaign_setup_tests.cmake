@@ -20,6 +20,8 @@ eawr_add_game_data_test(NAME galactic_origin_starbase_stock COMMAND galactic_liv
 set_tests_properties(galactic_origin_starbase_stock PROPERTIES LABELS game-data SKIP_REGULAR_EXPRESSION "SKIPPED:")
 eawr_add_game_data_test(NAME galactic_steal_offers_stock COMMAND galactic_live_campaign_setup_tests --steal-offers)
 set_tests_properties(galactic_steal_offers_stock PROPERTIES LABELS game-data SKIP_REGULAR_EXPRESSION "SKIPPED:")
+eawr_add_game_data_test(NAME galactic_removal_authoring_stock COMMAND galactic_live_campaign_setup_tests --removal-authoring)
+set_tests_properties(galactic_removal_authoring_stock PROPERTIES LABELS game-data SKIP_REGULAR_EXPRESSION "SKIPPED:")
 eawr_add_game_data_test(NAME galactic_unscouted_intel_stock COMMAND galactic_live_campaign_setup_tests --unscouted-intel)
 set_tests_properties(galactic_unscouted_intel_stock PROPERTIES LABELS game-data SKIP_REGULAR_EXPRESSION "SKIPPED:")
 
@@ -43,3 +45,11 @@ set_tests_properties(galactic_unresolved_location PROPERTIES LABELS game-data SK
 
 eawr_add_game_data_test(NAME galactic_guard_load_notes_stock COMMAND galactic_live_campaign_setup_tests --guard-load-notes)
 eawr_add_game_data_test(NAME galactic_production_load_notes_stock COMMAND galactic_live_campaign_setup_tests --production-load-notes)
+# About 25 minutes each (thousands of AI ticks, then a restore): batch-only keeps them out of routine runs; run by name.
+eawr_add_game_data_test(NAME galactic_coop_native_ai_restore_stock COMMAND galactic_live_campaign_setup_tests --coop-native-ai-restore)
+set_tests_properties(galactic_coop_native_ai_restore_stock PROPERTIES LABELS "game-data;batch-only" TIMEOUT 7200 SKIP_REGULAR_EXPRESSION "SKIPPED:")
+eawr_add_game_data_test(NAME galactic_native_ai_restore_matrix_stock COMMAND galactic_live_campaign_setup_tests --native-ai-restore-matrix)
+set_tests_properties(galactic_native_ai_restore_matrix_stock PROPERTIES LABELS "game-data;batch-only" TIMEOUT 7200 SKIP_REGULAR_EXPRESSION "SKIPPED:")
+# The #6388 rig save's shape on worker threads, probed at several ticks (about an hour on a pool host): batch-only like the others.
+eawr_add_game_data_test(NAME galactic_coop_native_ai_restore_live_stock COMMAND galactic_live_campaign_setup_tests --coop-native-ai-restore-live)
+set_tests_properties(galactic_coop_native_ai_restore_live_stock PROPERTIES LABELS "game-data;batch-only" TIMEOUT 7200 SKIP_REGULAR_EXPRESSION "SKIPPED:")

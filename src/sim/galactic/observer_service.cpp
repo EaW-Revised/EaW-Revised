@@ -193,6 +193,20 @@ core::Result<void> GalacticSession::Impl::service_discovery(const PartitionExecu
     discovery_records = discovery_targets = 0;
     if (!observer) return core::Result<void>::success();
     const auto& inputs = *observer;
+    if (inputs.planets.empty() || inputs.players.size() != setup.players.size()
+        || inputs.planets.size() != setup.planets.size()
+        || inputs.records.size() != inputs.players.size() * inputs.planets.size()) {
+        // One note per cause: the same mismatch holds every tick and would otherwise grow the list without bound.
+        if (!discovery_shape_noted) {
+            discovery_shape_noted = true;
+            core::LoadNote note;
+            note.code = diagnostic_codes::invalid_setup; note.diagnostic_code = diagnostic_codes::invalid_setup;
+            note.phase = core::LoadPhase::runtime; note.action = core::LoadAction::runtime_degraded;
+            note.message = "discovery skipped: observer table shape differs from setup";
+            core::LoadNoteBuffer buffer; buffer.runtime(std::move(note)); merge_load_notes(buffer);
+        }
+        return core::Result<void>::success();
+    }
     const auto live_fleets = sorted_fleets();
     const auto actors = actor_inputs();
     std::vector<od::PresenceTable> fleet_stages(live_fleets.size());

@@ -13,6 +13,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <map>
 #include <set>
 #include <string>
 #include <utility>
@@ -35,6 +36,10 @@ struct ArrivalSlotState final {
     std::size_t warm_requested{}, warm_admitted{};
     std::uint64_t warm_estimated_bytes{}, warm_available_bytes{};
     bool warm_complete{true}, warm_probe_available{}, warm_budget_off{};
+    std::uint64_t warm_resident_bytes{};
+    std::uint64_t launch_read_bytes{}, frame_launch_read_bytes{};
+    bool warm_out_of_memory{};
+    std::map<std::pair<sim::tactical::PlayerId, std::string>, std::string> warm_fallbacks;
     std::vector<sim::EntityId> undrawn;
     std::set<std::pair<sim::tactical::PlayerId, sim::tactical::TypeId>> purchases;
     std::set<std::pair<sim::tactical::PlayerId, sim::tactical::TypeId>> failed;

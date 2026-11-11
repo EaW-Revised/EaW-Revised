@@ -775,21 +775,49 @@ bool GalacticMode::State::service_corruption(const double elapsed) {
         galactic_view::observed_corruption(*displayed_snapshot, *galaxy, content->corruption_particle,
             publication, corruption_observation_scratch);
     if (options.hud_provider) options.hud_provider->corruption_frame(*this, elapsed);
+    // WGP-193: authored target effects follow successful committed ability notices,
+    // independently of persistent corruption and without reconstructing simulation outcomes.
+    if (game && audio_catalog && galaxy_setup.ability_host) {
+        const auto events = game->galactic_events_after(effect_event_cursor, sim::SeatId{galaxy->local.seat});
+        for (const auto& published : events.events) {
+            if (!published.feedback || published.feedback->kind != sim::galactic::GalacticFeedbackNotice::Kind::planet_destroyed) continue;
+            const auto& notice = *published.feedback;
+            if (notice.player != galaxy->local.player) continue;
+            const auto name = production_names.find(notice.source_type);
+            const auto& profiles = galaxy_setup.ability_host->profiles;
+            const auto ability_profile = std::find_if(profiles.begin(), profiles.end(), [&](const auto& row) { return row.type == notice.source_type; });
+            const auto planet = std::find_if(galaxy->planets.begin(), galaxy->planets.end(), [&](const auto& row) { return row.id == notice.planet; });
+            if (name == production_names.end() || ability_profile == profiles.end() || !ability_profile->destruction || planet == galaxy->planets.end()) continue;
+            auto [art, inserted] = destruction_effect_art.try_emplace(notice.source_type);
+            if (inserted) art->second = galactic_view::load_destruction_effect_art(*audio_catalog, name->second, ability_profile->destruction->name);
+            if (audio) audio->ability_sound(art->second.target_sfx, {planet->position.x, planet->position.y, planet->position.z});
+            publication.effects.push_back({published.cursor, notice.planet, galactic_view::GalacticEffectKind::planet_destruction,
+                art->second.target_particle, planet->position, static_cast<std::size_t>(art->second.layer),
+                art->second.lifetime_seconds, notice.logical_frame, art->second.scale});
+            ++destruction_effect_events;
+        }
+        effect_event_cursor = events.through;
+    }
     for (auto& fact : publication.planets) galactic_view::configure_corruption(fact, content->corruption_parameters);
     corruption_visuals.update(*galaxy, publication);
     const auto mounted = filesystem ? filesystem : (battle_content ? battle_content->filesystem : nullptr);
     if (!mounted || !audio_catalog) return true;
     std::array<bool, 4> occupied_layers{};
+    for (const auto& effect : corruption_visuals.one_shots) if (effect.layer) occupied_layers.at(*effect.layer) = true;
     for (const auto& attachment : corruption_visuals.attachments) {
         auto [entry, inserted] = corruption_particle_layers.try_emplace(attachment.fact.particle_type);
         if (inserted) entry->second = static_cast<std::size_t>(galactic_view::galactic_particle_layer(*audio_catalog, attachment.fact.particle_type));
         occupied_layers.at(entry->second) = true;
     }
+    const auto injected_frame = options.hud_provider ? options.hud_provider->corruption_display_frame() : std::nullopt;
+    const auto logical_frame = injected_frame.value_or(displayed_snapshot ? displayed_snapshot->clock().galactic_frame : 0);
     for (std::size_t layer = 0; layer < corruption_particles.size(); ++layer) {
         auto& particles = corruption_particles[layer];
         if (!particles && occupied_layers[layer] && scenes[layer].host)
             particles = std::make_unique<CorruptionParticles>(*scenes[layer].host, mounted);
         if (particles && !particles->service(corruption_visuals, *audio_catalog, *content, layer, camera, elapsed, failure)) return false;
+        if (particles && !particles->service_effects(corruption_visuals.one_shots, *audio_catalog, layer,
+            logical_frame, camera, elapsed, failure)) return false;
     }
     const auto& style = content->corruption_style;
     if (!corruption_lines && content->corruption_line_system
@@ -797,8 +825,6 @@ bool GalacticMode::State::service_corruption(const double elapsed) {
         const auto layer = static_cast<std::size_t>(galactic_view::galactic_particle_layer(*audio_catalog, style.line_particle));
         if (scenes[layer].host) corruption_lines = std::make_unique<CorruptionParticles>(*scenes[layer].host, mounted);
     }
-    const auto injected_frame = options.hud_provider ? options.hud_provider->corruption_display_frame() : std::nullopt;
-    const auto logical_frame = injected_frame.value_or(displayed_snapshot ? displayed_snapshot->clock().galactic_frame : 0);
     if (corruption_lines && content->corruption_line_system
         && !corruption_lines->service_lines(corruption_visuals, *galaxy, style, *content->corruption_line_system,
             logical_frame, camera, elapsed, failure)) return false;

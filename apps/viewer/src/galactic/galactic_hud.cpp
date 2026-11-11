@@ -3,6 +3,7 @@
 #include "viewer_load_notes.hpp"
 #include "galactic_lan_hud.hpp"
 #include "planet_label_scale.hpp"
+#include "command_bar_scale.hpp"
 #include "advisor_duration.hpp"
 #include "notice_text.hpp"
 #include "map_mode_types.hpp"
@@ -838,7 +839,7 @@ void GalacticMode::State::update_planet_levels(const galactic_view::ObjectId id,
         const float income_y = income ? income->vec2(data::ui::Field::offset).value_or(data::ui::Vec2{}).y : 0.0F;
         const auto texture = command_texture(textures.front());
         if (texture.is_null()) return;
-        const auto size = texture->get_size() * scale;
+        const auto size = texture->get_size() * galactic_view::command_bar_component_scale(*component, scale);
         const auto positions = std::min(images.size(), static_cast<std::size_t>(std::max<std::int64_t>(0, *capacity)));
         for (std::size_t index = 0; index < images.size(); ++index) {
             auto* image = images[index];
@@ -897,7 +898,7 @@ void GalacticMode::State::update_planet_bonus_icon(const galactic_view::ObjectId
     const auto offset = component->vec2(data::ui::Field::offset).value_or(data::ui::Vec2{});
     const auto size = texture->get_size();
     const auto rect = galactic_view::planet_bonus_icon_rect(anchor.x, anchor.y, offset.x, offset.y,
-        scale * component->number(data::ui::Field::scale).value_or(1.0F), size.x, size.y);
+        galactic_view::command_bar_component_scale(*component, scale), size.x, size.y);
     slot->set_texture(texture);
     slot->set_size({static_cast<float>(rect.width), static_cast<float>(rect.height)});
     slot->set_position({static_cast<float>(rect.x), static_cast<float>(rect.y)});
@@ -930,7 +931,7 @@ void GalacticMode::State::update_planet_status_icons(const galactic_view::Object
     if (base_levels_visible) if (const auto offset = authored("g_ground_icon", data::ui::Field::default_offset)) base_y = offset->y;
     const auto conflict_offset = conflict_style->vec2(data::ui::Field::offset).value_or(data::ui::Vec2{});
     const auto origin = galactic_view::status_row_origin(conflict_offset.x, conflict_offset.y, credit_y, base_y);
-    struct Entry final { TextureRect* image{}; Ref<Texture2D> texture; };
+    struct Entry final { TextureRect* image{}; Ref<Texture2D> texture; float authored_scale{}; };
     std::vector<Entry> entries;
     std::vector<double> widths;
     for (const auto kind : kinds) {
@@ -951,12 +952,16 @@ void GalacticMode::State::update_planet_status_icons(const galactic_view::Object
             slot->set_expand_mode(TextureRect::EXPAND_IGNORE_SIZE); world_overlays->add_child(slot);
         }
         if (build) slot->set_meta("production_texture", String::utf8(name.c_str()));
-        entries.push_back({slot, texture});
-        widths.push_back(texture->get_size().x);
+        const auto effect_component = galactic_view::status_effect_component_name(kind);
+        const auto* component = command_catalog.find(effect_component.empty()
+            ? (build ? "g_build" : "g_corruption_icon") : effect_component);
+        const float icon_scale = component ? galactic_view::command_bar_component_scale(*component, 1.0F) : 1.0F;
+        entries.push_back({slot, texture, icon_scale});
+        widths.push_back(texture->get_size().x * icon_scale);
     }
     const auto centres = galactic_view::status_row_centres(origin.x, widths);
     for (std::size_t index = 0; index < entries.size(); ++index) {
-        const auto size = entries[index].texture->get_size() * scale;
+        const auto size = entries[index].texture->get_size() * scale * entries[index].authored_scale;
         const Vector2 centre = anchor + Vector2(static_cast<float>(centres[index]), static_cast<float>(-origin.y)) * scale;
         entries[index].image->set_texture(entries[index].texture);
         entries[index].image->set_size(size);
@@ -1106,10 +1111,31 @@ void GalacticMode::State::build_command_bar_advisor(const data::ui::TextDatabase
     encyclopedia_panel->setup(std::move(popup_style));
     encyclopedia_panel->hide();
 
+    EawrUnitCards::Setup queue_setup;
+    fill_encyclopedia_popup(queue_setup, command_catalog, *filesystem, *hud_fonts, "english",
+        text, popup_diagnostics);
+    queue_setup.texture = [this](const std::string& name) { return command_texture(name); };
+    queue_setup.name = [](const std::string&) { return String(); };
+    queue_setup.encyclopedia = [](const std::string&) { return presentation::ui::UnitCardLooks{}; };
+    queue_setup.placement = [this] { return command_bar->placement(); };
+    queue_setup.space = [this] { return command_bar->space(); };
+    queue_setup.external_popup_anchor = [this] {
+        const auto point = presentation::ui::shell_to_screen(
+            {encyclopedia_anchor.x, encyclopedia_anchor.y, 0, 0}, command_bar->placement());
+        return Vector2(static_cast<float>(point.x), static_cast<float>(point.y));
+    };
+    queue_encyclopedia = memnew(EawrUnitCards);
+    queue_encyclopedia->set_name("GalacticQueueEncyclopedia");
+    queue_encyclopedia->set_z_index(9);
+    hud->add_child(queue_encyclopedia);
+    queue_encyclopedia->setup(std::move(queue_setup));
+
     // WGUI-35/94: localization comes from the text DB. No invented calendar.
     if (text) {
         if (const auto* entry = text->find("TEXT_CYCLES"))
             cycle_label = data::ui::to_utf8(entry->value);
+        if (const auto* entry = text->find("TEXT_TECH"))
+            technology_label = data::ui::to_utf8(entry->value);
     }
 }
 
@@ -1127,6 +1153,26 @@ bool GalacticMode::State::build_command_bar_shell() {
     setup.view = presentation::ui::hud_view_model(command_anchors, command_catalog,
         presentation::ui::alt_variant(command_faction), presentation::ui::vfs_shell_masks(*filesystem));
     const auto look = presentation::ui::hud_shell(command_anchors, command_catalog, command_faction);
+    // Report construction-time omissions once; frame refresh never repeats these warnings.
+    std::set<std::string> reported;
+    std::vector<std::string> optional_bindings;
+    for (const auto& diagnostic : look.diagnostics) {
+        const auto message = core::format_diagnostic(diagnostic);
+        if (!reported.insert(message).second) continue;
+        if (diagnostic.message.find("has no HUD blend") != std::string::npos)
+            UtilityFunctions::push_warning(String::utf8(message.c_str()));
+        else optional_bindings.push_back(message);
+    }
+    if (!optional_bindings.empty()) {
+        std::string summary = "GC shell (" + look.model + "): " + std::to_string(optional_bindings.size())
+            + " optional binding diagnostics; inspect definitions/anchors only for controls intended for GC"
+              " (tactical-only controls may remain absent). First examples: ";
+        for (std::size_t index = 0; index < std::min<std::size_t>(3, optional_bindings.size()); ++index) {
+            if (index) summary += " | ";
+            summary += optional_bindings[index];
+        }
+        UtilityFunctions::push_warning(String::utf8(summary.c_str()));
+    }
     for (const auto& mesh : look.meshes) {
         std::string why;
         const auto path = presentation::ui::vfs_standalone_textures(*filesystem)(mesh.texture);
@@ -1178,6 +1224,8 @@ void GalacticMode::State::build_command_bar_controls(const data::ui::TextDatabas
              "b_scroll_left", "b_scroll_right"};
     for (const auto& name : galactic_view::command_filter_names(command_catalog))
         if (std::find(names.begin(), names.end(), name) == names.end()) names.push_back(name);
+    for (const auto& name : galactic_view::command_menu_names(command_catalog))
+        if (std::find(names.begin(), names.end(), name) == names.end()) names.push_back(name);
     authored_controls = galactic_view::ControlStates{};
     build_command_controls(names, {}, text, true);
     add_story_controls(text);
@@ -1216,7 +1264,8 @@ void GalacticMode::State::build_command_controls(const std::vector<std::string>&
     std::vector<core::LoadNote> notes;
     const auto note = [&](const data::ui::CommandBarComponent& component, std::string tag, std::string value,
                           std::string message) {
-        core::LoadNote entry; entry.code = "EAWR-LOAD-UI-FILTER"; entry.file = component.logical_path;
+        core::LoadNote entry; entry.code = galactic_view::command_menu_action(component.name) == galactic_view::CommandMenuAction::none
+            ? "EAWR-LOAD-UI-FILTER" : "EAWR-LOAD-UI-COMMAND"; entry.file = component.logical_path;
         entry.line = component.line; entry.object = component.name; entry.tag = std::move(tag);
         entry.authored_value = std::move(value); entry.action = core::LoadAction::runtime_degraded;
         entry.message = std::move(message); notes.push_back(std::move(entry));
@@ -1225,9 +1274,13 @@ void GalacticMode::State::build_command_controls(const std::vector<std::string>&
         const auto* component = command_catalog.find(name);
         if (!component) continue;
         const bool filter = galactic_view::is_command_filter(*component);
-        const bool authored = filter || story_controls.contains(name); // state and flags come from the component
+        const auto menu = galactic_view::command_menu_action(name);
+        const bool authored = filter || menu != galactic_view::CommandMenuAction::none
+            || story_controls.contains(name); // state and flags come from the component
         if (!command_anchors.find(name)) {
             if (filter) note(*component, "Group", name, "Filter button has no shell anchor");
+            else if (menu != galactic_view::CommandMenuAction::none)
+                note(*component, "Type", name, "Command button has no shell anchor");
             continue;
         }
         auto* button = memnew(EawrHudButton);
@@ -1249,6 +1302,13 @@ void GalacticMode::State::build_command_controls(const std::vector<std::string>&
             String tooltip = button->get_tooltip_text();
             if (!tooltip.is_empty()) tooltip += String("\n");
             tooltip += String("Shared clock: any active human may pause or resume; a repeated press within 1 s is ignored");
+            button->set_tooltip_text(tooltip);
+        }
+        if (options.lan_match && std::string_view(name) == "b_fast_forward") {
+            // #5355: the shared 2x and its limits belong to the control that requests it.
+            String tooltip = button->get_tooltip_text();
+            if (!tooltip.is_empty()) tooltip += String("\n");
+            tooltip += String::utf8(galactic_view::lan_speed_tooltip().c_str());
             button->set_tooltip_text(tooltip);
         }
         const auto texture = [&](data::ui::Field field) {
@@ -1277,6 +1337,14 @@ void GalacticMode::State::build_command_controls(const std::vector<std::string>&
                     !component->flag(data::ui::Field::selected_alpha), true}});
         }
         button->set_flash_texture(texture(data::ui::Field::flash_texture_name));
+        if (menu != galactic_view::CommandMenuAction::none)
+            button->set_disabled(galactic_view::command_menu_disabled(menu,
+                component->flag(data::ui::Field::disabled), story_summary && story_summary->has_goals()));
+        // GHUDL-20: the camera has no action yet. Dim even when the authored control has no disabled art.
+        if (menu == galactic_view::CommandMenuAction::cinematic_camera) {
+            button->set_self_modulate(Color(0.5F, 0.5F, 0.5F, 1.0F));
+            note(*component, "Type", name, "Command button is inert: cinematic camera action is unavailable");
+        }
         button->set_action([this, name = std::string(name)] { press_command_control(name); });
         command_bar->add_child(button);
         command_buttons.emplace(name, button);
@@ -1298,14 +1366,36 @@ void GalacticMode::State::build_command_controls(const std::vector<std::string>&
 // One press of an authored or stock command-bar control, from a human or from a FORCE_CLICK_GUI reward. The action and
 // the press state are shared. A press made while the forced requests are drained is a forced one; it differs in not
 // raising the story click (ControlStateRules::forced_press_raises_story_click, off: the debug build's reward calls only
-// the control's click slot, not Tutorial_Click_UI; the slot's own body was not read) and in not refreshing the whole HUD
+// the control's click slot, not the story click the mouse handler raises; the slot's own body was not read) and in not refreshing the whole HUD
 // from inside the frame's own refresh.
 void GalacticMode::State::press_command_control(const std::string& name) {
-    const bool forced = forced_click_busy;
-    const bool raise = authored_controls.rules().raises_story_click(forced);
-    // WST-37: the plots hear a click on any control a STORY_CLICK_GUI event names, whatever else the click does.
-    if (raise && game && game->story_listens_for_click(name)) submit_gui_click(name);
-    if (authored_controls.has(name)) authored_controls.press(name);
+    class Effects final : public galactic_view::CommandPresses::Effects {
+    public:
+        explicit Effects(State& state) : state_(state) {}
+        [[nodiscard]] bool story_listens(const std::string& control) const override {
+            return state_.game && state_.game->story_listens_for_click(control);
+        }
+        void raise_click(const std::string& control) override { state_.submit_gui_click(control); }
+        void action(const std::string& control) override { state_.command_control_action(control); }
+        void refresh() override { state_.update_hud(); }
+    private:
+        State& state_;
+    } effects(*this);
+    command_presses.press(authored_controls, name, effects);
+}
+
+// What a press of a named control does besides its selection state and the story click.
+void GalacticMode::State::command_control_action(const std::string& name) {
+    const auto menu = galactic_view::command_menu_action(name);
+    if (menu == galactic_view::CommandMenuAction::options) {
+        if (save_controls) save_controls->open_menu();
+        return;
+    }
+    if (menu == galactic_view::CommandMenuAction::story_summary) {
+        service_story_summary(*this);
+        if (story_summary) story_summary->open(*this);
+        return;
+    }
     if (name == "b_space_tab") { selected_hud.space_tab = true; authored_controls.domain_changed(); }
     else if (name == "b_filters0") income_layer_visible = !income_layer_visible;
     else if (name == "b_filters1") base_levels_visible = !base_levels_visible;
@@ -1320,7 +1410,6 @@ void GalacticMode::State::press_command_control(const std::string& name) {
     else if (name == "b_fast_forward" && galactic_view::fast_forward_available(fast_forward_controls_enabled, paused, fast_forward_factor.has_value()) && game) {
         submit_strategic_speed(galactic_view::fast_forward_target(strategic_speed_now(), *fast_forward_factor));
     }
-    if (!forced) update_hud(); // a forced press runs inside the frame's update_hud already
 }
 
 // WST-75 / #5857: drains this seat's FORCE_CLICK_GUI requests. Each runs the named control's press path (its action and
@@ -1328,33 +1417,44 @@ void GalacticMode::State::press_command_control(const std::string& name) {
 // reward itself has no such gate in the debug build's reward function, and the slot's own check was not read); presses
 // beyond one drain's budget are dropped. Every drop is reported once per (control, reason), never an abort.
 void GalacticMode::State::service_forced_clicks() {
-    if (!game || !galaxy || forced_click_busy) return;
-    forced_click_busy = true; // a press never starts a second drain, whatever its action calls
-    struct Done { bool& busy; ~Done() { busy = false; } } done{forced_click_busy};
+    if (!game || !galaxy || command_presses.forced_press()) return;
     const auto published = game->story_presentation_after(forced_click_cursor, sim::SeatId{galaxy->local.seat});
-    galactic_view::ForcedClickBudget budget{sim::galactic::max_gui_clicks_per_tick};
-    const auto drop = [&](const std::string& component, const char* why) {
-        if (!forced_click_reported.insert(component + ' ' + why).second) return; // once per pair, like story_reported
-        core::LoadNote entry; entry.code = "EAWR-FORCE-CLICK"; entry.object = component;
-        entry.tag = "FORCE_CLICK_GUI"; entry.authored_value = component; entry.action = core::LoadAction::runtime_degraded;
-        entry.phase = core::LoadPhase::runtime; entry.message = why;
-        UtilityFunctions::push_warning(String::utf8(core::format_diagnostic(core::load_note_diagnostic(entry)).c_str()));
-    };
+    std::vector<std::string> components;
     for (const auto& row : published.events) {
         forced_click_cursor = row.cursor;
         const auto* request = std::get_if<sim::galactic::story::ConsumerRequest>(&row.event.payload);
         if (!request || request->consumer != sim::galactic::story::Consumer::gui || request->reward_name != "FORCE_CLICK_GUI"
             || request->parameters.empty()) continue;
-        const auto& component = request->parameters.front();
-        const auto found = std::find_if(command_buttons.begin(), command_buttons.end(), [&](const auto& entry) {
-            return entry.first.size() == component.size() && std::equal(entry.first.begin(), entry.first.end(), component.begin(),
-                [](char a, char b) { return std::tolower(static_cast<unsigned char>(a)) == std::tolower(static_cast<unsigned char>(b)); }); });
-        auto* button = found == command_buttons.end() ? nullptr : static_cast<EawrHudButton*>(found->second);
-        if (!button || button->is_disabled() || !button->is_visible_in_tree()) { drop(component, "the control is absent, hidden or disabled; no click"); continue; }
-        if (!budget.take()) { drop(component, "more forced clicks than one frame admits; the click is dropped"); continue; }
-        button->activate(); // the human press path minus the pointer and minus the story click
+        components.push_back(request->parameters.front());
     }
     forced_click_cursor = std::max(forced_click_cursor, published.through);
+    // The widgets behind the names; a name matches a control case-insensitively.
+    class Buttons final : public galactic_view::CommandPresses::Surface {
+    public:
+        explicit Buttons(std::map<std::string, godot::TextureButton*>& controls) : controls_(controls) {}
+        [[nodiscard]] galactic_view::CommandPresses::Target find(std::string_view component) const override {
+            const auto* button = lookup(component);
+            using Target = galactic_view::CommandPresses::Target;
+            return button ? Target{true, button->is_disabled(), button->is_visible_in_tree()} : Target{};
+        }
+        void activate(std::string_view component) override {
+            if (auto* button = lookup(component)) button->activate(); // the human press path minus the pointer and minus the story click
+        }
+    private:
+        [[nodiscard]] EawrHudButton* lookup(std::string_view component) const {
+            const auto found = std::find_if(controls_.begin(), controls_.end(), [&](const auto& entry) {
+                return entry.first.size() == component.size() && std::equal(entry.first.begin(), entry.first.end(), component.begin(),
+                    [](char a, char b) { return std::tolower(static_cast<unsigned char>(a)) == std::tolower(static_cast<unsigned char>(b)); }); });
+            return found == controls_.end() ? nullptr : static_cast<EawrHudButton*>(found->second);
+        }
+        std::map<std::string, godot::TextureButton*>& controls_;
+    } buttons(command_buttons);
+    command_presses.drain(components, buttons, sim::galactic::max_gui_clicks_per_tick, [](const galactic_view::CommandPresses::Drop& dropped) {
+        core::LoadNote entry; entry.code = "EAWR-FORCE-CLICK"; entry.object = dropped.component;
+        entry.tag = "FORCE_CLICK_GUI"; entry.authored_value = dropped.component; entry.action = core::LoadAction::runtime_degraded;
+        entry.phase = core::LoadPhase::runtime; entry.message = dropped.reason;
+        UtilityFunctions::push_warning(String::utf8(core::format_diagnostic(core::load_note_diagnostic(entry)).c_str()));
+    });
 }
 
 void GalacticMode::State::build_command_bar_choices(const pugi::xml_document& document) {
@@ -1651,8 +1751,34 @@ void GalacticMode::State::service_encyclopedia() {
         hovered = choice.type_id; hovered_choice = &choice; break;
     }
     if (!hovered) for (const auto& [name, row] : displayed_queues) {
-        if (pointer != command_buttons.at(name)) continue;
-        hovered = row.type_id; hovered_queue = &row; break;
+        const auto* button = command_buttons.at(name);
+        if (pointer != button || !button->is_visible_in_tree()) continue;
+        hovered_queue = &row; break;
+    }
+    // PU-73 / GHUD-C04: queue details use the shared external unit-card hook,
+    // full header and admitted queue price (WGEP-18..34), without remaining time.
+    // Borrow retained rows each frame; own content only when admission changes.
+    const auto publications = queue_hover.publications();
+    const bool queue_admitted = hovered_queue && encyclopedia_admitted();
+    if (queue_admitted) {
+        if (queue_hover_planet != selected_planet) queue_hover.clear();
+        queue_hover.publish(hovered_queue->build_id, hovered_queue->type, true);
+    } else queue_hover.clear();
+    if (queue_hover.publications() != publications) {
+        queue_encyclopedia->set_external_hover(0, std::nullopt);
+        if (const auto* active = queue_hover.get()) {
+            const auto art = production_art.find(active->type);
+            if (art != production_art.end())
+                queue_encyclopedia->set_external_hover(active->identity, art->second.encyclopedia_looks,
+                    {hovered_queue->price, {}, false});
+        }
+        queue_hover_planet = selected_planet;
+    }
+    if (queue_admitted) {
+        encyclopedia_timing = *encyclopedia_globals.timing;
+        encyclopedia_type = 0;
+        encyclopedia_panel->hide();
+        return;
     }
     const auto focused_type = focused_planet_hover_type();
     if (!hovered) hovered = focused_type;
@@ -1704,16 +1830,11 @@ void GalacticMode::State::service_encyclopedia() {
         || encyclopedia_planet != selected_planet || encyclopedia_width != camera.width || encyclopedia_height != camera.height
         || encyclopedia_existing_object != existing_object) {
         const galactic_view::BuildChoiceComponent* choice = hovered == encyclopedia_timing.shown ? hovered_choice : nullptr;
-        const galactic_view::QueueComponent* queue = hovered == encyclopedia_timing.shown ? hovered_queue : nullptr;
         if (!choice && !existing_object) for (const auto& [name, value] : displayed_choices) {
             static_cast<void>(name);
             if (value.type_id == encyclopedia_timing.shown) { choice = &value; break; }
         }
-        if (!queue && !existing_object) for (const auto& [name, value] : displayed_queues) {
-            static_cast<void>(name);
-            if (value.type_id == encyclopedia_timing.shown) { queue = &value; break; }
-        }
-        if (!choice && !queue && !existing_object) {
+        if (!choice && !existing_object) {
             encyclopedia_timing.shown = 0; encyclopedia_timing.alpha = 0; encyclopedia_panel->hide(); return;
         }
         const auto type_name = production_names.find(static_cast<sim::galactic::TypeId>(encyclopedia_timing.shown));
@@ -1747,13 +1868,15 @@ void GalacticMode::State::service_encyclopedia() {
 }
 
 void GalacticMode::State::configure_command_bar_text(const presentation::ui::ShellPlacement& placement, EawrHudText& label,
-    const data::ui::CommandBarComponent& component, const data::ui::ShellAnchor& anchor) {
+    const data::ui::CommandBarComponent& component, const data::ui::ShellAnchor& anchor, const bool second_text) {
     const HudTextStyleKey key{label.get_text(), &component, &anchor, camera.height, placement.scale};
     const auto previous = hud_text_styles.find(&label);
     if (previous != hud_text_styles.end() && previous->second == key) return;
     hud_text_styles.insert_or_assign(&label, key);
     ++hud_text_style_updates;
     auto look = *presentation::ui::hud_readout_style(command_catalog, component.name, anchor);
+    // A text button's second text sits at its own authored offset (debug build: Text_Offset2).
+    if (second_text) look.text_offset = component.vec2(data::ui::Field::text_offset2).value_or(data::ui::Vec2{});
     auto face = hud_fonts->resolve({look.text.face, look.text.point_size}, "english");
     int pixels = std::max(1, presentation::ui::font_pixel_height(face.point_size, camera.height));
     auto font = hud_fonts->command_font(face, pixels);
@@ -1781,7 +1904,7 @@ bool GalacticMode::State::update_command_bar_economy(const sim::galactic::Galact
     auto player = galactic_view::published_player_hud_facts(*displayed_snapshot, galaxy->local.player);
     if (fiscal_available) player.fiscal_cycle = clock.fiscal_cycle;
     player.hide_tech = command_faction == presentation::ui::HudFaction::underworld;
-    auto view = galactic_view::player_hud_view(player, cycle_label);
+    auto view = galactic_view::player_hud_view(player, cycle_label, technology_label);
     auto tooltip = galactic_view::income_forecast_text(displayed_snapshot->economy_forecast());
     std::string account;
     if (displayed_snapshot->player_economy()) for (const auto& economy : displayed_snapshot->player_economy()->players) {
@@ -1859,7 +1982,10 @@ void GalacticMode::State::update_command_bar_labels(const presentation::ui::Shel
         if (name == "Text_Day_Credits") {
             label->set_mouse_filter(Control::MOUSE_FILTER_STOP);
         } else if (name == "Text_Pop_Cap") label->set_mouse_filter(Control::MOUSE_FILTER_STOP);
-        set_command_bar_text(*label, String::utf8(value.c_str()).to_upper());
+        // GHUDL-19: readout labels retain their localized case; only planet names are uppercase.
+        auto displayed_text = String::utf8(value.c_str());
+        if (name == "Text_Planet") displayed_text = displayed_text.to_upper();
+        set_command_bar_text(*label, displayed_text);
         configure_command_bar_text(placement, *label, *component, *anchor);
         label->set_colour(Color(tint.r / 255.0F, tint.g / 255.0F, tint.b / 255.0F, tint.a / 255.0F));
         // Text wider than its authored box overflows about the anchor, not about the box edge the alignment uses.
@@ -1943,6 +2069,22 @@ void GalacticMode::State::update_command_bar_buttons(const presentation::ui::She
         const auto rect = command_bar_screen(placement, geometry.art);
         button->set_position(rect.position); button->set_size(rect.size);
         auto* hud_button = static_cast<EawrHudButton*>(button);
+        if (!component->flag(data::ui::Field::swap_texture)
+            && (galactic_view::is_command_filter(*component)
+                || name == "b_filters0" || name == "b_filters1" || name == "b_filters2" || name == "b_filters3"
+                || galactic_view::command_menu_action(name) != galactic_view::CommandMenuAction::none)) {
+            // GHUD-S73/HCB-12g: retain each layer at its own scaled texture size.
+            const auto icon = command_texture_optional(command_bar_token(*component, data::ui::Field::icon_texture_name));
+            const float layer_scale = galactic_view::command_bar_component_scale(*component,
+                static_cast<float>(placement.scale));
+            const auto backing = button->get_texture_normal();
+            if (icon.is_valid() && (backing.is_null() || icon->get_size() != backing->get_size())) {
+                const auto box = galactic_view::command_layer_rect(rect.size.x, rect.size.y,
+                    static_cast<float>(icon->get_width()), static_cast<float>(icon->get_height()), layer_scale);
+                hud_button->set_cell_portrait_box(Rect2(box.x, box.y, box.width, box.height));
+                hud_button->set_special_overlay_natural_scale(layer_scale);
+            }
+        }
         // Composite tab art overlaps; only the authored shell mesh is active.
         const auto hit = command_bar_screen(placement, geometry.hit);
         hud_button->set_hit_rect(Rect2(hit.position - rect.position, hit.size));
@@ -1970,7 +2112,7 @@ void GalacticMode::State::update_command_bar_buttons(const presentation::ui::She
             hud_button->set_flashing(paused && clock_controls_enabled);
         } else if (name == "b_fast_forward") {
             button->set_disabled(!galactic_view::fast_forward_available(fast_forward_controls_enabled, paused, fast_forward_factor.has_value()));
-            button->set_pressed_no_signal(fast_forward_factor && clock.strategic_speed == *fast_forward_factor);
+            button->set_pressed_no_signal(fast_forward_shown_pressed(clock));
         }
         if (!component->flag(data::ui::Field::swap_texture) && button->is_visible_in_tree()) {
             // Programmatic toggle/disabled changes emit no button signals; update the retained layers too.
@@ -2129,15 +2271,25 @@ galactic_view::ClockGates GalacticMode::State::clock_gates() const {
 
 void GalacticMode::State::update_command_bar() {
     if (!command_bar || !displayed_snapshot) return;
+    // WGUI-36: presentation goals can change without moving the retained economy/selection key.
+    // Refresh their admission before that cache can return; authored Disabled always takes precedence.
+    for (const auto& [name, button] : command_buttons) {
+        const auto menu = galactic_view::command_menu_action(name);
+        if (menu != galactic_view::CommandMenuAction::story_summary) continue;
+        const auto* component = command_catalog.find(name);
+        const bool disabled = galactic_view::command_menu_disabled(menu,
+            component->flag(data::ui::Field::disabled), story_summary && story_summary->has_goals());
+        if (button->is_disabled() != disabled) button->set_disabled(disabled);
+    }
     const auto gates = clock_gates();
     const bool clock_enabled = galactic_view::clock_controls_open(gates);
-    // TM-04: with several humans the shared pause works, but fast forward stays off.
-    const bool fast_forward_enabled = galactic_view::fast_forward_controls_admitted(clock_enabled, gates.active_humans, gates.fixture);
+    // #5355: fast forward follows the clock controls; in multiplayer it is the shared 2x through the agreed command.
+    const bool fast_forward_enabled = clock_enabled;
     const auto& clock = displayed_snapshot->clock();
     const bool fiscal_available = clock.fiscal_cycle >= 1 && clock.fiscal_end > clock.fiscal_start;
-    // TM-03/04: a live campaign (no synthetic HUD fixture) fast-forwards at the shared 4x rule; the
-    // button stays disabled with more than one human, as in retail network play.
-    if (const auto live = galactic_view::live_fast_forward_factor(bool(options.hud_provider), game != nullptr)) fast_forward_factor = live;
+    // TM-03/04, MP-06: a live solo campaign (no synthetic HUD fixture) fast-forwards at 4x; a multiplayer campaign at 2x.
+    if (const auto live = galactic_view::live_fast_forward_factor(bool(options.hud_provider), game != nullptr,
+            gates.lan_match || gates.active_humans > 1)) fast_forward_factor = live;
     // #4331: derive what the bar reads of this publication; only a result that differs from the last one moves a revision.
     if (update_command_bar_economy(clock, fiscal_available)) ++hud_economy_revision;
     const auto selected = hud_facts.find(selected_planet);
@@ -2175,7 +2327,7 @@ void GalacticMode::State::update_command_bar() {
             base_levels_visible, income_layer_visible, clock_enabled, fast_forward_enabled, paused, choice_page,
             fast_forward_factor, seat_flight().state(), command_bar->placement(), camera.height,
             hud_economy_revision, hud_view_revision, fiscal_pip(clock, fiscal_available),
-            fast_forward_factor && clock.strategic_speed == *fast_forward_factor,
+            fast_forward_shown_pressed(clock),
             selected == hud_facts.end() ? std::nullopt : std::optional(selected->second.name_colour),
             selected == hud_facts.end() ? std::nullopt : selected->second.observed_owner, native_toggles()};
     };

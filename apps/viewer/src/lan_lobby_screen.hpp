@@ -242,8 +242,9 @@ private:
     void refresh_staging();
     // GCMP-07 (#4363): the Galactic Conquest mode of the staging; the room's mode comes from the lobby snapshot.
     void configure_galactic_content();
-    // The galactic backend (created on first use) with its content load running on a worker thread. True once the load finished.
-    [[nodiscard]] bool prefetch_galactic_content();
+    // The galactic backend (created on first use) with its content load running on a worker thread. True once the load finished and,
+    // when `needs_mod_digests`, the mounted mods' content digests settled too (Load Game compares a save's mod list; a fresh host does not, #6349).
+    [[nodiscard]] bool prefetch_galactic_content(bool needs_mod_digests = false);
     // The campaign's localized title for the room list; the campaign name itself while its content is not loaded.
     [[nodiscard]] std::string campaign_display_name(const std::string& campaign);
     void finish_pending_galactic();

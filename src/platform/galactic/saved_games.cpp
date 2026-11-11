@@ -3,6 +3,7 @@
 #include "save_repository.hpp"
 
 #include "eawr/checkpoint/checkpoint.hpp"
+#include "eawr/checkpoint/tactical.hpp"
 
 #include <algorithm>
 
@@ -17,6 +18,24 @@ std::string utf8_directory(const std::filesystem::path& directory) {
 
 core::Result<std::vector<LiveSaveSlot>> list_saved_games(const std::filesystem::path& directory) {
     return save_detail::list(utf8_directory(directory));
+}
+
+core::Result<sim::tactical::TacticalSetup> skirmish_save_setup(const std::span<const std::uint8_t> bytes) {
+    using Result = core::Result<sim::tactical::TacticalSetup>;
+    auto parsed = checkpoint::parse_checkpoint(bytes);
+    if (!parsed) return Result::failure(parsed.error());
+    const auto* section = parsed.value().find(checkpoint::SectionId::child_log);
+    if (!section || !parsed.value().find(checkpoint::SectionId::tactical_host)) {
+        core::Diagnostic error; error.code = "EAWR-SAVE-0101"; error.message = "This is not a skirmish battle save.";
+        return Result::failure(std::move(error));
+    }
+    auto child = checkpoint::decode_child_log(section->bytes);
+    if (!child) return Result::failure(child.error());
+    if (!child.value().log.setup.skirmish) {
+        core::Diagnostic error; error.code = "EAWR-SAVE-0101"; error.message = "The save has no skirmish setup.";
+        return Result::failure(std::move(error));
+    }
+    return Result::success(std::move(child.value().log.setup));
 }
 
 core::Result<void> write_battle_save(const std::filesystem::path& directory, const std::string_view name,

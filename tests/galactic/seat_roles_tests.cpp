@@ -872,7 +872,7 @@ void controller_provenance() {
     expect(!game.submit({{game.completed_tick(), {2}, 2}, forged}), "human nested body cannot select trusted engine origin");
     roundtrip(game, executor);
 }
-// TM-04: a rejoin that makes the session multi-human ends strategic fast forward, deterministically.
+// TM-04/#5355: a rejoin that makes the session multi-human lowers 4x fast forward to the shared 2x, deterministically.
 void rejoin_ends_fast_forward() {
     const eawr::sim::InlineExecutor executor;
     auto config = setup(true);
@@ -880,19 +880,23 @@ void rejoin_ends_fast_forward() {
     auto live = take(galactic::GalacticSession::create(config));
     const auto fast = math::Fixed::from_raw(galactic::fast_forward_factor_raw);
     check(live.submit({{0, {1}, 1}, galactic::SetSpeed{false, fast}}));
+    check(live.submit({{0, {1}, 2}, galactic::SetSpeed{true, fast}}));
     (void)take(live.step(executor));
-    expect(live.clock().strategic_speed == fast, "one active human keeps fast forward");
+    expect(live.clock().strategic_speed == fast && live.clock().tactical_speed == fast, "one active human keeps fast forward");
     check(live.submit({{1, {2}, 1}, galactic::SeatRejoin{}}));
     const auto tick = take(live.step(executor));
     const auto changed = std::count_if(tick.snapshot->events().begin(), tick.snapshot->events().end(),
         [](const galactic::GalacticEvent& event) { return event.kind == galactic::GalacticEventKind::speed_changed; });
-    expect(live.clock().strategic_speed.raw() == math::Fixed::scale && changed == 1, "a second human rejoining resets strategic speed to 1x");
+    expect(live.clock().strategic_speed.raw() == galactic::multiplayer_speed_max_raw
+        && live.clock().tactical_speed.raw() == galactic::multiplayer_speed_max_raw && changed == 2,
+        "a second human rejoining lowers the strategic and the battle speed to the shared 2x");
     std::string last;
     for (int index = 0; index < 5; ++index) last = take(live.step(executor)).state_sha256;
     auto replayed = take(galactic::GalacticSession::from_replay(live.record()));
     std::string again;
     for (int index = 0; index < 7; ++index) again = take(replayed.step(executor)).state_sha256;
-    expect(again == last && replayed.clock().strategic_speed.raw() == math::Fixed::scale,
+    expect(again == last && replayed.clock().strategic_speed.raw() == galactic::multiplayer_speed_max_raw
+        && replayed.clock().tactical_speed.raw() == galactic::multiplayer_speed_max_raw,
         "the reset replays to the same state hash");
 }
 } // namespace

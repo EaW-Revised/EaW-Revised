@@ -5,12 +5,15 @@
 
 #include "eawr/assets/map.hpp"
 #include "eawr/sim/tactical/abilities.hpp"
+#include "eawr/sim/tactical/session.hpp"
 #include "eawr/vfs/vfs.hpp"
+#include "../../src/sim/tactical/combat_internal.hpp"
 
 #include <algorithm>
 #include <array>
 #include <cstdint>
 #include <filesystem>
+#include <iostream>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -356,6 +359,90 @@ void non_blast_self_destruct_is_kept() {
     expect(static_cast<bool>(t::validate_abilities(lenient.value())), "#5696: the lenient table validates");
 }
 
+void self_destruct_stop_parameter() {
+    std::vector<std::array<std::uint8_t, 32>> identities;
+    for (const auto authored : {"", "<Stop_When_Activated>Yes</Stop_When_Activated>",
+            "<Stop_When_Activated>No</Stop_When_Activated>"}) {
+        TempTree tree;
+        auto xml = with_second_frigate(layer_xml("15", "0.8"));
+        const auto ship = xml.find("<SpaceUnit Name=\"Test_Frigate\">");
+        const auto begin = xml.find("<Unit_Abilities_Data", ship);
+        const auto end = xml.find("</Unit_Abilities_Data>", begin);
+        xml.replace(begin, end + std::string_view("</Unit_Abilities_Data>").size() - begin,
+            std::string("<Unit_Abilities_Data><Unit_Ability><Type>SELF_DESTRUCT</Type>")
+            + "<Expiration_Seconds>3</Expiration_Seconds><Spawned_Object_Type>Proj_Test_Turbo</Spawned_Object_Type>"
+            + authored + "</Unit_Ability></Unit_Abilities_Data>");
+        write_fixture(tree.root, xml);
+        const auto tables = load_layers({tree.root});
+        expect(tables.has_value(), "WSD-02: stop parameter fixture loads");
+        if (!tables) continue;
+        identities.push_back(eawr::units::content_identity(*tables));
+        const auto bound = eawr::units::ability_table(*tables, {}, nullptr, true, eawr::units::ContentErrors::skip_object);
+        const auto* ability = bound ? ability_of(bound.value(), "Test_Frigate", t::AbilityKind::self_destruct) : nullptr;
+        const bool expected = std::string_view(authored).find(">No<") == std::string_view::npos;
+        expect(ability && ability->stop_when_activated == expected,
+            "WSD-02: default true and authored stop value reach the simulation");
+    }
+    expect(identities.size() == 3 && identities[0] == identities[1] && identities[1] != identities[2],
+        "WSD-02: effective stop value binds content identity");
+}
+
+void interdict_default_parameter() {
+    std::vector<std::array<std::uint8_t, 32>> identities;
+    for (const auto authored : {"", "<Active_By_Default>No</Active_By_Default>",
+            "<Active_By_Default>Yes</Active_By_Default>"}) {
+        TempTree tree;
+        auto xml = with_second_frigate(layer_xml("15", "0.8"));
+        const auto ship = xml.find("<SpaceUnit Name=\"Test_Frigate\">");
+        const auto begin = xml.find("<Unit_Abilities_Data", ship);
+        const auto end = xml.find("</Unit_Abilities_Data>", begin);
+        xml.replace(begin, end + std::string_view("</Unit_Abilities_Data>").size() - begin,
+            std::string("<Unit_Abilities_Data><Unit_Ability><Type>INTERDICT</Type>")
+            + authored + "</Unit_Ability></Unit_Abilities_Data>");
+        write_fixture(tree.root, xml);
+        const auto tables = load_layers({tree.root});
+        expect(tables.has_value(), "FS-51: default activation fixture loads");
+        if (!tables) continue;
+        identities.push_back(eawr::units::content_identity(*tables));
+        const auto bound = eawr::units::ability_table(*tables, {}, nullptr, true, eawr::units::ContentErrors::skip_object);
+        const auto* ability = bound ? ability_of(bound.value(), "Test_Frigate", t::AbilityKind::interdict) : nullptr;
+        const bool expected = std::string_view(authored).find(">Yes<") != std::string_view::npos;
+        expect(ability && ability->active_by_default == expected, "FS-51: authored default reaches the simulation");
+    }
+    expect(identities.size() == 3 && identities[0] == identities[1] && identities[1] != identities[2],
+        "FS-51: effective default binds content identity");
+}
+
+// FS-51: only INTERDICT and REPLENISH_WINGMEN read the default; another kind says so at load and stays unaffected.
+void active_by_default_other_kind_note() {
+    std::vector<std::array<std::uint8_t, 32>> identities;
+    for (const auto authored : {"", "<Active_By_Default>Yes</Active_By_Default>"}) {
+        TempTree tree;
+        auto xml = with_second_frigate(layer_xml("15", "0.8"));
+        const auto ship = xml.find("<SpaceUnit Name=\"Test_Frigate\">");
+        const auto begin = xml.find("<Unit_Abilities_Data", ship);
+        const auto end = xml.find("</Unit_Abilities_Data>", begin);
+        xml.replace(begin, end + std::string_view("</Unit_Abilities_Data>").size() - begin,
+            std::string("<Unit_Abilities_Data><Unit_Ability><Type>TURBO</Type><Recharge_Seconds>1</Recharge_Seconds>")
+            + authored + "</Unit_Ability></Unit_Abilities_Data>");
+        write_fixture(tree.root, xml);
+        const auto tables = load_layers({tree.root});
+        expect(tables.has_value(), "FS-51: other-kind default fixture loads");
+        if (!tables) continue;
+        identities.push_back(eawr::units::content_identity(*tables));
+        const bool noted = std::any_of(tables->notes.begin(), tables->notes.end(), [](const auto& row) {
+            return row.owner == "Test_Frigate" && row.field == "Active_By_Default"
+                && row.reason.find("applied only to INTERDICT and REPLENISH_WINGMEN") != std::string::npos;
+        });
+        expect(noted == (*authored != '\0'), "FS-51: an authored default on another kind raises a load note");
+        const auto bound = eawr::units::ability_table(*tables, {}, nullptr, true, eawr::units::ContentErrors::skip_object);
+        const auto* ability = bound ? ability_of(bound.value(), "Test_Frigate", t::AbilityKind::turbo) : nullptr;
+        expect(ability && !ability->active_by_default, "FS-51: another kind's authored default is not applied");
+    }
+    expect(identities.size() == 2 && identities[0] == identities[1],
+        "FS-51: an ignored default does not move content identity");
+}
+
 // #5704: retail multiplies SPEED_MULTIPLIER unchecked, so an authored 0.0 (a mod freezes the unit) loads, even strict.
 void zero_speed_multiplier_loads() {
     TempTree tree;
@@ -524,6 +611,303 @@ void super_laser_loading() {
     }
 }
 
+void jamming_parameters_load() {
+    for (const auto style : {"Space_Automatic", "Combat_Automatic", "User_Input"}) {
+    for (const auto duration : {"0", "0.5", "2.5"}) {
+        TempTree tree;
+        write_fixture(tree.root, with_second_frigate(with_abilities(layer_xml("15", "0.8"), "",
+            "<Abilities SubObjectList=\"Yes\"><Sensor_Jamming_Ability Name=\"Test_Jammer\">"
+            "<Activation_Style>" + std::string(style) + "</Activation_Style><Duration_In_Secs>" + std::string(duration)
+            + "</Duration_In_Secs></Sensor_Jamming_Ability></Abilities>")));
+        const auto tables = load_layers({tree.root});
+        expect(static_cast<bool>(tables), "WJM-01: style and duration fixture loads");
+        if (!tables) continue;
+        const auto loaded = eawr::units::ability_table(*tables, {});
+        expect(static_cast<bool>(loaded), "WJM-01: jammer fixture binds");
+        if (!loaded) continue;
+        const auto* profile = loaded.value().find(eawr::assets::object_type_crc("Test_Frigate"));
+        expect(profile && !profile->special.empty(), "WJM-01: jammer handler survives loading");
+        if (!profile || profile->special.empty()) continue;
+        const auto& jammer = profile->special.front();
+        expect(jammer.kind == t::SpecialAbilityKind::sensor_jamming
+            && jammer.style == t::special_activation_style(style), "WJM-01: authored style reaches the handler");
+        t::AbilityTable isolated;
+        t::UnitAbilityProfile source; source.type_id = profile->type_id; source.special = {jammer};
+        isolated.profiles = {source};
+        t::DurabilityTable health;
+        t::DurabilityProfile hull; hull.type_id = source.type_id;
+        hull.max_hull = eawr::units::Fixed::from_raw(100 * eawr::units::Fixed::scale);
+        health.profiles = {hull};
+        t::CombatTable combat;
+        t::CombatProfile fighting; fighting.type_id = source.type_id; combat.profiles = {fighting};
+        t::TacticalSetup setup; setup.seed = 6242;
+        setup.players = {{1, 1, 1, t::player_flag_commandable}, {2, 2, 2, t::player_flag_commandable}};
+        setup.units = {{1, source.type_id, 1, {}, eawr::sim::math::identity_quat(), {}}};
+        auto created = t::TacticalSession::create(setup, {}, health, {}, std::nullopt, combat, {}, isolated);
+        expect(static_cast<bool>(created), "WJM-01: nested-only jammer session creates");
+        if (!created) continue;
+        auto session = std::move(created).value();
+        const eawr::platform::ThreadWorkerAdapter executor(1);
+        for (unsigned frame = 0; frame < 20; ++frame)
+            expect(static_cast<bool>(session.step(executor)), "WJM-01: jammer session advances");
+        const auto state = session.canonical_state_bytes();
+        const std::array<std::uint8_t, 4> tag{'P', 'D', 'E', 'F'};
+        const bool registered = std::search(state.begin(), state.end(), tag.begin(), tag.end()) != state.end();
+        const bool expected = std::string_view(style) == "Combat_Automatic"
+            || (std::string_view(style) == "Space_Automatic" && std::string_view(duration) != "0.5");
+        expect(registered == expected, "WJM-01: authored style and duration change holder registration");
+    }
+    }
+    std::array<std::vector<eawr::sim::math::Vec3>, 2> missile_paths;
+    std::size_t radius_index = 0;
+    for (const int radius : {50, 150}) {
+        TempTree tree;
+        const auto ordinary = "<Unit_Ability><Type>SENSOR_JAMMING</Type><GUI_Activated_Ability_Name>Test_Jammer"
+            "</GUI_Activated_Ability_Name><Effective_Radius>" + std::to_string(radius)
+            + "</Effective_Radius><Expiration_Seconds>5</Expiration_Seconds></Unit_Ability>";
+        write_fixture(tree.root, with_second_frigate(with_abilities(layer_xml("15", "0.8"), ordinary,
+            "<Abilities SubObjectList=\"Yes\"><Sensor_Jamming_Ability Name=\"Test_Jammer\">"
+            "<Activation_Style>Combat_Automatic</Activation_Style></Sensor_Jamming_Ability></Abilities>")));
+        const auto tables = load_layers({tree.root});
+        expect(static_cast<bool>(tables), "WJM-01: radius fixture loads");
+        if (!tables) continue;
+        const auto loaded = eawr::units::ability_table(*tables, {});
+        const auto* profile = loaded ? loaded.value().find(eawr::assets::object_type_crc("Test_Frigate")) : nullptr;
+        const auto slot = profile ? t::ability_slot(*profile, t::AbilityKind::sensor_jamming) : std::nullopt;
+        expect(slot.has_value(), "WJM-01: authored radius binds to the named jammer");
+        if (!slot) continue;
+        namespace detail = eawr::sim::tactical::detail;
+        t::CombatProfile source; source.type_id = 1; source.passive_missile_shield_radius = eawr::units::Fixed::from_raw(200 * eawr::units::Fixed::scale);
+        t::CombatState fighting;
+        t::MotionTable motion; t::MotionProfile mover; mover.type_id = 1; motion.profiles = {mover};
+        detail::CombatWorld world; world.motion = &motion;
+        const std::vector<t::SnapshotPlayer> players{{1, 1, false}};
+        world.relationships = players;
+        world.units.resize(2);
+        for (std::size_t i = 0; i < world.units.size(); ++i) {
+            auto& unit = world.units[i]; unit.id = i + 1; unit.type_id = 1; unit.owner = 1;
+            unit.profile = &source; unit.combat = &fighting;
+        }
+        world.units[1].position.x = eawr::units::Fixed::from_raw(100 * eawr::units::Fixed::scale);
+        std::vector<detail::ProjectileDefenceAbilityInput> inputs(2);
+        inputs[0].active_jamming = true; inputs[0].jamming_radius = profile->abilities[*slot].effective_radius;
+        const eawr::platform::ThreadWorkerAdapter executor(1);
+        const auto prepared = detail::prepare_projectile_defences(world, inputs, executor);
+        expect(prepared && world.units[1].sensor_jammed == (radius == 150),
+            "WJM-01: authored ordinary radius overrides passive radius for recipient stamps");
+
+        // Exercise the automatic handler and the ordinary radius through the session's combat world.
+        // The passive holder is 200 wide; only its own automatic stamp selects the authored radius.
+        const auto q = [](const std::int64_t value) { return eawr::units::Fixed::from_raw(value * eawr::units::Fixed::scale); };
+        t::AbilityTable session_abilities;
+        auto session_profile = *profile;
+        session_profile.type_id = 1;
+        session_abilities.profiles = {session_profile};
+        t::DurabilityTable health;
+        t::DamageRules damage;
+        damage.damage_types = 1; damage.armor_types = 1; damage.armor_mods = {q(1)};
+        health.damage = damage;
+        for (const t::TypeId type : {1, 2, 3}) {
+            t::DurabilityProfile hull; hull.type_id = type; hull.max_hull = q(1000); health.profiles.push_back(hull);
+        }
+        t::CombatTable combat;
+        const t::CollisionBox box{point(raw(-20), raw(-10), raw(-10)), point(raw(20), raw(10), raw(10))};
+        t::CombatProfile holder; holder.type_id = 1; holder.category_bits = 1;
+        holder.passive_missile_shield_radius = q(200); holder.collision = box;
+        t::CombatProfile target; target.type_id = 2; target.category_bits = 1; target.collision = box;
+        t::CombatProfile shooter; shooter.type_id = 3; shooter.category_bits = 2;
+        shooter.max_attack_distance = q(1000); shooter.collision = box;
+        t::WeaponProfile weapon; weapon.hardpoint = 0; weapon.range = q(1000); weapon.pulse_count = 1;
+        weapon.min_recharge_hundredths = 100; weapon.max_recharge_hundredths = 100;
+        weapon.opportunity_when_idle = true; weapon.opportunity_when_targeting = true;
+        weapon.cone_width = q(360); weapon.cone_height = q(160);
+        weapon.fire_a = point(raw(20), 0, 0);
+        weapon.shot = t::ShotProfile{q(1), 0, q(7), q(1000), true, true, {}};
+        weapon.shot->homing = true; weapon.shot->turn_rate = q(3); shooter.weapons = {weapon};
+        combat.profiles = {holder, target, shooter};
+        t::MotionTable moves;
+        for (const t::TypeId type : {1, 2, 3}) {
+            t::MotionProfile row; row.type_id = type; row.rate_of_turn = q(3); moves.profiles.push_back(row);
+        }
+        t::TacticalSetup setup; setup.seed = 6242;
+        setup.players = {{1, 1, 1, t::player_flag_commandable}, {2, 2, 2, t::player_flag_commandable}};
+        setup.units = {{1, 3, 2, point(0, 0, 0), eawr::sim::math::identity_quat(), {}},
+            {2, 2, 1, point(raw(800), 0, 0), eawr::sim::math::identity_quat(), {}},
+            {3, 1, 1, point(raw(700), 0, 0), eawr::sim::math::identity_quat(), {}}};
+        const std::vector<t::SensorProfile> sensors{{1, q(1000)}, {2, q(1000)}, {3, q(1000)}};
+        auto created = t::TacticalSession::create(setup, sensors,
+            health, moves, std::nullopt, combat, {}, session_abilities);
+        expect(static_cast<bool>(created), "WJM-01: radius session creates");
+        if (!created) { ++radius_index; continue; }
+        auto session = std::move(created).value();
+        expect(static_cast<bool>(session.submit({{0, 2, 0}, {1}, t::AttackPayload{2}})),
+            "WJM-01: shooter attacks the recipient");
+        for (unsigned frame = 0; frame < 180; ++frame) {
+            const auto stepped = session.step(executor);
+            expect(static_cast<bool>(stepped), "WJM-01: radius session advances");
+            if (!stepped) break;
+            for (const auto& projectile : session.projectiles())
+                if (projectile.shooter == 1) missile_paths[radius_index].push_back(projectile.position);
+        }
+        ++radius_index;
+    }
+    expect(!missile_paths[0].empty() && !missile_paths[1].empty() && missile_paths[0] != missile_paths[1],
+        "WJM-01: automatic jammer's authored radius changes the session projectile path");
+    for (const auto name : {"", "Missing_Jammer"}) {
+        TempTree tree;
+        const auto ordinary = "<Unit_Ability><Type>SENSOR_JAMMING</Type><GUI_Activated_Ability_Name>"
+            + std::string(name) + "</GUI_Activated_Ability_Name></Unit_Ability>";
+        write_fixture(tree.root, with_second_frigate(with_abilities(layer_xml("15", "0.8"), ordinary,
+            "<Abilities SubObjectList=\"Yes\"><Sensor_Jamming_Ability Name=\"Test_Jammer\">"
+            "<Activation_Style>Combat_Automatic</Activation_Style></Sensor_Jamming_Ability></Abilities>")));
+        const auto tables = load_layers({tree.root});
+        expect(static_cast<bool>(tables), "WJM-01: missing handler fixture loads");
+        if (!tables) continue;
+        expect(has_row(tables->unresolved, "Test_Frigate", "GUI_Activated_Ability_Name", name),
+            "WJM-01: unnamed or unresolved jammer handler is reported");
+    }
+    std::array<std::array<std::uint8_t, 32>, 2> identities{};
+    std::size_t identity_index = 0;
+    for (const auto duration : {"3600", "5000"}) {
+        TempTree tree;
+        write_fixture(tree.root, with_second_frigate(with_abilities(layer_xml("15", "0.8"), "",
+            "<Abilities SubObjectList=\"Yes\"><Sensor_Jamming_Ability Name=\"Test_Jammer\">"
+            "<Activation_Style>Space_Automatic</Activation_Style><Duration_In_Secs>" + std::string(duration)
+            + "</Duration_In_Secs></Sensor_Jamming_Ability></Abilities>")));
+        const auto tables = load_layers({tree.root});
+        expect(static_cast<bool>(tables), "WJM-01: long-duration fixture loads");
+        if (!tables) return;
+        identities[identity_index++] = eawr::units::content_identity(*tables);
+    }
+    expect(identities[0] != identities[1], "WJM-01: durations beyond one hour retain their authored identity");
+}
+
+// WSH-10: XML perturbations must reach health, not merely survive parsing.
+void healing_automatic_modes() {
+    using eawr::units::Fixed;
+    const auto whole = [](const int value) { return Fixed::from_raw(value * Fixed::scale); };
+    for (const auto style : {"Space_Automatic", "Skirmish_Automatic", "Global_Automatic", "Combat_Automatic"}) {
+        for (const int radius : {0, 80, 160}) {
+            TempTree tree;
+            const auto interval = radius == 160 ? 12U : 6U;
+            const auto percent = radius == 160 ? "0.05" : "0.025";
+            const auto flat = radius == 160 ? "7" : "3";
+            const auto blob_colour = radius == 160 ? "90, 80, 70, 60" : "12, 34, 56, 78";
+            const auto blob_material = radius == 160 ? "Other_Range" : "Custom_Range";
+            write_fixture(tree.root, with_second_frigate(with_abilities(layer_xml("15", "0.8"), "",
+                "<Abilities SubObjectList=\"Yes\"><Force_Healing_Ability Name=\"Authored_Repair\">"
+                "<Activation_Style>" + std::string(style) + "</Activation_Style><Heal_Range>" + std::to_string(radius)
+                + "</Heal_Range><Blob_Color>" + blob_colour + "</Blob_Color><Heal_Range_Blob_Material>" + blob_material
+                + "</Heal_Range_Blob_Material><Heal_Percent>" + percent + "</Heal_Percent><Heal_Amount>" + flat
+                + "</Heal_Amount><Heal_Interval_In_Secs>" + (radius == 160 ? "0.4" : "0.2")
+                + "</Heal_Interval_In_Secs><Single_Target_Heal>No</Single_Target_Heal>"
+                "<Applicable_Unit_Types>Test_Frigate_Two</Applicable_Unit_Types>"
+                "</Force_Healing_Ability></Abilities>")));
+            const auto tables = load_layers({tree.root});
+            if (!tables) continue;
+            const auto unit = std::find_if(tables->units.begin(), tables->units.end(), [](const auto& value) {
+                return value.id == "Test_Frigate";
+            });
+            expect(unit != tables->units.end() && unit->healing_blobs.size() == 1,
+                "WSH-11: automatic healer retains presentation data");
+            if (unit != tables->units.end() && unit->healing_blobs.size() == 1) {
+                const auto& blob = unit->healing_blobs.front();
+                const auto expected_colour = radius == 160 ? std::array<std::uint8_t, 4>{90, 80, 70, 60}
+                    : std::array<std::uint8_t, 4>{12, 34, 56, 78};
+                expect(blob.material == blob_material && blob.colour == expected_colour && blob.range == whole(radius), "WSH-11: authored material, colour and radius survive loading");
+            }
+            const std::array<t::PlayerId, 2> players{1, 2};
+            const auto loaded = eawr::units::ability_table(*tables, players);
+            expect(static_cast<bool>(loaded), "WSH-10: automatic healer XML binds");
+            if (!loaded) continue;
+            const auto type = eawr::assets::object_type_crc("Test_Frigate");
+            const auto target = eawr::assets::object_type_crc("Test_Frigate_Two");
+            const auto* profile = loaded.value().find(type);
+            expect(profile != nullptr, "WSH-10: authored healer type binds");
+            if (!profile) continue;
+            const auto found = std::find_if(profile->special.begin(), profile->special.end(), [](const auto& h) {
+                return h.kind == t::SpecialAbilityKind::force_healing;
+            });
+            expect(found != profile->special.end(), "WSH-10: authored automatic healing handler is retained");
+            if (found == profile->special.end()) continue;
+            const auto& heal = *found;
+            expect(heal.style == t::special_activation_style(style) && heal.heal_range == whole(radius)
+                && heal.heal_percent == Fixed::from_decimal(percent).value() && heal.heal_amount == Fixed::from_decimal(flat).value()
+                && heal.heal_interval_frames == interval, "WSH-10: authored style, range, percent, amount and cadence survive");
+            t::AbilityTable abilities;
+            t::UnitAbilityProfile isolated; isolated.type_id = type; isolated.special.push_back(heal);
+            abilities.profiles.push_back(isolated);
+            t::DurabilityTable health;
+            t::CombatTable combat;
+            for (const auto id : {type, target}) {
+                t::DurabilityProfile h; h.type_id = id; h.max_hull = whole(1000); health.profiles.push_back(h);
+                t::CombatProfile c; c.type_id = id; combat.profiles.push_back(c);
+            }
+            t::TacticalSetup setup; setup.seed = 6237;
+            setup.players = {{1, 1, 1, t::player_flag_commandable}, {2, 2, 2, t::player_flag_commandable}};
+            setup.units = {{1, type, 1, {}, eawr::sim::math::identity_quat(), {}},
+                {2, target, 1, {whole(120), {}, {}}, eawr::sim::math::identity_quat(), {}},
+                {3, target, 2, {whole(120), {}, {}}, eawr::sim::math::identity_quat(), {}},
+                {4, type, 1, {whole(120), {}, {}}, eawr::sim::math::identity_quat(), {}}};
+            // The second source must not obscure recipient filtering.
+            setup.units.back().type_id = eawr::assets::object_type_crc("Excluded_Recipient");
+            auto excluded_health = health.profiles.front(); excluded_health.type_id = setup.units.back().type_id;
+            health.profiles.push_back(excluded_health);
+            auto excluded_combat = combat.profiles.front(); excluded_combat.type_id = excluded_health.type_id;
+            combat.profiles.push_back(excluded_combat);
+            std::sort(health.profiles.begin(), health.profiles.end(), [](const auto& a, const auto& b) { return a.type_id < b.type_id; });
+            std::sort(combat.profiles.begin(), combat.profiles.end(), [](const auto& a, const auto& b) { return a.type_id < b.type_id; });
+            for (const bool multiplayer : {true, false}) {
+                auto mode_setup = setup;
+                t::EconomyRules economy;
+                if (!multiplayer) {
+                    economy.campaign = true;
+                    for (const t::PlayerId id : {1U, 2U}) {
+                        t::EconomyPlayer account; account.player = id; account.population_cap = 99;
+                        account.start_tech = 1; account.max_tech = 5; account.credit_cap = whole(10000);
+                        economy.players.push_back(account);
+                    }
+                    mode_setup.first_free_entity_id = 5;
+                    mode_setup.campaign = t::CampaignBattleSetup{};
+                    mode_setup.campaign->players = economy.players;
+                }
+                const bool admitted = multiplayer || std::string_view(style) != "Skirmish_Automatic";
+                auto made = t::TacticalSession::create(mode_setup, {}, health, {}, std::nullopt, combat, {}, abilities, economy);
+                expect(static_cast<bool>(made), "WSH-10: authored healer session creates");
+                if (!made) continue;
+                auto& session = made.value();
+                for (const eawr::sim::EntityId id : {1U, 2U, 3U, 4U})
+                    expect(static_cast<bool>(session.submit({{1, 1, id}, {id}, t::DamagePayload{whole(500), t::hull_target}})),
+                        "WSH-10: fixture damage submits");
+                const auto first = session.ability_state(1)->special.slots[0].next_service_frame;
+                const auto expected_increment = eawr::sim::math::add(
+                    eawr::sim::math::multiply(whole(1000), heal.heal_percent).value(), heal.heal_amount).value();
+                std::uint32_t pulses = 0;
+                const eawr::platform::ThreadWorkerAdapter executor(2);
+                for (std::uint64_t tick = 0; tick <= first + interval * 2; ++tick) {
+                    const auto step = session.step(executor);
+                    expect(static_cast<bool>(step), "WSH-10: authored healer advances");
+                    if (!step) break;
+                    const auto due = tick >= 1 && tick >= first && (tick - first) % interval == 0;
+                    const auto recipient = radius == 0 ? 1U : 2U;
+                    const auto count = std::count_if(step.value().snapshot->combat_events().begin(),
+                        step.value().snapshot->combat_events().end(), [&](const auto& event) {
+                            return event.kind == t::CombatEventKind::heal_pulse && event.target == recipient;
+                        });
+                    expect(count == (admitted && due && radius != 80 ? 1 : 0),
+                        "WSH-10: healing obeys mode, self/area range and authored cadence");
+                    if (admitted && due && radius != 80) ++pulses;
+                }
+                expect(session.durability_state(radius == 0 ? 1U : 2U)->hull
+                    == Fixed::from_raw(whole(500).raw() + expected_increment.raw() * pulses),
+                    "WSH-10: perturbed percent and flat amount change measured hull");
+                expect(session.durability_state(3)->hull == whole(500) && session.durability_state(4)->hull == whole(500),
+                    "WSH-10: hostile and exact-type-excluded recipients never heal");
+            }
+        }
+    }
+}
+
 // WSH-04 (#5696): Heal_Amount below 0 together with a Heal_Percent loads leniently (retail adds percent x maximum and
 // amount); strict keeps refusing the combination.
 void healing_negative_amount_with_percent() {
@@ -649,9 +1033,48 @@ void sub_frame_expiration_is_one_frame() {
     }
 }
 
+template <typename Ability>
+void expect_decal_distance(const Ability& ability, const int expected) {
+    if constexpr (requires { ability.area_effect_decal_distance; }) {
+        const auto authored = ability.area_effect_decal_distance;
+        expect(authored && authored->raw() == expected * Fixed::scale,
+            "target preview retains each authored distance even before Type");
+    } else {
+        static_cast<void>(ability);
+        static_cast<void>(expected);
+        expect(false, "target preview retains each authored distance even before Type");
+    }
+}
+
+void area_decal_distance_is_authored() {
+    for (const auto kind : {"BARRAGE", "BUZZ_DROIDS", "FOW_REVEAL_PING", "WEAKEN_ENEMY", "PROXIMITY_MINES"}) {
+        for (const auto distance : {"120", "345"}) {
+            TempTree tree;
+            auto xml = with_second_frigate(layer_xml("15", "0.8"));
+            const auto ship = xml.find("<SpaceUnit Name=\"Test_Frigate\">");
+            const auto begin = xml.find("<Unit_Abilities_Data", ship);
+            const auto end = xml.find("</Unit_Abilities_Data>", begin);
+            xml.replace(begin, end + std::string_view("</Unit_Abilities_Data>").size() - begin,
+                "<Unit_Abilities_Data><Unit_Ability><Area_Effect_Decal_Distance>" + std::string(distance)
+                + "</Area_Effect_Decal_Distance><Type>" + kind + "</Type>"
+                  "</Unit_Ability></Unit_Abilities_Data>");
+            write_fixture(tree.root, xml);
+            const auto tables = load_layers({tree.root});
+            expect(static_cast<bool>(tables), "target preview fixture loads");
+            if (!tables) continue;
+            const auto unit = std::find_if(tables->units.begin(), tables->units.end(),
+                [](const auto& row) { return row.id == "Test_Frigate"; });
+            expect(unit != tables->units.end() && !unit->abilities.empty(), "target preview ability retained");
+            if (unit == tables->units.end() || unit->abilities.empty()) continue;
+            expect_decal_distance(unit->abilities.front(), std::stoi(distance));
+        }
+    }
+}
+
 } // namespace
 
 void ability_limits() {
+    area_decal_distance_is_authored();
     container_replenishment_loading();
     rocket_hero_loading();
     // WHE-61: unknown and omitted references retain the ability and its sibling in both modes.
@@ -804,12 +1227,17 @@ void ability_limits() {
     bad_entry_skips_only_its_type();
     bare_stub_rows_are_inert();
     non_blast_self_destruct_is_kept();
+    self_destruct_stop_parameter();
+    interdict_default_parameter();
+    active_by_default_other_kind_note();
     zero_speed_multiplier_loads();
     concentrate_fire_large_damage_loads();
     oversized_collision_loads_with_warning();
     long_projectile_lifetime_loads_leniently();
     unresolved_death_projectile_is_dropped();
     healing_negative_amount_with_percent();
+    healing_automatic_modes();
+    jamming_parameters_load();
     all_death_projectiles_dropped();
     unresolved_retreat_explosion_is_dropped();
     oversized_projectile_damage_saturates();

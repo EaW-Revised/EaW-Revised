@@ -10,17 +10,17 @@ namespace eawr::script::foc::galactic_ai {
 // WGA-204 seam: delivery may enqueue a handler, never service the parent.
 using MovementBattleSubscription = std::function<bool(std::uint64_t request)>;
 using MovementBattleDelivery = std::function<core::Result<void>(std::uint64_t request,
-    bool begin, const campaign::GalacticAiBattleNotice&)>;
+    bool begin, const campaign::GalacticAiBattleFacts&)>;
 using MovementBattleDegrade = std::function<void(std::uint64_t request, const core::Diagnostic&)>;
 
 // MovementOwner is NativeActions in production. Keeping its narrow existing
 // movements()/movement_conflict() interface lets the adapter be tested before
 // the shared TaskForce/action bindings are composed.
 template<class MovementOwner>
-std::function<core::Result<void>(const campaign::GalacticAiBattleNotice&)> movement_battle_listener(
+std::function<core::Result<void>(const campaign::GalacticAiBattleFacts&)> movement_battle_listener(
     std::shared_ptr<MovementOwner> owner, MovementBattleSubscription subscribed_request, MovementBattleDelivery delivery,
     MovementBattleDegrade degrade = {}) {
-    return [owner = std::move(owner), subscribed_request = std::move(subscribed_request), delivery = std::move(delivery), degrade = std::move(degrade)](const campaign::GalacticAiBattleNotice& notice) -> core::Result<void> {
+    return [owner = std::move(owner), subscribed_request = std::move(subscribed_request), delivery = std::move(delivery), degrade = std::move(degrade)](const campaign::GalacticAiBattleFacts& notice) -> core::Result<void> {
         const auto refuse = [](const char* message) {
             core::Diagnostic diagnostic; diagnostic.code = "EAWR-GCAI-BATTLE-0001"; diagnostic.message = message;
             return core::Result<void>::failure(std::move(diagnostic));
@@ -52,7 +52,7 @@ std::function<core::Result<void>(const campaign::GalacticAiBattleNotice&)> movem
                 });
             }
             if (!subscribed) continue;
-            if (auto changed = owner->movement_conflict(request, notice.conflict.planet, begin); !changed) {
+            if (auto changed = owner->movement_conflict(request, notice.conflict.planet, begin, notice.orbiting); !changed) {
                 if (!degrade) return changed;
                 degrade(request, changed.error()); continue;
             }
@@ -82,7 +82,7 @@ inline auto retained_movement_battle_listener(std::shared_ptr<NativeActions> act
             return engine ? movement_subscribed(*actions, *engine, request)
                 : found != actions->movements().end() && found->second.registered;
         },
-        [actions, engine, scheduler = std::move(scheduler)](std::uint64_t request, bool begin, const campaign::GalacticAiBattleNotice& notice) -> core::Result<void> {
+        [actions, engine, scheduler = std::move(scheduler)](std::uint64_t request, bool begin, const campaign::GalacticAiBattleFacts& notice) -> core::Result<void> {
             if (!actions || !actions->movements().contains(request)) {
                 core::Diagnostic error; error.code = std::string(authoritative::codes::invalid_request);
                 error.message = "battle delivery requires its retained native movement owner";
@@ -92,8 +92,7 @@ inline auto retained_movement_battle_listener(std::shared_ptr<NativeActions> act
             if (movement.freestore_actor) {
                 if (begin) return core::Result<void>::success();
                 const auto fleet = movement.actor;
-                const bool lost = std::none_of(notice.world.fleets().begin(), notice.world.fleets().end(),
-                    [fleet](const auto& row) { return row.id == fleet; });
+                const bool lost = !std::binary_search(notice.fleets.begin(), notice.fleets.end(), fleet);
                 const bool retreated = notice.result && notice.result->retreat_player == movement.player
                     && std::any_of(notice.conflict.forces.begin(), notice.conflict.forces.end(), [&](const auto& force) {
                         if (force.owner != movement.player || (force.id != fleet && force.parent != fleet && force.carrier != fleet)) return false;

@@ -150,11 +150,24 @@ void EawrProductionPanel::show(const View& view, const double seconds) {
         if (queued.component < queue_icons_.size() && (old == view_.queue.end() || old->type != queued.type))
             queue_icons_[queued.component] = icon_texture(queued.type);
     }
+    hover_.invalidate_unless([&](const Hover& active) {
+        if (!hover_target_) return false;
+        if (active.queue) {
+            return std::any_of(view.queue.begin(), view.queue.end(), [&](const QueueView& slot) {
+                return slot.component == hover_target_->index && slot.entry_id == hover_target_->entry_id
+                    && slot.type == active.type;
+            });
+        }
+        if (!pane_open_ || !view.reinforcement_allowed) return false;
+        const auto old = std::find_if(view_.pool.begin(), view_.pool.end(),
+            [&](const PoolView& slot) { return slot.slot == hover_target_->index; });
+        const auto current = std::find_if(view.pool.begin(), view.pool.end(),
+            [&](const PoolView& slot) { return slot.slot == hover_target_->index; });
+        return old != view_.pool.end() && current != view.pool.end() && *old == *current;
+    });
     view_ = view;
-    if (!view_.reinforcement_allowed) {
-        set_pane_open(false);
-        dragging_pool_ = false;
-    }
+    presentation::ui::apply_reinforcement_availability(view_.reinforcement_allowed,
+        [this] { set_pane_open(false); }, [this] { dragging_pool_ = false; });
     update_text();
     queue_redraw();
 }
@@ -163,6 +176,8 @@ void EawrProductionPanel::set_pane_open(const bool open) {
     if (open && !view_.reinforcement_allowed) return; // WR-07
     if (open == pane_open_) return;
     pane_open_ = open;
+    hover_target_.reset();
+    hover_.clear();
     hovered_close_ = false;
     if (open) flash_start_.reset();
     if (open && open_) open_(); // WR-07: closing and idempotent opens add no cue.
@@ -233,9 +248,36 @@ std::optional<EawrProductionPanel::Target> EawrProductionPanel::target_at(const 
 
 bool EawrProductionPanel::_has_point(const Vector2& point) const { return target_at(point).has_value(); }
 
+const EawrProductionPanel::Hover* EawrProductionPanel::hovered_entry() const {
+    return !dragging_pool_ && is_visible_in_tree() ? hover_.get() : nullptr;
+}
+
+void EawrProductionPanel::refresh_hover() {
+    if (!hover_target_ || dragging_pool_ || !is_visible_in_tree()) { hover_.clear(); return; }
+    if (hover_target_->kind == Hit::pool && pane_open_) {
+        const auto found = std::find_if(view_.pool.begin(), view_.pool.end(),
+            [&](const PoolView& slot) { return slot.slot == hover_target_->index; });
+        if (found != view_.pool.end()) {
+            hover_.publish((std::uint64_t{1} << 60U) | found->slot, found->type, false);
+            return;
+        }
+    } else if (hover_target_->kind == Hit::queue) {
+        const auto found = std::find_if(view_.queue.begin(), view_.queue.end(), [&](const QueueView& slot) {
+            return slot.component == hover_target_->index && slot.entry_id == hover_target_->entry_id;
+        });
+        if (found != view_.queue.end()) {
+            hover_.publish((std::uint64_t{1} << 59U) | found->entry_id, found->type, true);
+            return;
+        }
+    }
+    hover_.clear();
+}
+
 void EawrProductionPanel::_gui_input(const Ref<InputEvent>& event) {
     if (const auto* motion = Object::cast_to<InputEventMouseMotion>(event.ptr())) {
         const auto target = target_at(motion->get_position());
+        hover_target_ = dragging_pool_ ? std::nullopt : target;
+        refresh_hover();
         const bool hovered = target && target->kind == Hit::reinforce;
         if (hovered != hovered_reinforce_) { hovered_reinforce_ = hovered; queue_redraw(); }
         const bool close = target && target->kind == Hit::close;
@@ -270,6 +312,8 @@ void EawrProductionPanel::_gui_input(const Ref<InputEvent>& event) {
         return;
     }
     if (button->is_pressed()) {
+        hover_target_.reset();
+        hover_.clear();
         pressed_ = target;
         pressed_right_ = right;
         if (target && target->kind == Hit::close && !right) queue_redraw();
@@ -394,6 +438,10 @@ void EawrProductionPanel::update_text() {
 }
 
 void EawrProductionPanel::_notification(const int what) {
+    if (what == NOTIFICATION_MOUSE_EXIT || what == NOTIFICATION_VISIBILITY_CHANGED || what == NOTIFICATION_RESIZED) {
+        hover_target_.reset();
+        hover_.clear();
+    }
     if (what == NOTIFICATION_MOUSE_EXIT && hovered_close_) {
         hovered_close_ = false;
         queue_redraw();
@@ -655,6 +703,7 @@ std::string EawrProductionPanel::report_json() const {
     output << "{\"queue_slots\": " << setup_.queue.size() << ", \"pane_slots\": "
            << (setup_.pane ? setup_.pane->slots.size() : 0U) << ", \"pane_open\": " << (pane_open_ ? "true" : "false")
            << ", \"toggles\": " << toggles_ << ", \"cancels\": " << cancels_ << ", \"picks\": " << picks_
+           << ", \"hover_publications\": " << hover_.publications()
            << ", \"reinforce_drawn\": " << (reinforce_drawn_ ? "true" : "false")
            << ", \"reinforce_enabled\": " << (reinforce_enabled() ? "true" : "false")
            << ", \"flash_drawn\": " << (flash_drawn_ ? "true" : "false")

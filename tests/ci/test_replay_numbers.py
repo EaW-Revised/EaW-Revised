@@ -88,7 +88,7 @@ class ReplayNumbersTests(unittest.TestCase):
     def test_literal_max_opcode_is_still_checked(self):
         header = self.root / checker.OPCODE_HEADER
         text = header.read_text(encoding="utf-8")
-        header.write_text(text.replace("max_command_opcode = opcode_script_invulnerable", "max_command_opcode = 40"), encoding="utf-8")
+        header.write_text(text.replace("max_command_opcode = opcode_land_unload", "max_command_opcode = 40"), encoding="utf-8")
         self.assertTrue(any("max_command_opcode is 40" in problem for problem in checker.check(self.root)))
 
 

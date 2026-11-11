@@ -21,7 +21,9 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <vector>
+#include <utility>
 
 // Static scene builder (P1-11). Application/data side: it reads a loaded TED
 // map and the effective XML catalog and produces a deterministic static scene
@@ -168,14 +170,24 @@ struct Surface final {
     std::vector<TextureBinding> textures;
     // ALDEFAULT-01: effect lookup failed; use the built-in green material.
     bool effect_missing{};
+    bool translated{};
 };
 
 // The renderer-owned selector used only after mounted-file lookup establishes
 // absence. The authored effect name remains on Surface for evidence.
 [[nodiscard]] const LegacySelector& missing_effect_selector() noexcept;
 [[nodiscard]] const LegacySelector* material_selector(std::string_view program, bool effect_missing) noexcept;
+// Admission marker only: its empty program cannot validate as a legacy
+// material. A failed native upload therefore omits an unknown effect.
+[[nodiscard]] inline const LegacySelector& translated_material_selector() noexcept {
+    static constexpr LegacySelector selector{}; return selector;
+}
+[[nodiscard]] inline const LegacySelector* material_selector(std::string_view program, bool effect_missing, bool translated) noexcept {
+    const auto* adapter = material_selector(program, effect_missing);
+    return adapter ? adapter : translated ? &translated_material_selector() : nullptr;
+}
 [[nodiscard]] inline const LegacySelector* material_selector(const Surface& surface) noexcept {
-    return material_selector(surface.shader, surface.effect_missing);
+    return material_selector(surface.shader, surface.effect_missing, surface.translated);
 }
 
 struct AttachedEffect final {
@@ -208,6 +220,7 @@ struct AssetAccess final {
     std::function<const assets::Model*(std::string_view logical_path)> model;
     std::function<std::string(std::string_view logical_path)> sha256;
     std::function<bool(std::string_view logical_path)> particle_system;
+    std::function<bool(const assets::Submesh& surface)> admitted_shader{};
 };
 
 // ALDEFAULT-01: only absence of both source and compiled effects selects the
@@ -410,12 +423,21 @@ public:
     VfsAssetCache& operator=(const VfsAssetCache&) = delete;
 
     [[nodiscard]] AssetAccess access();
+    void set_admitted_shaders(std::function<bool(const assets::Submesh&)> admitted) { admitted_shader_ = std::move(admitted); }
     [[nodiscard]] bool exists(std::string_view logical_path);
     // The returned pointer remains valid until this cache wrapper is destroyed.
-    [[nodiscard]] const assets::Model* model(std::string_view logical_path);
+    class ModelPreparationScope;
+    using ModelIdentity = std::tuple<bool, std::string, std::string, std::string, vfs::AssetOrigin>;
+    // Exactly the shared store key; resolves the winning source without reading model bytes.
+    [[nodiscard]] ModelIdentity model_identity(std::string_view logical_path) const;
+    [[nodiscard]] const assets::Model* model(std::string_view logical_path, const ModelPreparationScope* preparation = nullptr);
     [[nodiscard]] core::Result<std::shared_ptr<const assets::Model>> shared_model(std::string_view logical_path);
+    // Returns the hash of the same bytes used for this decode, even if the bounded store cannot retain the model.
+    [[nodiscard]] core::Result<std::shared_ptr<const assets::Model>> shared_model(std::string_view logical_path, std::string& digest,
+        const ModelPreparationScope* preparation = nullptr);
     // Decode-ahead (scene::ModelPrefetch): the same decode as shared_model, but the store does not admit the result to
-    // its LRU and the census does not see the request. The caller's shared_ptr is then the only owner, so a model nobody
+    // its LRU and the census does not see the request. Negative results are retained without a payload charge.
+    // For successful results the caller's shared_ptr is the only owner, so a model nobody
     // asks for is freed when the caller drops it. The first ordinary request for the path admits it, as if it had
     // decoded it itself.
     [[nodiscard]] core::Result<std::shared_ptr<const assets::Model>> shared_model_ahead(std::string_view logical_path);
@@ -427,6 +449,10 @@ public:
     bool release_raw_pins();
     [[nodiscard]] std::string sha256(std::string_view logical_path);
     [[nodiscard]] bool particle_system(std::string_view logical_path);
+    // Only a bounded preparation owns policy: changes below become visible in call order after it closes.
+    // A ModelLoadScope opened during a bounded preparation ends that bound early, replays pending policy,
+    // then opens a real unbounded battle bracket. The old preparation scope cannot restore policy afterwards.
+    // Legacy fallback preparations own no policy: setters and battle brackets apply immediately as usual.
     // Shared by every wrapper of this mounted VFS. Bounds cache-owned vector
     // capacity, never decoding or asset size; zero disables successful retention.
     void set_model_cache_budget(std::uint64_t bytes);
@@ -441,6 +467,27 @@ public:
     // A mounted content set may survive a return to the menu. The next
     // campaign prepares with full sharing again and starts fresh phase counters.
     void begin_galactic_preparation();
+    // For an ordered preparation consumer that asks at most once per identity. Existing full entries stay protected
+    // until that consumer asks for them, so a warm menu cache adds no redecodes. The byte budget bounds unprotected
+    // retention; remaining protection is removed and the final budget applied before restoring the incoming policy.
+    // Ineligible phases or unproven live entries leave BASE policy untouched. Only a second owned window throws.
+    // bounded=false selects the legacy no-op scope; it still refuses an already owned bounded window.
+    // Only requests carrying this scope's token release initial protection; unrelated wrappers cannot consume it.
+    class ModelPreparationScope final {
+    public:
+        ModelPreparationScope(const vfs::Vfs& filesystem, std::uint64_t bytes, bool bounded = true);
+        ~ModelPreparationScope();
+        ModelPreparationScope(const ModelPreparationScope&) = delete;
+        ModelPreparationScope& operator=(const ModelPreparationScope&) = delete;
+        [[nodiscard]] bool active() const;
+        [[nodiscard]] std::uint64_t initial_bytes() const noexcept { return initial_bytes_; }
+        [[nodiscard]] const std::string& fallback_reason() const noexcept { return fallback_reason_; }
+    private:
+        friend class VfsAssetCache;
+        std::shared_ptr<ModelStore> models_;
+        std::uint64_t initial_bytes_{};
+        std::string fallback_reason_;
+    };
     // A later battle may re-read evicted models only inside its loading gate.
     // Restore initial-load sharing there, then the budget in effect at entry.
     class ModelLoadScope final {
@@ -461,8 +508,10 @@ public:
 
 private:
     struct Loaded;
-    [[nodiscard]] std::shared_ptr<const Loaded> loaded_model(std::string_view logical_path, bool ahead = false);
+    [[nodiscard]] std::shared_ptr<const Loaded> loaded_model(std::string_view logical_path, bool ahead = false,
+        const ModelPreparationScope* preparation = nullptr);
     const vfs::Vfs* filesystem_;
+    std::function<bool(const assets::Submesh&)> admitted_shader_;
     std::shared_ptr<ModelStore> models_;
     // Protected by the shared model-store mutex; first use pins a raw result. Keyed by the Loaded address, so the
     // iteration order differs between runs: only the owner census walks it, and its output sums do not depend on order.

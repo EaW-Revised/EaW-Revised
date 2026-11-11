@@ -30,6 +30,9 @@ MapMode::State::~State() {
         else if (particle_workers) particle_workers->shutdown();
         shutdown_trace::mark("particle lane joined");
         ready_load.reset();
+        // The HUD nodes may already have left their viewport during engine shutdown. The battle is
+        // ending, so release its HUD owner without restoring a view that will never be drawn again.
+        hud.reset();
         free_game_menu();
         shutdown_trace::mark("map mode teardown begins");
         land_overlay.reset();

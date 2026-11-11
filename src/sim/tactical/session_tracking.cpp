@@ -569,6 +569,7 @@ core::Result<TacticalSession::Impl::ApproachPlan> TacticalSession::Impl::approac
         auto slot = detail::approach_slot(unit.state.position, predicted.value(), range);
         if (!slot) return core::Result<ApproachPlan>::failure(slot.error());
         plan.slot = slot.value();
+        plan.centre = predicted.value();
         return core::Result<ApproachPlan>::success(plan);
     }
 

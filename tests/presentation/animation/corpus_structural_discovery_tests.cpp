@@ -1,3 +1,4 @@
+#include "../../support/runtime_path.hpp"
 #include "../../support/check.hpp"
 #include "eawr/vfs/vfs.hpp"
 #include "../../support/temp_dir.hpp"
@@ -298,7 +299,7 @@ std::size_t count(const std::string& haystack, const std::string_view needle) {
 
 void test_tracked_selection() {
 #if defined(EAWR_ASSOCIATION_FROZEN_MANIFEST)
-    std::ifstream input(EAWR_ASSOCIATION_FROZEN_MANIFEST, std::ios::binary);
+    std::ifstream input(eawr::testing::runtime_path("EAWR_TEST_SOURCE_ROOT", "tests/presentation/animation/corpus_association_frozen.tsv", EAWR_ASSOCIATION_FROZEN_MANIFEST), std::ios::binary);
     const std::string bytes{std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
     const auto digest = sources::sha256_of(std::as_bytes(std::span<const char>(bytes.data(), bytes.size())));
     auto load = audit::load_frozen_metadata(bytes, digest);

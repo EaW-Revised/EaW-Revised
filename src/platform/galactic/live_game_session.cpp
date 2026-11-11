@@ -30,7 +30,9 @@
 #include <cctype>
 #include <sstream>
 #include <condition_variable>
+#include <cstdlib>
 #include <exception>
+#include <future>
 #include <iterator>
 #include <limits>
 #include <map>
@@ -285,16 +287,35 @@ core::Result<std::unique_ptr<PreparedLiveCampaign>> PreparedLiveCampaign::from_p
     if (!filesystem_owner) return Result::failure(diagnostic("EAWR-SAVE-0104", "Missing campaign filesystem owner."));
     const auto& filesystem = *filesystem_owner;
     const std::shared_ptr<const vfs::Vfs> scoring_files = filesystem_owner;
+    // The space preparation owns its result and load notes. Its VFS model-cache
+    // wrapper is private; the mount's shared model store and VFS attachments
+    // are internally locked. Nothing is published until the original join.
+    // Tag tracing is process-wide, while its suppression scope is thread-local.
+    // Retain the serial path when recording.
+    const bool overlap = !data::tag_trace::enabled();
+    auto space_work = std::async(overlap ? std::launch::async : std::launch::deferred, [&] {
+        core::gc_load::Scope space_step("prep.space_entry");
+        return campaign::prepare_stock_space_entry(filesystem, catalog, data, types, plan,
+            plan.rules_flavour() == campaign::CampaignRulesFlavour::multiplayer ? difficulty : std::string_view{});
+    });
     std::optional<core::gc_load::Scope> step(std::in_place, "prep.services");
     auto services = campaign::prepare_live_campaign_services(filesystem, catalog, data, types, plan, difficulty);
     if (!services) return Result::failure(services.error());
-    step.emplace("prep.space_entry");
-    auto provider = campaign::prepare_stock_space_entry(filesystem, catalog, data, types, plan,
-        plan.rules_flavour() == campaign::CampaignRulesFlavour::multiplayer ? difficulty : std::string_view{});
+    // Fresh root construction does not consume the space provider. Keep it on
+    // this thread, and defer its refusal until all earlier stages have passed.
+    // Checkpoint restore uses the provider and remains after the join.
+    std::optional<core::Result<campaign::CampaignRoot>> fresh_root;
+    if (overlap && exact_checkpoint.empty()) {
+        step.emplace("prep.root");
+        fresh_root.emplace(campaign::CampaignRoot::create(campaign::CampaignSetupPlan(plan), services.value()));
+    }
+    step.reset();
+    auto provider = space_work.get();
     if (!provider) return Result::failure(provider.error());
     step.emplace("prep.conflicts_and_copies");
     auto configuration = std::make_shared<CampaignServiceConfiguration>();
     const auto space = provider.value();
+    if (plan.mode() == campaign::CampaignSetupMode::multiplayer && exact_checkpoint.empty()) configuration->provider_identity = space->prepared_identity(filesystem);
     diagnostics::GcMemoryWatch memory_watch;
     configuration->restore.content = [space](const auto& conflict) { return space->content(conflict); };
     // The restore adapter retains the immutable mounted VFS independently of presentation.
@@ -414,7 +435,9 @@ core::Result<std::unique_ptr<PreparedLiveCampaign>> PreparedLiveCampaign::from_p
         for (const auto& selected : runtime.value()->lifecycle.players)
             native_ai_players.push_back({selected.player, selected.player_type});
         step.emplace("prep.ai_usability");
+        std::optional<core::gc_load::Scope> usability_scope(std::in_place, "prep.ai_usability.prepare");
         auto usability = campaign::prepare_stock_galactic_ai_usability(data, campaign_plan, runtime.value()->perception);
+        usability_scope.reset();
         if (!usability) return Result::failure(usability.error());
         campaign::GalacticAiStockQueryFactory queries = [content = usability.value()] {
             auto owner = std::make_shared<campaign::GalacticAiUsabilityProvider>(content);
@@ -438,6 +461,8 @@ core::Result<std::unique_ptr<PreparedLiveCampaign>> PreparedLiveCampaign::from_p
     }
     // Restore prepares fresh mounted services without startup placement or AI decisions.
     auto root = [&]() -> core::Result<campaign::CampaignRoot> {
+        if (fresh_root) return std::move(*fresh_root);
+        const core::gc_load::Scope root_scope("prep.ai_usability.campaign_root");
         if (exact_checkpoint.empty()) return campaign::CampaignRoot::create(campaign::CampaignSetupPlan(plan), services.value());
         auto options = configuration->restore;
         options.player_load = false;
@@ -450,6 +475,7 @@ core::Result<std::unique_ptr<PreparedLiveCampaign>> PreparedLiveCampaign::from_p
     }();
     if (!root) return Result::failure(root.error());
     if (exact_checkpoint.empty()) {
+        const core::gc_load::Scope conflict_scope("prep.ai_usability.conflict_setup");
         if (auto configured = campaign::configure_live_campaign_conflicts(root.value(), filesystem, catalog, data, types, provider.value()); !configured)
             return Result::failure(configured.error());
     }
@@ -1235,7 +1261,8 @@ public:
         if (saved.failure) { outcome.phase = LiveSavePhase::failed; outcome.diagnostic = std::move(saved.failure); return; }
         auto container = checkpoint::parse_checkpoint(saved.bytes);
         if (!container) { outcome.phase = LiveSavePhase::failed; outcome.diagnostic = container.error(); return; }
-        auto description = mods::encode_description(options_.saves.mounted_mods);
+        const auto mounted = options_.saves.mounted_mods_snapshot ? options_.saves.mounted_mods_snapshot() : options_.saves.mounted_mods;
+        auto description = mods::encode_description(mounted);
         if (!description) {
             outcome.phase = LiveSavePhase::failed;
             outcome.diagnostic = diagnostic("EAWR-SAVE-0103", "Mounted mod description is invalid or too large."); return;
@@ -1267,7 +1294,8 @@ public:
                 continue;
             }
             auto identities = checkpoint::game_identities(session_->galaxy().setup());
-            auto captured = checkpoint::save_game_checkpoint(*session_, identities, request.presentation_hints, options_.saves.mounted_mods);
+            const auto mounted = options_.saves.mounted_mods_snapshot ? options_.saves.mounted_mods_snapshot() : options_.saves.mounted_mods;
+            auto captured = checkpoint::save_game_checkpoint(*session_, identities, request.presentation_hints, mounted);
             if (captured) {
                 auto saved = checkpoint::parse_checkpoint(captured.value());
                 if (!saved) {
@@ -1283,7 +1311,10 @@ public:
                 std::erase_if(input.commands, [&](const auto& command) { return command.key.tick < tick.completed_tick; });
                 bool extended = false;
                 if (!input.orders.empty() || !input.commands.empty()) {
-                    auto encoded = save_detail::encode_input(session_->galaxy().setup(), tick.completed_tick, input);
+                    // The section's recordings reference the checkpoint's own offer pool instead of repeating the tables.
+                    auto pool = save_detail::read_offer_pool(saved.value());
+                    auto encoded = pool ? save_detail::encode_input(session_->galaxy().setup(), tick.completed_tick, input, &pool.value())
+                                        : core::Result<checkpoint::Section>::failure(pool.error());
                     if (!encoded) captured = core::Result<std::vector<std::uint8_t>>::failure(encoded.error());
                     else { saved.value().sections.push_back(std::move(encoded).value()); extended = true; }
                 }
@@ -2205,7 +2236,7 @@ core::Result<std::unique_ptr<PreparedLiveRestore>> LiveGameSession::prepare_load
             identities = checkpoint::game_identities(impl_->session_->galaxy().setup());
             services = impl_->options_.services; entries = impl_->options_.entries; }
         auto options = services ? services->restore : checkpoint::GameLoadOptions{};
-        options.mounted_mods = impl_->options_.saves.mounted_mods;
+        options.mounted_mods = impl_->options_.saves.mounted_mods_snapshot ? impl_->options_.saves.mounted_mods_snapshot() : impl_->options_.saves.mounted_mods;
         if (!options.configure_native_ai && services)
             options.configure_native_ai = services->configure_native_ai;
         if (options.content == nullptr && !entries.empty()) {

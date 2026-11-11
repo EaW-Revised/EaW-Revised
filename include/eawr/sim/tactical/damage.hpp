@@ -213,11 +213,12 @@ struct FlightState {
 };
 
 // WRB-10: a key into the immutable combat table, independent of damage ownership.
-enum class ProjectileProfileKind : std::uint32_t { ordinary, ability, barrage, death, charged_blast = 4 };
+enum class ProjectileProfileKind : std::uint32_t { ordinary, ability, barrage, death, charged_blast = 4, lucky_shot = 5 };
 struct ProjectileProfileKey {
     TypeId type{};
     std::uint32_t weapon{};
     ProjectileProfileKind kind{};
+    TypeId holder{}; // WLK-02: original holder identity survives reflection and shooter removal.
     friend bool operator==(const ProjectileProfileKey&, const ProjectileProfileKey&) = default;
 };
 

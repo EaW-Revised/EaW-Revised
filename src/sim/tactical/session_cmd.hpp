@@ -72,7 +72,7 @@ private:
     core::Result<RejectReason> switch_ordinary_ability(const AbilityPayload& payload,
         const std::vector<LiveUnit*>& holders, auto& slot_of, auto& profile_of, const std::uint64_t& command_tick,
         const std::uint64_t& frame, std::vector<PlayerEconomy>& ledgers, detail::MapStage<CraftState>& crafts,
-        UnitStage& staged, std::vector<EntityId>& changed_speed, bool& hunt_stopped) const;
+        UnitStage& staged, std::vector<EntityId>& changed_speed, bool& hunt_stopped, bool& switched_any) const;
     core::Result<RejectReason> apply_blast(EntityId unit_id, const AbilityPayload& payload,
         const std::uint64_t& command_tick, UnitStage& staged) const;
     core::Result<RejectReason> apply_corrupt_systems(EntityId unit_id, const AbilityPayload& payload,
@@ -97,6 +97,8 @@ private:
         const std::uint64_t& command_tick, detail::MapStage<SquadronState>& minds, EntityId& next_id,
         const std::uint64_t& frame, UnitStage& staged, const SquadronTable& squadron_table,
         const MotionTable& table, SeatId caller) const;
+    core::Result<RejectReason> apply_lucky_shot(EntityId unit_id, const AbilityPayload& payload,
+        const std::uint64_t& command_tick, detail::MapStage<SquadronState>& minds, UnitStage& staged) const;
     core::Result<RejectReason> apply_ion_cannon_shot(EntityId unit_id, const AbilityPayload& payload,
         const std::uint64_t& command_tick, detail::MapStage<SquadronState>& minds, UnitStage& staged,
         const SquadronTable& squadron_table) const;
@@ -127,6 +129,7 @@ struct Tick::PlanLanes final {
         CommandKey order{};
         std::uint32_t rank{};
         bool landing{};
+        std::optional<math::Vec3> approach_centre{}; // OR-28; absent for ordinary moves and landed searches.
     };
     std::vector<PlanJob> pending;
     SpacePathService::Lanes<4> paths;

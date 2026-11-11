@@ -1,4 +1,5 @@
 #include "galaxy_view.hpp"
+#include "eawr/presentation/ui/minimap.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -478,7 +479,7 @@ bool PlanetCamera::right_drag(const GalaxyView& view, const float x, const float
                              const bool held, const bool control) {
     if (!held) return false;
     const float multiplier = 1000.0F * constants_.right_scroll_factor * (control ? 1.0F : 4.0F);
-    pan(view, x * multiplier, -y * multiplier);
+    pan(view, x * multiplier, y * multiplier);
     return true;
 }
 
@@ -618,18 +619,48 @@ CameraLighting PlanetCamera::lighting() const {
             lerp(constants_.out_angles, constants_.in_angles, blend)};
 }
 
-std::optional<Vec3> radar_to_world(const Vec3 local, const float width, const float height) {
-    if (!(width > 0.0F && height > 0.0F) || !std::isfinite(width) || !std::isfinite(height)
-        || !std::isfinite(local.x) || !std::isfinite(local.y)) return std::nullopt;
-    // WGUI-90: fixed radar half-extents 380 X / 460 Y and world Z 10.
-    return Vec3{local.x / (width * 0.5F) * 380.0F, local.y / (height * 0.5F) * 460.0F, 10.0F};
+RadarExtents radar_extents(const GalaxyView& galaxy, const bool fit) noexcept {
+    RadarExtents result;
+    if (fit) for (const auto& planet : galaxy.planets) {
+        if (!std::isfinite(planet.position.x) || !std::isfinite(planet.position.y)) continue;
+        result.x = std::max(result.x, std::abs(planet.position.x));
+        result.y = std::max(result.y, std::abs(planet.position.y));
+    }
+    // WGUI-177: leave in-extent axes unchanged; margin belongs only to an expanded axis.
+    if (result.x > RadarExtents{}.x) result.x /= 0.95F;
+    if (result.y > RadarExtents{}.y) result.y /= 0.95F;
+    return result;
 }
 
-std::optional<Vec3> world_to_radar(const Vec3 world, const float width, const float height) {
-    if (!(width > 0.0F && height > 0.0F) || !std::isfinite(width) || !std::isfinite(height)
+std::optional<Bounds> radar_camera_bounds(const presentation::FixedCamera& camera, const RadarExtents extents) {
+    const auto ground = presentation::ui::minimap_ground_corners(camera, 0.0);
+    if (!ground || !(extents.x > 0.0F && extents.y > 0.0F)
+        || !std::isfinite(extents.x) || !std::isfinite(extents.y)) return std::nullopt;
+    const presentation::ui::MinimapExtents frame{
+        .min_x = -extents.x, .min_y = -extents.y, .max_x = extents.x, .max_y = extents.y,
+        .playable_min_x = -extents.x, .playable_min_y = -extents.y,
+        .playable_max_x = extents.x, .playable_max_y = extents.y};
+    const auto guide = presentation::ui::minimap_guide(*ground, frame, true);
+    for (const auto& point : guide)
+        if (!std::isfinite(point.x) || !std::isfinite(point.y)) return std::nullopt;
+    return Bounds{{static_cast<float>(guide[3].x), static_cast<float>(guide[3].y), 0},
+                  {static_cast<float>(guide[1].x), static_cast<float>(guide[1].y), 0}};
+}
+
+std::optional<Vec3> radar_to_world(const Vec3 local, const float width, const float height, const RadarExtents extents) {
+    if (!(extents.x > 0.0F && extents.y > 0.0F) || !std::isfinite(extents.x) || !std::isfinite(extents.y)
+        || !(width > 0.0F && height > 0.0F) || !std::isfinite(width) || !std::isfinite(height)
+        || !std::isfinite(local.x) || !std::isfinite(local.y)) return std::nullopt;
+    // WGUI-90/WGUI-177: retail or explicitly fitted half-extents, world Z 10.
+    return Vec3{local.x / (width * 0.5F) * extents.x, local.y / (height * 0.5F) * extents.y, 10.0F};
+}
+
+std::optional<Vec3> world_to_radar(const Vec3 world, const float width, const float height, const RadarExtents extents) {
+    if (!(extents.x > 0.0F && extents.y > 0.0F) || !std::isfinite(extents.x) || !std::isfinite(extents.y)
+        || !(width > 0.0F && height > 0.0F) || !std::isfinite(width) || !std::isfinite(height)
         || !std::isfinite(world.x) || !std::isfinite(world.y)) return std::nullopt;
-    // WGUI-90: inverse uses the same fixed 380 X / 460 Y half-extents and radar Z 0.
-    return Vec3{world.x / 380.0F * width * 0.5F, world.y / 460.0F * height * 0.5F, 0.0F};
+    // WGUI-90/WGUI-177: the inverse shares the selected extents, radar Z 0.
+    return Vec3{world.x / extents.x * width * 0.5F, world.y / extents.y * height * 0.5F, 0.0F};
 }
 
 } // namespace eawr::viewer::galactic

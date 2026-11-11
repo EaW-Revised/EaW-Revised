@@ -31,7 +31,7 @@ REVIEWED = {
     "src/presentation/shader_runtime.cpp": "identity-checked native DLL loader, no asset/VFS reads",
     # Asks the OS whether a drive letter's volume is a spinning disk (a storage-property query on the volume device, zero
     # bytes read, no file of the game); the model prefetch uses it to size its reader pool.
-    "src/units/simulation_model.cpp": "volume seek-penalty query for the reader count, no asset read",
+    "src/core/host_probe.cpp": "volume seek-penalty query for the reader count, no asset read",
     # An opt-in diagnostic trace file written by the galactic AI barrier; it reads no asset.
     "src/campaign/game_session.cpp": "opt-in oracle trace output, no asset read",
 }
@@ -136,9 +136,9 @@ def mods_violations(relative: str, text: str) -> list[str]:
         for kind, header in _INCLUDE.findall(code):
             if kind == '"':
                 if not header.startswith(("eawr/mods/", "eawr/core/")) and not (
-                        (profile or windows_profile) and header == "profile_io.hpp") and not (
+                        (profile or windows_profile or digest) and header == "profile_io.hpp") and not (
                         index_builder and header == "eawr/vfs/vfs.hpp") and not (
-                        digest and header == "eawr/platform/native_read.hpp") and not (
+                        digest and header in {"eawr/platform/native_read.hpp", "../../third_party/xxhash/xxhash.h"}) and not (
                         (digest or priority) and header == "thread_priority.hpp"):
                     problems.append(f"include \"{header}\" is outside the mod core and eawr/core")
             elif not (header in MODS_HEADERS_ALLOWED
@@ -157,6 +157,11 @@ def mods_violations(relative: str, text: str) -> list[str]:
                     digest and stream == "ifstream" and re.search(r"\bstd::ifstream\s+in\s*\(\s*cache_path\s*,", body)) and not (
                     digest and stream == "istreambuf_iterator" and re.search(r"\(\s*std::istreambuf_iterator<char>\(in\)\s*\)", body)):
                 problems.append(f"{stream} is a file stream outside the reviewed reader")
+        if digest:
+            # Only the reviewed atomic replacement of the user-cache temporary file is allowed.
+            remaining = re.sub(r"\bdetail::replace_profile_file\s*\(\s*temporary\s*,\s*target\s*\)", "cache_replace", body)
+            if re.search(r"\breplace_profile_file\s*\(", remaining):
+                problems.append("atomic replacement is outside the reviewed cache path")
         file_calls = body
         if profile:
             file_calls = re.sub(r"\bfs::(?:rename|remove)\b", "profile_file_operation", file_calls)
@@ -227,6 +232,7 @@ MODS_PATH_MUST_FAIL = [
     ("src/mods/content_digest.cpp", "fs::remove(path, error);"),
     ("src/mods/content_digest.cpp", "fs::rename(path, other);"),
     ("src/mods/content_digest.cpp", "fs::rename(temporary, path, error);"),
+    ("src/mods/content_digest.cpp", "detail::replace_profile_file(temporary, path);"),
     ("src/mods/content_digest.cpp", "fs::create_directories(mod_root);"),
     ("src/mods/content_digest.cpp", "fs::create_directories(mod_root, error);"),
     ("src/mods/content_digest.cpp", "fs::remove(temporary, error); fs::remove(path, error);"),
@@ -247,6 +253,8 @@ MODS_PATH_MUST_FAIL = [
     ("src/mods/thread_priority.cpp", "std::ifstream in(mod_file);"),
     ("src/mods/thread_priority.cpp", "DeleteFileW(p);"),
     ("src/mods/discovery.cpp", '#include "thread_priority.hpp"'),
+    ("src/mods/discovery.cpp", '#include "../../third_party/xxhash/xxhash.h"'),
+    ("src/mods/discovery.cpp", '#include "profile_io.hpp"'),
     ("src/mods/discovery.cpp", '#include "eawr/platform/native_read.hpp"'),
     ("src/mods/content_digest.cpp", '#include "eawr/vfs/vfs.hpp"'),
     ("src/mods/discovery.cpp", "#include <sys/resource.h>"),
@@ -270,10 +278,13 @@ MODS_PATH_MUST_PASS = [
     ("src/mods/content_digest.cpp", "std::ofstream out(temporary, std::ios::binary | std::ios::trunc);"),
     ("src/mods/content_digest.cpp", "fs::create_directories(target.parent_path(), error);"),
     ("src/mods/content_digest.cpp", "fs::rename(temporary, target, error);"),
+    ("src/mods/content_digest.cpp", "detail::replace_profile_file(temporary, target);"),
     ("src/mods/content_digest.cpp", "fs::remove(partial_path, error);"),
     ("src/mods/content_digest.cpp", "#include <fstream>"),
     ("src/mods/content_digest.cpp", '#include "eawr/platform/native_read.hpp"'),
     ("src/mods/content_digest.cpp", '#include "thread_priority.hpp"'),
+    ("src/mods/content_digest.cpp", '#include "profile_io.hpp"'),
+    ("src/mods/content_digest.cpp", '#include "../../third_party/xxhash/xxhash.h"'),
     ("src/mods/content_digest.cpp", "const fs::directory_entry entry(path, error);"),
     ("include/eawr/mods/content_digest.hpp", "#include <thread>"),
     ("include/eawr/mods/content_digest.hpp", "#include <mutex>"),

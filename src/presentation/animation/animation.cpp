@@ -8,6 +8,7 @@
 #include <iterator>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <unordered_set>
 #include <vector>
 #include <utility>
@@ -463,6 +464,82 @@ core::Result<void> Player::sample_position(const std::uint64_t position, const s
 
 std::uint32_t Player::playable_frames() const noexcept { return playable_frames_; }
 float Player::frames_per_second() const noexcept { return frames_per_second_; }
+
+bool Player::blend_compatible(const Player& other) const noexcept {
+    if (bones_.size() != other.bones_.size()) return false;
+    for (std::size_t index = 0; index < bones_.size(); ++index)
+        if (bones_[index].name != other.bones_[index].name || bones_[index].parent != other.bones_[index].parent
+            || bones_[index].bind_local != other.bones_[index].bind_local) return false;
+    return true;
+}
+
+core::Result<Pose> Player::sample_blend(const std::uint64_t position, const Player& other,
+    const std::uint64_t other_position, const std::uint32_t subdivisions, const float weight) const {
+    if (!blend_compatible(other))
+        return core::Result<Pose>::failure(failure(diagnostic_codes::invalid_request, "clip blend models differ"));
+    Pose output;
+    auto sampled = sample_blend(position, other, other_position, subdivisions, weight, output);
+    if (!sampled) return core::Result<Pose>::failure(std::move(sampled.error()));
+    return core::Result<Pose>::success(std::move(output));
+}
+
+core::Result<void> Player::sample_blend(const std::uint64_t position, const Player& other,
+    const std::uint64_t other_position, const std::uint32_t subdivisions, const float weight, Pose& output) const {
+    if (!finite(weight) || weight < 0.0F || weight > 1.0F || bones_.size() != other.bones_.size())
+        return core::Result<void>::failure(failure(diagnostic_codes::invalid_request, "invalid clip blend"));
+    auto left = sample_position(position, subdivisions, output);
+    if (!left) return left;
+    // Reuse the pose's second bone array without allocating a temporary pose.
+    Pose right;
+    right.bones.swap(output.blend_scratch_);
+    auto sampled_right = other.sample_position(other_position, subdivisions, right);
+    right.bones.swap(output.blend_scratch_);
+    if (!sampled_right) return sampled_right;
+    const auto local_trs = [](const Player& player, const std::size_t bone_index,
+                              const std::uint64_t clip_position, const std::uint32_t parts) -> std::optional<Trs> {
+        const auto track = std::find_if(player.tracks_.begin(), player.tracks_.end(),
+            [bone_index](const Track& item) { return item.bone == bone_index; });
+        if (track == player.tracks_.end()) {
+            if (!unsupported_bind(player.bones_[bone_index].bind_local).empty()) return {};
+            return decompose(player.bones_[bone_index].bind_local);
+        }
+        const auto first = player.playable_frames_ == 0 ? 0U : static_cast<std::size_t>(clip_position / parts);
+        const auto second = std::min(first + 1U, static_cast<std::size_t>(player.playable_frames_));
+        const float fraction = player.playable_frames_ == 0 ? 0.0F
+            : static_cast<float>(clip_position % parts) / static_cast<float>(parts);
+        const auto& ta = track->translation[first * track->translation_stride];
+        const auto& tb = track->translation[second * track->translation_stride];
+        const auto& sa = track->scale[first * track->scale_stride];
+        const auto& sb = track->scale[second * track->scale_stride];
+        const auto& ra = track->rotation[first * track->rotation_stride];
+        const auto& rb = track->rotation[second * track->rotation_stride];
+        return Trs{lerp(ta, tb, interpolation_amount(track->translation_interpolation, fraction)),
+            lerp(sa, sb, interpolation_amount(track->scale_interpolation, fraction)),
+            track->rotation_interpolation == assets::Interpolation::spherical
+                ? slerp(normalized(ra), normalized(rb), fraction)
+                : nlerp(normalized(ra), normalized(rb), interpolation_amount(track->rotation_interpolation, fraction))};
+    };
+    for (std::size_t index = 0; index < bones_.size(); ++index) {
+        auto& bone = output.bones[index];
+        const auto& target = output.blend_scratch_[index];
+        if (weight == 1.0F) bone.local_asset = target.local_asset;
+        else if (weight != 0.0F && bone.local_asset != target.local_asset) {
+            const auto a = local_trs(*this, index, position, subdivisions);
+            const auto b = local_trs(other, index, other_position, subdivisions);
+            if (!a || !b)
+                return core::Result<void>::failure(failure(diagnostic_codes::unsupported_bind_blend,
+                    "clip blend requires a decomposable untracked bind transform"));
+            bone.local_asset = compose({lerp(a->translation, b->translation, weight), lerp(a->scale, b->scale, weight),
+                nlerp(a->rotation, b->rotation, weight)});
+        }
+        bone.visible = bone.visible || target.visible;
+        const Matrix parent = bones_[index].parent < 0 ? identity_matrix()
+            : output.bones[static_cast<std::size_t>(bones_[index].parent)].model_asset;
+        bone.model_asset = multiply(parent, bone.local_asset);
+        bone.skin_asset = multiply(bone.model_asset, bones_[index].inverse_bind);
+    }
+    return core::Result<void>::success();
+}
 
 core::Result<Pose> Player::interpolate(const std::size_t first, const std::size_t second, const float fraction, const float sampled,
     const float blend_to_bind) const {

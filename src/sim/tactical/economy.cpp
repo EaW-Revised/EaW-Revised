@@ -390,8 +390,10 @@ core::Result<void> validate_economy(const EconomyRules& rules, const std::span<c
         return invalid("disabled types are not strictly increasing");
     }
     const auto amount = [](const math::Fixed value) { return value.raw() >= 0 && value.raw() <= max_credits_raw; };
+    // Capture needs a neutral player only when some pad captures (an inert land build pad never does).
     if (!rules.pads.capture.empty()) {
-        if (std::none_of(players.begin(), players.end(), [&](const Player& player) { return player.player_id == rules.pads.neutral; })) {
+        if (std::any_of(rules.pads.capture.begin(), rules.pads.capture.end(), [](const CaptureProfile& point) { return point.captures; })
+            && std::none_of(players.begin(), players.end(), [&](const Player& player) { return player.player_id == rules.pads.neutral; })) {
             return invalid("capture requires a declared neutral player");
         }
         for (std::size_t index = 0; index < rules.pads.capture.size(); ++index) {

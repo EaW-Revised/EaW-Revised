@@ -1,4 +1,5 @@
 #include "live_save_transport.hpp"
+#include "eawr/sim/galactic/offer_pool.hpp"
 #include <algorithm>
 #include <bit>
 #include <limits>
@@ -14,9 +15,18 @@ void length(std::vector<std::uint8_t>& out, std::uint32_t n) {
     for (unsigned i = 0; i < 4; ++i) out.push_back(static_cast<std::uint8_t>(n >> (8U * i)));
 }
 }
-core::Result<checkpoint::Section> encode_input(const gc::GalacticSetup& setup,
-    std::uint64_t frontier, const Input& input) {
-    checkpoint::Section result{input_section, 3, false, {}};
+core::Result<gc::OfferPool> read_offer_pool(const checkpoint::Checkpoint& saved) {
+    const auto* section = saved.find(checkpoint::SectionId::offer_pool);
+    auto pool = section ? gc::OfferPool::decode(section->bytes) : std::nullopt;
+    if (!pool) return fail<gc::OfferPool>("the checkpoint's offer pool is missing or malformed");
+    return core::Result<gc::OfferPool>::success(std::move(*pool));
+}
+namespace {
+// `lacks_table` is set when the pool had to grow, i.e. the setup has an offer table the checkpoint's pool does not hold.
+core::Result<checkpoint::Section> encode_input_with(const gc::GalacticSetup& setup,
+    std::uint64_t frontier, const Input& input, gc::OfferPool* const pool, bool& lacks_table) {
+    checkpoint::Section result{input_section, static_cast<std::uint16_t>(pool ? 4 : 3), false, {}};
+    const auto pooled_tables = pool ? pool->table_count() : 0;
     gc::GalacticReplay orders{setup, frontier, {}}, commands{setup, frontier, input.commands};
     for (std::size_t i = 0; i < input.orders.size(); ++i) {
         const auto& order = input.orders[i];
@@ -34,8 +44,9 @@ core::Result<checkpoint::Section> encode_input(const gc::GalacticSetup& setup,
         std::vector<gc::GameCommand> sorted; sorted.reserve(indices.size());
         for (const auto i : indices) sorted.push_back(std::move(replay->commands[i]));
         replay->commands = std::move(sorted);
-        auto bytes = gc::write_replay(*replay);
+        auto bytes = gc::write_replay(*replay, pool);
         if (!bytes) return core::Result<checkpoint::Section>::failure(bytes.error());
+        if (pool && pool->table_count() != pooled_tables) { lacks_table = true; return fail<checkpoint::Section>("offer table outside the pool"); }
         if (result.bytes.size() > checkpoint::max_bytes - 4
             || bytes.value().size() > checkpoint::max_bytes - result.bytes.size() - 4)
             return fail<checkpoint::Section>("queued input exceeds the byte budget");
@@ -44,17 +55,34 @@ core::Result<checkpoint::Section> encode_input(const gc::GalacticSetup& setup,
     }
     return core::Result<checkpoint::Section>::success(std::move(result));
 }
+} // namespace
+core::Result<checkpoint::Section> encode_input(const gc::GalacticSetup& setup,
+    std::uint64_t frontier, const Input& input, gc::OfferPool* const pool) {
+    bool lacks_table = false;
+    auto pooled = encode_input_with(setup, frontier, input, pool, lacks_table);
+    // The pool is the checkpoint's own and already holds every table of the setup the save recorded, so this is not
+    // expected; but a save must never fail in a running match over it, and the checkpoint's capture commitment covers
+    // its pool section, so the pool cannot grow now. The recordings then carry their tables inline (version 3).
+    if (lacks_table) return encode_input_with(setup, frontier, input, nullptr, lacks_table);
+    return pooled;
+}
 core::Result<Input> decode_input(const checkpoint::Checkpoint& saved) {
     const auto at = std::find_if(saved.sections.begin(), saved.sections.end(), [](const auto& s) { return s.id == input_section; });
     if (at == saved.sections.end()) return core::Result<Input>::success({});
-    if (at->version != 3) return fail<Input>("unsupported section version");
+    if (at->version != 3 && at->version != 4) return fail<Input>("unsupported section version");
+    std::optional<gc::OfferPool> pool;
+    if (at->version == 4) {
+        auto read = read_offer_pool(saved);
+        if (!read) return core::Result<Input>::failure(read.error());
+        pool = std::move(read).value();
+    }
     std::size_t cursor{}; Input input;
     for (unsigned i = 0; i < 2; ++i) {
         if (at->bytes.size() - cursor < 4) return fail<Input>("missing replay length");
         std::uint32_t size{};
         for (unsigned b = 0; b < 4; ++b) size |= static_cast<std::uint32_t>(at->bytes[cursor++]) << (8U * b);
         if (size > at->bytes.size() - cursor) return fail<Input>("truncated replay");
-        auto replay = gc::parse_replay(std::span(at->bytes).subspan(cursor, size)); cursor += size;
+        auto replay = gc::parse_replay(std::span(at->bytes).subspan(cursor, size), {}, pool ? &*pool : nullptr); cursor += size;
         if (!replay) return core::Result<Input>::failure(replay.error());
         if (replay.value().setup.content_identity != saved.header.identities.content
             || replay.value().setup.campaign_identity != saved.header.identities.campaign

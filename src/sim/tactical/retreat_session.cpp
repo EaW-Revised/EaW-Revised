@@ -70,6 +70,15 @@ core::Result<void> TacticalSession::configure_retreat(RetreatConfig config) {
 RetreatGate TacticalSession::Impl::retreat_gate(const PlayerId player) const {
     RetreatGate gate; gate.battle_decided = outcome.has_value();
     if (!retreat) return gate;
+    // WRP-02/03: the existing source ledger follows live carriers and riders.
+    for (const auto& source : command_ledger.sources) {
+        if (!economy.command_bonuses[source.profile].retreat_prevention) continue;
+        const auto at = handles.find(source.host);
+        if (at != handles.end() && live_at(source.host, at->second).state.owner == player) {
+            gate.prevention = true;
+            break;
+        }
+    }
     for (const auto& source : retreat->prevention) {
         if (std::find(source.enemies.begin(), source.enemies.end(), player) == source.enemies.end()) continue;
         const auto at = handles.find(source.unit);

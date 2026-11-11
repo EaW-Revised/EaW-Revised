@@ -160,6 +160,8 @@ core::Result<void> session_detail::Tick::pad_lifecycle() {
             next_id = final_id == std::numeric_limits<EntityId>::max() ? invalid_entity_id : final_id + 1;
             // WBP-22/WPR-16: admission precedes this frame's income pass.
             if (impl_->economy.stream(profile->constructed) != nullptr) earners.emplace_back(final_id, state.builder);
+            const std::array<EntityId, 1> created{final_id};
+            if (auto defaults = request_survivor_defaults(created); !defaults) return defaults;
         }
         pad->second.under_construction = invalid_entity_id;
         replaced_children.push_back(id);
@@ -340,10 +342,22 @@ core::Result<void> session_detail::Tick::station_upgrades() {
             });
             for (auto& earner : earners) if (earner.first == held.station) earner.first = replacement_id;
             // WPR-56 (project), FL-02/08: reconcile by squadron type, never by an old entry index.
-            const auto* new_hangar = squadron_table.find_spawner(menu->next_level, old.state.owner);
-            const auto* old_hangar = squadron_table.find_spawner(old.state.type_id, old.state.owner);
+            const auto prior_hangar = spawners.find(held.station);
+            const auto* old_hangar = prior_hangar != spawners.end() && prior_hangar->second.selected_tech
+                ? squadron_table.find_spawner_at_tech(old.state.type_id, old.state.owner, *prior_hangar->second.selected_tech)
+                : squadron_table.find_spawner(old.state.type_id, old.state.owner);
+            const auto owner_account = std::find_if(ledgers.begin(), ledgers.end(), [&](const auto& row) {
+                return row.player == old.state.owner;
+            });
+            const auto selected_tech = squadron_table.tech_spawners.contains(menu->next_level)
+                ? std::optional<std::uint32_t>{owner_account == ledgers.end() ? 0U : std::min(owner_account->tech_level, 6U)}
+                : std::nullopt;
+            const auto* new_hangar = selected_tech
+                ? squadron_table.find_spawner_at_tech(menu->next_level, old.state.owner, *selected_tech)
+                : squadron_table.find_spawner(menu->next_level, old.state.owner);
             // WFO-12: a station born during object service waits for a subsequent traversal.
             auto next_hangar = initial_spawner(impl_->setup.seed, frame + 1, replacement_id);
+            next_hangar.selected_tech = selected_tech;
             if (new_hangar != nullptr) {
                 next_hangar.ready = true;
                 next_hangar.next_spawn_frame = frame;
@@ -393,6 +407,8 @@ core::Result<void> session_detail::Tick::station_upgrades() {
             if (new_hangar != nullptr) spawners.emplace(replacement_id, std::move(next_hangar));
             // 6. The presentation event moves selection and provides the faction sound trigger.
             events.push_back(Event{tick, EventKind::station_replaced, old.state.owner, replacement_id, held.station});
+            const std::array<EntityId, 1> created{replacement_id};
+            if (auto defaults = request_survivor_defaults(created); !defaults) return defaults;
         }
     }
 
@@ -454,7 +470,7 @@ core::Result<void> session_detail::Tick::economy() {
         }
     };
     bool upgrade_ids_exhausted = false;
-    const auto modifier_service = impl_->service_income_modifiers(ledgers, survivors, earners, tick, executor);
+    const auto modifier_service = impl_->service_income_modifiers(ledgers, survivors, earners, tick, executor, named_ability_locks_);
     if (!modifier_service) return modifier_service;
     std::array<std::optional<core::Diagnostic>, tick_partition_count> income_errors{};
     // WBP-22/23/26, PU-02..04: workers read live ownership and standing bonuses once
@@ -466,13 +482,21 @@ core::Result<void> session_detail::Tick::economy() {
         for (auto index = range.begin; index < range.end; ++index) {
             const auto* source = survivor(earners[index].first);
             const auto* stream = impl_->economy.stream(source->state.type_id);
+            payments[index] = {source->state.owner, 0, false, 0};
+            if (!stream->automatic || !named_ability_enabled(named_ability_locks_, source->state.owner,
+                source->state.type_id, stream->name, stream->initially_enabled)) continue;
             auto amount = stream->per_frame.raw();
             const auto* hull = impl_->health_profile(*source);
             for (const auto& bonus : stream->bonuses) {
-                const bool standing = bonus.hardpoint == always_on
+                // PU-08/WHD-05: loaded names use the retained owner/type lock. Unnamed
+                // synthetic profiles retain their direct hardpoint predicate.
+                const bool standing = !bonus.name.empty() ? bonus.automatic
+                    && named_ability_enabled(named_ability_locks_, source->state.owner,
+                        source->state.type_id, bonus.name, bonus.initially_enabled)
+                    : bonus.automatic && bonus.initially_enabled && (bonus.hardpoint == always_on
                     || (source->durability && hull != nullptr && bonus.hardpoint < hull->hardpoints.size()
                         && !hardpoint_destroyed(*hull, *source->durability, bonus.hardpoint)
-                        && !hardpoint_disabled(*source->durability, bonus.hardpoint));
+                        && !hardpoint_disabled(*source->durability, bonus.hardpoint)));
                 if (standing) amount += bonus.per_frame.raw();
             }
             if (!impl_->income_category_parts.empty()) {
@@ -491,12 +515,27 @@ core::Result<void> session_detail::Tick::economy() {
                     amount = total.value().raw();
                 }
             }
-            if (stream->split_with_allies && !stream->full_amount_to_everyone) {
-                std::int64_t recipients = 0;
+            std::int64_t recipients = 1;
+            if (stream->split_with_allies) {
+                recipients = 0;
                 for (const auto& ledger : ledgers) recipients += impl_->allied(source->state.owner, ledger.player) ? 1 : 0;
-                if (recipients != 0) amount /= recipients;
             }
-            payments[index] = {source->state.owner, amount, stream->split_with_allies};
+            auto owner_amount = amount;
+            if (stream->split_favors_owner) {
+                // PU-09: the remainder divisor includes the owner, who receives only
+                // its reserved fraction. This policy takes precedence over full sharing.
+                if (amount <= 0) { amount = 0; owner_amount = 0; }
+                else {
+                    const auto reserved = math::multiply(math::Fixed::from_raw(amount), stream->owner_income_percentage);
+                    if (!reserved) { income_errors[partition] = reserved.error(); break; }
+                    owner_amount = std::clamp(reserved.value().raw(), std::int64_t{0}, amount);
+                    amount = recipients != 0 ? (amount - owner_amount) / recipients : 0;
+                }
+            } else if (stream->split_with_allies && !stream->full_amount_to_everyone) {
+                if (recipients != 0) amount /= recipients;
+                owner_amount = amount;
+            }
+            payments[index] = {source->state.owner, amount, stream->split_with_allies, owner_amount};
         }
     };
     if (!earners.empty()) {
@@ -511,7 +550,8 @@ core::Result<void> session_detail::Tick::economy() {
         const auto player = impl_->economy.player_at(ledger.player, tick);
         for (const auto& payment : payments) {
             if (payment.owner != ledger.player && (!payment.split || !impl_->allied(payment.owner, ledger.player))) continue;
-            const auto balance = change_credits(ledger, *player, math::Fixed::from_raw(payment.amount));
+            const auto balance = change_credits(ledger, *player,
+                math::Fixed::from_raw(payment.owner == ledger.player ? payment.owner_amount : payment.amount));
             if (!balance) return core::Result<void>::failure(balance.error());
         }
         // PU-18: an entry whose station is gone or no longer offers its type is dropped.
@@ -575,7 +615,7 @@ core::Result<void> session_detail::Tick::economy() {
     }
     // WFO-31/WBP-45: queue-created objects activate after current income, before
     // ordinary services in the next traversal. Activation never repays earlier frames.
-    const auto activated_modifiers = impl_->service_income_modifiers(ledgers, survivors, earners, tick, executor, true);
+    const auto activated_modifiers = impl_->service_income_modifiers(ledgers, survivors, earners, tick, executor, named_ability_locks_, true);
     if (!activated_modifiers) return activated_modifiers;
 
     return core::Result<void>::success();

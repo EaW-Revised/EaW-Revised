@@ -34,6 +34,27 @@ int case_galactic_planet_hud_tests() {
         assert(eawr::data::ui::parse_command_bar_components(std::as_bytes(std::span(stock_xml.data(), stock_xml.size())),
             record, catalog, diagnostics));
         assert(command_filter_names(catalog).empty());
+        assert(command_menu_names(catalog).empty());
+        const std::string menus = "<CommandBarComponents>"
+            "<CommandBarComponent Name='b_story_arc_g'><Type>Button</Type></CommandBarComponent>"
+            "<CommandBarComponent Name='b_option_g'><Type>TextButton</Type></CommandBarComponent>"
+            "<CommandBarComponent Name='B_CAMERA_G'><Type>TextButton</Type></CommandBarComponent>"
+            "<CommandBarComponent Name='unbound_menu'><Type>Button</Type></CommandBarComponent>"
+            "</CommandBarComponents>";
+        assert(eawr::data::ui::parse_command_bar_components(std::as_bytes(std::span(menus.data(), menus.size())),
+            record, catalog, diagnostics));
+        assert((command_menu_names(catalog) == std::vector<std::string>{"b_story_arc_g", "b_option_g", "B_CAMERA_G"}));
+        assert(command_menu_action("B_STORY_ARC_G") == CommandMenuAction::story_summary);
+        assert(command_menu_action("b_option_g") == CommandMenuAction::options);
+        assert(command_menu_action("B_CAMERA_G") == CommandMenuAction::cinematic_camera);
+        assert(command_menu_action("unbound_menu") == CommandMenuAction::none);
+        // WGUI-36: no goals closes admission; a new goal opens it unless the author disabled the control.
+        assert(command_menu_disabled(CommandMenuAction::story_summary, false, false));
+        assert(!command_menu_disabled(CommandMenuAction::story_summary, false, true));
+        assert(command_menu_disabled(CommandMenuAction::story_summary, true, true));
+        assert(command_menu_disabled(CommandMenuAction::story_summary, true, false));
+        assert(command_menu_disabled(CommandMenuAction::cinematic_camera, false, true));
+        assert(!command_menu_disabled(CommandMenuAction::options, false, false));
         const std::string mod_xml = "<CommandBarComponents><CommandBarComponent Name='synthetic_filter'>"
             "<Type>Button</Type><Group>Filter_Custom</Group><Toggle>True</Toggle>"
             "</CommandBarComponent></CommandBarComponents>";
@@ -55,6 +76,15 @@ int case_galactic_planet_hud_tests() {
             && near(scaled.art.width, 42) && near(scaled.art.height, 28));
         assert(near(scaled.hit.x, 89) && near(scaled.hit.y, 41)
             && near(scaled.hit.width, 28) && near(scaled.hit.height, 14));
+        // A larger icon is centred on a smaller backing, at the same authored and shell scale.
+        const auto icon = command_layer_rect(4.5F, 4.375F, 144.0F, 144.0F, 0.125F);
+        assert(near(icon.width, 18.0F) && near(icon.height, 18.0F));
+        assert(near(icon.x, -6.75F) && near(icon.y, -6.8125F));
+        const auto zoomed = command_layer_rect(9.0F, 8.75F, 144.0F, 144.0F, 0.25F);
+        assert(near(zoomed.width, 36.0F) && near(zoomed.x, -13.5F));
+        const auto state = command_layer_rect(4.5F, 4.375F, 36.0F, 35.0F, 0.125F);
+        assert(near(state.x, 0.0F) && near(state.y, 0.0F));
+        assert(near(state.width, 4.5F) && near(state.height, 4.375F));
         const auto stock = command_button_geometry(anchor, {}, 60, 40, 1.0F);
         assert((stock.art == eawr::data::ui::ReferenceRect{70, 30, 60, 40}));
         assert(stock.hit == anchor.rect);
@@ -85,17 +115,16 @@ int case_galactic_planet_hud_tests() {
         const auto normal = Fixed::from_raw(Fixed::scale);
         const auto factor = Fixed::from_raw(eawr::sim::galactic::fast_forward_factor_raw);
         assert(factor.raw() == 4 * Fixed::scale);
-        assert(live_fast_forward_factor(false, true) == factor);
-        assert(!live_fast_forward_factor(true, true) && !live_fast_forward_factor(false, false)); // fixture keeps its own
+        assert(live_fast_forward_factor(false, true, false) == factor);
+        // #5355 / MP-06: a multiplayer campaign shares 2x (the debug build's network maximum), never the 4x button.
+        assert(live_fast_forward_factor(false, true, true) == Fixed::from_raw(2 * Fixed::scale));
+        assert(Fixed::from_raw(eawr::sim::galactic::multiplayer_speed_max_raw) == Fixed::from_raw(2 * Fixed::scale));
+        assert(!live_fast_forward_factor(true, true, false) && !live_fast_forward_factor(false, false, false)
+            && !live_fast_forward_factor(true, true, true)); // fixture keeps its own
         assert(clock_controls_admitted(1, false, false, false) && clock_controls_admitted(0, false, false, false));
         assert(!clock_controls_admitted(2, false, false, false) && clock_controls_admitted(2, true, false, false));
         assert(clock_controls_admitted(2, false, true, true)); // TP-MP01: agreed LAN pause
         assert(!clock_controls_admitted(1, true, true, false)); // no input during LAN transitions
-        // #4552: the authored pause button drives the shared clock whenever the admission above is open; the
-        // authored fast-forward button additionally needs at most one human (TM-04), also in a LAN match.
-        assert(fast_forward_controls_admitted(true, 1, false) && fast_forward_controls_admitted(true, 0, false));
-        assert(!fast_forward_controls_admitted(true, 2, false) && fast_forward_controls_admitted(true, 2, true));
-        assert(!fast_forward_controls_admitted(false, 1, false) && !fast_forward_controls_admitted(false, 2, true));
         {
             // The pause button / Space decision: a LAN match with gameplay open admits pause for host, client and co-op
             // seats (any human count); each closed gate switches it off, with or without a clock bar.
@@ -121,11 +150,12 @@ int case_galactic_planet_hud_tests() {
             assert(clock_controls_open(solo));
         }
         for (const std::size_t humans : {std::size_t{1}, std::size_t{2}, std::size_t{4}}) {
-            // A LAN match with gameplay open: pause is admitted for every seat count, fast forward only for one human.
+            // A LAN match with gameplay open: pause and the shared 2x are admitted for every seat count (#5355); the
+            // fast-forward button follows the clock controls, so a closed LAN gate switches both off.
             const bool pause_enabled = clock_controls_admitted(humans, false, true, true);
-            const bool fast_enabled = fast_forward_controls_admitted(pause_enabled, humans, false)
-                && fast_forward_available(true, false, true);
-            assert(pause_enabled && fast_enabled == (humans == 1));
+            const auto lan_factor = live_fast_forward_factor(false, true, true);
+            assert(pause_enabled && fast_forward_available(pause_enabled, false, lan_factor.has_value()));
+            assert(fast_forward_target(normal, *lan_factor) == *lan_factor && fast_forward_target(*lan_factor, *lan_factor) == normal);
             assert(!clock_controls_admitted(humans, false, true, false)); // LAN transitions admit no clock input
         }
         assert(fast_forward_available(true, false, true));
@@ -233,6 +263,26 @@ int case_galactic_planet_hud_tests() {
         }
     }
     {
+        // WGUI-91: a queue entry must not resurrect an offer denied by a story lock.
+        PlanetHudFacts facts;
+        facts.discovered = facts.locally_controlled = facts.surface_accessible = true;
+        facts.maximum_queue = 5;
+        facts.space_queue = std::vector<ProductionItem>{};
+        eawr::sim::galactic::ObservedProductionOffer row;
+        row.type = 99;
+        row.domain = eawr::sim::galactic::ProductionDomain::space;
+        row.current = false;
+        row.already_in_production = true;
+        row.admission = eawr::sim::galactic::ProductionAdmission::locked;
+        facts.choices = {production_choice_facts(row)};
+        assert(planet_hud_view(&facts, true, 3, 2).choices.empty());
+        // Purchase affordability is checked earlier, but cannot mask the menu lock.
+        row.admission = eawr::sim::galactic::ProductionAdmission::credits;
+        row.capability = eawr::sim::galactic::ProductionAdmission::locked;
+        facts.choices = {production_choice_facts(row)};
+        assert(planet_hud_view(&facts, true, 3, 2).choices.empty());
+    }
+    {
     eawr::sim::galactic::ObservedPlanet observation;
     observation.player = 1; observation.planet = 7; observation.discovered = true;
     eawr::sim::galactic::ObserverPlanet payload;
@@ -321,6 +371,42 @@ int case_galactic_planet_hud_tests() {
     assert(!absent.present && absent.colour == Rgb{});
     assert(overview_name_alpha(0) == 1 && overview_name_alpha(0.05) == 0.5);
     assert(overview_name_alpha(0.1) == 0 && overview_name_alpha(1) == 0);
+    {
+        // WGEP-18..34: queue cost is retained at admission. Later offers do
+        // not reprice it, and a removed offer cannot erase its tooltip cost.
+        namespace gc = eawr::sim::galactic;
+        using Fixed = eawr::sim::math::Fixed;
+        const auto credits = [](const std::int64_t value) { return Fixed::from_raw(value * Fixed::scale); };
+        gc::PlanetProduction production;
+        gc::ProductionEntry entry;
+        entry.type = 90; entry.build_id = 91; entry.price = credits(125);
+        production.queues[1].push_back(entry);
+        gc::ProductionOffer offer;
+        offer.type = entry.type; offer.price = entry.price;
+        production.offers.push_back(offer);
+        const auto queue_view = [&] {
+            const auto items = production_queue_items(production, [](const gc::TypeId) {
+                return std::pair{std::string("queued type"), std::string("type icon")};
+            });
+            PlanetHudFacts retained;
+            retained.planet = 7; retained.discovered = true; retained.locally_controlled = true;
+            retained.maximum_queue = 5;
+            retained.space_queue = items.space; retained.ground_queue = items.ground;
+            return planet_hud_view(&retained, true, 1, 0);
+        };
+        const auto admitted = queue_view();
+        assert(admitted.queues.front().price == 125);
+        production.offers.front().price = credits(300);
+        const auto repriced_offer = queue_view();
+        assert(repriced_offer.queues.front().price == 125);
+        assert(repriced_offer.queues == admitted.queues);
+        production.offers.clear();
+        const auto absent_offer = queue_view();
+        assert(absent_offer.queues.front().visible && absent_offer.queues.front().price == 125);
+        assert(absent_offer.queues.front().type_id == entry.type);
+        assert(absent_offer.queues.front().build_id == entry.build_id);
+        assert(absent_offer.queues == admitted.queues);
+    }
     PlanetHudFacts facts;
     facts.planet = 7;
     facts.discovered = true;
@@ -374,7 +460,9 @@ int case_galactic_planet_hud_tests() {
         PlanetStatusIcon::smuggler, PlanetStatusIcon::bounty_hunter, PlanetStatusIcon::smuggled,
         PlanetStatusIcon::corruption_info}));
     facts.siphon_smuggled = facts.bounty_hunter_active = facts.siphon_source = false;
+    assert(status_effect_component_name(PlanetStatusIcon::smuggler) == "g_smuggler");
     assert(status_effect_component_name(PlanetStatusIcon::bounty_hunter) == "g_bounty_hunter");
+    assert(status_effect_component_name(PlanetStatusIcon::smuggled) == "g_smuggled");
     assert(status_effect_icon_name(PlanetStatusIcon::smuggler, {"a", "b"}) == "a");
     assert(status_effect_icon_name(PlanetStatusIcon::smuggler, {}).empty());
     assert(status_effect_icon_name(PlanetStatusIcon::build, {"a"}).empty());
@@ -602,9 +690,13 @@ int case_galactic_planet_hud_tests() {
     player.population_with_production = 13;
     player.population_capacity = 20;
     player.displayed_tech = 4;
-    const auto summary = player_hud_view(player, "Cycle");
-    assert(summary.cycle == "Cycle 1" && summary.next_income == "$ 100");
-    assert(summary.population == "13 / 20" && summary.technology == "4");
+    const auto summary = player_hud_view(player, "Cycle", "Tech:");
+    assert(summary.cycle == "Cycle: 1" && summary.next_income == "$ 100");
+    assert(summary.population == "13 / 20" && summary.technology == "Tech: 4");
+    const auto translated = player_hud_view(player, "Jour", "Niveau");
+    assert(translated.cycle == "Jour: 1" && translated.technology == "Niveau 4");
+    const auto unlabelled = player_hud_view(player, "", "");
+    assert(unlabelled.cycle == "1" && unlabelled.technology == "4");
     player.next_income = -0.3;
     assert(player_hud_view(player, "Cycle").next_income == "$ 0");
     player.hide_tech = true;

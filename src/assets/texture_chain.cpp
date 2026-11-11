@@ -4,6 +4,7 @@
 #include <array>
 #include <cmath>
 #include <limits>
+#include <numeric>
 #include <utility>
 
 // Block layouts (public S3TC documentation), texels in raster order inside a 4x4 block:
@@ -577,16 +578,58 @@ void renormalize_normals(const std::span<std::uint8_t> rgba) noexcept {
     }
 }
 
+// Rank each filtered light texel against the top level's luminance distribution.
+// The unadjusted box chain remains the input to the next level, as in the measured overlay.
+[[nodiscard]] float light_luma(const std::uint8_t* p) noexcept {
+    return 0.2126F * p[0] + 0.7152F * p[1] + 0.0722F * p[2];
+}
+
+[[nodiscard]] std::vector<float> light_distribution(const PixelFormat format, const MipLevel& level) {
+    std::vector<std::uint8_t> pixels;
+    if (block_size_of(format) != 0U) pixels = decode_blocks(format, level.bytes, level.width, level.height);
+    else {
+        pixels.resize(static_cast<std::size_t>(level.width) * level.height * 4U);
+        for (std::uint32_t y = 0; y < level.height; ++y)
+            unpack_row(format, level, y, pixels.data() + static_cast<std::size_t>(y) * level.width * 4U);
+    }
+    std::vector<float> values(pixels.size() / 4U);
+    for (std::size_t i = 0; i < values.size(); ++i) values[i] = light_luma(pixels.data() + i * 4U);
+    std::sort(values.begin(), values.end());
+    return values;
+}
+
+void compensate_light(std::vector<std::uint8_t>& pixels, const std::vector<float>& top) {
+    const std::size_t count = pixels.size() / 4U;
+    std::vector<std::size_t> order(count);
+    std::iota(order.begin(), order.end(), 0U);
+    std::stable_sort(order.begin(), order.end(), [&](const std::size_t a, const std::size_t b) {
+        return light_luma(pixels.data() + 4U * a) < light_luma(pixels.data() + 4U * b);
+    });
+    for (std::size_t rank = 0; rank < count; ++rank) {
+        auto* const p = pixels.data() + 4U * order[rank];
+        const float gain = top[static_cast<std::size_t>((static_cast<double>(rank) + 0.5) * static_cast<double>(top.size()) / static_cast<double>(count))]
+            / std::max(light_luma(p), 0.001F);
+        for (std::size_t c = 0; c < 3; ++c)
+            p[c] = static_cast<std::uint8_t>(std::clamp(p[c] * gain + 0.5F, 0.0F, 255.0F));
+    }
+}
+
 bool extend_mip_chain(Texture& texture, const ChainKind kind) {
     if (!mip_chain_incomplete(texture)) return false;
+    if (kind == ChainKind::compensated_light && texture.mips.size() != 1U) return false;
     const PixelFormat format = texture.format;
+    const auto distribution = kind == ChainKind::compensated_light ? light_distribution(format, texture.mips.front()) : std::vector<float>{};
     std::uint32_t width = half_of(texture.mips.back().width);
     std::uint32_t height = half_of(texture.mips.back().height);
     std::vector<std::uint8_t> rgba = halve_stored_level(format, texture.mips.back());
     if (kind == ChainKind::normal && renormalize_normal_chains) renormalize_normals(rgba);
     std::vector<MipLevel> added;
     for (;;) {
-        added.push_back(store_level(format, rgba, width, height));
+        if (kind == ChainKind::compensated_light && !added.empty()) {
+            auto mapped = rgba;
+            compensate_light(mapped, distribution);
+            added.push_back(store_level(format, mapped, width, height));
+        } else added.push_back(store_level(format, rgba, width, height));
         if (width == 1U && height == 1U) break;
         rgba = box_halve_rgba(rgba, width, height);
         if (kind == ChainKind::normal && renormalize_normal_chains) renormalize_normals(rgba);

@@ -5,6 +5,7 @@
 #include "eawr/sim/math/fixed.hpp"
 
 #include <array>
+#include <compare>
 #include <cstdint>
 #include <map>
 #include <memory>
@@ -31,8 +32,21 @@ enum class EventOrder : std::uint8_t { document };
 inline constexpr EventOrder interim_event_order = EventOrder::document; // interim rule, #4344 C1
 
 inline constexpr std::string_view land_battle_refusal = "not available until land battles";
-inline constexpr std::size_t token_slots_event = 7;   // Event_Param1..7 (WST-05)
-inline constexpr std::size_t token_slots_reward = 14; // Reward_Param1..14 (WST-05)
+// WST-05: fixed retail reader schema, independent of which slots a plot authors.
+namespace retail_schema {
+inline constexpr auto event_parameter_tags = std::to_array<std::string_view>({
+    "Event_Param1", "Event_Param2", "Event_Param3", "Event_Param4",
+    "Event_Param5", "Event_Param6", "Event_Param7"
+});
+inline constexpr auto reward_parameter_tags = std::to_array<std::string_view>({
+    "Reward_Param1", "Reward_Param2", "Reward_Param3", "Reward_Param4",
+    "Reward_Param5", "Reward_Param6", "Reward_Param7", "Reward_Param8",
+    "Reward_Param9", "Reward_Param10", "Reward_Param11", "Reward_Param12",
+    "Reward_Param13", "Reward_Param14"
+});
+} // namespace retail_schema
+inline constexpr std::size_t token_slots_event = retail_schema::event_parameter_tags.size();
+inline constexpr std::size_t token_slots_reward = retail_schema::reward_parameter_tags.size();
 inline constexpr int max_branch_reset_depth = 3;       // WST-24
 inline constexpr int max_trigger_depth = 128;           // recursion guard: dependant chains and TRIGGER_EVENT cycles (WST-21)
 
@@ -73,6 +87,16 @@ struct PlotRecord { // WST-01
 // An event or reward the loader or engine refused to run, with the reason.
 struct Refusal { Player owner{}; std::string subplot, event, what, reason; };
 
+// TRIGGER_AI (WST-49, debug build): a flag keyed by
+// player, planet (0 = none) and trigger name, read and cleared by the Lua Check_Story_Flag.
+struct AiFlag {
+    Player player{};
+    std::uint64_t planet{};
+    std::string name; // upper-cased
+    friend bool operator==(const AiFlag&, const AiFlag&) = default;
+    friend auto operator<=>(const AiFlag&, const AiFlag&) = default;
+};
+
 struct EventState {
     std::string name; // restore is by event name (WST-61)
     bool triggered{}, active{}, disabled{};
@@ -110,6 +134,8 @@ struct State {
     std::map<std::string, std::int64_t> flags; // upper-cased flag name -> value (WST-27)
     // WST-56 Lua edits, in order of first edit. Not part of the positional fields: saved as an optional tail.
     std::vector<EventEdit> edits;
+    // TRIGGER_AI flags, sorted. Saved after the edits as an optional tail, only when present (an unflagged game keeps its bytes).
+    std::vector<AiFlag> ai_flags;
 };
 
 // One Lua request on a plot, as plain ordered data (ids are names, never pointers). `subplot` is the file name as
@@ -153,6 +179,10 @@ struct ScriptCall {
 struct Config {
     // WST-14: outside solo and skirmish games only `Multiplayer` events are evaluated.
     bool solo{true};
+    // TRIGGER_AI names its faction and planet by text (Reward_Param2/3). Upper-cased faction -> its player (the lowest
+    // player id of that faction, WST-91) and upper-cased planet name -> planet id. Empty: such a reward is diagnosed.
+    std::map<std::string, Player> factions;
+    std::map<std::string, std::uint64_t> planets;
 };
 
 class Engine final {
@@ -204,6 +234,9 @@ public:
     [[nodiscard]] bool triggered(std::string_view subplot, std::string_view event) const;
     [[nodiscard]] bool active(std::string_view subplot, std::string_view event) const;
     [[nodiscard]] std::optional<std::int64_t> flag(std::string_view name) const;
+    // TRIGGER_AI flags for the Lua Check_Story_Flag: a read, and the clear that a "reset" check asks for.
+    [[nodiscard]] bool ai_flag(Player player, std::uint64_t planet, std::string_view name) const;
+    void clear_ai_flag(Player player, std::uint64_t planet, std::string_view name);
 
     struct Impl;
 private:

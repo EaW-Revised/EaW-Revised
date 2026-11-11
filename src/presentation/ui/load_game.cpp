@@ -204,6 +204,27 @@ LoadGameEntry make_replay_entry(const std::string_view file_name, const std::int
 LoadGameModel::LoadGameModel(Path store, std::shared_ptr<SavedGameStore> saves)
     : store_(std::move(store)), saves_(std::move(saves)) {}
 
+void SavedLoadReview::begin(SavedGameRequest request, std::string prompt) {
+    request_ = std::move(request); prompt_ = std::move(prompt); waiting_ = false;
+}
+void SavedLoadReview::wait(SavedGameRequest request) {
+    begin(std::move(request), {}); waiting_ = true;
+}
+bool SavedLoadReview::complete(std::string prompt) {
+    if (!waiting()) return false;
+    prompt_ = std::move(prompt); waiting_ = false; return true;
+}
+std::optional<SavedGameRequest> SavedLoadReview::proceed() {
+    return waiting() || needs_confirmation() ? std::nullopt : std::exchange(request_, std::nullopt);
+}
+std::optional<SavedGameRequest> SavedLoadReview::answer(const bool yes) {
+    if (yes && waiting()) return std::nullopt;
+    waiting_ = false;
+    prompt_.clear();
+    auto request = std::exchange(request_, std::nullopt);
+    return yes ? request : std::nullopt;
+}
+
 void LoadGameModel::refresh() {
     const LoadGameEntry* before = selected_entry();
     const std::string kept = before != nullptr ? before->file_name : std::string{};

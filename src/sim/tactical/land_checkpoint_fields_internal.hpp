@@ -1,6 +1,7 @@
 #pragma once
 
 #include "checkpoint_archive_internal.hpp"
+#include "checkpoint_fields_internal.hpp"
 #include "eawr/sim/tactical/land_movement.hpp"
 #include "session_land_internal.hpp"
 
@@ -8,6 +9,12 @@ namespace eawr::sim::tactical::checkpoint_detail {
 
 template <> struct Fields<session_detail::LandCombatState> {
     template <class A, class T> static void apply(A& a, T& v) { a(v.targets); }
+};
+
+template <> struct Fields<session_detail::LandLanding> {
+    template <class A, class T> static void apply(A& a, T& v) {
+        a(v.sequence, v.owner, v.company, v.position, v.yaw, v.created_frame, v.finalize_frame, v.pool_token, v.seat.value);
+    }
 };
 
 template <> struct Fields<LandOccupation> {
@@ -44,6 +51,18 @@ template <> struct Fields<LandSearch::Checkpoint> {
             v.cells, v.kept, v.smooth_anchor, v.smooth_low, v.smooth_high, v.smooth_step, v.check_index, v.smooth_mode, v.result);
     }
 };
+template <> struct Fields<LandFormationSlot> {
+    template <class A, class T> static void apply(A& a, T& v) { a(v.id, v.offset); }
+};
+template <> struct Fields<LandFormationOrder> {
+    template <class A, class T> static void apply(A& a, T& v) { a(v.lead, v.request, v.heading, v.slots); }
+};
+template <> struct Fields<session_detail::LandWalkingMember> {
+    template <class A, class T> static void apply(A& a, T& v) { a(v.slot, v.centre_segments, v.current_segment); }
+};
+template <> struct Fields<session_detail::LandWalkingFormation> {
+    template <class A, class T> static void apply(A& a, T& v) { a(v.centre, v.slots); }
+};
 template <> struct Fields<units::LandCompanyMember> {
     template <class A, class T> static void apply(A& a, T& v) {
         a(v.type, v.kind, v.locomotor, v.movement_class, v.create_team, v.named_hero, v.generic_hero,
@@ -52,7 +71,8 @@ template <> struct Fields<units::LandCompanyMember> {
 };
 template <> struct Fields<LandLocomotionProfile> {
     template <class A, class T> static void apply(A& a, T& v) {
-        a(v.maximum_speed, v.acceleration, v.deceleration, v.turn_rate, v.radius, v.walk_transition, v.collision_class);
+        a(v.maximum_speed, v.acceleration, v.deceleration, v.turn_rate, v.radius, v.walk_transition, v.collision_class,
+            v.min_speed_fraction_for_turn, v.close_enough_angle, v.start_clock, v.start_clip_ticks);
     }
 };
 template <> struct Fields<LandMotionGates> {
@@ -76,7 +96,18 @@ template <> struct Fields<LandMovingSquad> {
             v.following_start, v.progress, v.yielding_to, v.blocker_progress, v.has_formation, v.formation_length,
             v.temporary_path, v.temporary_next, v.temporary_first, v.temporary_second, v.generic_team, v.turning,
             v.mapped_axis, v.has_mapped, v.straggler_wait_remaining, v.collision_class, v.jiggle, v.terrain_blocked,
-            v.terrain_target, v.assigned_speed, v.collision_speed);
+            v.terrain_target, v.assigned_speed, v.collision_speed, v.turn_start_heading, v.awaiting_splice, v.formation,
+            v.formation_slot);
+    }
+};
+// Version 16 (G-04..G-09): the garrison records. Hidden occupants are archived with the whole live-unit field list.
+template <> struct Fields<LandMovement::DetachedSquad> {
+    template <class A, class T> static void apply(A& a, T& v) { a(v.squad, v.members); }
+};
+template <> struct Fields<session_detail::LandGarrisonEntry> {
+    template <class A, class T> static void apply(A& a, T& v) {
+        a(v.entrant, v.host, v.host_type, v.bone, v.value, v.phase, v.destroy_with_host, v.fade_frames, v.host_position,
+            v.host_facing, v.request, v.target, v.detached, v.hidden);
     }
 };
 template <> struct Fields<LandContactSettings> {

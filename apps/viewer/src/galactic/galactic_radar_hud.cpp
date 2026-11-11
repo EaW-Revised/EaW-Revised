@@ -1,4 +1,6 @@
 #include "galactic_mode_internal.hpp"
+#include "command_bar_scale.hpp"
+#include "settings_store.hpp"
 #include "ui/tactical_hud_internal.hpp"
 #include "ui/input_routing.hpp"
 #include "eawr/presentation/ui/layout.hpp"
@@ -68,8 +70,9 @@ bool GalacticMode::State::build_radar_hud() {
             }, [this](bool inward) {
                 if (map_input.wheel_zoom()) static_cast<void>(request_hud_zoom(inward));
             }, [this](bool right) {
-                if (right) { scrolling = false; map_input.held_scroll = false; pointer_warp.reset(); }
+                if (right) { scrolling = false; map_input.held_scroll = false; }
                 else { orbiting = false; map_input.held_rotate = false; }
+                if (!scrolling && !orbiting) scroll_hold.end();
             });
             for (const auto& planet : galaxy->planets) {
                 auto* blip = memnew(EawrHudButton); radar->add_child(blip);
@@ -380,8 +383,12 @@ void GalacticMode::State::update_advanced_land_tray(const presentation::ui::Shel
 void GalacticMode::State::update_advanced_open_button(const presentation::ui::ShellPlacement& placement) {
     if (!advanced_open_button) return;
     const auto* anchor = fleet_anchors.find("advanced_planetary");
-    if (!anchor) { advanced_open_button->hide(); return; }
-    const auto pixels = presentation::ui::shell_to_screen(anchor->rect, placement);
+    const auto* component = command_catalog.find("advanced_planetary");
+    const auto art = advanced_open_button->get_texture_normal();
+    if (!anchor || !component || art.is_null()) { advanced_open_button->hide(); return; }
+    const auto face = galactic_view::button_face_rect(*anchor, static_cast<float>(art->get_width()),
+        static_cast<float>(art->get_height()), galactic_view::command_bar_component_scale(*component, 1.0F));
+    const auto pixels = presentation::ui::shell_to_screen(face, placement);
     advanced_open_button->set_position({static_cast<float>(pixels.x), static_cast<float>(pixels.y)});
     advanced_open_button->set_size({static_cast<float>(pixels.width), static_cast<float>(pixels.height)});
     advanced_open_button->set_hit_rect({{}, advanced_open_button->get_size()});
@@ -416,7 +423,7 @@ bool GalacticMode::State::request_hud_zoom(bool inward, bool toggle) {
 
 bool GalacticMode::State::request_radar_position(galactic_view::PointerPoint point, float width, float height) {
     if (!galaxy || tactical || loading || !map_input.hud_event()) return false;
-    const auto position = map_input.radar(point, width, height);
+    const auto position = map_input.radar(point, width, height, radar_frame);
     if (!position) return false;
     seat_flight().position(*position); last_radar_position = position; ++radar_positions;
     apply_camera();
@@ -451,7 +458,7 @@ void GalacticMode::State::update_radar_blips(std::size_t index, Vector2 size, do
             galaxy->local.player, planet.id) : std::nullopt;
         const auto fact = hud_facts.find(planet.id);
         const bool discovered = fact != hud_facts.end() ? fact->second.discovered : discovery.value_or(false);
-        const auto local = galactic_view::world_to_radar(planet.position, size.x, size.y);
+        const auto local = galactic_view::world_to_radar(planet.position, size.x, size.y, radar_frame);
         auto tint = neutral_tint;
         // Owner RGB colours the icon, while selected art keeps its
         // authored RGB. WGP-119's discovery alpha applies to both.
@@ -724,7 +731,14 @@ void GalacticMode::State::update_radar_hud() {
     update_advanced_map_markers();
     if (advanced_map_shell) advanced_map_shell->set_visible(advanced);
     update_advanced_map_labels();
-    const bool changed = radar_publication != displayed_snapshot || radar_selection != selected_planet
+    const auto* saved = ActiveSettings::get();
+    const bool fit = saved && saved->gameplay.fit_radar_to_galaxy;
+    const bool fit_changed = fit != radar_fit;
+    if (fit_changed || radar_publication != displayed_snapshot) {
+        radar_frame = galactic_view::radar_extents(*galaxy, fit);
+        radar_fit = fit;
+    }
+    const bool changed = fit_changed || radar_publication != displayed_snapshot || radar_selection != selected_planet
         || radar_pending_planet != pending_battle_planet
         || radar_viewport != Vector2(static_cast<float>(camera.width), static_cast<float>(camera.height));
     if (changed) {
@@ -781,17 +795,17 @@ void GalacticMode::State::update_radar_hud() {
             const auto size = radar->get_size();
             if (changed) update_radar_blips(index, size, placement.scale);
             if (auto* view = radar_view_icons[index]) {
-                const auto local = galactic_view::world_to_radar(seat_flight().pose().target, size.x, size.y);
+                const auto bounds = galactic_view::radar_camera_bounds(camera, radar_frame);
                 const auto texture = view->get_texture();
-                const auto* style = command_catalog.find("g_radar_view");
-                const auto authored = style ? style->vec2(data::ui::Field::size) : std::nullopt;
-                const auto glyph_size = authored ? Vector2(authored->x, authored->y) * static_cast<float>(placement.scale)
-                    : texture.is_valid() ? texture->get_size() * static_cast<float>(placement.scale) : Vector2{};
-                view->set_size(glyph_size);
-                view->set_visible(local && texture.is_valid() && seat_flight().state() != galactic_view::CameraState::focused);
-                if (local) view->set_position(Vector2(size.x * .5F + local->x, size.y * .5F - local->y) - glyph_size * .5F);
-                // WGUI-U07: camera view extent calibration remains a named seam;
-                // the authored icon follows camera position, without a fabricated frustum.
+                view->set_visible(bounds && texture.is_valid() && seat_flight().state() != galactic_view::CameraState::focused);
+                if (bounds) {
+                    // WGUI-178: the same camera-plane footprint as the skirmish rectangle.
+                    // The radar parent clips its authored outline texture at the frame edges.
+                    view->set_position({(bounds->min.x + 1.0F) * size.x * 0.5F,
+                                        (1.0F - bounds->max.y) * size.y * 0.5F});
+                    view->set_size({(bounds->max.x - bounds->min.x) * size.x * 0.5F,
+                                    (bounds->max.y - bounds->min.y) * size.y * 0.5F});
+                }
             }
         }
         auto* zoom = radar_zoom_buttons[index];

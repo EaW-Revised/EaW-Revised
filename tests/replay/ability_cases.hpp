@@ -61,6 +61,7 @@ void test_stealth_duration_modifiers();
 void test_laser_defence();
 void test_self_destruct_projectile_order();
 void test_self_destruct();
+void test_gui_name_is_no_handler_selector();
 void test_redirect_blaster();
 void test_corrupt_scatter();
 void test_corrupt_systems();

@@ -21,8 +21,8 @@ Fixed f(std::int64_t n) { return Fixed::from_integer(n).value(); }
 void native_actor_change_rollback() {
     using Change = gc::GalacticSession::NativeActorChange;
     using Checkpoint = gc::session_detail::NativeActorChangeCheckpoint;
-    const Checkpoint::Changes prior{{Change::Kind::changed, 41, 0, false, {}, true},
-        {Change::Kind::created, 42, 17, {}, false, {}}, {Change::Kind::lost, 43, 0, true, true, false}};
+    const Checkpoint::Changes prior{{Change::Kind::changed, 41, 0, false, {}, true, {}, {}},
+        {Change::Kind::created, 42, 17, {}, false, {}, {}, {}}, {Change::Kind::lost, 43, 0, true, true, false, {}, {}}};
     const auto equal = [](const auto& left, const auto& right) {
         return std::equal(left.begin(), left.end(), right.begin(), right.end(), [](const auto& a, const auto& b) {
             return std::tie(a.kind, a.actor, a.source, a.dead, a.deleting, a.death_clone)
@@ -36,7 +36,7 @@ void native_actor_change_rollback() {
         const auto erased = pending;
         checkpoint.restore();
         expect(equal(pending, prepared ? prior : erased), "prepared rollback restores erased entries and every prior field in order");
-        pending.assign({{Change::Kind::created, 99, 0, {}, {}, {}}});
+        pending.assign({{Change::Kind::created, 99, 0, {}, {}, {}, {}, {}}});
         pending.insert(pending.end(), prior.begin(), prior.end());
         const auto appended = pending;
         checkpoint.restore();
@@ -90,6 +90,36 @@ struct Fixture {
         return cp::place_starting_force(inputs, request(type), next, galaxy, context);
     }
 };
+void indexed_nested_creation_preserves_first_matches() {
+    Fixture fixture;
+    // The catalog and bindings may contain case aliases; the legacy resolver
+    // selects the first matching type and then the first binding for that type.
+    auto duplicate = fixture.source(7); duplicate.name = "sHiP";
+    fixture.inputs.types.types.push_back(duplicate);
+    fixture.inputs.bindings.push_back({18, "SHIP"});
+    fixture.inputs.runtime_types.push_back({18, false, false, {}});
+    fixture.source(11).squadron_units = {"sHiP", "SHIP"};
+    const auto old = cp::prepare_nested_creation(fixture.inputs);
+    const auto indexed = cp::prepare_initial_nested_creation(fixture.inputs, nullptr, nullptr);
+    expect(old && indexed && old.value() == indexed.value(), "indexed nested creation retains first matching type and binding");
+    if (indexed) {
+        const auto row = std::find_if(indexed.value().types.begin(), indexed.value().types.end(),
+            [](const auto& type) { return type.type == 11; });
+        expect(row != indexed.value().types.end() && row->members == std::vector<gc::TypeId>{7, 7},
+            "case aliases and duplicate authored members retain their first binding and order");
+    }
+    fixture.source(11).squadron_units = {"missing", "Ship"};
+    eawr::core::LoadNoteBuffer old_notes, new_notes;
+    std::set<gc::TypeId> old_omitted, new_omitted;
+    const auto degraded = cp::prepare_nested_creation(fixture.inputs, &old_notes, &old_omitted);
+    const auto indexed_degraded = cp::prepare_initial_nested_creation(fixture.inputs, &new_notes, &new_omitted);
+    eawr::core::LoadNoteCollector old_collector, new_collector;
+    old_collector.merge(old_notes); new_collector.merge(new_notes);
+    expect(degraded && indexed_degraded && degraded.value() == indexed_degraded.value()
+        && old_omitted == new_omitted
+        && eawr::core::load_notes_json(old_collector.snapshot()) == eawr::core::load_notes_json(new_collector.snapshot()),
+        "indexed resolution preserves omitted templates and ordered diagnostics for missing names");
+}
 void reconciled_placement_contracts() {
     Fixture fixture;
     auto inputs = std::make_shared<const cp::StartingForceInputs>(fixture.inputs);
@@ -1195,6 +1225,7 @@ int case_galactic_starting_forces_tests() {
     expect(setenv("EAWR_VERIFY_GALACTIC_HASH", "1", 1) == 0, "full galactic hash verifier enabled");
 #endif
     native_actor_change_rollback();
+    indexed_nested_creation_preserves_first_matches();
     reconciled_placement_contracts();
     duplicate_authored_starbases();
     level_one_starbase_clears_space_structures();

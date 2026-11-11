@@ -1,6 +1,7 @@
 #include "orders_internal.hpp"
 
 #include "motion_internal.hpp"
+#include "eawr/sim/tactical/pathfind.hpp"
 
 #include <algorithm>
 
@@ -90,6 +91,49 @@ core::Result<math::Vec3> approach_slot(const math::Vec3& unit, const math::Vec3&
                     calc.add(predicted.y, calc.div(calc.mul(dy, radius), length)), predicted.z};
     if (!calc.ok()) return core::Result<math::Vec3>::failure(calc.error("approach slot"));
     return core::Result<math::Vec3>::success(slot);
+}
+
+core::Result<std::optional<math::Vec3>> open_approach_slot(const math::Vec3& slot, const math::Vec3& centre,
+    const math::Vec3& position, const AvoidanceRules& rules, const Footprint& footprint,
+    const CollisionWorld& world, const EntityId entity, const std::uint64_t frame, const bool through_hazards,
+    std::uint32_t* const candidates) {
+    using Result = core::Result<std::optional<math::Vec3>>;
+    if (candidates != nullptr) *candidates = 0;
+    if (frame > max_ticks) return Result::success(std::nullopt);
+    motion_detail::Calc calc;
+    LinearQuery query;
+    query.start_frame = whole(static_cast<std::int64_t>(frame));
+    query.end_frame = whole(std::int64_t{1} << 32);
+    query.facing = {whole(1), Fixed{}};
+    query.x_extent = query.y_extent = calc.mul(footprint.radius, rules.occupation_radius);
+    query.ignore = entity;
+    const auto dx = calc.sub(slot.x, centre.x);
+    const auto dy = calc.sub(slot.y, centre.y);
+    // OR-28: fixed work, at most 37 candidates, without changing the ring's reach.
+    // The maximum arc is the per-unit adaptation; the retail group chooses a narrower arc.
+    for (int index = 0; index <= 36 && calc.ok(); ++index) {
+        const auto degrees = whole(((index + 1) / 2) * 5 * (index % 2 == 0 ? -1 : 1));
+        const auto cosine = calc.cos_deg(degrees);
+        const auto sine = calc.sin_deg(degrees);
+        const math::Vec3 candidate = index == 0 ? slot : math::Vec3{
+            calc.add(centre.x, calc.sub(calc.mul(dx, cosine), calc.mul(dy, sine))),
+            calc.add(centre.y, calc.add(calc.mul(dx, sine), calc.mul(dy, cosine))), slot.z};
+        if (!calc.ok()) break;
+        // Only pass destinations the motion planner can represent.
+        constexpr auto limit = motion_detail::coordinate_limit_raw;
+        if (candidate.x.raw() < -limit || candidate.x.raw() > limit
+            || candidate.y.raw() < -limit || candidate.y.raw() > limit) continue;
+        const auto filter = movement_collision_filter(world, footprint, entity, frame, position, candidate, through_hazards);
+        if (!filter) return Result::failure(filter.error());
+        query.start = query.end = {candidate.x, candidate.y};
+        if (candidates != nullptr) ++*candidates;
+        const auto collision = find_dual_collision(world, footprint.layer, query);
+        if (!collision) return Result::failure(collision.error());
+        if ((collision.value() & filter.value()) == 0) return Result::success(candidate);
+        if (dx.raw() == 0 && dy.raw() == 0) break;
+    }
+    if (!calc.ok()) return Result::failure(calc.error("open approach slot"));
+    return Result::success(std::nullopt);
 }
 
 } // namespace eawr::sim::tactical::detail

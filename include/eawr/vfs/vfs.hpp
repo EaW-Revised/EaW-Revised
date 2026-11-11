@@ -17,6 +17,8 @@
 #include <vector>
 #include <utility>
 
+namespace eawr::core { struct ContentInputReceipt; }
+
 namespace eawr::vfs {
 
 struct ArchiveSpec {
@@ -69,6 +71,7 @@ inline constexpr std::string_view archive_path_collision = "EAWR-VFS-0009";
 inline constexpr std::string_view manifest_invalid = "EAWR-VFS-0010";
 inline constexpr std::string_view mount_invalid = "EAWR-VFS-0011";
 inline constexpr std::string_view manifest_absent = "EAWR-VFS-0012";
+inline constexpr std::string_view content_unagreed = "EAWR-VFS-0013";
 } // namespace diagnostic_codes
 
 [[nodiscard]] core::Result<std::string> canonicalize(std::string_view logical_path);
@@ -122,6 +125,24 @@ public:
 
     [[nodiscard]] static core::Result<Vfs> mount(std::span<const MountSpec> ordered_layers);
 
+    // Private MP preparation view: shares mount indices/cache ownership, records consumed bytes, then freezes its
+    // complete read set. The source remains unrestricted. Sealed reads verify bytes before exposing any to callers;
+    // metadata only exposes agreed records, so an unknown path cannot bypass the contract through a decoded cache.
+    [[nodiscard]] static core::Result<Vfs> preparation_view(std::shared_ptr<const Vfs> source,
+        std::span<const core::ContentInputReceipt> known_inputs);
+    // Cached immutable inputs supply their original consumed-byte hash, never a hash of a later file version.
+    // Unrestricted VFS instances ignore these receipts; after seal, this only verifies already-agreed receipts.
+    [[nodiscard]] core::Result<void> remember_content_inputs(std::span<const core::ContentInputReceipt> inputs) const;
+    [[nodiscard]] core::Result<std::vector<core::ContentInputReceipt>> seal_content() const;
+    [[nodiscard]] bool has_content_contract() const noexcept;
+    // Diagnostic work only: never included in the agreement or simulation state.
+    struct ModelRefreshCost { std::uint64_t entries{}, elapsed_ns{}; };
+    void record_model_refresh(std::uint64_t elapsed_ns) const;
+    [[nodiscard]] ModelRefreshCost model_refresh_cost() const;
+    // Decode-ahead bytes are not simulation inputs until an ordered consumer supplies their receipt. Before seal
+    // this does not grow the closure; after seal it verifies/refuses exactly like open(). Never a late-read bypass.
+    [[nodiscard]] core::Result<std::vector<std::byte>> open_for_prefetch(std::string_view logical_path) const;
+
     [[nodiscard]] core::Result<std::vector<std::byte>> open(std::string_view logical_path) const;
     // The first min(size, max_bytes) bytes of the effective winner, read without the rest of the asset (#5197: a picker
     // that needs only a header does not read every file whole).
@@ -167,6 +188,9 @@ private:
     struct Impl;
     explicit Vfs(std::unique_ptr<Impl> impl);
     std::unique_ptr<Impl> impl_;
+    struct ContentReads;
+    std::shared_ptr<const Vfs> source_;
+    std::shared_ptr<ContentReads> content_reads_;
 };
 
 } // namespace eawr::vfs

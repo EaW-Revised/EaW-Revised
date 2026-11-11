@@ -1,7 +1,9 @@
 #include "unit_tables_decode.hpp"
 #include "eawr/core/load_profile.hpp"
 
+#include "eawr/assets/assets.hpp"
 #include "eawr/data/retail_values.hpp"
+#include "eawr/vfs/vfs.hpp"
 
 #include <algorithm>
 
@@ -63,6 +65,26 @@ bool land_ground_object(Object& object) {
     return !trim(object.text("Land_Model_Name")).empty() && trim(object.text("Space_Model_Name")).empty();
 }
 
+bool land_pad_object(Object& object) {
+    return land_behavior(object, "TACTICAL_BUILD_OBJECTS") || land_behavior(object, "TACTICAL_UNDER_CONSTRUCTION");
+}
+
+LandRevealInputs Loader::read_land_reveal(Object& object) {
+    LandRevealInputs fog;
+    fog.reveal = land_behavior(object, "REVEAL");
+    fog.range = object.fixed(domain_tag(input_.domain, DomainTag::reveal_range), report_, false);
+    if (fog.reveal && !fog.range) fog.range = Fixed{};
+    fog.dense_multiplier = object.fixed("Dense_FOW_Reveal_Range_Multiplier", report_, false)
+        .value_or(Fixed::from_raw(Fixed::scale / 2));
+    fog.multisample = flag(object, "Multisample_FOW_Check", false).value_or(false);
+    fog.box_x_offset = object.fixed("Custom_Hard_XExtent_Offset", report_, false).value_or(Fixed{});
+    fog.box_y_offset = object.fixed("Custom_Hard_YExtent_Offset", report_, false).value_or(Fixed{});
+    // The fog box half extents follow the authored hard extents (the same retail float parse as the footprint).
+    fog.custom_hard_x = object.retail_float("Custom_Hard_XExtent", report_);
+    fog.custom_hard_y = object.retail_float("Custom_Hard_YExtent", report_);
+    return fog;
+}
+
 void Loader::load_land_body(Object& object, UnitType& unit) {
     core::load_profile::Scope unit_body_scope(core::load_profile::Phase::unit_body);
     // Shared combat profile classification; the land session supplies its own locomotion.
@@ -73,6 +95,7 @@ void Loader::load_land_body(Object& object, UnitType& unit) {
     unit.movement.max_speed = object.retail_float("Max_Speed", report_);
     unit.mouse_collide_sphere_radius = object.fixed("Mouse_Collide_Override_Sphere_Radius", report_, false);
     unit.valid_target = flag(object, "Is_Valid_Target", false).value_or(true);
+    unit.influences_capture = flag(object, "Influences_Capture_Point", false).value_or(true);
     unit.named_hero = flag(object, "Is_Named_Hero", false).value_or(false);
     unit.generic_hero = flag(object, "Is_Generic_Hero", false).value_or(false);
     unit.living_projectile_collision = flag(object, "Collidable_By_Projectile_Living", false).value_or(false);
@@ -112,6 +135,15 @@ void Loader::load_land_body(Object& object, UnitType& unit) {
     unit.attack_move_response_range = object.fixed("Attack_Move_Response_Range", report_, false);
     mask_flags(object, unit);
     unit.ranged_target_z_adjust = object.fixed("Ranged_Target_Z_Adjust", report_, false);
+    // LC-86: the reveal behaviour (land or shared list) and the object's authored reveal inputs. The debug build's
+    // type constructor defaults the range to 0 (the reveal then floors it at 10) and the dense multiplier to 0.5.
+    const auto fog = read_land_reveal(object);
+    unit.reveal = fog.reveal;
+    unit.fow_reveal_range = fog.range;
+    unit.dense_fow_multiplier = fog.dense_multiplier;
+    unit.multisample_fow = fog.multisample;
+    unit.fog_box_offset.x = fog.box_x_offset;
+    unit.fog_box_offset.y = fog.box_y_offset;
     // Projectile contact: the authored footprint rows, then the model's collision bounds and meshes.
     unit.footprint = read_footprint(object, model);
     if (model != nullptr) {
@@ -123,6 +155,29 @@ void Loader::load_land_body(Object& object, UnitType& unit) {
     for (const auto* node : object.list("Death_Clone", report_)) unit.death_clones.push_back(trim(node->raw_text));
     unit.death_fade_time = object.fixed("Death_Fade_Time", report_, false);
     unit.death_persistence_duration = object.fixed("Death_Persistence_Duration", report_, false);
+}
+
+LandGarrisonData Loader::land_garrison(Object& object) {
+    LandGarrisonData row;
+    row.entrant = land_behavior(object, "GARRISON_UNIT");
+    row.hovering = land_behavior(object, "GARRISON_HOVER");
+    row.host = row.hovering || land_behavior(object, "GARRISON_VEHICLE")
+        || land_behavior(object, "GARRISON_STRUCTURE");
+    if (!row.entrant && !row.host) return row;
+    row.categories = mask(object.text("Garrison_Category"));
+    row.value = count(object, "Garrison_Value", false).value_or(1);
+    row.slots = count(object, "Num_Garrison_Slots", false).value_or(0);
+    row.guns = count(object, "Num_Garrison_Guns", false).value_or(0);
+    row.radius = object.fixed("Garrison_Radius", report_, false).value_or(Fixed{});
+    row.enter_distance = object.fixed("Garrison_Enter_Dist", report_, false).value_or(Fixed{});
+    row.exit_distance = object.fixed("Garrison_Exit_Dist", report_, false).value_or(Fixed{});
+    row.scale = object.retail_float("Scale_Factor", report_).value_or(row.scale);
+    const auto names = tokens(object.text("Garrison_Bone_Names"));
+    const auto model_name = names.empty() ? std::string{} : trim(object.text("Land_Model_Name"));
+    const auto* model = model_name.empty() ? nullptr : frames(model_path(model_name), object.effective.object_id);
+    for (const auto& bone : names)
+        row.bones.push_back(point(bone, model, object.effective.object_id, "Garrison_Bone_Names"));
+    return row;
 }
 
 LandCompanyMember Loader::land_member(Object& object) {
@@ -140,11 +195,66 @@ LandCompanyMember Loader::land_member(Object& object) {
     return member;
 }
 
+void Loader::load_land_pad(Object& object, UnitType& unit) {
+    // LE-LOADER: the pad behaviours come from the land or shared behaviour list. A pad needs no CAPTURE_POINT (stock faction pads
+    // and structure pads have none), so the capture inputs are read for every build pad, not only for capture points.
+    unit.capture_point = land_behavior(object, "CAPTURE_POINT");
+    unit.build_pad = land_behavior(object, "TACTICAL_BUILD_OBJECTS");
+    unit.under_construction = land_behavior(object, "TACTICAL_UNDER_CONSTRUCTION");
+    unit.affiliation = object.text("Affiliation");
+    // WBP-02/07/50: the capture candidate flags, with the same defaults as the space path.
+    unit.influences_capture = flag(object, "Influences_Capture_Point", false).value_or(true);
+    unit.construction_blocker = !land_behavior(object, "BASE_SHIELD") && !land_behavior(object, "DUMMY_GROUND_STRUCTURE");
+    if (unit.capture_point) {
+        unit.capture_radius = object.fixed("Capture_Point_Radius", report_, true);
+        unit.capture_seconds = object.fixed("Capture_Point_Transition_Time_Seconds", report_, true);
+        unit.ownership_sticks = flag(object, "Ownership_Sticks", false).value_or(false);
+    } else if (unit.build_pad) {
+        // U1 (debug build): the "new construction allowed here" test reads the TYPE's capture radius whether or not the
+        // object is a capture point, and the type constructor defaults the radius to 200 and the transition time to 2.
+        auto radius = object.fixed("Capture_Point_Radius", report_, false);
+        if (!radius) report_.note(unit.id, "Capture_Point_Radius", {}, "absent on a build pad: the type constructor default 200 applies (U1)");
+        // xml-fallback: Capture_Point_Radius
+        unit.capture_radius = radius.value_or(Fixed::from_raw(200 * Fixed::scale));
+        auto transition = object.fixed("Capture_Point_Transition_Time_Seconds", report_, false);
+        if (!transition) report_.note(unit.id, "Capture_Point_Transition_Time_Seconds", {}, "absent on a build pad: the type constructor default 2 applies (unused by a pad that does not capture)");
+        // xml-fallback: Capture_Point_Transition_Time_Seconds
+        unit.capture_seconds = transition.value_or(Fixed::from_raw(2 * Fixed::scale));
+    }
+    if (unit.under_construction) {
+        unit.constructed_type = trim(object.text("Tactical_Buildable_Constructed"));
+        if (!unit.constructed_type.empty()) enqueue(unit.constructed_type, UnitKind::ship);
+    }
+    if (unit.build_pad) {
+        unit.respects_prebuilt_base = flag(object, "Respects_Skirmish_Pre_Build_Bases_Option", false).value_or(true);
+        unit.child_persists = flag(object, "Tactically_Built_Child_Object_Persists", false).value_or(true);
+        unit.destroy_when_child_dies = flag(object, "Destroy_When_Child_Dies", false).value_or(false);
+        unit.pad_rebuild_seconds = object.fixed("Minimum_Time_Before_Pad_Can_Build_Again", report_, false);
+    }
+    // The menu, price, time and queue rows (Tactical_Buildable_Objects_*, Tactical_Build_Cost_*, Tactical_Build_Time_Seconds ...).
+    load_production(object, unit);
+    if (unit.build_pad) {
+        for (const auto& group : unit.production.buildable) {
+            for (const auto& child : group.types) enqueue(child, UnitKind::ship);
+        }
+        const auto attachment = trim(object.text("Tactical_Build_Attachment_Bone_Name"));
+        if (!attachment.empty() && !unit.model_path.empty()) {
+            unit.build_attachment = point(attachment, frames(unit.model_path, unit.id), unit.id,
+                "Tactical_Build_Attachment_Bone_Name");
+        }
+    }
+}
+
 void Loader::load_land_static(Object& object) {
     if (std::any_of(tables_.land_static_objects.begin(), tables_.land_static_objects.end(),
         [&](const auto& row) { return iequals(row.id, object.effective.object_id); })) return;
     LandStaticObject row;
+    row.garrison = land_garrison(object);
     row.id = object.effective.object_id; row.xml_type = object.effective.type_name;
+    row.hide_when_fogged = land_behavior(object, "HIDE_WHEN_FOGGED");
+    row.dummy_tooltip = land_behavior(object, "DUMMY_TOOLTIP");
+    row.immune_to_damage = flag(object, "Immune_To_Damage", false).value_or(false);
+    row.valid_target = flag(object, "Is_Valid_Target", false).value_or(true);
     row.hq_victory_relevant = flag(object, "HQ_Win_Condition_Relevant", false).value_or(false);
     row.victory_relevant = flag(object, "Victory_Relevant", false).value_or(false);
     row.land_victory_relevant = flag(object, "Land_Victory_Relevant", false).value_or(false);
@@ -152,7 +262,34 @@ void Loader::load_land_static(Object& object) {
         for (const auto& behavior : tokens(object.text(tag))) {
             row.behaviors.push_back(behavior);
             if (iequals(behavior, "LAND_OBSTACLE")) row.land_obstacle = true;
+            if (iequals(behavior, "REINFORCEMENT_POINT")) row.reinforcement_point = true;
+            if (iequals(behavior, "CAPTURE_POINT")) row.capture_point = true;
+            if (iequals(behavior, "ENERGY_POOL")) row.energy_pool = true;
         }
+    // LC-44/45/48/49/52: the reinforcement, capacity and capture rows of any placed type.
+    row.influences_capture = flag(object, "Influences_Capture_Point", false).value_or(true);
+    row.affiliation = trim(object.text("Affiliation"));
+    row.reinforcement_enabling_radius = object.fixed("Reinforcement_Enabling_Radius", report_, false);
+    row.reinforcement_prevention_radius = object.fixed("Reinforcement_Prevention_Radius", report_, false);
+    if (row.capture_point) {
+        // Debug build (U1, out/ls/pad-loader-retail.md): the type constructor sets the capture radius to 200 and the transition time to
+        // 2 for every object type, so an authored CAPTURE_POINT that omits either tag (the stock Secondary_* structures) keeps those.
+        auto radius = object.fixed("Capture_Point_Radius", report_, false);
+        if (!radius) report_.note(row.id, "Capture_Point_Radius", {}, "absent on a capture point: the type constructor default 200 applies");
+        // xml-fallback: Capture_Point_Radius
+        row.capture_radius = radius.value_or(Fixed::from_raw(200 * Fixed::scale));
+        auto transition = object.fixed("Capture_Point_Transition_Time_Seconds", report_, false);
+        if (!transition) report_.note(row.id, "Capture_Point_Transition_Time_Seconds", {}, "absent on a capture point: the type constructor default 2 applies");
+        // xml-fallback: Capture_Point_Transition_Time_Seconds
+        row.capture_seconds = transition.value_or(Fixed::from_raw(2 * Fixed::scale));
+        row.ownership_sticks = flag(object, "Ownership_Sticks", false).value_or(false);
+    }
+    if (const auto* node = object.single("Additional_Population_Capacity")) {
+        if (const auto capacity = data::retail::integer_value(node->raw_text)) row.additional_population_capacity = capacity->value;
+    }
+    // LC-86 (#6183): every placed static candidate reads its fog inputs, obstacle or not (a build pad reveals without being
+    // an obstacle), with the same tags and defaults as a land body.
+    row.fog = read_land_reveal(object);
     if (row.land_obstacle) {
         row.proxy_type = trim(object.text("Obstacle_Proxy_Type"));
         row.secondary_passability = trim(object.text("SecondaryOccupationPassability"));
@@ -176,6 +313,11 @@ void Loader::load_land_static(Object& object) {
                 auto bounds = prepare_galactic_collision_bounds(*model->model);
                 if (!bounds) report_.missing(row.id, "Land_Model_Name", row.model_path, bounds.error().message);
                 else row.collision_bounds = bounds.value();
+                // LC-89: the fog box falls back to the model's collision half extents, as a unit's does.
+                if (const auto extents = collision_half_extents(*model->model, model->frames)) {
+                    row.collision_half_x = extents->first;
+                    row.collision_half_y = extents->second;
+                }
                 append_collision_meshes(*model->model, model->frames, sim::math::identity_matrix(), no_index, row.collision_meshes);
             }
         }
@@ -191,6 +333,25 @@ void Loader::load_land_static(Object& object) {
     tables_.land_static_objects.push_back(std::move(row));
 }
 
+namespace {
+// LR13-17: the first MOVESTART variant of a model, `<directory>/<model stem or anim override stem>_movestart_00.ala` (the naming
+// rule of every clip, docs/behaviour/unit-animation.md).
+std::string movestart_clip_path(const std::string& model, std::string_view anim_override) {
+    if (!model.ends_with(".alo")) return {};
+    const auto slash = model.rfind('/');
+    const auto directory = slash == std::string::npos ? std::string{} : model.substr(0, slash + 1);
+    auto base = model.substr(directory.size(), model.size() - directory.size() - 4);
+    if (!anim_override.empty()) {
+        std::string name = lower(trim(anim_override));
+        std::replace(name.begin(), name.end(), '\\', '/');
+        if (const auto cut = name.rfind('/'); cut != std::string::npos) name.erase(0, cut + 1);
+        if (name.ends_with(".alo")) name.resize(name.size() - 4);
+        if (!name.empty()) base = std::move(name);
+    }
+    return directory + base + "_movestart_00.ala";
+}
+} // namespace
+
 LandLocomotionData Loader::land_locomotion(Object& object) {
     LandLocomotionData member;
     // LSL-P1: the retail float parse; the authored value is kept as parsed, its meaning applies in the adapter.
@@ -203,6 +364,8 @@ LandLocomotionData Loader::land_locomotion(Object& object) {
     member.hard_x = object.retail_float("Custom_Hard_XExtent", report_);
     member.hard_y = object.retail_float("Custom_Hard_YExtent", report_);
     member.formation_spacing = object.retail_float("FormationSpacing", report_);
+    member.min_speed_fraction_for_turn = object.retail_float("Min_Speed_Fraction_For_Turn", report_);
+    member.close_enough_angle = object.retail_float("Close_Enough_Angle_For_Move_Start", report_);
     // WLPA-73: an engine-fixed name set; absent = None. LSL-06: an unknown name fails only that key, so the
     // class keeps its None default and the loader leaves a note.
     if (const auto* node = object.single("UnitCollisionClass")) {
@@ -210,9 +373,32 @@ LandLocomotionData Loader::land_locomotion(Object& object) {
         if (const auto parsed = parse_land_collision_class(name)) member.collision_class = *parsed;
         else report_.note(object.effective.object_id, "UnitCollisionClass", name, "not a collision class name; None stays (LSL-06)");
     }
+    // LMF-02: FormationGrouping; absent = Standard. A name outside the two the stock data uses keeps Standard and leaves a note.
+    if (const auto* node = object.single("FormationGrouping")) {
+        const auto name = trim(node->raw_text);
+        if (iequals(name, "Solo")) member.formation_grouping = LandFormationGrouping::solo;
+        else if (!iequals(name, "Standard")) report_.note(object.effective.object_id, "FormationGrouping", name, "not a grouping name this build reads; Standard stays (LMF-02)");
+    }
     member.walk_transition = flag(object, "Walk_Transition", false).value_or(false);
     member.has_pre_turn_animation = flag(object, "Has_Pre_Turn_Anim", false).value_or(false);
+    member.movement_animation_speed = object.retail_float("Movement_Animation_Speed", report_);
+    member.walk_animation_speed = object.retail_float("Walk_Animation_Speed", report_);
+    member.crouch_animation_speed = object.retail_float("Crouch_Animation_Speed", report_);
+    member.rotation_animation_speed = object.retail_float("Rotation_Animation_Speed", report_);
+    member.max_rate_of_roll = object.retail_float("Max_Rate_Of_Roll", report_);
+    member.bank_turn_angle = object.retail_float("Bank_Turn_Angle", report_);
     const auto model_name = trim(object.text("Land_Model_Name"));
+    if (member.walk_transition && input_.filesystem && !model_name.empty()) {
+        // LR13-17: a Walk_Transition member starts through its MOVESTART clip; a model without the clip has none to wait for.
+        member.start_clip_read = true;
+        const auto path = movestart_clip_path(model_path(model_name), object.text("Land_Model_Anim_Override_Name"));
+        if (!path.empty()) {
+            if (const auto clip = assets::load_animation(*input_.filesystem, path)) {
+                member.start_clip_frames = clip.value().stored_frame_count;
+                member.start_clip_fps = clip_frames_per_second(clip.value());
+            }
+        }
+    }
     if (!model_name.empty()) {
         if (const auto* model = frames(model_path(model_name), object.effective.object_id)) {
             if (const auto extents = collision_half_extents(*model->model, model->frames)) {
@@ -260,6 +446,10 @@ void Loader::load_land_company(Object& object) {
     company.id = object.effective.object_id;
     company.xml_type = object.effective.type_name;
     company.transport = trim(object.text("Company_Transport_Unit"));
+    if (const auto* node = object.single("Population_Value")) {
+        if (const auto value = data::retail::integer_value(node->raw_text); value && value->value >= 0)
+            company.population_value = static_cast<std::uint32_t>(value->value);
+    }
     bool complete = true;
     std::string first_member_team;
     std::vector<std::string> ids;
@@ -270,8 +460,11 @@ void Loader::load_land_company(Object& object) {
     // LSL-05: an empty or placeholder list leaves the member list at its empty default, exactly as when the tag
     // is absent, so the company takes the LC-01 direct-object path.
     if (ids.empty()) {
+        // The direct object is itself a capture candidate, even without a separate body row.
+        if (!flag(object, "Influences_Capture_Point", false).value_or(true)) load_land_static(object);
         company.direct_object = true; // LC-01: no member list, the one object is attempted
         company.members.push_back(land_member(object));
+        company.member_garrisons.push_back(land_garrison(object));
         company.locomotion.push_back(land_locomotion(object));
         first_member_team = trim(object.text("Create_Team_Type"));
     }
@@ -285,6 +478,7 @@ void Loader::load_land_company(Object& object) {
         if (company.members.empty()) first_member_team = trim(member->text("Create_Team_Type"));
         enqueue(member->effective.object_id, UnitKind::ship); // the member's combat and durability body
         company.members.push_back(land_member(*member));
+        company.member_garrisons.push_back(land_garrison(*member));
         company.locomotion.push_back(land_locomotion(*member));
         member->note_duplicates(report_);
     }
@@ -308,6 +502,7 @@ void Loader::load_land_company(Object& object) {
                 "Create_Team_Type", report_)) {
             record_layers(*team);
             company.team_type = team->effective.object_id;
+            company.team_garrison = land_garrison(*team);
             company.team_locomotor = locomotor_behavior(*team);
             const auto team_speed = team->retail_float("Max_Speed", report_); // LSL-P1
             if (!team_speed)

@@ -53,6 +53,11 @@ core::Result<void> session_detail::Tick::prepare_targets() {
     const auto& starts = gather_.value().starts.value();
     const auto& craft_squadron = craft_prep_.value().craft_squadron.value();
     const auto& arrivals = staging_.value().arrivals.value();
+    // FS-45/46, FD-75: publish this frame's jammer state before the projectile
+    // defence snapshot. Cross-object service-registration order remains a seam.
+    std::vector<std::int8_t> jammer_transitions;
+    if (auto serviced = impl_->service_jamming(moving, arrivals, named_ability_locks_, tick, executor, jammer_transitions); !serviced)
+        return serviced;
     // Targeting phase (#73): after movement and before this tick's commands, so an attack order
     // acts from the next frame like a move. Workers read one immutable world view (the moved
     // units, their health and the last published visibility) and write each unit's combat state
@@ -65,6 +70,8 @@ core::Result<void> session_detail::Tick::prepare_targets() {
     if (!world) {
         return core::Result<void>::failure(world.error());
     }
+    for (std::size_t i = 0; i < jammer_transitions.size(); ++i)
+        if (jammer_transitions[i] != 0) register_jammer(moving[i].state.entity_id, jammer_transitions[i] > 0);
     // WSQ-45/47: reuse the immutable membership index prepared for movement. Member scans
     // must not walk every squadron roster to normalize each candidate (ADR-009).
     world.value().craft_containers = &craft_squadron;
@@ -214,6 +221,7 @@ core::Result<void> session_detail::Tick::retry_buzz_targets(std::vector<LiveUnit
         if (!retried) return retried;
         auto& next_id = staging_->next_id.value();
         std::vector<LiveUnit> droids;
+        std::vector<EntityId> created_defaults;
         // Partition ranges and slots are ascending ID; only successful applications allocate IDs
         // and change shared ownership/registration state (WAB-71/FS-08).
         for (const auto& requests : buzz_requests) for (const auto& decision : requests) {
@@ -231,6 +239,10 @@ core::Result<void> session_detail::Tick::retry_buzz_targets(std::vector<LiveUnit
             if (impl_->motion.squadrons.find_spawner(droid.state.type_id, droid.state.owner) != nullptr)
                 staging_->born_spawners.push_back(droid.state.entity_id);
             track_victory_change(nullptr, &droid.state, false);
+            const auto* profile = impl_->abilities.find(droid.state.type_id);
+            if (profile && std::any_of(profile->abilities.begin(), profile->abilities.end(), [](const auto& ability) {
+                    return ability.kind == AbilityKind::replenish_wingmen && ability.active_by_default;
+                })) created_defaults.push_back(droid.state.entity_id);
             droids.push_back(std::move(droid));
             apply_squadron_order(minds.at(source.state.entity_id), StopPayload{}, source.state.position, impl_->motion.squadrons);
             auto& frame = squadron_frames.at(source.state.entity_id);
@@ -240,6 +252,23 @@ core::Result<void> session_detail::Tick::retry_buzz_targets(std::vector<LiveUnit
             frame.attacking = false;
         }
         moving.insert(moving.end(), std::make_move_iterator(droids.begin()), std::make_move_iterator(droids.end()));
+        if (!created_defaults.empty()) {
+            UnitStage staged(std::move(moving));
+            const auto first_added = next_id;
+            Impl::EconomyStage stage{staging_->ledgers.value(), staging_->arrivals.value(), staging_->shares.value(),
+                staging_->crafts.value(), minds, staging_->arrived_squadrons.value(), staging_->born_spawners,
+                staging_->earners.value(), next_id, impl_->pad_stage.values, impl_->construction_stage.values,
+                staging_->pad_requests.value(), impl_->pad_stage, impl_->construction_stage, pending_economy_cues_,
+                &gather_->reinforcement_work.value()};
+            const auto applied = impl_->request_creation_defaults(created_defaults, staged, stage, tick);
+            if (!applied) return applied;
+            for (auto id = first_added; id != invalid_entity_id && id != next_id;
+                    id = id == std::numeric_limits<EntityId>::max() ? invalid_entity_id : id + 1) {
+                const auto born = staged.find(id);
+                if (born != staged.end()) track_victory_change(nullptr, &born->second.state, false);
+            }
+            moving = staged.release();
+        }
     }
     return core::Result<void>::success();
 }

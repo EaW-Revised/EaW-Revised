@@ -532,6 +532,11 @@ bool damage_target_valid(const DurabilityProfile& profile, const std::uint32_t t
 DamageOutcome apply_damage(const DurabilityProfile& profile, DurabilityState& state, const std::uint32_t target,
     const math::Fixed amount) noexcept {
     DamageOutcome outcome;
+    if (state.hardpoints.size() != profile.hardpoints.size()
+        || (target != hull_target && target >= state.hardpoints.size())) {
+        outcome.invalid_target = true;
+        return outcome;
+    }
     const auto hit = [&amount](math::Fixed& health) {
         health = amount.raw() >= health.raw() ? math::Fixed{} : math::Fixed::from_raw(health.raw() - amount.raw());
         return health.raw() == 0;

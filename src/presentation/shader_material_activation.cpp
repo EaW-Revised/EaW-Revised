@@ -85,6 +85,7 @@ activation::Diagnostic stage_issue(const runtime::StageResult& result) {
     case runtime::DiagnosticReason::unsupported_resource: reason = report::Reason::unsupported_resource; break;
     case runtime::DiagnosticReason::unsupported_option: reason = report::Reason::unsupported_option; break;
     case runtime::DiagnosticReason::malformed_stage: reason = report::Reason::malformed_stage; break;
+    case runtime::DiagnosticReason::invalid_shader:
     case runtime::DiagnosticReason::compiler_failure: reason = report::Reason::compile_failure; break;
     case runtime::DiagnosticReason::reflection_failure: reason = report::Reason::reflection_failure; break;
     case runtime::DiagnosticReason::invalid_cached_result: reason = report::Reason::cache_failure; break;
@@ -93,6 +94,25 @@ activation::Diagnostic stage_issue(const runtime::StageResult& result) {
     case runtime::DiagnosticReason::backend_failure: break;
     }
     return issue(where, reason);
+}
+runtime::StageResult invalid_shader_refusal() {
+    return {{}, {{runtime::DiagnosticPhase::stage_compile, runtime::DiagnosticReason::invalid_shader,
+        runtime::Severity::error, {}, "public stage compiler failed"}}};
+}
+bool deterministic_refusal(const runtime::StageResult& result) {
+    if (result.artifact || result.diagnostics.size() != 1U) return false;
+    const auto& diagnostic = result.diagnostics.front();
+    return diagnostic.phase == runtime::DiagnosticPhase::stage_compile
+        && diagnostic.reason == runtime::DiagnosticReason::invalid_shader
+        && diagnostic.severity == runtime::Severity::error && !diagnostic.location
+        && diagnostic.detail == "public stage compiler failed";
+}
+// A single canonical typed refusal, with no compiler text or variable fields.
+// Schema/domain changes are required before another reason can be persisted.
+constexpr std::string_view refusal_payload = "eawr-stage-refusal/1:stage_compile:invalid_shader:error";
+bool validate_refusal(std::span<const std::uint8_t> bytes) {
+    return bytes.size() == refusal_payload.size()
+        && std::equal(bytes.begin(), bytes.end(), refusal_payload.begin());
 }
 } // namespace
 shader_cache::Key source_stage_cache_key(const shader_cache::Key& input, std::string_view entry,
@@ -124,6 +144,7 @@ runtime::StageResult Compiler::stage(const activation::Input& input, const asset
         + hex(compiler.public_c_abi.manifest_sha256) + ":" + std::to_string(compiler.result_schema_version)
         + ":" + std::to_string(compiler.options_manifest_version);
     const auto cache_key = input.cache_key ? std::optional{key("material-stage/1", input.cache_key->sha256, identity)} : std::nullopt;
+    const auto refusal_key = input.cache_key ? std::optional{key("material-stage-refusal/1", input.cache_key->sha256, identity)} : std::nullopt;
     const auto validate = [&](std::span<const std::uint8_t> bytes) {
         return runtime::decode_stage_result(std::as_bytes(bytes), current).artifact.has_value();
     };
@@ -132,6 +153,10 @@ runtime::StageResult Compiler::stage(const activation::Input& input, const asset
         if (cached.status == shader_cache::Status::hit) {
             auto decoded = runtime::decode_stage_result(std::as_bytes(std::span(cached.payload)), current);
             if (decoded.artifact) { ++work_.cache_hits; return decoded; }
+        }
+        const auto refused = cache_->lookup(*refusal_key, true, validate_refusal);
+        if (refused.status == shader_cache::Status::hit && !cancellation.cancelled()) {
+            ++work_.cache_hits; return invalid_shader_refusal();
         }
     }
     if (cancellation.cancelled()) return {{}, {{runtime::DiagnosticPhase::stage_input,
@@ -142,6 +167,9 @@ runtime::StageResult Compiler::stage(const activation::Input& input, const asset
         const auto encoded = runtime::encode_stage_result(*translated.artifact);
         if (encoded.bytes) static_cast<void>(cache_->store(*cache_key, true,
             {reinterpret_cast<const std::uint8_t*>(encoded.bytes->data()), encoded.bytes->size()}, validate));
+    } else if (cache_ && refusal_key && deterministic_refusal(translated) && !cancellation.cancelled()) {
+        static_cast<void>(cache_->store(*refusal_key, true,
+            {reinterpret_cast<const std::uint8_t*>(refusal_payload.data()), refusal_payload.size()}, validate_refusal));
     }
     return translated;
 }
@@ -253,9 +281,8 @@ activation::Prepared Compiler::prepare(const activation::Input& input, const act
             continue;
         }
         programs[t] = std::move(result).value();
-        programs[t]->material.technique = effect.techniques[t].name;
-        programs[t]->material.pass_name = effect.techniques[t].passes[pass.pass].name;
-        programs[t]->retained_bytes += programs[t]->material.technique.capacity() + programs[t]->material.pass_name.capacity();
+        // Activation retains the selected technique/pass in its Variant.
+        // The assembled modern material must keep legacy selectors empty.
         if (programs[t]->retained_bytes > limits_.programs - retained_programs) {
             programs[t].reset();
             diagnostics.push_back(issue(report::FailureStage::technique_admission, report::Reason::budget_exceeded)); break;

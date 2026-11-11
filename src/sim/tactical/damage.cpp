@@ -428,6 +428,10 @@ bool in_ion_storm(const DamageRules& rules, const DurabilityState& state, const 
 
 core::Result<HitOutcome> apply_hit(const DurabilityProfile& profile, const DamageRules& rules, DurabilityState& state,
     const Hit& hit, const std::uint64_t frame) {
+    if (state.hardpoints.size() != profile.hardpoints.size()
+        || (hit.hardpoint != hull_target && hit.hardpoint >= state.hardpoints.size()))
+        return core::Result<HitOutcome>::failure(detail::diagnostic(diagnostic_codes::invalid_setup,
+            "damage target disagrees with durability state"));
     HitOutcome outcome;
     outcome.routed_hardpoint = hit.hardpoint;
     // DG-40: retain collision/aiming and every hardpoint; script damage remains privileged.

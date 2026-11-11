@@ -41,6 +41,21 @@ stop-velocity policy remain integration work; this service represents their
 gates without claiming a complete animation player. Deployed movement and
 terrain body pitch/roll are outside this first following service.
 
+Start transition (legacy EAWR-6115), LR13-17. A `Walk_Transition` member that starts from standing plays its `MOVESTART` clip and
+the walk (member and container alike) is held until the clip is almost finished. Nothing published that gate in a live
+session, so such a unit (the stock walkers, the bike, the scout trooper) stood for ever after its first order. The
+land content adapter now reads the clip (`<model>_movestart_00.ala`, the first variant, from the model or its
+`Land_Model_Anim_Override_Name`) and works out the wait in whole logical frames at load, so no float reaches the simulation:
+the clip's stored frame count minus 2 frames at its frame rate (read to 1/1000) times `Max_Speed / Movement_Animation_Speed`
+(1 when that tag is zero or absent), rounded up to logical frames and one frame short. The member's `transition_frame` counts
+the frames it has waited while `starting`, and the gate opens when that reaches the profile's wait (retail: the active frame is at
+least the frame count minus 2 minus the animation's playback-rate multiplier, as observed in the debug build (LR13-17);
+in clip frames that is one frame of playback whatever the rate, so the wait here
+agrees with retail to within a tick). A model with no such clip has nothing to wait for. A published `start_almost_finished` still opens the gate, and a
+profile built by hand (no clock) waits for it alone. Deviations: the blend into the clip (`gStartWalkBlendTime`) and
+the variant choice among several start clips are not modelled; the stop transition (`stop_point`, `stop_almost_finished`)
+has no clock yet, so a member that stops stays `stopping` and a later order restarts it with no clip.
+
 Yield, recovery, dropped and reached are distinct order states (LR9-07/08).
 Recovery accepts a strictly increased progress observation for the retained
 blocker identity; elapsed frames never recover or drop an order. Pair contact
@@ -205,14 +220,26 @@ does not drop the order. The squad keeps walking while the new path is searched 
 the nearer of the current leg end and one second of travel (`land_reorder_lookahead_ticks`).
 The old route is cut at that anchor. A result arriving in time is spliced behind the squad
 (`splice_path`); a longer search leaves it stopped at the anchor until it can turn in place.
-The first corner at the splice is checked against the
-interim smooth-start gate: smooth when the slowest member turns through it within one
-second. A sharper corner falls back to the old start: the order is dropped, the path is
-searched again from the squad position and the squad turns in place (WLPA-68). A
+The corner at the splice keeps the walk when it has turn speed (WLPA-89, WLPA-90); a
+corner below an authored minimum falls back to the old start: the order is dropped, the
+path is searched again from the squad position and the squad turns in place (WLPA-68). A
 standing start, a turning, yielded or recovering squad, a squad on a contact route and
-a generic-team squad take the old route unchanged. No retained field is added: the
-anchor is derived from the saved squad path and tracker, and the search start from the
-saved request, so a save inside the search window restores to the same splice.
+a generic-team squad take the old route unchanged.
+
+WLPA-90/91: a squad on its own path turns toward each segment at its slowest member turn
+rate while it walks. Until its heading is within one frame's turn the speed is capped at
+the corner's turn speed, the smaller of `w d / (2 sin theta)` and
+`clamp(d / 2, 20, 100) w / (1 - cos theta)` (w the turn rate in radians per second, d the
+segment length, theta the corner angle), over the top speed; a corner below the authored
+`Min_Speed_Fraction_For_Turn` has none and the squad stops and turns in place. The speed
+also never exceeds the speed that brakes at the squad deceleration to the next corner's turn
+speed or to a stop at the path end, so a squad reaches its destination slowly. Position stays
+on the path polyline and does not round the corner yet (speed and facing only); the speed is also scaled
+by the cosine of the heading error, so a body never runs along the path against its facing. A single object (no team container) walks
+off at once when its first heading error is within one frame's turn or within the move-start
+angle; the team container always turns in place first. The first corner of a path is
+measured from the squad facing when the path was installed; both that heading and the
+splice-anchor flag are saved (land section version 10; version 12 adds the formation lead, slot and pending formation orders, LMF-01..LMF-08).
 
 All settings, quota epoch/charge, contacts, counters, roles, locks, speed limits,
 blocked terrain target and ordinary/temporary trackers are typed checkpoint

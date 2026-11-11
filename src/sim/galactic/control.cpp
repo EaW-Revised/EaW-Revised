@@ -1333,7 +1333,7 @@ core::Result<GalacticSession::NativeFleetReceipt> GalacticSession::land_native_t
                         } restore{impl, impl.native_actor_changes_handler};
                         if (!impl.native_actor_changes_handler && impl.native_live_ability_actor_changes)
                             impl.native_actor_changes_handler = *impl.native_live_ability_actor_changes;
-                        impl.dispatch_ground_ability(at->id, orbit, seat->seat_id, 0, impl.completed_tick, events);
+                        impl.dispatch_ground_ability(at->id, orbit, seat->seat_id, 0, impl.completed_tick, events, false);
                     }
                 }
             }

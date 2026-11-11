@@ -100,9 +100,16 @@ bool UnitCombat::attempt(const std::uint32_t slot, const EntityId target_id, Com
         std::optional<WeaponProfile> ion;
         std::optional<WeaponProfile> barrage;
         if (unit_.ion_held) {
-            if (!unit_.ion_armed || !profile_.weapons[slot].ability_shot) return false;
-            ion = profile_.weapons[slot];
-            ion->shot = ion->ability_shot;
+            const auto& selected = unit_.lucky_held ? lucky_shot(profile_.weapons[slot], unit_.lucky_holder_type) : profile_.weapons[slot].ability_shot;
+            if (!unit_.ion_armed || !selected) {
+                // WLK-02: only a team hardpoint suppresses its ordinary fallback.
+                const auto parent = world_.container_of(unit_.id);
+                if (!unit_.lucky_held || (mode_weapon.hardpoint != object_weapon
+                    && parent != invalid_entity_id && parent != unit_.id)) return false;
+            } else {
+                ion = profile_.weapons[slot];
+                ion->shot = selected;
+            }
         }
         if (!ion && unit_.barrage_target != invalid_entity_id && target_id == unit_.barrage_target) {
             if (!profile_.weapons[slot].barrage_shot) return false;
@@ -260,7 +267,7 @@ bool UnitCombat::attempt(const std::uint32_t slot, const EntityId target_id, Com
         }
         events_.push_back(CombatEvent{world_.frame, CombatEventKind::weapon_fired, unit_.id, weapon.hardpoint,
             target->id, aim->hardpoint, muzzle, scattered,
-            (ion ? fired_ability_shot : barrage ? fired_barrage_shot : 0U) | (charged ? fired_charged_shot : 0U)});
+            (ion ? (unit_.lucky_held ? fired_lucky_shot : fired_ability_shot) : barrage ? fired_barrage_shot : 0U) | (charged ? fired_charged_shot : 0U)});
         // RFL-15: a ROCKET is created facing its firing bone's x axis (the muzzle bone, else the fire
         // bone, posed with its turret), else the unit's facing; the aim stays the scattered point.
         if (weapon.shot && weapon.shot->flight && weapon.shot->flight->kind == FlightKind::rocket) {
@@ -420,7 +427,8 @@ void UnitCombat::service_weapon(const std::uint32_t slot) {
             // the cost; a unit without a pool never fires it.
             if (state_.attack_target == invalid_entity_id) return;
             // WAD-38/EN-05: energy admission uses the projectile selected for this target.
-            const auto& selected = !unit_.ion_held && unit_.barrage_target != invalid_entity_id
+            const auto* lucky = unit_.lucky_held && unit_.ion_armed ? &lucky_shot(weapon, unit_.lucky_holder_type) : nullptr;
+            const auto& selected = lucky && lucky->has_value() ? *lucky : !unit_.ion_held && unit_.barrage_target != invalid_entity_id
                     && state_.attack_target == unit_.barrage_target
                 ? weapon.barrage_shot : weapon.shot;
             const auto cost = selected ? selected->energy_per_shot : math::Fixed{};

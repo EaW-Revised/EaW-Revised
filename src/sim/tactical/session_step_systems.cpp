@@ -112,7 +112,7 @@ core::Result<void> session_detail::Tick::nebulas() {
             if (enter) {
                 if (!state.active) continue;
                 // WHZ-26/WAB-65: the team adapter owns pending-shot accounting and recharge.
-                if (ability.kind != AbilityKind::ion_cannon_shot) {
+                if (ability.kind != AbilityKind::ion_cannon_shot && ability.kind != AbilityKind::lucky_shot) {
                     const auto changed = deactivate_ability(ability, state, tick);
                     unit.abilities->replan_due = unit.abilities->replan_due || changed.speed;
                 }

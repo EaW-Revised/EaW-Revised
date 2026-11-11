@@ -579,9 +579,17 @@ void replay_and_checkpoint() {
     config.fiscal->contributions->factions[0].alignment = galactic::IncomeAlignment::light;
     config.fiscal->contributions->planets[0].alignment = galactic::IncomeAlignment::light;
     config.fiscal->contributions->planets[0].strength = f(1);
+    // CGS-16: a planet type with no authored alignment carries the invalid alignment through the wire and validation.
+    config.fiscal->contributions->planets[1].alignment = galactic::IncomeAlignment::invalid;
+    expect(bool(galactic::validate_setup(config)), "invalid planet alignment admitted");
     const auto replay = galactic::GalacticReplay{config, 12, {}};
     const auto bytes = take(galactic::write_replay(replay));
     expect(take(galactic::parse_replay(bytes)) == replay, "fiscal wire round trip");
+    {
+        auto faction_invalid = config;
+        faction_invalid.fiscal->contributions->factions[0].alignment = galactic::IncomeAlignment::invalid;
+        expect(!galactic::validate_setup(faction_invalid), "a faction never carries the invalid alignment");
+    }
     // Locate the version byte in the tag-6 payload, then garble it.
     auto garbled = bytes;
     std::size_t offset = 100; // fixed header plus extension count

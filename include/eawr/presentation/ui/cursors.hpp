@@ -32,6 +32,10 @@ struct CursorInput final {
 };
 // CU-04..11: pure resolution of already evaluated input, with no world scans.
 [[nodiscard]] std::string_view battle_cursor(const CursorInput& input) noexcept;
+// A modal or blocked world keeps cursor ownership during a tactical cinematic.
+[[nodiscard]] constexpr bool hide_battlecam_cursor(bool active, bool world_allowed, bool modal) noexcept {
+    return active && world_allowed && !modal;
+}
 // Retain diagnostic transitions only. Comparing an unchanged ID never constructs a string,
 // including after the bounded history fills; callers may pass temporary views.
 class CursorHistory final {

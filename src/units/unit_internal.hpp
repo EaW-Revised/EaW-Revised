@@ -12,6 +12,8 @@
 #include <utility>
 #include <vector>
 
+namespace eawr::assets { struct Animation; }
+
 namespace eawr::units::detail {
 
 [[nodiscard]] std::string trim(std::string_view value);
@@ -25,6 +27,7 @@ namespace eawr::units::detail {
 // bounds here, in the units converter file.
 [[nodiscard]] std::optional<std::pair<Fixed, Fixed>> collision_half_extents(
     const assets::Model& model, const std::vector<sim::math::Mat3x4>& frames);
+[[nodiscard]] Fixed clip_frames_per_second(const assets::Animation& clip);
 [[nodiscard]] std::string lower(std::string_view value);
 [[nodiscard]] std::string upper(std::string_view value);
 [[nodiscard]] bool iequals(std::string_view left, std::string_view right) noexcept;

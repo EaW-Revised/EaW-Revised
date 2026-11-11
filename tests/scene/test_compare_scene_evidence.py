@@ -1,4 +1,4 @@
-"""Focused rejection tests for the five-target scene evidence gate."""
+"""Focused rejection tests for the four-target scene evidence gate."""
 
 from __future__ import annotations
 

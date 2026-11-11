@@ -25,6 +25,10 @@ struct FreestoreFacts {
 // WGA-316: ordinary construction only; never call over a loaded/live actor.
 // Generated team/squadron actors subsequently copy their source AI-usability.
 [[nodiscard]] FreestoreFacts ordinary_freestore_birth(FreestoreFacts);
+// One actor's facts in the saved freestore form (QualifiedFreestore::encode writes the same bytes per actor; the actor id is the first
+// word and decodes into object.id). Decoding checks the framing and flag bytes only; owner and identity checks stay with the reader.
+void encode_freestore_facts(std::vector<std::uint8_t>&, sim::EntityId actor, const FreestoreFacts&);
+[[nodiscard]] bool decode_freestore_facts(std::span<const std::uint8_t>, std::size_t& at, FreestoreFacts&);
 
 // WGA-303..315: retained membership and explicit local lifecycle operations.
 // Updating raw facts never silently rebuilds membership. The owner is nested

@@ -12,6 +12,7 @@
 
 #include "eawr/presentation/ui/load_game.hpp"
 #include "eawr/mods/save_description.hpp"
+#include "eawr/core/result.hpp"
 
 #include <cstddef>
 #include <cstdint>
@@ -92,6 +93,13 @@ private:
 
 [[nodiscard]] std::string saved_game_mod_details(std::span<const std::uint8_t> bytes,
     const mods::ModDescription& mounted);
+// Read/compare on a worker. Empty text means no definite mod difference; structural
+// failures remain failures and cannot be accepted by a mod confirmation.
+[[nodiscard]] core::Result<std::string> saved_game_mod_prompt(
+    const presentation::ui::SavedGameRequest&, const mods::ModDescription& mounted);
+enum class SavedGameRestoreStage { checkpoint, owner_start, reconstruction };
+[[nodiscard]] std::string saved_game_restore_refusal(const core::Diagnostic& diagnostic,
+    SavedGameRestoreStage stage = SavedGameRestoreStage::checkpoint);
 [[nodiscard]] std::optional<mods::ModDescription> saved_game_mod_description(std::span<const std::uint8_t> bytes);
 [[nodiscard]] std::string saved_game_mod_details(const std::optional<mods::ModDescription>& saved,
     const mods::ModDescription& mounted);

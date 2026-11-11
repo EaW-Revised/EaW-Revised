@@ -68,7 +68,10 @@ enum class Phase : std::size_t {
     // (the load report's texture_prefetch line carries the readers' share).
     texture_read, texture_parse,
     // The main thread waiting for a texture a read-ahead reader was still decoding (scene::TexturePrefetch::acquire).
-    texture_wait, count
+    texture_wait,
+    // Battle-start identity and save validation on the calling thread: the read and SHA-256 of every mounted Lua/XML file
+    // (read_data_identity), and the live-AI plan validation of a saved battle.
+    data_identity, live_ai_validate, count
 };
 inline constexpr std::array<std::string_view, static_cast<std::size_t>(Phase::count)> names{
     "vfs_mount_index", "xml_catalog", "unit_tables", "map_decode", "session_setup_first_frame",
@@ -86,7 +89,8 @@ inline constexpr std::array<std::string_view, static_cast<std::size_t>(Phase::co
     "model_request", "model_sha256", "bind_frames", "bone_lookup", "unit_link", "unit_projectile_load",
     "model_read", "model_parse", "unit_body", "unit_hardpoint", "unit_abilities", "unit_production", "unit_frames",
     "upload_keep_texture", "upload_count_texture", "upload_identity_copy", "upload_identity_submit", "upload_gpu_create",
-    "mesh_add_surface", "mesh_surface_count", "texture_read", "texture_parse", "texture_wait"};
+    "mesh_add_surface", "mesh_surface_count", "texture_read", "texture_parse", "texture_wait",
+    "data_identity", "live_ai_validate"};
 // Work counters (scan steps, sizes) for the load-check report: added to, never read, by the load path.
 enum class Counter : std::size_t {
     bone_lookups, bone_scan_steps, unit_index_scans, unit_index_steps, projectile_index_scans, projectile_index_steps,
@@ -128,6 +132,10 @@ struct ModelCost final {
     std::uint64_t file_bytes{}, io_read_bytes{};
     [[nodiscard]] double total_ms() const noexcept { return decode_ms + sha_ms + bind_ms; }
 };
+// The millisecond field of a FileCost or ModelCost a scope adds its time to. Named fields (not member pointers) so
+// simulation-boundary code can open a scope without spelling a floating type.
+enum class FileField : std::uint8_t { read, parse, merge };
+enum class ModelField : std::uint8_t { decode, sha, bind, read, parse, compose, upload };
 // Catalog::resolve cache misses by variant-chain depth (layers merged): calls and total ms.
 struct DepthCost final { std::uint64_t calls{}; double ms{}; };
 inline constexpr std::size_t resolve_depth_buckets = 16;
@@ -295,7 +303,11 @@ void model_cost(const std::string_view path, Update&& update) {
 }
 
 // Adds to a work counter of the calling thread's recording; one check without one.
+// Per-thread asset reads remain measurable without enabling the full recorder.
+// Workers own separate totals, so a launch scope attributes only its main-thread reads.
+inline thread_local std::uint64_t asset_read_bytes{};
 inline void count(const Counter counter, const std::uint64_t amount = 1) noexcept {
+    if (counter == Counter::model_read_bytes || counter == Counter::texture_read_bytes) asset_read_bytes += amount;
     if (active) active->counters[static_cast<std::size_t>(counter)] += amount;
 }
 
@@ -326,21 +338,42 @@ private:
     std::uint64_t before_{};
 };
 
+[[nodiscard]] inline double& file_field(FileCost& cost, const FileField field) noexcept {
+    switch (field) {
+    case FileField::read: return cost.read_ms;
+    case FileField::parse: return cost.parse_ms;
+    case FileField::merge: break;
+    }
+    return cost.merge_ms;
+}
+[[nodiscard]] inline double& model_field(ModelCost& cost, const ModelField field) noexcept {
+    switch (field) {
+    case ModelField::decode: return cost.decode_ms;
+    case ModelField::sha: return cost.sha_ms;
+    case ModelField::bind: return cost.bind_ms;
+    case ModelField::read: return cost.read_ms;
+    case ModelField::parse: return cost.parse_ms;
+    case ModelField::compose: return cost.compose_ms;
+    case ModelField::upload: break;
+    }
+    return cost.upload_ms;
+}
+
 // Adds the time from construction to the end of the scope to one of a model's millisecond fields.
 class ModelScope final {
 public:
-    ModelScope(const std::string_view path, double ModelCost::* const field)
+    ModelScope(const std::string_view path, const ModelField field)
         : path_(path), field_(field), live_(active != nullptr) {
         if (live_) start_ = Clock::now();
     }
     ModelScope(const ModelScope&) = delete;
     ModelScope& operator=(const ModelScope&) = delete;
     ~ModelScope() {
-        if (live_) model_cost(path_, [&](ModelCost& cost) { cost.*field_ += since_ms(start_); });
+        if (live_) model_cost(path_, [&](ModelCost& cost) { model_field(cost, field_) += since_ms(start_); });
     }
 private:
     std::string_view path_;
-    double ModelCost::* field_;
+    ModelField field_;
     bool live_;
     Clock::time_point start_{};
 };
@@ -348,7 +381,7 @@ private:
 // ModelScope for detailed recordings only (compose_ms, upload_ms).
 class DetailModelScope final {
 public:
-    DetailModelScope(const std::string_view path, double ModelCost::* const field) {
+    DetailModelScope(const std::string_view path, const ModelField field) {
         if (active && active->detailed) scope_.emplace(path, field);
     }
     DetailModelScope(const DetailModelScope&) = delete;
@@ -403,7 +436,7 @@ private:
 // merge_ms). Without a recording it is one thread-local check: no clock read, no string copy.
 class FileScope final {
 public:
-    FileScope(const std::string_view path, const std::string_view layer, double FileCost::* const field)
+    FileScope(const std::string_view path, const std::string_view layer, const FileField field)
         : path_(path), layer_(layer), field_(field), live_(active != nullptr) {
         if (live_) start_ = Clock::now();
     }
@@ -412,13 +445,13 @@ public:
     ~FileScope() {
         if (!live_) return;
         file_cost(path_, [&](FileCost& cost) {
-            cost.*field_ += since_ms(start_);
+            file_field(cost, field_) += since_ms(start_);
             if (cost.layer.empty()) cost.layer = std::string(layer_);
         });
     }
 private:
     std::string_view path_, layer_;
-    double FileCost::* field_;
+    FileField field_;
     bool live_;
     Clock::time_point start_{};
 };

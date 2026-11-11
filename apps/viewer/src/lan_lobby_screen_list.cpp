@@ -5,6 +5,7 @@ void EawrLanLobby::open_lobby() {
     page_ = Page::lobby;
     impl_->prompt.reset();
     impl_->host_pending = false; impl_->load_pending = false;
+    impl_->pending_text.clear(); impl_->content_wait_since.reset();   // an abandoned press leaves no stale wait behind (#6349)
     build_page(lobby_dialog);
     PageState& state = *state_;
     const BuiltDialog& dialog = *state.dialog;

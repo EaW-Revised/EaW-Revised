@@ -105,6 +105,8 @@ struct UnitType final {
     bool mouse_sensitive{}; // WSU-13: behaviour, impassable asteroid or living-collidable valid target
     bool bar_admitted{}; // WSU-50: selectable, hero, construction or indigenous-spawner admission
     bool locomotion{};
+    bool movie_object{true}; // BCAM-06: presentation eligibility, excluded from content identity.
+    std::vector<std::string> glory_cinematics; // BCAM-13: presentation-only authored paths.
     bool decoration{};
     // FW-25/26: presentation memory only; excluded from content identity.
     bool last_state_visible_under_fow{};
@@ -153,6 +155,14 @@ struct UnitType final {
     std::optional<ObjectTurret> object_turret{};
     std::vector<Ability> abilities;
     std::vector<sim::tactical::SpecialAbilityProfile> special_abilities;
+    struct HealingBlob final {
+        std::string material;
+        std::array<std::uint8_t, 4> colour{255, 255, 255, 255};
+        Fixed range{};
+        sim::tactical::SpecialActivationStyle style{};
+        bool operator==(const HealingBlob&) const = default;
+    };
+    std::vector<HealingBlob> healing_blobs; // WSH-11: presentation only, excluded from identity
     std::optional<BuzzDroids> buzz_droids; // WAB-70: its nested Buzz_Droids_Ability
     std::optional<ClusterBomb> cluster_bomb;
     std::optional<BuzzDroids> team_buzz_droids; // WAB-70: the team container's (AB-60)
@@ -193,6 +203,7 @@ struct UnitType final {
     // WBP-01..19: live capture content, and the separate UC replacement path.
     bool capture_point{};
     bool build_pad{};
+    bool respects_prebuilt_base{true}; // Provisional project default (absent-tag default open, U-R4-11); LR4-21 records the gate, not the default
     bool under_construction{};
     bool living_projectile_collision{}; // WBP-50/51: effective living object types opt in
     bool valid_target{true}; // WCC-25: effective Is_Valid_Target, default true
@@ -249,6 +260,7 @@ struct UnitType final {
     bool display_contained_hero_bars{};
     std::string replenish_team;
     bool replenish_via_members{}; // WHE-70: TEAM dispatches this ability to its members.
+    bool ability_team_dispatch{}; // FS-52: authored TEAM behavior routes default requests
     bool redirect_damage_to_teammates{};
     // WNO-29: authored order, resolved independently of ordinary weapons.
     std::vector<std::string> death_projectiles{};
@@ -338,6 +350,8 @@ struct UnitTables final {
     std::vector<EnumValue> categories; // GameObjectCategoryType.xml, file order
     std::vector<EnumValue> properties; // GameObjectPropertiesType.xml, file order
     CombatConstants constants;
+    // WLAN-03/06 presentation inputs; excluded from simulation content identity.
+    std::vector<NamedConstant> land_animation_constants;
     std::vector<Unresolved> unresolved;
     std::vector<Unresolved> notes;
     std::vector<HardpointHealthDefault> hardpoint_health_defaults;

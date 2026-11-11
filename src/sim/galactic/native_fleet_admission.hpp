@@ -99,7 +99,7 @@ void execute_native_fleet(Owner& owner, const GameCommand& command, const std::u
             if (destination.orbit != planet || destination.motion.transit)
                 return reject(GalacticRejectReason::incompatible_location);
         } else {
-            if (owner.next_id == std::numeric_limits<EntityId>::max() || owner.live_object_count >= galactic_max_objects)
+            if (owner.next_id == std::numeric_limits<EntityId>::max() || owner.live_object_count >= galactic_max_objects || native_id_block_exhausted(owner))
                 return reject(GalacticRejectReason::resource_limit);
             target = owner.next_id++;
             owner.insert(Fleet{target, issuer->player, planet, {}, transfer->slot}); ++owner.live_object_count;
@@ -134,7 +134,7 @@ void execute_native_fleet(Owner& owner, const GameCommand& command, const std::u
         if (!owner.planets.contains(create->planet)) return reject(GalacticRejectReason::unknown_value);
         const auto reason = check_detached(create->members, create->planet);
         if (reason != GalacticRejectReason::none) return reject(reason);
-        if (owner.next_id == std::numeric_limits<EntityId>::max() || owner.live_object_count >= galactic_max_objects)
+        if (owner.next_id == std::numeric_limits<EntityId>::max() || owner.live_object_count >= galactic_max_objects || native_id_block_exhausted(owner))
             return reject(GalacticRejectReason::resource_limit);
         const auto id = owner.next_id++;
         // WGM-196: retail writes the requested slot without an occupancy test; so do we.

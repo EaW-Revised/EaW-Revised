@@ -312,10 +312,11 @@ TURN/service lifetime is distinct from code expiry and recovery grace.
 not in this space-skirmish scope yet. No two-hour service age or expired TURN
 credential should force a healthy match to end: E adds admitted heartbeats,
 authenticated renewable sessions/credentials and renewal failure handling.
-The current lockstep also enforces `max_session_ticks = 1'000'000` through
-`SetupOffer::final_tick_count` and batch validation: about **9.26 hours at 30 Hz**,
-with wall-clock duration depending on speed/waits. E must lift/qualify this finite
-limit and its retention/resource bounds before promising unrestricted duration.
+Space-skirmish lockstep retains `max_session_ticks = 1'000'000` (about 9.26 hours
+at 30 Hz). Galactic Conquest uses `galactic_max_ticks = 100'000'000` (about
+925.93 logical hours), including setup, sealed inputs, checkpoint recovery and
+campaign loading. Wall-clock duration depends on speed and waits. Retention and
+service credentials have their own bounds below.
 Crash/relaunch rejoin is a nice-to-have and deferred; connection longevity does
 not depend on implementing persisted rejoin secrets.
 
@@ -340,18 +341,27 @@ Wall clock follows the match speed; ticks do not.
 
 | Limit | Value | After 1 h (108,000 ticks) | After 4 h (432,000) | After 12 h (1,296,000) |
 | --- | --- | --- | --- | --- |
-| `net::max_session_ticks` = `tactical::max_ticks` = `final_tick_count` | 1,000,000 ticks, 9 h 15 min 33 s | 10.8 %, no effect | 43 %, no effect | **reached at 9 h 15 min 33 s**; the match ends there like any match reaching its agreed final tick, and the online view warns 15 minutes ahead (1738; LAN retains its existing end behaviour) |
+| Tactical `net::max_session_ticks` = `tactical::max_ticks` (default agreed final tick) | 1,000,000 ticks, 9 h 15 min 33 s | 10.8 %, no effect | 43 %, no effect | **reached at 9 h 15 min 33 s**; the match ends there like any match reaching its agreed final tick, and the online view warns 15 minutes ahead (1738; LAN retains its existing end behaviour) |
+| GC `galactic_max_ticks` (default agreed final tick and campaign restore budget) | 100,000,000 ticks, 925 h 55 min 33 s | 0.108 %, no effect | 0.432 %, no effect | 1.296 %, no tick-limit end |
 | Live TURN credentials issued at pairing | `max_session_lifetime` + 60 s, clamped to 48 h; default 24 h 1 min, renewed service leases do not change these credentials | valid | valid | valid by default, though the tick cap ends a normal-speed tactical match sooner; notices at 15 and 2 min before this separate boundary |
 | Reconnect log (`max_log_bytes`) | 64 MiB default, 256 MiB maximum, about 20 bytes per idle tick plus 16 bytes and the payload per command | about 2 MB idle | about 8.6 MB idle | 20 MB idle at the tick cap; a heavy match (about 100 commands/s, assuming 40-byte command payloads plus the 16-byte record overhead) reaches 64 MiB in roughly 3 h, after which reconnect is disabled with a notice while play continues |
 | Desync monitor (`max_retained_bytes` 64 MiB, `exchange_every` 30) | windowed: rows and inputs are dropped after each agreed window, two checkpoints kept | bounded, no growth | bounded, no growth | bounded, no growth |
-| Replay recording / checkpoints / fog sidecar | all share the 1,000,000-tick format limit | unaffected | unaffected | stops at the same tick as the match |
+| Lockstep accepted-batch digests (`LockstepSession::accepted_`; bounded retention work (legacy EAWR-3771)) | unpruned, 32 bytes per peer per tick, plus vector capacity; at four peers about 128 MB per million ticks | about 13.8 MB at four peers | about 55.3 MB at four peers | about 165.9 MB at four peers; continues growing in long GC sessions until bounded retention lands |
+| Tactical replay / checkpoints / fog sidecar | 1,000,000 ticks | unaffected | unaffected | stops at the tactical match limit |
+| GC replay / campaign checkpoint | 100,000,000 ticks; tick fields are unsigned 64-bit | unaffected | unaffected | saves and restores beyond the tactical limit |
 
-**Why the tick cap is not lifted here.** The cap is the simulation's own limit: the
-tactical session, replay format, checkpoint restore and fog sidecar all fail at 1,000,000
-completed ticks, and the canonical-input exports used by desync diagnostics are written in
-that format. Raising only the net constant would let a match run on while its diagnostics
-and recording failed. Lifting it is a sim and format change (with the 76-replay comparison),
-filed for the owner as a follow-up; it is not needed for any match shorter than 9 h 15 min.
+**Mode limits and the 15-minute warning.** The tactical online view keeps its
+15-minute warning (1738) before the agreed tactical final tick. That warning does
+not impose a 1,000,000-tick deadline on GC. Campaign LAN ends at its own agreed
+final tick; a long campaign remains subject to the separate service and retained
+history budgets above.
+
+GC setup offers use envelope revision 4 to agree the wider mode limit; older GC
+offers are refused with a matching-build message. Tactical offers remain revision
+3. No replay or checkpoint layout changed: GC replay already uses the galactic
+limit, and campaign restore's tick budget is a runtime option. Tick, sequence,
+resume and recovery frontier fields retain their 8-byte unsigned encodings;
+tactical replay and fog sidecar limits remain unchanged.
 
 ## Public list and service bounds
 

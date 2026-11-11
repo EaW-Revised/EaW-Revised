@@ -2,13 +2,12 @@
 
 #include "checkpoint_access_internal.hpp"
 
-// Raw domain 9 retains six bonus slots; domain 10 includes WFR-01's nonzero fire range.
-// TL-03 adds 2 to the domain (11, 12) when any live unit has the Lua Make_Invulnerable flag.
+// WLK-04: child domains 21..24 append the spent-lock flag; optional range/invulnerability bits remain.
 namespace eawr::sim::tactical::checkpoint_detail {
 
 template <> struct Fields<AbilitySlot> {
     template <class A, class T> static void apply(A& a, T& v) {
-        a(v.active, v.autofire, v.started_tick, v.expires_tick, v.ready_tick, v.target, v.target_hardpoint, v.position);
+        a(v.active, v.autofire, v.started_tick, v.expires_tick, v.ready_tick, v.target, v.target_hardpoint, v.position, v.lucky_autofire_set, v.lucky_spent);
     }
 };
 
@@ -336,7 +335,7 @@ template <> struct Fields<Projectile> {
 
 template <> struct Fields<ProjectileProfileKey> {
     template <class A, class T> static void apply(A& a, T& v) {
-        a(v.type, v.weapon, v.kind);
+        a(v.type, v.weapon, v.kind, v.holder);
     }
 };
 
@@ -402,13 +401,14 @@ template <> struct Fields<SpawnedShip> {
 
 template <> struct Fields<SpawnerState> {
     template <class A, class T> static void apply(A& a, T& v) {
-        a(v.next_service_frame, v.next_spawn_frame, v.ready, v.entries, v.ships);
+        a(v.next_service_frame, v.next_spawn_frame, v.ready, v.entries, v.ships, v.selected_tech, v.ready_to_deploy);
     }
 };
 
 template <> struct Fields<SpecialAbilitySlot> {
     template <class A, class T> static void apply(A& a, T& v) {
-        a(v.enabled, v.cancelled, v.despawn_success, v.next_service_frame, v.context, v.targets);
+        a(v.enabled, v.cancelled, v.despawn_success, v.jammer_initialized, v.jammer_active, v.jammer_registered, v.jammer_unregistered,
+            v.jammer_remaining, v.jammer_disabled_registration, v.next_service_frame, v.context, v.targets);
     }
 };
 

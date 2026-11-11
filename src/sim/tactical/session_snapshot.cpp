@@ -200,7 +200,7 @@ void append_spawner(std::vector<std::uint8_t>& bytes, const EntityId id, const S
     sim::detail::append_u64(bytes, id);
     sim::detail::append_u64(bytes, state.next_service_frame);
     sim::detail::append_u64(bytes, state.next_spawn_frame);
-    sim::detail::append_u32(bytes, state.ready ? 1U : 0U);
+    sim::detail::append_u32(bytes, (state.ready ? 1U : 0U) | (state.ready_to_deploy ? 2U : 0U));
     sim::detail::append_u32(bytes, static_cast<std::uint32_t>(state.entries.size()));
     for (const auto& entry : state.entries) {
         sim::detail::append_i64(bytes, entry.alive);

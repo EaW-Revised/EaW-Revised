@@ -62,7 +62,11 @@ void GalacticSession::Impl::record_actor(CensusObject row, NativeActorChange::Ki
         }
     }
     const auto at = actor_records.find(row.id);
-    if (kind == NativeActorChange::Kind::changed && at != actor_records.end() && at->second == row) return;
+    if (kind == NativeActorChange::Kind::changed && at != actor_records.end()) {
+        row.story_prevent_ai_usage = at->second.story_prevent_ai_usage;
+        row.story_prefer_ground = at->second.story_prefer_ground;
+        if (at->second == row) return;
+    }
     if (ability_host && (at == actor_records.end() || at->second.owner != row.owner || at->second.planet != row.planet
         || at->second.current_type != row.current_type || at->second.dead != row.dead || at->second.delete_pending != row.delete_pending))
         ++ability_input_generation;
@@ -73,8 +77,9 @@ void GalacticSession::Impl::record_actor(CensusObject row, NativeActorChange::Ki
     published_actor_records.reset();
     invalidate_observer_projection();
     dirty[static_cast<std::size_t>(StateSection::census)] = true;
-    if (native_actor_changes_handler) pending_actor_changes.push_back({kind, row.id,
-        kind == NativeActorChange::Kind::created ? row.generated_source : 0, {}, {}, {}});
+    if (native_actor_changes_handler) {
+        pending_actor_changes.push_back({kind, row.id, kind == NativeActorChange::Kind::created ? row.generated_source : 0, {}, {}, {}, {}, {}});
+    }
 }
 void GalacticSession::Impl::relocate_actor(EntityId id, PlayerId owner, PlanetId planet, EntityId parent) {
     if (const auto at = actor_records.find(id); at != actor_records.end()) {
@@ -118,7 +123,7 @@ void GalacticSession::Impl::lose_actor(EntityId id) {
     const bool born_here = std::any_of(pending_actor_changes.begin(), pending_actor_changes.end(),
         [id](const NativeActorChange& change) { return change.actor == id && change.kind == NativeActorChange::Kind::created; });
     std::erase_if(pending_actor_changes, stale);
-    if (!born_here) pending_actor_changes.push_back({NativeActorChange::Kind::lost, id, 0, {}, {}, {}});
+    if (!born_here) pending_actor_changes.push_back({NativeActorChange::Kind::lost, id, 0, {}, {}, {}, {}, {}});
 }
 core::Result<void> GalacticSession::Impl::deliver_actor_changes() {
     if (pending_actor_changes.empty()) return core::Result<void>::success();
@@ -127,6 +132,27 @@ core::Result<void> GalacticSession::Impl::deliver_actor_changes() {
     auto delivered = native_actor_changes_handler(*snapshot, changes);
     if (!delivered) failed = true;
     return delivered;
+}
+core::Result<void> GalacticSession::set_story_ai_usage(EntityId actor, std::optional<bool> prevent,
+    std::optional<bool> prefer_ground) {
+    auto& impl = *impl_;
+    const auto at = impl.actor_records.find(actor);
+    if (impl.failed || at == impl.actor_records.end() || (!prevent && !prefer_ground))
+        return invalid<void>("story AI usage requires a live world actor and a write");
+    if (!impl.native_replaying) {
+        std::vector<std::uint8_t> bytes;
+        detail::put_u64(bytes, actor);
+        detail::put_u8(bytes, prevent ? (*prevent ? 2 : 1) : 0);
+        detail::put_u8(bytes, prefer_ground ? (*prefer_ground ? 2 : 1) : 0);
+        if (auto saved = append_native_effect(NativeEffectKind::story_ai_usage, std::move(bytes)); !saved) return saved;
+    }
+    if (prevent) at->second.story_prevent_ai_usage = prevent;
+    if (prefer_ground) at->second.story_prefer_ground = prefer_ground;
+    impl.published_actor_records.reset();
+    impl.dirty[static_cast<std::size_t>(StateSection::census)] = true;
+    const auto events = impl.snapshot->events();
+    impl.snapshot = impl.make_snapshot({events.begin(), events.end()});
+    return core::Result<void>::success();
 }
 core::Result<void> GalacticSession::change_actor_current_type(EntityId actor, TypeId type) {
     auto& impl = *impl_;
@@ -275,7 +301,7 @@ core::Result<std::vector<GalacticSession::NativeActorChange>> ordered_births(std
         mark = 1;
         const auto& row = *records.at(id);
         if (row.generated_source && !self(self, row.generated_source, depth + 1)) return false;
-        mark = 2; changes.push_back({Change::Kind::created, id, row.generated_source, {}, {}, {}});
+        mark = 2; changes.push_back({Change::Kind::created, id, row.generated_source, {}, {}, {}, {}, {}});
         return true;
     };
     for (const auto& row : rows) if (!visit(visit, row.id, 0))
@@ -623,20 +649,88 @@ std::uint64_t GalacticSession::next_native_invasion_id() const noexcept {
     if (const auto* shadow = native_shadow()) return shadow->next_native_invasion_id();
     return impl_->next_native_invasion;
 }
+struct GalacticSession::PreparedNotifications::Saved {
+    NativeActorChangesHandler actors;
+    NativeMovementListener movement;
+    CreditNotificationHandler credits;
+    NativeProductionOutcomeHandler outcomes;
+    NativeProductionHandler production;
+};
+GalacticSession::PreparedNotifications::PreparedNotifications(GalacticSession& world)
+    : world_(world), saved_(std::make_unique<Saved>()) {
+    auto& impl = *world.impl_;
+    saved_->actors = std::move(impl.native_actor_changes_handler); saved_->movement = std::move(impl.native_movement_listener);
+    saved_->credits = std::move(impl.credit_notification_handler); saved_->outcomes = std::move(impl.native_production_outcome_handler);
+    // The stage delivered the births and changes of what it decided, so those are not delivered again. A LOSS is different: the
+    // world can remove an actor while it readmits (a landing consumes its fleet and units) without the stage having published
+    // it, and a retained owner that never hears of the loss keeps an actor the world no longer has. Losses pass through; a loss
+    // the owner already took is a no-op for it.
+    impl.native_actor_changes_handler = {};
+    if (saved_->actors) impl.native_actor_changes_handler = [real = saved_->actors](const GalacticSnapshot& snapshot,
+            std::span<const NativeActorChange> changes) -> core::Result<void> {
+        std::vector<NativeActorChange> lost;
+        for (const auto& change : changes) if (change.kind == NativeActorChange::Kind::lost) lost.push_back(change);
+        return lost.empty() ? core::Result<void>::success() : real(snapshot, lost);
+    };
+    impl.native_movement_listener = {};
+    impl.credit_notification_handler = {}; impl.native_production_outcome_handler = {};
+    // The lane's stage already ran the real mark (goal, funding, purchase row) when the AI decided; like the barrier replay,
+    // the readmission asks for a payment that changes nothing (clearing it would refuse canonical production).
+    saved_->production = std::move(impl.native_production_handler);
+    impl.native_production_handler = [](const NativeProductionNotice&) { return core::Result<NativeProductionPayment>::success({}); };
+}
+GalacticSession::PreparedNotifications::~PreparedNotifications() {
+    auto& impl = *world_.impl_;
+    impl.native_actor_changes_handler = std::move(saved_->actors); impl.native_movement_listener = std::move(saved_->movement);
+    impl.credit_notification_handler = std::move(saved_->credits); impl.native_production_outcome_handler = std::move(saved_->outcomes);
+    impl.native_production_handler = std::move(saved_->production);
+}
 core::Result<std::unique_ptr<GalacticSession::NativeActionBarrier>> GalacticSession::begin_native_barrier(
     std::span<const PlayerId> players, std::size_t max_requests) {
+    return begin_native_barrier(players, max_requests, NativeBarrierOptions{});
+}
+core::Result<std::unique_ptr<GalacticSession::NativeActionBarrier>> GalacticSession::begin_native_barrier(
+    std::span<const PlayerId> players, std::size_t max_requests, NativeBarrierOptions options) {
     using Result = core::Result<std::unique_ptr<NativeActionBarrier>>;
     if (!native_action_barrier_context.expired() || impl_->native_barrier_active.load(std::memory_order_acquire)
         || impl_->failed || !max_requests || max_requests > galactic_max_commands
         || !std::is_sorted(players.begin(), players.end()) || std::adjacent_find(players.begin(), players.end()) != players.end())
         return invalid<std::unique_ptr<NativeActionBarrier>>("native barrier requires one live owner, ordered players and bounded requests");
     if (players.empty()) return Result::success({});
-    auto root = begin_native_actions(players.front(), std::min<std::size_t>(max_requests, galactic_max_objects));
+    const auto root_requests = std::min<std::size_t>(max_requests, galactic_max_objects);
+    auto root = options.overlay ? continue_native_actions(*options.overlay, root_requests, false, false)
+                                : begin_native_actions(players.front(), root_requests);
     if (!root) return Result::failure(root.error());
     root.value().data_->movement_listener = impl_->native_movement_listener; root.value().data_->prelude = true;
     root.value().data_->max_requests = max_requests;
-    root.value().data_->invasion_records = impl_->native_invasions.size(); root.value().data_->invasion_transports = impl_->native_invasion_transport_count;
-    root.value().data_->next_invasion = impl_->next_native_invasion; root.value().data_->invasions_enabled = impl_->native_invasions_enabled;
+    // The replayed overlay records are not this window's requests: the window budget starts empty.
+    if (options.overlay) root.value().data_->work.requests = 0;
+    // The overlay carries its own invasion tallies (replayed invasions); the bare world's are the live ones.
+    if (!options.overlay) {
+        root.value().data_->invasion_records = impl_->native_invasions.size(); root.value().data_->invasion_transports = impl_->native_invasion_transport_count;
+        root.value().data_->next_invasion = impl_->next_native_invasion; root.value().data_->invasions_enabled = impl_->native_invasions_enabled;
+    }
+    if (options.first_id || options.first_invasion) {
+        const auto room = std::numeric_limits<std::uint64_t>::max() - galactic_max_objects;
+        const auto id = options.first_id ? options.first_id : impl_->next_id;
+        const auto invasion = options.first_invasion ? options.first_invasion : impl_->next_native_invasion;
+        // A window whose identity block the caller already reserved starts inside it (below the world counter, at its end).
+        const bool reserved = options.id_end && impl_->next_id == options.id_end && id < options.id_end;
+        const bool reserved_invasion = options.invasion_end && impl_->next_native_invasion == options.invasion_end
+            && invasion < options.invasion_end;
+        if ((id < impl_->next_id && !reserved) || (invasion < impl_->next_native_invasion && !reserved_invasion)
+            || id >= room || invasion >= room)
+            return invalid<std::unique_ptr<NativeActionBarrier>>("native barrier identities must start at or above the live frontier");
+        root.value().data_->first_id = root.value().data_->next_id = id;
+        root.value().data_->first_invasion = root.value().data_->next_invasion = invasion;
+    }
+    root.value().data_->intent_sink = std::move(options.intent_sink);
+    root.value().data_->free_players = options.lane;
+    if (options.id_end || options.invasion_end) {
+        if (options.id_end <= root.value().data_->next_id || options.invasion_end <= root.value().data_->next_invasion)
+            return invalid<std::unique_ptr<NativeActionBarrier>>("native barrier identity blocks must lie above their first identity");
+        root.value().data_->range_end = options.id_end; root.value().data_->invasion_range_end = options.invasion_end;
+    }
     auto state = std::make_shared<NativeActionBarrier::State>();
     state->world = this; state->owner = impl_.get(); state->players.assign(players.begin(), players.end()); state->max_requests = max_requests;
     state->segments.push_back(std::make_unique<NativeActionShadow>(std::move(root).value()));
@@ -784,6 +878,20 @@ core::Result<void> GalacticSession::NativeActionBarrier::select_player(PlayerId 
     state_->segments.push_back(std::make_unique<NativeActionShadow>(std::move(next).value()));
     return core::Result<void>::success();
 }
+core::Result<void> GalacticSession::NativeActionBarrier::begin_turn() {
+    if (!state_ || state_->finished || state_->provider_active || state_->prelude || !state_->independent_players.empty()
+        || native_action_barrier_context.lock().get() != state_.get() || state_->segments.empty()
+        || !state_->segments.back()->data_->free_players)
+        return invalid<void>("native turn requires an active lane barrier that has left its prelude");
+    if (!state_->tail) return core::Result<void>::success();
+    state_->tail = false;
+    auto next = state_->world->continue_native_actions(*state_->segments.back(),
+        std::min<std::size_t>(state_->max_requests, galactic_max_objects), false, false);
+    if (!next) return core::Result<void>::failure(next.error());
+    next.value().data_->max_requests = state_->max_requests;
+    state_->segments.push_back(std::make_unique<NativeActionShadow>(std::move(next).value()));
+    return core::Result<void>::success();
+}
 core::Result<void> GalacticSession::NativeActionBarrier::begin_tail() {
     if (!state_ || state_->finished || state_->provider_active || native_action_barrier_context.lock().get() != state_.get()
         || (!state_->independent_players.empty() && !state_->independent_committed))
@@ -808,8 +916,9 @@ core::Result<void> GalacticSession::NativeActionBarrier::commit() {
 }
 core::Result<void> GalacticSession::NativeActionBarrier::discard() {
     if (!state_ || state_->finished || state_->provider_active || !state_->independent_players.empty()
-        || native_action_barrier_context.lock().get() != state_.get() || state_->world->impl_->failed)
+        || native_action_barrier_context.lock().get() != state_.get() || state_->world->impl_->failed) {
         return invalid<void>("native phase discard requires its healthy unpublished serial barrier");
+    }
     native_action_barrier_context.reset(); state_->finished = true;
     state_->world->impl_->native_barrier_active.store(false, std::memory_order_release);
     while (!state_->segments.empty()) state_->segments.pop_back();
@@ -838,7 +947,7 @@ core::Result<GalacticSession::NativeActionShadow> GalacticSession::continue_nati
     data->inherit_reads(previous.data_);
     data->first_id = data->next_id = before.next_id; data->live_objects = before.live_objects; data->max_requests = max_requests;
     data->independent_player = before.independent_player; data->range_end = before.range_end;
-    data->invasion_range_end = before.invasion_range_end;
+    data->invasion_range_end = before.invasion_range_end; data->free_players = before.free_players;
     data->can_create = before.can_create; data->continuation = true; data->prelude = native_barrier() && native_barrier()->prelude; data->immediate_batch = immediate; data->tail = tail;
     data->graph = before.graph; data->movement = before.movement; data->observer_generation = before.observer_generation;
     data->population_schema = before.population_schema; data->income_schema = before.income_schema; data->fiscal_schema = before.fiscal_schema;
@@ -871,6 +980,29 @@ core::Result<void> GalacticSession::advance_native_segment(bool tail, std::size_
     state->actions += actions; state->segments.push_back(std::make_unique<NativeActionShadow>(std::move(next).value()));
     return core::Result<void>::success();
 }
+namespace {
+// #6378: an immediate batch's staged AI-usage writes keep their places among its births when the ordered commit replays the
+// births. The replayed tail of `pending` (from `replay_from`) is the batch's own notifications in order, without the staged
+// writes; should it differ from the batch's list, the writes follow the replayed tail in their own order.
+void keep_staged_ai_usage(std::vector<GalacticSession::NativeActorChange>& pending, std::size_t replay_from,
+    std::span<const GalacticSession::NativeActorChange> staged) {
+    using Change = GalacticSession::NativeActorChange;
+    const auto usage = [](const Change& change) { return change.prevent_ai_usage || change.prefer_ground; };
+    if (std::none_of(staged.begin(), staged.end(), usage)) return;
+    std::vector<Change> merged, writes;
+    auto replayed = replay_from;
+    bool aligned = true;
+    for (const auto& change : staged) {
+        if (usage(change)) { merged.push_back(change); writes.push_back(change); continue; }
+        if (replayed < pending.size() && pending[replayed].kind == change.kind && pending[replayed].actor == change.actor)
+            merged.push_back(pending[replayed++]);
+        else aligned = false;
+    }
+    if (!aligned || replayed != pending.size()) { pending.insert(pending.end(), writes.begin(), writes.end()); return; }
+    pending.resize(replay_from);
+    pending.insert(pending.end(), merged.begin(), merged.end());
+}
+} // namespace
 core::Result<void> GalacticSession::deliver_native_shadow_changes(const NativeActionShadow& shadow, std::size_t first) {
     const auto changes = shadow.actor_changes().subspan(first);
     if (changes.empty() || !impl_->native_actor_changes_handler) return core::Result<void>::success();
@@ -1024,7 +1156,7 @@ core::Result<std::vector<EntityId>> GalacticSession::stage_native_force(
 core::Result<void> GalacticSession::stage_native_effect(
     NativeActionShadow& shadow, NativeEffectKind kind, std::vector<std::uint8_t> payload, NativeEffectPhase phase) {
     auto* state = native_barrier();
-    if (!state || impl_->failed || impl_->native_replaying || kind < NativeEffectKind::fleet || kind > NativeEffectKind::identity_reservation
+    if (!state || impl_->failed || impl_->native_replaying || kind < NativeEffectKind::fleet || kind > NativeEffectKind::story_ai_usage
         || phase > NativeEffectPhase::world_service || payload.size() > galactic_replay_max_payload
         || impl_->native_dropped + impl_->native_effects.size() + state->journal_entries + impl_->executed_dropped + impl_->executed.size() + impl_->pending.size() >= galactic_max_commands
         || state->journal_entries >= std::numeric_limits<std::uint64_t>::max() - impl_->native_sequence) {
@@ -1129,6 +1261,31 @@ core::Result<GalacticSession::NativeActionShadow> GalacticSession::begin_native_
     shadow.value().data_->graph = impl_->graph ? std::make_shared<const PlanetGraph>(*impl_->graph) : nullptr;
     return shadow;
 }
+core::Result<GalacticSession> GalacticSession::create_lane_shell(const GalacticSession& live) {
+    if (live.impl_->failed) return invalid<GalacticSession>("a lane shell requires a live campaign");
+    return GalacticSession::create(live.impl_->setup);
+}
+core::Result<void> GalacticSession::refresh_lane(const GalacticSession& live) {
+    if (live.native_shadow() || native_shadow() || live.impl_->failed || impl_->failed || &live == this
+        || impl_->native_barrier_active.load(std::memory_order_acquire) || live.impl_->native_barrier_active.load(std::memory_order_acquire))
+        return invalid<void>("a lane refresh requires two idle sessions");
+    const auto& src = *live.impl_; auto& dst = *impl_;
+    dst.snapshot = src.snapshot; dst.completed_tick = src.completed_tick; dst.clock = src.clock;
+    dst.next_id = src.next_id; dst.next_native_invasion = src.next_native_invasion;
+    dst.native_invasions_enabled = src.native_invasions_enabled; dst.native_invasions = src.native_invasions;
+    dst.native_invasion_transport_count = src.native_invasion_transport_count;
+    dst.live_object_count = src.live_object_count; dst.system_hold = src.system_hold;
+    dst.population = src.population; dst.population_stale = src.population_stale;
+    dst.native_population_schema = src.native_population_schema; dst.native_income_schema = src.native_income_schema;
+    dst.native_fiscal_schema = src.native_fiscal_schema; dst.income_edges = src.income_edges;
+    if (src.production && dst.production) dst.production->players = src.production->players;
+    dst.lane_base_credits.clear();
+    if (src.setup.fiscal) {
+        dst.lane_base_credits.reserve(src.setup.planets.size());
+        for (std::size_t i = 0; i < src.setup.planets.size(); ++i) dst.lane_base_credits.push_back(src.planet_base_credits(i));
+    }
+    return core::Result<void>::success();
+}
 core::Result<void> GalacticSession::commit_native_actions(const NativeActionShadow& shadow, bool actor_changes_prepared, bool deliver_intents) {
     if (native_shadow()) return publish_native_batch(shadow, actor_changes_prepared, deliver_intents);
     if (!deliver_intents) return invalid<void>("manual native intent delivery requires an immediate player transaction");
@@ -1148,7 +1305,70 @@ core::Result<GalacticSession::NativeTransportLandingReceipt> GalacticSession::re
         return invalid<NativeTransportLandingReceipt>("control reconciliation requires a control intent");
     return readmit_native_movement(intent);
 }
+bool GalacticSession::native_lane_identity_in_use(EntityId first_id) const {
+    if (impl_->fleets.contains(first_id) || impl_->actor_records.contains(first_id)) return true;
+    if (impl_->production)
+        for (const auto& planet : impl_->production->planets)
+            for (const auto& queue : planet.queues)
+                if (std::any_of(queue.begin(), queue.end(), [&](const auto& entry) { return entry.build_id == first_id; })) return true;
+    return false;
+}
+core::Result<bool> GalacticSession::rewind_native_lane_identity(EntityId first_id, EntityId allocated) {
+    if (!allocated || first_id >= impl_->next_id) return core::Result<bool>::success(false);
+    // The lane range is empty until its slice is applied. An identity in use means the intent was consumed already:
+    // no rewind, so the admission probe finds its identity span unmatched and the intent is refused (never an abort).
+    if (native_lane_identity_in_use(first_id)) return core::Result<bool>::success(false);
+    if (auto rewound = reserve_native_frontiers_rewindable(impl_->next_id, first_id, impl_->next_native_invasion, impl_->next_native_invasion); !rewound)
+        return core::Result<bool>::failure(rewound.error());
+    return core::Result<bool>::success(true);
+}
+core::Result<void> GalacticSession::restore_native_lane_identity() {
+    if (!impl_->native_rewound_next) return core::Result<void>::success();
+    return reserve_native_frontiers(impl_->next_id, impl_->native_rewound_next, impl_->next_native_invasion, impl_->next_native_invasion);
+}
 core::Result<GalacticSession::NativeTransportLandingReceipt> GalacticSession::readmit_native_movement(
+    const NativeActionShadow::IntentRecord& intent) {
+    using Result = core::Result<NativeTransportLandingReceipt>;
+    auto rewound = rewind_native_lane_identity(intent.first_id, intent.next_id >= intent.first_id ? intent.next_id - intent.first_id : 0);
+    if (!rewound) return Result::failure(rewound.error());
+    auto result = readmit_native_movement_unscoped(intent);
+    if (rewound.value()) if (auto restored = restore_native_lane_identity(); !restored && result) return Result::failure(restored.error());
+    return result;
+}
+// The admission probe shared by the ordered readmit (the candidate is then committed to the world) and the window overlay
+// (the candidate is kept on a shadow chain): run the recorded request through the raw shadow admission and accept it only
+// when the object and the identity span equal what the lane projected.
+core::Result<GalacticSession::NativeTransportLandingReceipt> GalacticSession::probe_native_movement(
+    NativeActionShadow& candidate, const NativeActionShadow::IntentRecord& intent,
+    const NativeFleetReceipt& projected, EntityId allocated) {
+    using Result = core::Result<NativeTransportLandingReceipt>;
+    const auto* request = std::get_if<NativeActionShadow::FleetRequest>(&intent.request);
+    const auto* control = std::get_if<NativeActionShadow::ControlRequest>(&intent.request);
+    const auto first = candidate.next_entity_id();
+    auto checked = [&]() -> Result {
+        if (request) {
+            auto result = candidate.admit_fleet(request->player, request->payload, request->pending);
+            if (!result) return Result::failure(result.error());
+            return Result::success({result.value(), false});
+        }
+        using Kind = NativeActionShadow::ControlRequest::Kind;
+        if (control->kind == Kind::actor_land)
+            // A frozen surface count is not a live assertion after earlier players commit.
+            return candidate.land_transport(control->player, control->object, control->target, control->pending);
+        auto result = control->kind == Kind::launch
+            ? candidate.launch_transport(control->player, control->object, control->target, control->pending)
+            : candidate.land_transports(control->player, control->object, control->pending);
+        if (!result) return Result::failure(result.error());
+        return Result::success({result.value(), false});
+    }();
+    if (!checked) return checked;
+    auto receipt = checked.value();
+    if (receipt.event.admitted && (receipt.event.object != projected.object
+        || candidate.next_entity_id() - first != allocated))
+        receipt = {{false, 0, GalacticRejectReason::invalid_membership}, false};
+    return Result::success(receipt);
+}
+core::Result<GalacticSession::NativeTransportLandingReceipt> GalacticSession::readmit_native_movement_unscoped(
     const NativeActionShadow::IntentRecord& intent) {
     using Result = core::Result<NativeTransportLandingReceipt>;
     const auto* request = std::get_if<NativeActionShadow::FleetRequest>(&intent.request);
@@ -1179,28 +1399,9 @@ core::Result<GalacticSession::NativeTransportLandingReceipt> GalacticSession::re
     // accepted candidate commits, never while checking a refused candidate.
     candidate.data_->movement_listener = {};
     if (allocated) candidate.data_->first_id = candidate.data_->next_id = intent.first_id;
-    const auto first = candidate.next_entity_id();
-    auto checked = [&]() -> Result {
-        if (request) {
-            auto result = candidate.admit_fleet(request->player, request->payload, request->pending);
-            if (!result) return Result::failure(result.error());
-            return Result::success({result.value(), false});
-        }
-        using Kind = NativeActionShadow::ControlRequest::Kind;
-        if (control->kind == Kind::actor_land)
-            // A frozen surface count is not a live assertion after earlier players commit.
-            return candidate.land_transport(control->player, control->object, control->target, control->pending);
-        auto result = control->kind == Kind::launch
-            ? candidate.launch_transport(control->player, control->object, control->target, control->pending)
-            : candidate.land_transports(control->player, control->object, control->pending);
-        if (!result) return Result::failure(result.error());
-        return Result::success({result.value(), false});
-    }();
-    if (!checked) return checked;
-    auto receipt = checked.value();
-    if (receipt.event.admitted && (receipt.event.object != projected.object
-        || candidate.next_entity_id() - first != allocated))
-        receipt = {{false, 0, GalacticRejectReason::invalid_membership}, false};
+    auto probed = probe_native_movement(candidate, intent, projected, allocated);
+    if (!probed) return probed;
+    auto receipt = probed.value();
     if (!receipt.event.admitted) {
         if (auto reserved = burn(); !reserved) return Result::failure(reserved.error());
         return Result::success(receipt);
@@ -1212,7 +1413,116 @@ core::Result<GalacticSession::NativeTransportLandingReceipt> GalacticSession::re
     }
     return Result::success(receipt);
 }
+core::Result<GalacticSession::NativeActionShadow> GalacticSession::build_native_overlay(
+    PlayerId opener, std::span<const NativeOverlayRecord> records, const PartitionExecutor& executor, NativeOverlayStats& stats) const {
+    using Result = core::Result<NativeActionShadow>;
+    using Shadow = NativeActionShadow;
+    if (native_shadow() || impl_->failed) return invalid<NativeActionShadow>("a window overlay requires the completed world and no open native shadow");
+    auto opened = begin_native_actions(opener, galactic_max_objects);
+    if (!opened) return opened;
+    auto root = std::move(opened).value();
+    root.data_->free_players = true; root.data_->movement_listener = {}; root.data_->intent_sink = {};
+    const auto clear_logs = [](NativeActionShadow& shadow) {
+        shadow.data_->action_requests.clear(); shadow.data_->actor_changes.clear(); shadow.data_->events.clear();
+    };
+    for (const auto& step : records) {
+        if (!step.record) return invalid<NativeActionShadow>("a window overlay record is missing");
+        const auto& intent = *step.record;
+        ++stats.records;
+        const auto allocated = intent.next_id >= intent.first_id ? intent.next_id - intent.first_id : 0;
+        const auto fleet = std::get_if<Shadow::FleetRequest>(&intent.request);
+        const auto control = std::get_if<Shadow::ControlRequest>(&intent.request);
+        const auto force = std::get_if<Shadow::ForceRequest>(&intent.request);
+        const auto production = std::get_if<Shadow::ProductionRequest>(&intent.request);
+        const auto cash = std::get_if<Shadow::CashRequest>(&intent.request);
+        const auto invasion = std::get_if<Shadow::InvasionRequest>(&intent.request);
+        if (std::holds_alternative<Shadow::FinishRequest>(intent.request)) { ++stats.unreplayed_finish; continue; }
+        if (std::holds_alternative<Shadow::JournalRequest>(intent.request)) { ++stats.unreplayed_journal; continue; }
+        if (std::holds_alternative<Shadow::OrbitRecheckRequest>(intent.request)) { ++stats.unreplayed_orbit; continue; }
+        if (invasion && invasion->retire) { ++stats.unreplayed_release; continue; }
+        // One disposable continuation per record: kept only when admitted and the allocated span matches.
+        auto next = continue_native_actions(root, galactic_max_objects, false, false);
+        if (!next) return Result::failure(next.error());
+        auto candidate = std::move(next).value();
+        candidate.data_->movement_listener = {}; candidate.data_->intent_sink = {};
+        // The shadow verbs refuse a player other than the chain's outside the prelude; the overlay chain serves every player in turn.
+        // Tail work is tagged with the last selected player, so the request's own player decides (b21: caller 1 on a chain of player 3).
+        candidate.data_->player = fleet ? fleet->player : control ? control->player : production ? production->request.player
+            : cash ? cash->player : invasion ? invasion->player : step.player;
+        if (intent.first_id) candidate.data_->first_id = candidate.data_->next_id = intent.first_id;
+        if (intent.first_invasion) candidate.data_->first_invasion = candidate.data_->next_invasion = intent.first_invasion;
+        bool admitted{};
+        if (fleet || control) {
+            const auto& projected = fleet ? fleet->receipt : control->receipt;
+            if (projected.admitted) {
+                auto probed = probe_native_movement(candidate, intent, projected, allocated);
+                if (!probed) return Result::failure(probed.error());
+                admitted = probed.value().event.admitted;
+            }
+        } else if (force) {
+            if (!force->force) return invalid<NativeActionShadow>("a window overlay force record has no placement");
+            const auto first = candidate.next_entity_id();
+            auto made = candidate.create_force(force->force->request,
+                [&](const NativeForceView&, EntityId) { return core::Result<NativeForcePlacement>::success(force->force->placement); }, executor);
+            admitted = made && made.value() == force->actors && candidate.next_entity_id() - first == allocated;
+        } else if (production) {
+            if (production->receipt.admission == ProductionAdmission::allowed) {
+                auto made = candidate.admit_production(production->request, executor,
+                    [](const NativeProductionNotice&) { return core::Result<NativeProductionPayment>::success({}); },
+                    impl_->corruption_local_unlocks(production->request.planet, production->request.player));
+                if (!made) return Result::failure(made.error());
+                admitted = made.value().admission == ProductionAdmission::allowed && made.value().build == production->receipt.build
+                    && candidate.next_entity_id() == intent.next_id;
+            }
+        } else if (cash) {
+            auto added = candidate.add_credits(cash->player, cash->delta, cash->multiplier);
+            if (!added) return Result::failure(added.error());
+            admitted = true;
+        } else if (invasion) {
+            if (invasion->receipt.admitted) {
+                auto made = candidate.admit_invasion(invasion->player, invasion->fleet, invasion->transports, invasion->pending);
+                if (!made) return Result::failure(made.error());
+                admitted = made.value().admitted && made.value().request == invasion->receipt.request;
+            }
+        }
+        if (!admitted) { ++stats.refused; continue; }
+        ++stats.replayed;
+        clear_logs(candidate);
+        root = std::move(candidate);
+    }
+    clear_logs(root);
+    root.data_->player = opener;
+    return Result::success(std::move(root));
+}
 core::Result<GalacticSession::NativeInvasionReceipt> GalacticSession::readmit_native_invasion(
+    const NativeActionShadow::IntentRecord& intent, bool reserved_lane) {
+    using Result = core::Result<NativeInvasionReceipt>;
+    const auto* request = std::get_if<NativeActionShadow::InvasionRequest>(&intent.request);
+    if (impl_->failed || native_shadow() || !request || request->retire || !intent.first_id || intent.first_id != intent.next_id
+        || !intent.first_invasion || intent.next_invasion < intent.first_invasion
+        || intent.next_invasion == std::numeric_limits<std::uint64_t>::max()
+        || intent.next_invasion - intent.first_invasion > 1
+        || (request->receipt.admitted && (intent.next_invasion != intent.first_invasion + 1
+            || request->receipt.request != intent.first_invasion))
+        || (!request->receipt.admitted && intent.next_invasion != intent.first_invasion))
+        return invalid<NativeInvasionReceipt>("native invasion reconciliation requires its ordered admission intent");
+    const bool rewind = reserved_lane && intent.next_invasion > intent.first_invasion
+        && intent.first_invasion && intent.first_invasion < impl_->next_native_invasion;
+    if (rewind) {
+        if (impl_->native_invasions.contains(intent.first_invasion))
+            return invalid<NativeInvasionReceipt>("native lane invasion identity is already in use");
+        if (auto reserved = reserve_native_frontiers_rewindable(impl_->next_id, impl_->next_id,
+            impl_->next_native_invasion, intent.first_invasion); !reserved) return Result::failure(reserved.error());
+    }
+    auto result = readmit_native_invasion_unscoped(intent);
+    if (rewind) {
+        auto restored = reserve_native_frontiers(impl_->next_id, impl_->next_id,
+            impl_->next_native_invasion, impl_->native_rewound_invasion);
+        if (!restored && result) return Result::failure(restored.error());
+    }
+    return result;
+}
+core::Result<GalacticSession::NativeInvasionReceipt> GalacticSession::readmit_native_invasion_unscoped(
     const NativeActionShadow::IntentRecord& intent) {
     using Result = core::Result<NativeInvasionReceipt>;
     const auto* request = std::get_if<NativeActionShadow::InvasionRequest>(&intent.request);
@@ -1272,6 +1582,15 @@ core::Result<math::Fixed> GalacticSession::readmit_native_cash(const NativeActio
 core::Result<GalacticSession::NativeForceReceipt> GalacticSession::readmit_native_force(
     const NativeActionShadow::IntentRecord& intent, const NativeReconciledForceBuilder& builder, const PartitionExecutor& executor) {
     using Result = core::Result<NativeForceReceipt>;
+    auto rewound = rewind_native_lane_identity(intent.first_id, intent.next_id >= intent.first_id ? intent.next_id - intent.first_id : 0);
+    if (!rewound) return Result::failure(rewound.error());
+    auto result = readmit_native_force_unscoped(intent, builder, executor);
+    if (rewound.value()) if (auto restored = restore_native_lane_identity(); !restored && result) return Result::failure(restored.error());
+    return result;
+}
+core::Result<GalacticSession::NativeForceReceipt> GalacticSession::readmit_native_force_unscoped(
+    const NativeActionShadow::IntentRecord& intent, const NativeReconciledForceBuilder& builder, const PartitionExecutor& executor) {
+    using Result = core::Result<NativeForceReceipt>;
     const auto* request = std::get_if<NativeActionShadow::ForceRequest>(&intent.request);
     if (impl_->failed || native_shadow() || !request || !request->force || !builder || !intent.first_id
         || intent.next_id < intent.first_id || intent.next_id == std::numeric_limits<EntityId>::max()
@@ -1328,6 +1647,15 @@ core::Result<GalacticSession::NativeForceReceipt> GalacticSession::readmit_nativ
     return Result::success({true, std::move(actual).value()});
 }
 core::Result<GalacticSession::NativeProductionReceipt> GalacticSession::readmit_native_production(
+    const NativeActionShadow::IntentRecord& intent, const PartitionExecutor& executor, const NativeProductionPreflight& preflight) {
+    using Result = core::Result<NativeProductionReceipt>;
+    auto rewound = rewind_native_lane_identity(intent.first_id, intent.next_id >= intent.first_id ? intent.next_id - intent.first_id : 0);
+    if (!rewound) return Result::failure(rewound.error());
+    auto result = readmit_native_production_unscoped(intent, executor, preflight);
+    if (rewound.value()) if (auto restored = restore_native_lane_identity(); !restored && result) return Result::failure(restored.error());
+    return result;
+}
+core::Result<GalacticSession::NativeProductionReceipt> GalacticSession::readmit_native_production_unscoped(
     const NativeActionShadow::IntentRecord& intent, const PartitionExecutor& executor, const NativeProductionPreflight& preflight) {
     using Result = core::Result<NativeProductionReceipt>;
     const auto* request = std::get_if<NativeActionShadow::ProductionRequest>(&intent.request);
@@ -1477,6 +1805,7 @@ core::Result<void> GalacticSession::commit_native_actions(std::span<const Native
             if (data.immediate_batch) {
                 const session_detail::NativeActorChangeCheckpoint pending_before(impl_->pending_actor_changes, actor_changes_prepared);
                 std::vector<GalacticEvent> events(impl_->snapshot->events().begin(), impl_->snapshot->events().end());
+                const auto replay_from = impl_->pending_actor_changes.size();
                 if (!data.forces.empty()) {
                     auto movement = std::make_shared<MovementSetup>(*impl_->movement_inputs);
                     for (const auto& force : data.forces)
@@ -1484,6 +1813,8 @@ core::Result<void> GalacticSession::commit_native_actions(std::span<const Native
                     std::sort(movement->contents.begin(), movement->contents.end(), [](const auto& x, const auto& y) { return x.container < y.container; });
                     impl_->movement_inputs = std::move(movement);
                 }
+                if (!actor_changes_prepared && impl_->native_actor_changes_handler)
+                    keep_staged_ai_usage(impl_->pending_actor_changes, replay_from, data.actor_changes);
                 pending_before.restore();
                 for (const auto& [player, balance] : data.accounts) {
                     auto& accounts = impl_->economy->players;
@@ -1605,6 +1936,7 @@ core::Result<void> GalacticSession::commit_native_actions(std::span<const Native
     std::vector<GalacticEvent> events(impl_->snapshot->events().begin(), impl_->snapshot->events().end());
     for (const auto& shadow : shadows) {
         const auto& data = *shadow.data_;
+        const auto replay_from = impl_->pending_actor_changes.size();
         if (!data.forces.empty()) {
             auto movement = std::make_shared<MovementSetup>(*impl_->movement_inputs);
             for (const auto& force : data.forces)
@@ -1612,6 +1944,8 @@ core::Result<void> GalacticSession::commit_native_actions(std::span<const Native
             std::sort(movement->contents.begin(), movement->contents.end(), [](const auto& a, const auto& b) { return a.container < b.container; });
             impl_->movement_inputs = std::move(movement);
         }
+        if (!actor_changes_prepared && impl_->native_actor_changes_handler)
+            keep_staged_ai_usage(impl_->pending_actor_changes, replay_from, data.actor_changes);
         pending_before.restore();
         for (const auto& [id, balance] : data.accounts) {
             auto& accounts = impl_->economy->players;

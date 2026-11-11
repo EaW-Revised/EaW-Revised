@@ -381,7 +381,7 @@ struct EawrLanLobby::PageState final {
     std::optional<net::GalacticLobbyOptions> galactic_editing;
     EawrUiCheck* gc_custom{};
     EawrUiCheck* gc_heroes{};
-    EawrUiEdit *gc_credits{}, *gc_start_tech{}, *gc_max_tech{};
+    EawrUiEdit *gc_credits{}, *gc_start_tech{}, *gc_max_tech{}, *gc_vote_timeout{};
     EawrUiCombo* gc_difficulty{};
     EawrUiCombo* gc_auto_resolve{};
     EawrUiLabel* gc_error{};
@@ -396,6 +396,7 @@ struct EawrLanLobby::PageState final {
 };
 
 struct EawrLanLobby::Impl final {
+    std::shared_ptr<void> load_digest_wait, review_digest_wait;
     std::shared_ptr<model::LobbyGameSource> source;
     std::shared_ptr<net::OnlineRoomSource> online_rooms;
     std::size_t online_page{};
@@ -445,6 +446,7 @@ struct EawrLanLobby::Impl final {
     bool locked{};
     bool refused{};
     bool mod_review_box{};
+    std::optional<mods::ModDescription> deferred_mod_review;
     EawrMessageBox* box{};
     // The rows as last shown, for the report and the start checks.
     std::vector<model::StagingRow> rows;
@@ -453,6 +455,7 @@ struct EawrLanLobby::Impl final {
     std::string preview_path;
     std::string status;
     std::string start_caption;
+    std::string start_original_caption; // the host's Start caption while the button reads Cancel (#6045)
     std::string start_reason;
     bool start_enabled{};
     std::size_t visible_rows{};
@@ -478,6 +481,8 @@ struct EawrLanLobby::Impl final {
     bool host_pending{};
     bool load_pending{};
     std::string host_button_caption;
+    std::string pending_text;                                  // the waiting line last shown for the pending press, to draw it once per change
+    std::optional<std::chrono::steady_clock::time_point> content_wait_since; // set while a press waits; logged once on each end
     EawrLoadGameScreen* checkpoint_list{};
     struct CheckpointRead {
         std::shared_ptr<const std::vector<std::uint8_t>> bytes;
@@ -500,6 +505,7 @@ struct EawrLanLobby::Impl final {
     std::shared_ptr<const std::vector<std::uint8_t>> checkpoint_bytes;
     std::optional<GalacticLobbyBackend::CheckpointCandidate> checkpoint_candidate;
     std::vector<net::SetupSeat> checkpoint_bindings;
+    std::vector<net::PeerIndex> checkpoint_bound_peers; // the room's peers the bindings were fitted to (#6121)
     std::string checkpoint_description, checkpoint_date, checkpoint_problem;
     std::string checkpoint_signature, checkpoint_status_signature;
     bool checkpoint_applied{};

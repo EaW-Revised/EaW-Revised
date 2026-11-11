@@ -18,7 +18,39 @@
 #include <thread>
 #include <vector>
 
+namespace eawr::scene { class ModelPrefetch; }
+
 namespace eawr::units {
+
+// GC table preparation uses the shared full decoder, then keeps only table inputs. A bounded full cache is safe only
+// when each resolved identity is requested once: otherwise evicting an earlier request can change the legacy final
+// cache survivors. Preflight checks effective model references; aliases use legacy retention. Existing full entries
+// are protected until their first ordered request, rather than evicted and decoded again.
+// No projection is published as a full model. This scope ends before gameplay and restores the incoming cache budget.
+class SharedModelPreparation final {
+public:
+    SharedModelPreparation(const vfs::Vfs& filesystem, const data::Catalog& catalog,
+                           std::uint64_t budget_bytes);
+    ~SharedModelPreparation();
+    SharedModelPreparation(const SharedModelPreparation&) = delete;
+    SharedModelPreparation& operator=(const SharedModelPreparation&) = delete;
+    [[nodiscard]] const assets::Model* model(std::string_view logical_path);
+    // A hint arriving after projection must not decode an already consumed, evicted full payload.
+    void hint(scene::ModelPrefetch& ahead, std::string_view logical_path) const;
+    [[nodiscard]] std::string sha256(std::string_view logical_path);
+    struct Stats final {
+        bool bounded{};
+        bool reference_aliases{};
+        bool populated_store{};
+        std::string fallback_reason; // ineligible stores retain full models; only a second exclusive window throws
+        std::uint64_t requests{}, aliases{}, projections{}, projection_bytes{};
+        std::uint64_t protected_initial_bytes{};
+    };
+    [[nodiscard]] Stats stats() const;
+private:
+    struct State;
+    std::unique_ptr<State> state_;
+};
 
 // The part of a decoded model that unit-table loading reads: every bone, and for each collidable mesh its name, bone,
 // bounds and submesh geometry (vertices, indices, skin palette). Everything else (non-collidable meshes, materials,
@@ -163,7 +195,7 @@ private:
     std::uint64_t window_files_{};
     std::uint64_t window_read_bytes_{};
     std::int64_t window_start_ns_{};
-    double last_rate_{};
+    std::uint64_t last_rate_{}; // bytes per millisecond
     unsigned last_limit_{};
     bool frozen_{};
 };

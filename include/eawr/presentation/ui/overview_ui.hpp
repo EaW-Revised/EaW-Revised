@@ -36,6 +36,11 @@ struct OverviewUi final {
                       .unit_brackets = false, .world_markers = true, .distance_fog = false};
 }
 
+// Cinematic mode hides the shell but does not revoke the reinforcement pane's state.
+[[nodiscard]] constexpr bool reinforcement_available(bool allowed, bool tactical_shell, bool movie, bool land) noexcept {
+    return allowed && (tactical_shell || movie) && !land;
+}
+
 // V-5g: the fade's fixed steps, per drawn frame: opacity 1 - n x 0.025 / 0.25 on the n-th frame after
 // the held image, 0.9 down to 0.1 over nine frames, gone on the tenth.
 inline constexpr float overview_fade_length = 0.25F;

@@ -972,7 +972,11 @@ core::Result<void> GoalStateContributor::validate(const Engine& e, const detail:
     // A restore checks references against the rebuilt world's completed view, which the host
     // only holds after validation succeeded; a rebuilt host still has its pre-publication view.
     const detail::WorldView* const view = completed_view ? completed_view : e.host_ ? e.host_->view.get() : nullptr;
-    const auto check = [](bool ok) { if (!ok) throw std::runtime_error("galactic goal state has invalid identity/reference"); };
+    // The line names which invariant failed; a bare message cannot be traced from a long run's log.
+    const auto check = [](bool ok, const std::source_location& location = std::source_location::current()) {
+        if (!ok) throw std::runtime_error("galactic goal state has invalid identity/reference (check at line "
+            + std::to_string(location.line()) + ")");
+    };
     try {
         const auto running = e.ordered_runtime(&PlayerAi::running);
         const auto taskforces = e.ordered_runtime(&PlayerAi::taskforces);
@@ -997,7 +1001,8 @@ core::Result<void> GoalStateContributor::validate(const Engine& e, const detail:
         const auto* native_actions = galactic ? dynamic_cast<const galactic_ai::NativeActions*>(e.host_->galactic_execution.get()) : nullptr;
         // WGA-484/227: launch can retain a newly allocated fleet, even after a later
         // member refuses. Its identity belongs to the live owner, not perception.
-        const auto object_limit = native_actions ? native_actions->next_entity_id() : e.host_->ai_world->next_entity_id();
+        // Async lane: objects the AI holds beyond the world's frontier (decided, slice not applied yet; the window overlay shows them to the next window).
+        const auto object_limit = native_actions ? native_actions->identity_ceiling() : e.host_->ai_world->next_entity_id();
         check(e.frame_ >= 0 && e.next_plan_id_ && e.next_target_id_ && e.next_taskforce_id_ && e.next_instance_ >= first_plan_instance);
         check(e.game_seed_ == static_cast<std::uint32_t>(e.host_->setup.seed) || !e.initialized_);
         check(e.initialized_ || (e.players_.empty() && running.empty() && e.targets_.empty() && taskforces.empty() && blocks.empty()));
@@ -1163,7 +1168,9 @@ core::Result<void> GoalStateContributor::validate(const Engine& e, const detail:
             if (b.kind == Block::Kind::galactic_invade && b.galactic_request) {
                 const auto* actions = dynamic_cast<const galactic_ai::NativeActions*>(e.host_->galactic_execution.get());
                 const auto* invasion = actions ? actions->invasion_status(b.galactic_request) : nullptr;
-                check(invasion && invasion->fleet == b.galactic_actor && invasion->invader == running.at(instances.at(b.instance))->player);
+                // Async lane: an invasion decided by the lane whose slice has not applied yet is not in the world's table.
+                check((invasion && invasion->fleet == b.galactic_actor && invasion->invader == running.at(instances.at(b.instance))->player)
+                    || (!invasion && actions && actions->invasion_pending(b.galactic_request)));
             }
         }
         const auto has_goal = [&](tactical::PlayerId player, std::uint64_t id) {
@@ -1197,10 +1204,44 @@ void global_scalar_tail(Archive& ar, std::map<std::string, Engine::GlobalScalar,
 }
 } // namespace
 
+namespace {
+// "name=digest name=digest ..." from the save against the same list for this load, as words.
+std::string identity_group_difference(std::string_view saved, std::string_view now) {
+    const auto parse = [](std::string_view text) {
+        std::vector<std::pair<std::string, std::string>> out;
+        while (!text.empty()) {
+            const auto end = text.find(' ');
+            const auto token = text.substr(0, end);
+            const auto equals = token.find('=');
+            if (equals != std::string_view::npos) out.emplace_back(std::string(token.substr(0, equals)), std::string(token.substr(equals + 1)));
+            text = end == std::string_view::npos ? std::string_view{} : text.substr(end + 1);
+        }
+        return out;
+    };
+    if (now.empty()) return {};
+    if (saved.empty()) return " [the save carries no group list (it was written before saves recorded one); this load: " + std::string(now) + "]";
+    const auto before = parse(saved), after = parse(now);
+    std::string different;
+    for (const auto& [name, digest] : after) {
+        const auto match = std::find_if(before.begin(), before.end(), [&](const auto& row) { return row.first == name; });
+        if (match != before.end() && match->second == digest) continue;
+        different += (different.empty() ? "" : "; ") + name + " (saved " + (match == before.end() ? std::string("absent") : match->second) + ", now " + digest + ")";
+    }
+    for (const auto& [name, digest] : before) {
+        static_cast<void>(digest);
+        if (std::none_of(after.begin(), after.end(), [&](const auto& row) { return row.first == name; })) different += (different.empty() ? "" : "; ") + name + " (saved only)";
+    }
+    if (different.empty()) return " [every group digest agrees, so the difference is in what no group names]";
+    return " [differing groups: " + different + "]";
+}
+} // namespace
+
 core::Result<Bytes> GoalStateContributor::encode(Engine& engine) const {
     try {
         Archive ar; ar.galactic_tasks = true;
-        std::string tag(domain), identity(content_identity_), configuration = GoalStateCodec::configuration(engine); std::uint32_t version{17};
+        // The saved identity is the digest, then (when this load knows them) the digests of the groups it is made of, so a
+        // later load that refuses can say which group changed. Only the digest decides; the groups only word the refusal.
+        std::string tag(domain), identity(content_identity_ + (identity_detail_.empty() ? std::string() : " " + identity_detail_)), configuration = GoalStateCodec::configuration(engine); std::uint32_t version{17};
         ar.fields(tag, version, identity, configuration);
         auto credits = engine.host_->credit_changes;
         GoalStateCodec::runtime(ar, engine, credits);
@@ -1232,7 +1273,20 @@ core::Result<void> GoalStateContributor::restore(const galactic_ai::NativeState&
         Archive ar(bytes); ar.galactic_tasks = true;
         std::string tag, identity, configuration; std::uint32_t version{};
         ar.fields(tag, version, identity, configuration);
-        ar.check(tag == domain && version == 17 && identity == content_identity_ && configuration == GoalStateCodec::configuration(staged));
+        // Four separate causes, each named: they used to share one check that reported only an encoding line number.
+        if (tag != domain || version != 17)
+            return fail<void>("the saved AI goal state is a different record (tag or version " + std::to_string(version)
+                + "): it was written by another EAWR version than the one that loads it");
+        const auto split = identity.find(' ');
+        const std::string saved_digest = identity.substr(0, split);
+        const std::string saved_groups = split == std::string::npos ? std::string() : identity.substr(split + 1);
+        if (saved_digest != content_identity_)
+            return fail<void>("the saved AI goal state was made with different campaign content or start settings than are loaded now "
+                "(game data, mods, campaign, difficulty, players, fog or seed): its identity is " + saved_digest.substr(0, 8)
+                + "..., this load computes " + content_identity_.substr(0, 8) + "..."
+                + identity_group_difference(saved_groups, identity_detail_));
+        if (configuration != GoalStateCodec::configuration(staged))
+            return fail<void>("the saved AI goal state was made with a different AI configuration (goal, plan or equation set) than is loaded now");
         std::map<tactical::PlayerId, math::Fixed> credits;
         GoalStateCodec::runtime(ar, staged, credits); global_scalar_tail(ar, staged.globals_); ar.check(ar.input.empty());
         for (const auto& [player, value] : credits) { static_cast<void>(value); ar.check(staged.host_->players.contains(player)); }

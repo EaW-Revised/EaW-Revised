@@ -96,6 +96,9 @@ public:
     GalacticAiServices native_ai;
     core::Result<void> battle_notice(GalacticAiBattleKind kind, const ConflictRecord& conflict,
         const BattleResult* result = nullptr, bool automatic = false);
+    // A2.1: notices the sim thread produced and the AI side has not applied yet, in production order.
+    std::vector<OwnedGalacticAiBattleNotice> battle_inbox;
+    core::Result<void> deliver_battle_inbox();
     mutable std::optional<std::uint64_t> native_oracle_session;
     core::Result<std::string> native_hash() const;
     static std::string with_native(const std::string& base, const std::string& native);

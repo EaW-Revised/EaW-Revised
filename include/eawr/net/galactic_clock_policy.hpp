@@ -14,9 +14,11 @@ enum class GalacticClockPolicy : std::uint8_t { unrestricted, limited };
 
 // #4574: the one place the shared-clock limits live. Pause and resume never use the speed budget; they only have a
 // short per-seat debounce against double clicks. Every duration is in session seconds (30 ticks per second).
+// #5355, owner decision 2026-11-07: speed changes are limited to 2 per 10 session seconds per seat, a deliberate
+// deviation from the debug build's local throttle of 2 per 45000 ms (MP-06); one 2x-and-back toggle fits the window.
 struct ClockThrottle {
-    static constexpr std::uint64_t window_seconds = 45;
-    static constexpr std::size_t speed_changes_per_window = 6;
+    static constexpr std::uint64_t window_seconds = 10;
+    static constexpr std::size_t speed_changes_per_window = 2;
     static constexpr std::uint64_t pause_debounce_ticks = sim::galactic::galactic_frames_per_second; // 1 s
     static constexpr std::uint64_t window_ticks = window_seconds * sim::galactic::galactic_frames_per_second;
     static constexpr std::uint64_t window_ms = window_seconds * 1000;

@@ -210,6 +210,100 @@ void test_names_and_validation() {
 
 
 void test_timers() {
+    // WGEP-145: campaign entitlement is per owner and per authored ability identity.
+    tactical::MarketAbilityPolicy market{{{10, {"Cloak"}}, {20, {"Salvo"}}, {30, {"CLOAK"}}},
+        {{1, {10}}, {2, {20}}}};
+    auto market_profile = turbo();
+    market_profile.market_purchase_required = true;
+    market_profile.gui_activated_ability_name = "cloak";
+    tactical::AbilityGate campaign_gate;
+    campaign_gate.market = &market;
+    campaign_gate.market_owner = 1;
+    expect(tactical::ability_ready(market_profile, {}, campaign_gate, 0), "market: owner one purchased cloak");
+    campaign_gate.market_owner = 2;
+    expect(!tactical::ability_ready(market_profile, {}, campaign_gate, 0), "market: owner two has not purchased cloak");
+    campaign_gate.market_owner = 3;
+    expect(!tactical::ability_ready(market_profile, {}, campaign_gate, 0), "market: absent owner has not purchased cloak");
+    campaign_gate.market_owner = 2;
+    market_profile.gui_activated_ability_name = "Salvo";
+    expect(tactical::ability_ready(market_profile, {}, campaign_gate, 0), "market: second ability is independently purchased");
+    market_profile.gui_activated_ability_name = "Unknown";
+    expect(tactical::ability_ready(market_profile, {}, campaign_gate, 0), "market: unmatched identity defaults available");
+    market_profile.gui_activated_ability_name = "Cloak";
+    market.owners[1].purchased.push_back(10);
+    expect(tactical::ability_ready(market_profile, {}, campaign_gate, 0), "market: purchase changes availability");
+    tactical::UnitAbilityProfile nested;
+    tactical::SpecialAbilityProfile handler;
+    handler.name = "Cloak";
+    handler.market_purchase_required = true;
+    nested.special.push_back(handler);
+    campaign_gate.market_profile = &nested;
+    market_profile.market_purchase_required = false;
+    market.owners[1].purchased = {20};
+    expect(!tactical::ability_ready(market_profile, {}, campaign_gate, 0), "market: nested handler has its own gate");
+    campaign_gate.market_profile = nullptr;
+    market_profile.market_purchase_required = true;
+    campaign_gate.market = nullptr;
+    expect(tactical::ability_ready(market_profile, {}, campaign_gate, 0), "market: skirmish bypasses purchase gate");
+    {
+        auto battle = setup();
+        battle.units[2].type_id = corvette_type;
+        battle.first_free_entity_id = 4;
+        battle.campaign.emplace();
+        for (const auto id : {1U, 2U}) {
+            tactical::EconomyPlayer account;
+            account.player = id;
+            account.credit_cap = Fixed{};
+            battle.campaign->players.push_back(account);
+        }
+        battle.campaign->market_abilities = market;
+        auto cloak = turbo();
+        cloak.market_purchase_required = true;
+        cloak.gui_activated_ability_name = "Cloak";
+        auto salvo = tartan_power();
+        salvo.market_purchase_required = true;
+        salvo.gui_activated_ability_name = "Salvo";
+        auto row = unit_of(corvette_type, cloak);
+        row.abilities.push_back(salvo);
+        tactical::AbilityTable table;
+        table.profiles = {row};
+        tactical::EconomyRules economy;
+        economy.campaign = true;
+        economy.players = battle.campaign->players;
+        // Owner two's cloak is locked in this battle; owner one's salvo is locked.
+        battle.campaign->market_abilities->owners[1].purchased = {20};
+        auto made = tactical::TacticalSession::create(battle, {}, durability(), motion(), std::nullopt, {}, {}, table, economy);
+        expect(static_cast<bool>(made), "market: campaign tactical session creates");
+        if (made) {
+            auto world = std::move(made).value();
+            expect(world.submit(command(0, 1, 0, 1, tactical::AbilityPayload{cloak.kind, tactical::AbilityAction::activate}))
+                && world.submit(command(0, 1, 1, 1, tactical::AbilityPayload{salvo.kind, tactical::AbilityAction::activate}))
+                && world.submit(command(0, 2, 0, 3, tactical::AbilityPayload{cloak.kind, tactical::AbilityAction::activate}))
+                && world.submit(command(0, 2, 1, 3, tactical::AbilityPayload{salvo.kind, tactical::AbilityAction::activate})),
+                "market: both owners' commands submit");
+            const eawr::platform::ThreadWorkerAdapter executor(1);
+            expect(static_cast<bool>(world.step(executor)), "market: campaign battle advances");
+            const auto first = world.ability_state(1);
+            const auto second = world.ability_state(3);
+            expect(first && second && first->slots[0].active && !first->slots[1].active
+                && !second->slots[0].active && second->slots[1].active,
+                "market: tactical activation follows each owner's purchase");
+        }
+        battle.campaign.reset();
+        battle.first_free_entity_id.reset();
+        economy.campaign = false;
+        auto skirmish = tactical::TacticalSession::create(battle, {}, durability(), motion(), std::nullopt, {}, {}, table, economy);
+        expect(static_cast<bool>(skirmish), "market: skirmish control creates");
+        if (skirmish) {
+            auto world = std::move(skirmish).value();
+            expect(static_cast<bool>(world.submit(command(0, 2, 0, 3,
+                tactical::AbilityPayload{cloak.kind, tactical::AbilityAction::activate}))), "market: skirmish command submits");
+            const eawr::platform::ThreadWorkerAdapter executor(1);
+            expect(static_cast<bool>(world.step(executor)), "market: skirmish advances");
+            const auto state = world.ability_state(3);
+            expect(state && state->slots[0].active, "market: skirmish bypasses the purchase gate");
+        }
+    }
     // AB-11, AB-12: TURBO lasts 600 frames, then recharges for 1500.
     const auto profile = turbo();
     tactical::AbilitySlot slot;

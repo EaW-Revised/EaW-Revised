@@ -241,6 +241,7 @@ core::Result<void> session_detail::Tick::abilities_tracking() {
         std::vector<std::uint8_t> speed_changed(moving.size());
         std::vector<std::uint8_t> jammer_ended(moving.size());
         std::vector<std::uint8_t> detonating(moving.size());
+        std::vector<std::uint8_t> self_destruct_stops(moving.size());
         std::vector<std::uint8_t> lure_ended(moving.size());
         std::vector<std::uint8_t> mc30_fired(moving.size());
         // FC-58/UFS-27 post-movement proximity seam: immutable inputs use all objects'
@@ -275,7 +276,12 @@ core::Result<void> session_detail::Tick::abilities_tracking() {
                     lure_ended[index] = luring && !moving[index].abilities->slots[*lure].active ? 1U : 0U;
                     impl_->detect_stealth(moving[index], moving, tick); // WST-08
                     jammer_ended[index] = active && !moving[index].abilities->slots[*jammer].active ? 1U : 0U;
+                    const auto self_destruct = ability_slot(profile, AbilityKind::self_destruct);
+                    const bool was_destructing = self_destruct && moving[index].abilities->slots[*self_destruct].active;
                     detonating[index] = impl_->service_self_destruct(moving, index, craft_squadron, collection, tick) ? 1U : 0U;
+                    self_destruct_stops[index] = self_destruct && !was_destructing
+                        && moving[index].abilities->slots[*self_destruct].active
+                        && profile.abilities[*self_destruct].stop_when_activated ? 1U : 0U;
                     mc30_fired[index] = impl_->service_mc30(moving[index], script_inputs, craft_squadron, collection, tick) ? 1U : 0U;
                 }
                 if (moving[index].ion_stun) Impl::service_ion_stun(moving[index], tick);
@@ -306,6 +312,11 @@ core::Result<void> session_detail::Tick::abilities_tracking() {
         }
         for (std::size_t index = 0; index < moving.size(); ++index) {
             auto& unit = moving[index];
+            if (self_destruct_stops[index]) {
+                unit.formation.reset();
+                unit.state.order = order_for(StopPayload{}, tick);
+                if (auto stopped = impl_->plan_order(unit, StopPayload{}, tick + 1); !stopped) return stopped;
+            }
             // FD-47: ordered projectile IDs in this same admitted turn, after ordinary
             // ability service and before subsequent phase readers. No queued command.
             if (mc30_fired[index]) {
@@ -1051,6 +1062,8 @@ Event session_detail::Tick::destruction_event(const std::uint64_t event_tick, co
         // WHE-41/50: sparse ordered destruction, members before their contained team.
         // These limbo identities were never admitted to the victory or spatial census.
         const auto destroy_rider = [&](auto&& self, const CarriedObject& rider) -> void {
+            // G-09: a land garrison host that is not hovering releases its occupants; the garrison service places them.
+            if (impl_->land) if (const auto* hiding = impl_->land->garrison_hiding(rider.entity_id); hiding && !hiding->destroy_with_host) return;
             for (const auto& member : rider.members) self(self, member);
             if (!loss_ids_.insert(rider.entity_id).second) return;
             pay_bounty(rider.type_id, unit.owner, killer);

@@ -3,6 +3,7 @@
 // the catalog file and the read-only contract. No game data, no network; Workshop ids are made up.
 #include "eawr/mods/discovery.hpp"
 #include "eawr/mods/fingerprint.hpp"
+#include "eawr/mods/profile.hpp"
 #include "eawr/mods/record.hpp"
 #include "eawr/mods/steam/library_folders.hpp"
 #include "eawr/mods/steam/paths.hpp"
@@ -366,7 +367,10 @@ void test_workshop_transitions_and_snapshot() {
     auto baseline = workshop_snapshot(input);
     CHECK(baseline.complete && baseline.revision.size() == 64);
     CHECK(workshop_snapshot(input).revision == baseline.revision);
+    const auto baseline_acf_time = fs::last_write_time(workshop_acf_path(library));
     write_acf(installed_entry("77", "old", 1000), details_entry("77", "new", "", 0), false, true);
+    // The rewrite has the same length, and a fast host can give it the same mtime.
+    fs::last_write_time(workshop_acf_path(library), baseline_acf_time + std::chrono::seconds(2));
     CHECK(parse_workshop_manifest(workshop_acf("", "", false, true))->needs_update);
     CHECK(state() == ModState::needs_update);  // ordinary details manifest, no latest_* extension
     CHECK(workshop_snapshot(input).revision != baseline.revision);
@@ -531,6 +535,17 @@ void test_fingerprints() {
         fs::last_write_time(copy / file, fs::last_write_time(mod / file));
     }
     CHECK(tree_fingerprint(copy).tree == renamed.tree);
+
+    // Equivalent paths must identify the same chain, including when a caller uses an alias.
+    const fs::path game = scratch.path() / "game";
+    write_file(game / "corruption/Data/base.xml", "base");
+    write_file(game / "GameData/Data/base.xml", "base");
+    Profile profile;
+    profile.layers.push_back({"manual:mod", steam::path_to_utf8(mod)});
+    const auto chain = loadcheck_chain_fingerprint(profile, game, "engine");
+    CHECK(!chain.empty());
+    profile.layers[0].root = steam::path_to_utf8(mod / ".." / "Mod");
+    CHECK(loadcheck_chain_fingerprint(profile, game / ".." / "game", "engine") == chain);
 
     // The cap: the walk stops, says so, and discovery warns.
     const TreeFingerprint capped = tree_fingerprint(mod, 3);

@@ -146,6 +146,8 @@ struct TacticalInstance {
     // SND-46: locomotor path presence for presentation audio, not velocity or idle orbiting.
     // A squadron publishes its members' shared move/approach here. Excluded from canonical bytes.
     bool has_movement_path{};
+    // BCAM-05: copied for presentation selection; excluded from canonical snapshot bytes.
+    EntityId presentation_attack_target{};
     // SND-67: sampled ordinary-space walk speed for audio, published in existing worker slots.
     // Absent for craft/non-locomotor objects; excluded from canonical bytes.
     std::optional<math::Fixed> locomotor_speed_per_frame{};
@@ -164,6 +166,7 @@ struct TacticalInstance {
     bool rocket_attack{};
     SeatId controller_seat{};
     UnitControl control{UnitControl::none};
+    bool hide_when_fogged{}; // land static fog presentation input
     friend bool operator==(const TacticalInstance&, const TacticalInstance&) = default;
 };
 

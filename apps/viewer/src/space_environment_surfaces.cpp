@@ -77,6 +77,15 @@ void EnvironmentView::upload(Item item, const space::SceneSurface& surface, cons
         item.cause = std::move(cause);
         items_.push_back(std::move(item));
     };
+    const sim::AssetId asset = next_asset_;
+    const auto matrix = instance_matrix(transform);
+    bool native{};
+    if (matrix && surface.native_geometry && surface.route != space::SceneRoute::missing_effect) {
+        auto uploaded = renderer_->upload_shader_material(asset, geometry);
+        if (!uploaded) return skip(core::format_diagnostic(uploaded.error()));
+        native = uploaded.value();
+        if (native) ++next_asset_;
+    }
     MaterialDescription material{
         .schema_version = MaterialDescription::current_schema_version,
         .route = MaterialRoute::modern_spatial,
@@ -87,106 +96,108 @@ void EnvironmentView::upload(Item item, const space::SceneSurface& surface, cons
         .bindings = {},
     };
     std::vector<std::pair<std::string, std::string>> textures;
-    switch (surface.route) {
-    case space::SceneRoute::meshgloss:
-        material.program = std::string(meshgloss_sky_shader);
-        material.bindings = meshgloss_bindings(*surface.meshgloss, space::unlit_sky_policy());
-        textures.emplace_back("BaseTexture", surface.base_texture);
-        break;
-    case space::SceneRoute::meshadditive:
-    case space::SceneRoute::meshadditive2x:
-    case space::SceneRoute::meshadditive_vcolor:
-        material.pass = RenderPass::transparent;
-        material.program = surface.route == space::SceneRoute::meshadditive2x
-            ? meshadditive2x_sky_shader()
-            : surface.route == space::SceneRoute::meshadditive
-                ? std::string(meshadditive_sky_shader) : meshadditive_vcolor_sky_shader();
-        material.bindings = meshadditive_bindings(*surface.meshadditive, space::meshadditive_default_inputs());
-        textures.emplace_back("BaseTexture", surface.base_texture);
-        break;
-    case space::SceneRoute::skydome:
-        material.program = std::string(skydome_sky_shader);
-        material.bindings.push_back({"eawr_diffuse", std::string{"asset"}});
-        textures.emplace_back("BaseTexture", surface.base_texture);
-        break;
-    case space::SceneRoute::planet:
-    case space::SceneRoute::nebula: {
-        space::EnvironmentEffectInputs inputs;
-        inputs.id = light_ ? "environment-0-light-0" : "no-light";
-        inputs.time_seconds = 0.0F;
-        inputs.light_scale = {1.0F, 1.0F, 1.0F, 1.0F};
-        if (light_) {
-            inputs.light_direction = space::render_from_source(light_->toward_light);
-            inputs.ambient_light = light_->ambient;
-            inputs.diffuse_light = light_->diffuse;
-            inputs.specular_light = light_->specular;
+    if (!native) {
+        if (!surface.problem.empty()) return skip(surface.problem);
+        switch (surface.route) {
+        case space::SceneRoute::meshgloss:
+            material.program = std::string(meshgloss_sky_shader);
+            material.bindings = meshgloss_bindings(*surface.meshgloss, space::unlit_sky_policy());
+            textures.emplace_back("BaseTexture", surface.base_texture);
+            break;
+        case space::SceneRoute::meshadditive:
+        case space::SceneRoute::meshadditive2x:
+        case space::SceneRoute::meshadditive_vcolor:
+            material.pass = RenderPass::transparent;
+            material.program = surface.route == space::SceneRoute::meshadditive2x
+                ? meshadditive2x_sky_shader()
+                : surface.route == space::SceneRoute::meshadditive
+                    ? std::string(meshadditive_sky_shader) : meshadditive_vcolor_sky_shader();
+            material.bindings = meshadditive_bindings(*surface.meshadditive, space::meshadditive_default_inputs());
+            textures.emplace_back("BaseTexture", surface.base_texture);
+            break;
+        case space::SceneRoute::skydome:
+            material.program = std::string(skydome_sky_shader);
+            material.bindings.push_back({"eawr_diffuse", std::string{"asset"}});
+            textures.emplace_back("BaseTexture", surface.base_texture);
+            break;
+        case space::SceneRoute::planet:
+        case space::SceneRoute::nebula: {
+            space::EnvironmentEffectInputs inputs;
+            inputs.id = light_ ? "environment-0-light-0" : "no-light";
+            inputs.time_seconds = 0.0F;
+            inputs.light_scale = {1.0F, 1.0F, 1.0F, 1.0F};
+            if (light_) {
+                inputs.light_direction = space::render_from_source(light_->toward_light);
+                inputs.ambient_light = light_->ambient;
+                inputs.diffuse_light = light_->diffuse;
+                inputs.specular_light = light_->specular;
+            }
+            const space::EnvironmentEffectPlan plan = space::plan_environment_effect(
+                *planned_from, surface.mesh_index, surface.submesh_index, "t0", inputs);
+            if (plan.status != space::EnvironmentEffectStatus::ready) {
+                return skip("plan " + std::string(space::to_string(plan.status)) + ": " + plan.detail);
+            }
+            material = plan.material;
+            textures = plan.textures;
+            break;
         }
-        const space::EnvironmentEffectPlan plan = space::plan_environment_effect(
-            *planned_from, surface.mesh_index, surface.submesh_index, "t0", inputs);
-        if (plan.status != space::EnvironmentEffectStatus::ready) {
-            return skip("plan " + std::string(space::to_string(plan.status)) + ": " + plan.detail);
+        case space::SceneRoute::legacy_mesh: {
+            const auto* selector = scene::find_legacy_selector(surface.shader);
+            if (!selector) return skip("companion mesh has no scene selector");
+            material.route = MaterialRoute::legacy_effect;
+            material.pass = selector->transparent ? RenderPass::transparent : RenderPass::opaque;
+            material.program = std::string(selector->program);
+            material.technique = std::string(selector->technique);
+            material.pass_name = std::string(selector->pass);
+            for (const auto& parameter : planned_from->meshes[surface.mesh_index].submeshes[surface.submesh_index].parameters) {
+                material.bindings.push_back({parameter.name, parameter.value});
+            }
+            if (legacy::reads_effect_time(material)) {
+                material.bindings.push_back({"eawr_effect_time", 0.0F});
+            }
+            textures.emplace_back("BaseTexture", surface.base_texture);
+            for (const legacy::TextureBinding& sampled : legacy::binding_textures(material)) {
+                const auto* binding = legacy::bindings::find(material, sampled.name);
+                const auto* declared = binding == nullptr ? nullptr : std::get_if<std::string>(&binding->value);
+                if (declared) textures.emplace_back(std::string(sampled.name), *declared);
+            }
+            break;
         }
-        material = plan.material;
-        textures = plan.textures;
-        break;
-    }
-    case space::SceneRoute::legacy_mesh: {
-        const auto* selector = scene::find_legacy_selector(surface.shader);
-        if (!selector) return skip("companion mesh has no scene selector");
-        material.route = MaterialRoute::legacy_effect;
-        material.pass = selector->transparent ? RenderPass::transparent : RenderPass::opaque;
-        material.program = std::string(selector->program);
-        material.technique = std::string(selector->technique);
-        material.pass_name = std::string(selector->pass);
-        for (const auto& parameter : planned_from->meshes[surface.mesh_index].submeshes[surface.submesh_index].parameters) {
-            material.bindings.push_back({parameter.name, parameter.value});
+        case space::SceneRoute::missing_effect: {
+            const auto& selector = scene::missing_effect_selector();
+            material.route = MaterialRoute::legacy_effect;
+            material.program = std::string(selector.program);
+            material.technique = std::string(selector.technique);
+            material.pass_name = std::string(selector.pass);
+            break;
         }
-        if (legacy::reads_effect_time(material)) {
-            material.bindings.push_back({"eawr_effect_time", 0.0F});
+        case space::SceneRoute::unsupported:
+            return skip(surface.problem);
         }
-        textures.emplace_back("BaseTexture", surface.base_texture);
-        for (const legacy::TextureBinding& sampled : legacy::binding_textures(material)) {
-            const auto* binding = legacy::bindings::find(material, sampled.name);
-            const auto* declared = binding == nullptr ? nullptr : std::get_if<std::string>(&binding->value);
-            if (declared) textures.emplace_back(std::string(sampled.name), *declared);
+        if (surface.route != space::SceneRoute::missing_effect
+            && (textures.empty() || textures.front().first != "BaseTexture")) return skip("the surface binds no BaseTexture");
+        std::optional<assets::Texture> primary;
+        if (surface.route == space::SceneRoute::missing_effect) {
+            primary = family_placeholder_texture(legacy::TexturePlaceholder::black);
         }
-        break;
-    }
-    case space::SceneRoute::missing_effect: {
-        const auto& selector = scene::missing_effect_selector();
-        material.route = MaterialRoute::legacy_effect;
-        material.program = std::string(selector.program);
-        material.technique = std::string(selector.technique);
-        material.pass_name = std::string(selector.pass);
-        break;
-    }
-    case space::SceneRoute::unsupported:
-        return skip(surface.problem);
-    }
-    if (surface.route != space::SceneRoute::missing_effect
-        && (textures.empty() || textures.front().first != "BaseTexture")) return skip("the surface binds no BaseTexture");
-    std::optional<assets::Texture> primary;
-    if (surface.route == space::SceneRoute::missing_effect) {
-        primary = family_placeholder_texture(legacy::TexturePlaceholder::black);
-    }
-    std::vector<GodotRenderer::BindingTexture> extra;
-    for (const auto& [binding, declared] : textures) {
-        std::string logical;
-        std::string failure;
-        auto loaded = texture(declared, logical, failure);
-        if (!loaded) return skip(binding + ": " + failure);
-        if (binding == "BaseTexture") {
-            item.texture = logical;
-            primary = std::move(loaded);
-        } else {
-            extra.push_back({binding, std::move(*loaded)});
+        std::vector<GodotRenderer::BindingTexture> extra;
+        for (const auto& [binding, declared] : textures) {
+            std::string logical;
+            std::string failure;
+            auto loaded = texture(declared, logical, failure);
+            if (!loaded) return skip(binding + ": " + failure);
+            if (binding == "BaseTexture") {
+                item.texture = logical;
+                primary = std::move(loaded);
+            } else {
+                extra.push_back({binding, std::move(*loaded)});
+            }
         }
-    }
-    const auto matrix = instance_matrix(transform);
-    if (!matrix) return skip("the object transform is not finite in Q24");
-    const sim::AssetId asset = next_asset_++;
-    if (auto uploaded = renderer_->upload(asset, geometry, *primary, material, extra); !uploaded) {
-        return skip(core::format_diagnostic(uploaded.error()));
+        if (!matrix) return skip("the object transform is not finite in Q24");
+        ++next_asset_;
+        if (auto uploaded = renderer_->upload(asset, geometry, *primary, material, extra); !uploaded) {
+            return skip(core::format_diagnostic(uploaded.error()));
+        }
     }
     // FW-19: backdrop layers precede fading foreground geometry. Godot also
     // routes the opaque sky into its transparent pass because depth_draw_never
@@ -207,8 +218,8 @@ void EnvironmentView::upload(Item item, const space::SceneSurface& surface, cons
     // backdrop objects sit far outside any shadow the scene would use.
     renderer_->set_casts_shadows(asset, false);
     assets_.push_back(asset);
-    if (surface.route == space::SceneRoute::planet || surface.route == space::SceneRoute::nebula
-        || legacy::reads_effect_time(material)) {
+    if (!native && (surface.route == space::SceneRoute::planet || surface.route == space::SceneRoute::nebula
+        || legacy::reads_effect_time(material))) {
         effect_clock_assets_.push_back(asset);
     }
     instances_.push_back({static_cast<sim::EntityId>(asset), asset, *matrix});
@@ -226,6 +237,7 @@ void EnvironmentView::upload(Item item, const space::SceneSurface& surface, cons
         sky_instances_.emplace_back(instances_.size() - 1, transform);
     }
     item.asset = asset;
+    if (native) item.route = "translated";
     item.pass = material.pass;
     item.status = "drawn";
     items_.push_back(std::move(item));
@@ -243,7 +255,8 @@ void EnvironmentView::compose_object(const Placed& placed, const std::vector<spa
         item.shader = surface.shader;
         item.route = std::string(space::to_string(surface.route));
         item.billboard = surface.billboard;
-        if (!surface.problem.empty()) {
+        const bool native = surface.native_geometry;
+        if (!surface.problem.empty() && !native) {
             item.cause = surface.problem;
             items_.push_back(std::move(item));
             continue;

@@ -1,4 +1,5 @@
 #include "eawr/campaign/planet_economy.hpp"
+#include "eawr/sim/galactic/economy_corruption.hpp" // include-guard: keep (gc::economy_arithmetic_bound_raw)
 #include "eawr/core/text.hpp"
 #include "eawr/data/retail_values.hpp"
 #include "eawr/data/tag_trace.hpp"
@@ -86,9 +87,9 @@ core::Result<gc::EconomyCorruptionState> prepare_corruption_economy(const data::
         low = high = core::Result<Fixed>::success(gc::corruption_fixture::one);
     }
     const auto bounded = [&](Fixed value, const data::XmlNode* node, std::string_view object, std::string_view tag) {
-        const auto effective = std::clamp(value, Fixed::from_raw(-(std::int64_t{1} << 48)), Fixed::from_raw(std::int64_t{1} << 48));
+        const auto effective = std::clamp(value, Fixed::from_raw(-gc::economy_arithmetic_bound_raw), Fixed::from_raw(gc::economy_arithmetic_bound_raw));
         if (effective != value) campaign_load_note(notes, "EAWR-LOAD-1209", node, object, tag,
-            std::to_string(effective.raw()) + "/" + std::to_string(Fixed::scale), "unknown: project arithmetic support range",
+            std::to_string(effective.raw()) + "/" + std::to_string(Fixed::scale), "project arithmetic bound, not retail",
             core::LoadCategory::unknown_degrade, core::LoadAction::clamped);
         return effective;
     };
@@ -173,6 +174,13 @@ core::Result<gc::EconomyCorruptionState> prepare_corruption_economy(const data::
                 "skip item", "unknown", core::LoadCategory::unknown_degrade, core::LoadAction::skipped_object); continue;
         }
         data::tag_trace::used(faction); item.faction = factions.at(key(core::trim(faction->raw_text, core::xml_whitespace)));
+        if (const auto* names = child(node, "Ability_Names")) {
+            data::tag_trace::used(names);
+            auto text = names->raw_text;
+            for (auto& c : text) if (c == ',') c = ' ';
+            std::istringstream stream(text);
+            for (std::string name; stream >> name;) item.ability_names.push_back(std::move(name));
+        }
         // WGEP-105: the ordinary item constructor supplies 1/0/0.
         const auto ordinary = [&](std::string_view tag, Fixed fallback, bool integral = false) {
             const auto* n = child(node, tag);
@@ -205,13 +213,13 @@ core::Result<gc::EconomyCorruptionState> prepare_corruption_economy(const data::
             item.tutorial_tech = static_cast<int>(tutorial.value().trunc_to_integer()); item.tutorial_base_cost = tutorial_cost.value();
         }
         const auto supported = [&](Fixed value, std::string_view tag, Fixed minimum) {
-            const auto bounded = std::clamp(value, minimum, Fixed::from_raw(std::int64_t{1} << 48));
+            const auto bounded = std::clamp(value, minimum, Fixed::from_raw(gc::economy_arithmetic_bound_raw));
             if (bounded != value) campaign_load_note(notes, "EAWR-LOAD-1209", child(node, tag) ? child(node, tag) : &node,
                 std::to_string(item.id), tag, std::to_string(bounded.raw()) + "/" + std::to_string(Fixed::scale),
-                "unknown: project arithmetic support range", core::LoadCategory::unknown_degrade, core::LoadAction::clamped);
+                "project arithmetic bound, not retail", core::LoadCategory::unknown_degrade, core::LoadAction::clamped);
             return bounded;
         };
-        item.base_cost = supported(item.base_cost, "Base_Cost_Credits", Fixed::from_raw(-(std::int64_t{1} << 48)));
+        item.base_cost = supported(item.base_cost, "Base_Cost_Credits", Fixed::from_raw(-gc::economy_arithmetic_bound_raw));
         item.uncommon_multiplier = supported(item.uncommon_multiplier, "Uncommon_Price_Multiplier", Fixed{});
         result.items.push_back(item);
     }
@@ -234,7 +242,7 @@ core::Result<gc::BlackMarketBuyer> prepare_black_market_buyer(const data::Catalo
     const auto* despawn_node = child(*ability, "Causes_Despawn");
     auto despawn = despawn_node ? flag(despawn_node) : core::Result<bool>::success(true);
     auto low = numbers(child(*ability, "Min_Respawn_Times"), 5, notes, type); auto high = numbers(child(*ability, "Max_Respawn_Times"), 5, notes, type);
-    if (!price || price.value() < Fixed{} || price.value().raw() > (std::int64_t{1} << 48) || !despawn) {
+    if (!price || price.value() < Fixed{} || price.value().raw() > gc::economy_arithmetic_bound_raw || !despawn) {
         campaign_load_note(notes, "EAWR-LOAD-1206", ability, type, "Black_Market_Ability", "price 1; causes despawn");
         price = core::Result<Fixed>::success(gc::corruption_fixture::one);
     }
@@ -250,9 +258,9 @@ core::Result<gc::BlackMarketBuyer> prepare_black_market_buyer(const data::Catalo
         if (low.value()[i] < Fixed{} || low.value()[i] > high.value()[i]) valid = false;
     if (!valid) campaign_load_note(notes, "EAWR-LOAD-1207", child(*ability, "Min_Respawn_Times") ? child(*ability, "Min_Respawn_Times") : ability, type, "Min_Respawn_Times/Max_Respawn_Times",
         "both arrays empty", "WGEP-107: invalid respawn arrays clear both", core::LoadCategory::retail_accepts);
-    if (valid && std::any_of(high.value().begin(), high.value().end(), [](Fixed value) { return value.raw() > (std::int64_t{1} << 48); })) {
+    if (valid && std::any_of(high.value().begin(), high.value().end(), [](Fixed value) { return value.raw() > gc::economy_arithmetic_bound_raw; })) {
         campaign_load_note(notes, "EAWR-LOAD-1209", child(*ability, "Max_Respawn_Times"), type,
-            "Min_Respawn_Times/Max_Respawn_Times", "both arrays empty", "unknown: project arithmetic support range");
+            "Min_Respawn_Times/Max_Respawn_Times", "both arrays empty", "project arithmetic bound, not retail");
         valid = false;
     }
     if (valid) { result.absence_min = std::move(low).value(); result.absence_max = std::move(high).value(); }

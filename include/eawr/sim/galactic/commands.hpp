@@ -130,6 +130,10 @@ inline constexpr std::int64_t max_speed_factor_raw = std::int64_t{16} << 24;
 // target with 120 ticks a second against the nominal 30 (TM-03), so 4x. Pacing only. With more than
 // one active human seat the sim refuses this factor (TM-04).
 inline constexpr std::int64_t fast_forward_factor_raw = std::int64_t{4} << 24;
+// #5355: the shared strategic and tactical (battle child) speed with more than one active human seat. The
+// debug build's network speed settings top out at 4 = 60 frames a second (MP-06, TM-01), so 2x against the
+// nominal 30; the sim refuses a larger factor of either clock from any seat while several humans are active.
+inline constexpr std::int64_t multiplayer_speed_max_raw = std::int64_t{2} << 24;
 struct SetSpeed {
     bool tactical{};
     math::Fixed factor{};

@@ -528,11 +528,11 @@ void test_fire_range_bonus() {
                 }
                 if (frame == 1) {
                     const auto checkpoint = world.save_checkpoint_state();
-                    const auto domain = scenario == 0 ? 9U : 10U;
+                    const auto domain = scenario == 0 ? 25U : 26U;
                     expect(checkpoint && checkpoint.value().size() >= 4
                         && checkpoint.value()[0] == domain && checkpoint.value()[1] == 0
                         && checkpoint.value()[2] == 0 && checkpoint.value()[3] == 0,
-                        "WFR-01: zero range retains domain 9; nonzero range selects domain 10");
+                        "WFR-01: zero range uses domain 25; nonzero range selects domain 26");
                     auto fresh = tactical::TacticalSession::from_replay(world.record(),
                         std::vector<tactical::SensorProfile>{{corvette_type, units(1500)}, {frigate_type, units(1500)}},
                         health, {}, std::nullopt, combat, {}, {}, economy);
@@ -564,7 +564,7 @@ void test_fire_range_bonus() {
 
 void test_script_invulnerable() {
     // TL-03: the Lua Make_Invulnerable flag blocks combat and environment damage (DG-40), leaves privileged
-    // script damage alone, is idempotent, and survives a checkpoint round trip in domain 11.
+    // script damage alone, is idempotent, and survives a checkpoint round trip in domain 19.
     auto table = durability();
     auto hull = table.profiles.front();
     hull.max_shields = Fixed{};
@@ -621,11 +621,11 @@ void test_script_invulnerable() {
             const auto full = raw_health.profiles.front().max_hull;
             expect(final && final->hull.raw() < full.raw(), "TL-03: privileged script damage reaches a flagged unit");
             const auto checkpoint = session.save_checkpoint_state();
-            // Domain 9 unless a unit still holds the flag; the leading uint32 is little-endian.
-            const unsigned domain = scenario == 1 ? 11U : 9U;
+            // The invulnerability bit selects the extended domain; the leading uint32 is little-endian.
+            const unsigned domain = scenario == 1 ? 27U : 25U;
             expect(checkpoint && checkpoint.value().size() >= 4 && checkpoint.value()[0] == domain
                 && checkpoint.value()[1] == 0 && checkpoint.value()[2] == 0 && checkpoint.value()[3] == 0,
-                "TL-03: the flag selects domain 11; a cleared or absent flag keeps domain 9");
+                "TL-03: the flag selects domain 27; a cleared or absent flag keeps domain 25");
             if (scenario == 1) {
                 // Opcode 34 survives write and parse with its flag and unit list intact.
                 const auto bytes = tactical::write_replay(session.record());
@@ -656,7 +656,7 @@ void test_script_invulnerable() {
                         "TL-03: a restored session continues with the same hash");
                     // A flagged domain whose flag is gone is noncanonical and refused.
                     auto tampered = checkpoint.value();
-                    tampered[0] = 12;
+                    tampered[0] = 16;
                     auto victim = tactical::TacticalSession::from_replay(session.record(), {}, raw_health);
                     if (victim) expect(!victim.value().load_checkpoint_state(tampered), "TL-03: a mismatched fire-range domain is refused");
                 }

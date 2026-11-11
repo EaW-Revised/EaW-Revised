@@ -25,6 +25,139 @@ sys.path.insert(0, str(ROOT))
 @unittest.skipUnless(os.environ.get("EAWR_GODOT_VIEWER_RUNTIME_TEST") and os.environ.get("EAWR_EAW_GAME_ROOT"),
                      "requires the viewer GPU lane and installed game data")
 class SkirmishSetupGpu(unittest.TestCase):
+    def _popup_probe(self, script, output, resolution, arguments):
+        output.mkdir()
+        result = subprocess.run([
+            os.environ["EAWR_GODOT_EXECUTABLE"], "--resolution", resolution, "--max-fps", "60",
+            "--path", str(ROOT / "apps/viewer/project"), "--script", str(script), "--",
+            "--eawr-game-root", os.environ["EAWR_EAW_GAME_ROOT"], "--eawr-audio", "off",
+            "--eawr-font-cache", os.environ.get("EAWR_FONT_CACHE", str(ROOT / "out/fonts")),
+            "--popup-output=" + str(output), "--popup-resolution=" + resolution, *arguments],
+            cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=240)
+        (output / "viewer.log").write_text(result.stdout, encoding="utf-8")
+        self.assertEqual(result.returncode, 0, result.stdout[-6000:])
+
+    def test_all_combo_popup_construction_paths(self):
+        from combo_popup_test_support import USERS_SCRIPT
+        with tempfile.TemporaryDirectory(prefix="combo-users-") as temporary:
+            directory = Path(temporary)
+            script = directory / "users.gd"
+            script.write_text(USERS_SCRIPT, encoding="utf-8")
+            pages = {
+                "performance": {"IDC_PARTICLE_THREADS", "IDC_SIMULATION_THREADS", "IDC_DEPTH_PREPASS", "IDC_RENDER_THREAD"},
+                "keyboard": {"IDC_CAMERA_KEYS", "IDC_SELECTION_ALL_KEY", "IDC_SELECTION_SCREEN_KEY"},
+                "tweaks": {"IDC_SELECTION_HOTKEYS"}, "video": {"IDC_FRAME_RATE_LIMIT"},
+                "skirmish": {"IDC_PLAYER_FACTION_0", "IDC_PLAYER_FACTION_8"},
+            }
+            for resolution in ("1280x720", "1920x1080"):
+                scale = int(resolution.split("x")[1]) / 720
+                for page, expected in pages.items():
+                    args = (["--eawr-skirmish-setup"] if page == "skirmish" else [
+                        "--eawr-options", "--eawr-options-page", page,
+                        "--eawr-settings-file", str(directory / (page + ".json"))])
+                    output = directory / (page + resolution)
+                    self._popup_probe(script, output, resolution, args)
+                    reports = json.loads((output / "users.json").read_text(encoding="utf-8"))
+                    self.assertTrue(expected <= {r["id"] for r in reports})
+                    self.assertIn("DirectCombo", {r["id"] for r in reports})
+                    for report in reports:
+                        with self.subTest(page=page, resolution=resolution, control=report["id"]):
+                            self.assertGreaterEqual(report["height"], 20 * scale, report)
+                            self.assertGreater(report["page"], 0, report)
+                            if report["id"] in expected and page != "skirmish":
+                                self.assertFalse(report["scroll"], "closed-only geometry must show all three entries")
+                                self.assertGreaterEqual(report["height"] + 1, report["minimum"], report)
+
+    @unittest.skipUnless(os.environ.get("EAWR_REMAKE_MOD_ROOT"), "requires Remake for actual long-list faction input")
+    def test_faction_popup_real_input(self):
+        from combo_popup_test_support import INPUT_SCRIPT
+        with tempfile.TemporaryDirectory(prefix="combo-input-") as temporary:
+            directory = Path(temporary)
+            script = directory / "input.gd"
+            script.write_text(INPUT_SCRIPT, encoding="utf-8")
+            for resolution in ("1280x720", "1920x1080"):
+                output = directory / resolution
+                self._popup_probe(script, output, resolution, ["--eawr-skirmish-setup", "--eawr-profile", "remake",
+                    "--eawr-mod-root", os.environ["EAWR_REMAKE_MOD_ROOT"]])
+                report = json.loads((output / "input.json").read_text(encoding="utf-8"))
+                with self.subTest(resolution=resolution):
+                    self.assertTrue(report["opened"], report)
+                    self.assertGreater(report["wheel_value"], report["first_value"], report)
+                    self.assertEqual(report["click_selected"], report["last_index"], report)
+                    self.assertEqual(report["click_faction"], report["expected_last"], report)
+                    self.assertTrue(report["click_closed"], report)
+                    self.assertTrue(report["keyboard_opened"], report)
+                    self.assertEqual(report["keyboard_initial_focused"], report["last_index"], report)
+                    self.assertEqual(report["key_selected"], 2, report)
+                    self.assertEqual(report["key_faction"], report["expected_key"], report)
+                    for key in ("key_closed", "escape_closed", "outside_closed"):
+                        self.assertTrue(report[key], report)
+                    self.assertEqual(report["escape_selected"], 2, report)
+                    self.assertEqual(report["outside_selected"], 2, report)
+
+    def test_resource_bounded_faction_popup(self):
+        from PIL import Image, ImageChops, ImageDraw
+        from combo_popup_test_support import SCRIPT
+        from tools.inventory.corpus import Corpus
+
+        resource = Corpus(os.environ["EAWR_EAW_GAME_ROOT"]).read_effective(
+            "foc", "data/resources/guidialog/guidialogs.rc").data.decode("utf-8-sig", errors="replace")
+        dialog = resource.split("IDD_SKIRMISH_STAGING_DIALOG DIALOGEX", 1)[1].split("\nEND", 1)[0]
+        authored = re.search(r"COMBOBOX\s+IDC_PLAYER_FACTION_0,\s*\d+,\s*\d+,\s*\d+,\s*(\d+)", dialog)
+        self.assertIsNotNone(authored)
+        with tempfile.TemporaryDirectory(prefix="combo-popup-") as temporary:
+            directory = Path(temporary)
+            script = directory / "popup.gd"
+            script.write_text(SCRIPT, encoding="utf-8")
+            for control, width, height in ((control, w, h)
+                    for control in ("IDC_PLAYER_FACTION_0", "IDC_PLAYER_FACTION_8")
+                    for w, h in ((1280, 720), (1920, 1080))):
+                output = directory / f"{control}-{width}"
+                output.mkdir()
+                result = subprocess.run([
+                    os.environ["EAWR_GODOT_EXECUTABLE"], "--resolution", f"{width}x{height}",
+                    "--max-fps", "60", "--path", str(ROOT / "apps/viewer/project"),
+                    "--script", str(script), "--", "--eawr-skirmish-setup", "--eawr-audio", "off",
+                    "--eawr-game-root", os.environ["EAWR_EAW_GAME_ROOT"],
+                    "--eawr-font-cache", os.environ.get("EAWR_FONT_CACHE", str(ROOT / "out/fonts")),
+                    "--eawr-report", str(output / "viewer.json"), "--popup-output=" + str(output),
+                    "--popup-height=" + authored.group(1), "--popup-control=" + control,
+                    f"--popup-resolution={width}x{height}"],
+                    cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=240)
+                (output / "viewer.log").write_text(result.stdout, encoding="utf-8")
+                self.assertEqual(result.returncode, 0, result.stdout[-6000:])
+                reports = json.loads((output / "popup.json").read_text(encoding="utf-8"))
+                self.assertEqual(len(reports), 6)
+                for report in reports:
+                    with self.subTest(control=control, resolution=width, count=report["count"], edge=report["edge"]):
+                        x, y, w, h = report["rect"]
+                        self.assertLessEqual(h, report["budget"])
+                        self.assertTrue(0 <= x < x + w <= width and 0 <= y < y + h <= height, report)
+                        self.assertAlmostEqual(report["alpha"], report["authored_alpha"], delta=1/255)
+                        if report["count"] == 3:
+                            self.assertFalse(report["scroll"], report)
+                            self.assertEqual(report["last_value"], 0)
+                        else:
+                            self.assertTrue(report["scroll"], report)
+                            self.assertGreater(report["last_value"], report["first_value"])
+                        self.assertEqual(report["focused"], report["count"] - 1)
+                        # A row of text is never cut at the bottom when capacity is exceeded.
+                        if report["scroll"]:
+                            local = h / report["scale"] - report["frame"]
+                            self.assertAlmostEqual(local / report["stride"], round(local / report["stride"]),
+                                                   delta=1/report["stride"], msg=str(report))
+                        before = Image.open(output / (report["stem"] + "-top.png")).convert("RGB")
+                        after = Image.open(output / (report["stem"] + "-changed.png")).convert("RGB")
+                        self.assertEqual(before.size, (width, height))
+                        delta = ImageChops.difference(before, after).convert("L")
+                        self.assertGreater(sum(v > 20 for v in delta.getdata()), 30, "visible rows really draw")
+                        # Changing all labels (including offscreen rows) can affect pixels only
+                        # inside the popup. Allow one pixel at fractional scale raster edges.
+                        ax, ay, aw, ah = report["after_rect"]
+                        ImageDraw.Draw(delta).rectangle((min(x, ax)-1, min(y, ay)-1,
+                                                        max(x+w, ax+aw)+1, max(y+h, ay+ah)+1), fill=0)
+                        self.assertEqual(sum(v > 20 for v in delta.getdata()), 0, "rows escaped the list frame")
+
     def test_ninth_local_row_opens_closes_and_starts_nine_seats(self):
         from PIL import Image, ImageChops
         with tempfile.TemporaryDirectory(prefix="setup-nine-") as temporary:

@@ -159,6 +159,7 @@ void EawrLanLobby::open_staging(const bool host, const std::string& game, const 
     impl.online_connections.clear();
     impl.refused = false;
     impl.mod_review_box = false;
+    impl.deferred_mod_review.reset();
     page_ = Page::staging;
     build_page(staging_dialog);
     PageState& state = *state_;
@@ -255,6 +256,13 @@ void EawrLanLobby::open_staging(const bool host, const std::string& game, const 
     }
     if (auto* title = EAWR_CONTROL(EawrUiLabel, "IDC_INTERNET_DIALOG_HEADER")) {
         title->set_text(resolved(resources.text, host ? "TEXT_INTERNET_HOST_GAME_TITLE" : "TEXT_INTERNET_JOIN_GAME_TITLE"));
+        auto* progress = memnew(EawrUiLabel);
+        progress->set_theme(resources.theme);
+        progress->set_theme_type_variation(title->get_theme_type_variation());
+        progress->set_position(title->get_position()); progress->set_size(title->get_size());
+        progress->set_mouse_filter(Control::MOUSE_FILTER_IGNORE);
+        progress->hide(); dialog.frame->add_child(progress);
+        state.controls["EAWR_MOD_REVIEW_STATUS"] = progress;
     }
     // Staging keeps its loaded rectangles: fit the skin and caption inside each one.
     for (const auto& gadget : dialog.gadgets) {
@@ -400,6 +408,7 @@ void EawrLanLobby::fill_map_list() {
 }
 
 void EawrLanLobby::leave_staging() {
+    impl_->deferred_mod_review.reset();
     ++impl_->checkpoint_request;
     impl_->checkpoint_store.reset();
     close_checkpoint_list();

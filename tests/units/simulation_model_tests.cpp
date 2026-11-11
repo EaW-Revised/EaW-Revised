@@ -1,6 +1,8 @@
 // The load check's model path: the simulation projection must give the same unit tables as the full model, and the
 // store must read, hash and decode each file once, hold no full model after the call and report the same hash and
 // failures as VfsAssetCache.
+#include "eawr/core/load_profile.hpp"
+#include "eawr/data/tag_trace.hpp"
 #include "eawr/data/xml.hpp"
 #include "eawr/scene/scene.hpp"
 #include "eawr/sim/replay.hpp"
@@ -15,6 +17,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <bit>
 #include <cctype>
 #include <chrono>
 #include <condition_variable>
@@ -24,6 +27,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <map>
 #include <optional>
 #include <stdexcept>
@@ -32,6 +36,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace unit_tables_test_support {
@@ -145,6 +150,505 @@ std::vector<std::byte> tiny_alo() {
         for (unsigned shift = 0; shift < 32; shift += 8) bytes.push_back(static_cast<std::byte>((word >> shift) & 0xffU));
     bytes.insert(bytes.end(), 4, std::byte{});
     return bytes;
+}
+
+std::vector<std::byte> bone_alo() {
+    const auto u32 = [](std::vector<std::byte>& out, const std::uint32_t value) {
+        for (unsigned shift = 0; shift < 32; shift += 8) out.push_back(static_cast<std::byte>((value >> shift) & 0xffU));
+    };
+    const auto chunk = [&](const std::uint32_t kind, const std::vector<std::byte>& payload, const bool group = false) {
+        std::vector<std::byte> out;
+        u32(out, kind); u32(out, static_cast<std::uint32_t>(payload.size()) | (group ? 0x80000000U : 0));
+        out.insert(out.end(), payload.begin(), payload.end());
+        return out;
+    };
+    const auto add = [](std::vector<std::byte>& out, const std::vector<std::byte>& part) {
+        out.insert(out.end(), part.begin(), part.end());
+    };
+    std::vector<std::byte> bone;
+    add(bone, chunk(0x203, {std::byte{'R'}, std::byte{'O'}, std::byte{'O'}, std::byte{'T'}, std::byte{}}));
+    std::vector<std::byte> data;
+    u32(data, 0xffffffffU); u32(data, 1);
+    for (unsigned index = 0; index < 12; ++index)
+        u32(data, std::bit_cast<std::uint32_t>(index == 0 || index == 5 || index == 10 ? 1.0F : 0.0F));
+    add(bone, chunk(0x205, data));
+    std::vector<std::byte> skeleton;
+    std::vector<std::byte> count;
+    u32(count, 1);
+    add(skeleton, chunk(0x201, count)); add(skeleton, chunk(0x202, bone, true));
+    std::vector<std::byte> bytes;
+    add(bytes, chunk(0x200, skeleton, true));
+    // Empty connections, as in tiny_alo().
+    const auto empty = tiny_alo();
+    bytes.insert(bytes.end(), empty.begin() + 20, empty.end());
+    return bytes;
+}
+
+void shared_preparation_lifetime() {
+    TempTree tree;
+    write_fixture(tree.root, units_xml("200", "Select_Test"));
+    const auto bytes = bone_alo();
+    for (const auto name : {"a.alo", "b.alo", "c.alo", "d.alo"}) {
+        const auto directory = tree.root / "art" / "models";
+        std::filesystem::create_directories(directory);
+        std::ofstream file(directory / name, std::ios::binary);
+        file.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+    }
+    const std::array mounts{eawr::vfs::MountSpec{"base", tree.root, "data", {}}};
+    auto baseline = eawr::vfs::Vfs::mount(mounts);
+    auto catalog = eawr::data::load_catalog(baseline.value(), eawr::data::Profile::foc);
+    expect(static_cast<bool>(catalog), "shared preparation catalog loads");
+    if (!catalog) return;
+    {
+        eawr::data::tag_trace::Recording recording;
+        units::SharedModelPreparation preparation(baseline.value(), catalog.value().catalog, 0);
+        expect(recording.finish().empty(), "alias policy preflight does not mark catalog fields consumed");
+    }
+    eawr::scene::VfsAssetCache old(baseline.value());
+    std::uint64_t size{};
+    for (const auto name : {"a.alo", "b.alo", "c.alo", "d.alo"}) {
+        const auto loaded = old.shared_model(std::string("data/art/models/") + name);
+        expect(loaded.has_value(), "preparation full model loads");
+        if (!loaded) return;
+        size = assets::payload_capacity(*loaded.value()).total_bytes();
+    }
+    expect(size > 0, "the preparation fixture has nonzero decoded capacity");
+    old.set_model_cache_budget(size * 2);
+    for (const unsigned readers : {1U, 8U}) {
+        auto bounded = eawr::vfs::Vfs::mount(mounts);
+        eawr::scene::VfsAssetCache probe(bounded.value());
+        const assets::Model* first{};
+        {
+            units::SharedModelPreparation preparation(bounded.value(), catalog.value().catalog, size * 2);
+            expect(preparation.stats().bounded, "unique-reference preparation enables bounded full retention");
+            eawr::scene::ModelPrefetchOptions options;
+            options.fixed_readers = readers; options.window_bytes = bytes.size() * 3;
+            eawr::scene::ModelPrefetch ahead(bounded.value(), options);
+            // Decode completion may differ from the ordered consumer, but only that consumer admits full payloads.
+            // A is initially unplanned, as an attached model can be. Its hint arrives after full-payload eviction.
+            for (const auto name : {"b.alo", "d.alo", "c.alo"})
+                preparation.hint(ahead, std::string("data/art/models/") + name);
+            for (const auto name : {"a.alo", "b.alo", "c.alo", "d.alo"}) {
+                const std::string path = std::string("data/art/models/") + name;
+                const auto* model = preparation.model(path);
+                ahead.taken(path);
+                expect(model && model->bones.size() == 1, "projections retain the table's bone inputs");
+                if (name == std::string_view("a.alo")) first = model;
+                expect(probe.model_stats().cache_retained_bytes <= size * 2, "full retention stays within its budget");
+            }
+            preparation.hint(ahead, "data/art/models/a.alo");
+            preparation.hint(ahead, "data//art/models/./a.alo");
+            expect(preparation.model("data\\art\\models\\.\\a.alo") == first,
+                "a different spelling after eviction returns the identical projection");
+            expect(preparation.sha256("data//art/models/./a.alo") == preparation.sha256("data/art/models/a.alo"),
+                "projection aliases share the digest from the same decoded file");
+            expect(ahead.stats().planned == 3, "a late hint cannot schedule another decode of a projected model");
+            ahead.finish();
+            eawr::core::load_profile::Recording digest_reads;
+            const auto previous_recording = std::exchange(eawr::core::load_profile::active, &digest_reads);
+            const auto digest = preparation.sha256("data/art/models/a.alo");
+            eawr::core::load_profile::active = previous_recording;
+            expect(!digest.empty() && digest == old.sha256("data/art/models/a.alo"),
+                "the evicted full model keeps the hash of its decoded bytes");
+            expect(digest_reads.counters[static_cast<std::size_t>(eawr::core::load_profile::Counter::sha_bytes)] == 0,
+                "the table digest never reopens an evicted model to hash it again");
+            expect(probe.model_stats().successful_entries == 2, "only the full survivor suffix remains, independent of projections");
+            expect(first && first->bones.front().name == "ROOT"
+                && preparation.model("data/art/models/a.alo") == first, "an evicted full model's projection stays valid without a decode");
+            expect(probe.model_stats().unique_loads == 4, "Start decodes every full identity exactly once with 1/8 readers");
+            expect(preparation.stats().aliases == 1 && preparation.stats().projections == 4,
+                "alternate spelling counts one alias without another projection");
+        }
+        expect(probe.model_stats().cache_budget_bytes == std::numeric_limits<std::uint64_t>::max(),
+            "the preparation scope restores the incoming cache budget");
+        for (const auto name : {"c.alo", "d.alo"}) {
+            const std::string path = std::string("data/art/models/") + name;
+            expect(probe.shared_model(path).has_value() && old.shared_model(path).has_value(), "legacy full survivors remain complete cache hits");
+        }
+        expect(probe.model_stats().unique_loads == 4 && old.model_stats().unique_loads == 4,
+            "later full consumers add no battle decode relative to the legacy trim");
+    }
+    // The menu's existing full cache must not turn every actual Start into the legacy fallback.
+    // The preceding comparison applied its final small budget; real Start reopens preparation before this scope.
+    old.begin_galactic_preparation();
+    {
+        units::SharedModelPreparation populated(baseline.value(), catalog.value().catalog, 0);
+        expect(populated.stats().bounded && populated.stats().populated_store
+            && populated.stats().protected_initial_bytes == size * 2, "a populated store protects its existing full entries");
+        expect(populated.model("data/art/models/c.alo") && populated.model("data/art/models/d.alo"),
+            "existing entries survive until their first table request even with a zero unprotected budget");
+        expect(old.model_stats().unique_loads == 4, "a warm preparation adds no decode of the initial entries");
+    }
+    {
+        auto warm = eawr::vfs::Vfs::mount(mounts);
+        eawr::scene::VfsAssetCache cache(warm.value());
+        expect(cache.shared_model("data/art/models/a.alo").has_value()
+            && cache.shared_model("data/art/models/b.alo").has_value(), "the attract cache starts with two full models");
+        {
+            units::SharedModelPreparation preparation(warm.value(), catalog.value().catalog, size * 2);
+            // An ahead reader can hold an already admitted attract entry. It must stay in the LRU until its
+            // first ordered request: an evicted hold has sticky admission and would otherwise miss re-admission.
+            auto ahead_hold = cache.shared_model_ahead("data/art/models/a.alo");
+            expect(ahead_hold.has_value(), "an ahead reader holds a previously admitted initial model");
+            for (const auto name : {"c.alo", "d.alo", "a.alo"}) {
+                expect(preparation.model(std::string("data/art/models/") + name) != nullptr,
+                    "the ordered consumer mixes old and new full identities");
+            }
+            expect(cache.model_stats().unique_loads == 4, "late consumption of a protected initial model adds no decode");
+        }
+        // The unbounded legacy order would be a,d,c,b, so a,d must both survive the final trim.
+        expect(cache.model_stats().cache_retained_bytes == size * 2, "unused initial protection is removed at scope exit");
+        expect(cache.shared_model("data/art/models/a.alo").has_value()
+            && cache.shared_model("data/art/models/d.alo").has_value() && cache.model_stats().unique_loads == 4,
+            "the final suffix preserves legacy survivors after warm-cache consumption");
+    }
+    {
+        auto warm = eawr::vfs::Vfs::mount(mounts);
+        eawr::scene::VfsAssetCache cache(warm.value());
+        cache.begin_galactic_gameplay(size * 2);
+        expect(cache.shared_model("data/art/models/a.alo").has_value(), "an initial gameplay model loads without a hash");
+        cache.begin_galactic_preparation();
+        units::SharedModelPreparation preparation(warm.value(), catalog.value().catalog, size * 2);
+        expect(preparation.model("data/art/models/a.alo") != nullptr, "preparation reuses the initial gameplay payload");
+        eawr::core::load_profile::Recording digest_reads;
+        const auto previous_recording = std::exchange(eawr::core::load_profile::active, &digest_reads);
+        const auto digest = preparation.sha256("data/art/models/a.alo");
+        const auto repeated = preparation.sha256("data/art/models/a.alo");
+        eawr::core::load_profile::active = previous_recording;
+        expect(!digest.empty() && digest == repeated && digest == old.sha256("data/art/models/a.alo"),
+            "an initial gameplay entry gets the same lazy digest as legacy loading");
+        expect(digest_reads.counters[static_cast<std::size_t>(eawr::core::load_profile::Counter::sha_bytes)] == bytes.size()
+            && cache.model_stats().unique_loads == 1, "a missing initial digest is read once without another model decode");
+    }
+    {
+        auto isolated = eawr::vfs::Vfs::mount(mounts);
+        eawr::scene::VfsAssetCache cache(isolated.value());
+        expect(cache.shared_model("data/art/models/a.alo").has_value(), "initial model loads before exclusive window");
+        units::SharedModelPreparation preparation(isolated.value(), catalog.value().catalog, 0);
+        bool second_refused = false;
+        std::thread second([&] {
+            try { units::SharedModelPreparation nested(isolated.value(), catalog.value().catalog, 0); }
+            catch (const std::logic_error& error) {
+                second_refused = std::string_view(error.what()).find("already owned") != std::string_view::npos;
+            }
+        });
+        second.join();
+        expect(second_refused, "a second concurrent preparation explicitly refuses the owned window");
+        cache.begin_galactic_preparation();
+        expect(cache.model_stats().cache_budget_bytes == 0,
+            "a viewer preparation reset is deferred without changing the owner's budget");
+        // A separate wrapper may read the protected initial model while services overlap preparation. It must not
+        // consume the table loader's token, even after its temporary shared owner disappears and budget pressure follows.
+        { auto other = cache.shared_model("data/art/models/a.alo"); expect(other.has_value(), "unrelated reader hits initial model"); }
+        expect(preparation.model("data/art/models/b.alo") != nullptr, "budget pressure follows unrelated reader");
+        expect(preparation.model("data/art/models/a.alo") != nullptr && cache.model_stats().unique_loads == 2,
+            "only the preparation owner's ordered request can release initial protection");
+    }
+    {
+        std::ofstream bad(tree.root / "art" / "models" / "bad.alo", std::ios::binary);
+        bad.close();
+        auto failing = eawr::vfs::Vfs::mount(mounts);
+        eawr::scene::VfsAssetCache cache(failing.value());
+        units::SharedModelPreparation preparation(failing.value(), catalog.value().catalog, 0);
+        expect(!cache.shared_model_ahead("data/art/models/bad.alo"), "failed ahead fixture is rejected");
+        expect(!preparation.model("data/art/models/bad.alo") && !preparation.model("data/art/models/./bad.alo"),
+            "ordered and aliased failed requests reuse the negative ahead result");
+        expect(!preparation.model("data/art/models/missing.alo"), "an ordered missing fixture fails");
+        eawr::scene::ModelPrefetchOptions options;
+        options.fixed_readers = 1;
+        eawr::scene::ModelPrefetch ahead(failing.value(), options);
+        preparation.hint(ahead, "data/art/models/bad.alo");
+        preparation.hint(ahead, "data//art/models/./missing.alo");
+        ahead.finish();
+        expect(ahead.stats().planned == 0 && cache.model_stats().unique_loads == 2,
+            "later hints of failed identities do not retry either an ahead or an ordered failure");
+    }
+    {
+        auto gameplay = eawr::vfs::Vfs::mount(mounts);
+        eawr::scene::VfsAssetCache cache(gameplay.value());
+        cache.begin_galactic_gameplay(size * 2);
+        units::SharedModelPreparation inactive(gameplay.value(), catalog.value().catalog, size * 2);
+        expect(!inactive.stats().bounded && !inactive.stats().fallback_reason.empty()
+            && cache.model_stats().cache_budget_bytes == size * 2,
+            "a reused gameplay phase leaves BASE policy unchanged rather than failing");
+        expect(inactive.model("data/art/models/a.alo") != nullptr, "legacy preparation succeeds in gameplay phase");
+    }
+    {
+        auto deferred = eawr::vfs::Vfs::mount(mounts);
+        eawr::scene::VfsAssetCache cache(deferred.value());
+        {
+            units::SharedModelPreparation preparation(deferred.value(), catalog.value().catalog, 0);
+            bool setters_succeeded = false;
+            std::thread viewer([&] {
+                try {
+                    cache.begin_galactic_gameplay(size);
+                    cache.begin_model_load(size);
+                    cache.end_model_load(size);
+                    cache.begin_galactic_preparation();
+                    cache.set_model_cache_budget(size * 2);
+                    setters_succeeded = true;
+                } catch (const std::logic_error&) {}
+            });
+            viewer.join();
+            expect(setters_succeeded && cache.model_stats().cache_budget_bytes == 0,
+                "all five viewer policy setters defer without throwing or disrupting the active bound");
+            expect(preparation.model("data/art/models/a.alo") != nullptr,
+                "the ordered consumer remains usable after deferred viewer transitions");
+        }
+        expect(cache.model_stats().cache_budget_bytes == size * 2,
+            "deferred policy calls apply in order after restoration of the incoming budget");
+        eawr::scene::VfsAssetCache::ModelPreparationScope next(deferred.value(), 0);
+        expect(next.fallback_reason().empty(), "the deferred preparation reset clears gameplay and tactical phases");
+    }
+    for (const bool battle_finishes_first : {false, true}) {
+        auto overlap = eawr::vfs::Vfs::mount(mounts);
+        eawr::scene::VfsAssetCache cache(overlap.value());
+        expect(cache.shared_model("data/art/models/a.alo").has_value()
+            && cache.shared_model("data/art/models/b.alo").has_value(), "overlap starts with two protected full models");
+        std::optional<units::SharedModelPreparation> preparation;
+        preparation.emplace(overlap.value(), catalog.value().catalog, 0);
+        expect(preparation->stats().bounded, "overlap begins with a real zero-budget preparation bound");
+        std::optional<eawr::scene::VfsAssetCache::ModelLoadScope> battle;
+        battle.emplace(overlap.value());
+        cache.begin_model_load(0); // viewer ready-job order: bracket, then tactical budget
+        expect(!preparation->stats().bounded && !preparation->stats().fallback_reason.empty()
+            && cache.model_stats().cache_budget_bytes == std::numeric_limits<std::uint64_t>::max(),
+            "a battle ends the bound early and its tactical budget cannot bound the real bracket");
+        expect(preparation->model("data/art/models/a.alo") != nullptr,
+            "the table consumer remains usable after the bound ends early");
+        if (battle_finishes_first) battle.reset();
+        else preparation.reset();
+        expect(cache.model_stats().cache_budget_bytes == std::numeric_limits<std::uint64_t>::max(),
+            "either closing order leaves the overlapping battle unbounded");
+        expect(cache.shared_model("data/art/models/a.alo").has_value()
+            && cache.shared_model("data/art/models/b.alo").has_value()
+            && cache.model_stats().unique_loads == 2 && cache.model_stats().cache_evictions == 0,
+            "early fallback preserves full survivors with no eviction or extra decode");
+        expect(cache.shared_model("data/art/models/c.alo").has_value(), "another model loads after overlap");
+        expect(cache.model_stats().battle_loads == (battle_finishes_first ? 0U : 1U),
+            "overlapping loads count as battle work only while the real bracket remains open");
+        battle.reset();
+        preparation.reset();
+    }
+    {
+        auto nested = eawr::vfs::Vfs::mount(mounts);
+        eawr::scene::VfsAssetCache cache(nested.value());
+        eawr::scene::VfsAssetCache::ModelPreparationScope preparation(nested.value(), 0);
+        cache.set_model_cache_budget(size); // queued before the first battle, restored after the last one
+        std::optional<eawr::scene::VfsAssetCache::ModelLoadScope> outer;
+        outer.emplace(nested.value());
+        {
+            eawr::scene::VfsAssetCache::ModelLoadScope inner(nested.value());
+            outer.reset();
+            cache.begin_model_load(0);
+            expect(!preparation.active()
+                && cache.model_stats().cache_budget_bytes == std::numeric_limits<std::uint64_t>::max(),
+                "a nested bracket keeps early-fallback battle loading unbounded after the outer bracket closes");
+            expect(cache.shared_model("data/art/models/a.alo").has_value()
+                && cache.shared_model("data/art/models/b.alo").has_value()
+                && cache.model_stats().unique_loads == 2 && cache.model_stats().cache_evictions == 0,
+                "the last overlapping bracket prevents eviction and extra decode");
+        }
+        expect(cache.model_stats().cache_budget_bytes == size,
+            "the last nested bracket restores the policy applied before the battle");
+    }
+    {
+        auto transition = eawr::vfs::Vfs::mount(mounts);
+        eawr::scene::VfsAssetCache cache(transition.value());
+        units::SharedModelPreparation preparation(transition.value(), catalog.value().catalog, 0);
+        const auto* projected = preparation.model("data/art/models/a.alo");
+        eawr::scene::VfsAssetCache::ModelLoadScope battle(transition.value());
+        eawr::scene::ModelPrefetchOptions options;
+        options.fixed_readers = 1;
+        eawr::scene::ModelPrefetch ahead(transition.value(), options);
+        preparation.hint(ahead, "data/art/models/a.alo");
+        preparation.hint(ahead, "data/art/models/b.alo");
+        const auto* full = preparation.model("data/art/models/b.alo");
+        ahead.taken("data/art/models/b.alo");
+        ahead.finish();
+        expect(projected && preparation.model("data/art/models/a.alo") == projected,
+            "early fallback preserves an existing projection after its full model was evicted");
+        const auto shared = cache.shared_model("data/art/models/b.alo");
+        expect(full && shared && full == shared.value().get() && preparation.stats().projections == 1,
+            "new paths after early fallback return the full cache model without creating a projection");
+        expect(!preparation.stats().bounded && ahead.stats().planned == 1 && cache.model_stats().unique_loads == 2,
+            "early-fallback hints skip old projections and prefetch new full models without another decode");
+    }
+    for (const bool battle_finishes_first : {false, true}) {
+        auto finite = eawr::vfs::Vfs::mount(mounts);
+        eawr::scene::VfsAssetCache cache(finite.value());
+        cache.set_model_cache_budget(size * 2);
+        std::optional<eawr::scene::VfsAssetCache::ModelPreparationScope> preparation;
+        preparation.emplace(finite.value(), 0);
+        cache.set_model_cache_budget(size); // differs from the pre-window policy, so a double restore is observable
+        std::optional<eawr::scene::VfsAssetCache::ModelLoadScope> battle;
+        battle.emplace(finite.value());
+        if (battle_finishes_first) battle.reset();
+        else preparation.reset();
+        expect(cache.model_stats().cache_budget_bytes == (battle_finishes_first
+                ? size : std::numeric_limits<std::uint64_t>::max()),
+            "early fallback keeps the correct finite policy or open battle budget after the first close");
+        battle.reset();
+        preparation.reset();
+        expect(cache.model_stats().cache_budget_bytes == size,
+            "the last close preserves the replayed finite budget instead of restoring the pre-window budget twice");
+    }
+    {
+        auto protected_files = eawr::vfs::Vfs::mount(mounts);
+        eawr::scene::VfsAssetCache cache(protected_files.value());
+        cache.set_model_cache_budget(size * 2); // fits both survivors; the window budget below fits only one
+        expect(cache.shared_model("data/art/models/a.alo").has_value()
+            && cache.shared_model("data/art/models/b.alo").has_value(), "finite policy retains two initial models");
+        eawr::scene::VfsAssetCache::ModelPreparationScope preparation(protected_files.value(), size);
+        expect(preparation.active() && preparation.initial_bytes() == size * 2,
+            "the active finite window protects more initial bytes than its one-model budget");
+        {
+            eawr::scene::VfsAssetCache::ModelLoadScope battle(protected_files.value());
+            expect(cache.model_stats().cache_evictions == 0 && cache.model_stats().successful_entries == 2,
+                "early end skips the window trim instead of evicting a protected survivor");
+            expect(cache.shared_model("data/art/models/a.alo").has_value()
+                && cache.shared_model("data/art/models/b.alo").has_value() && cache.model_stats().unique_loads == 2,
+                "both protected full models remain cache hits after the early end");
+        }
+        expect(cache.model_stats().cache_budget_bytes == size * 2 && cache.model_stats().cache_evictions == 0,
+            "the finite pre-window policy fits the survivors without eviction after battle close");
+    }
+    for (const bool second_battle_outlives_preparation : {false, true}) {
+        auto fallback = eawr::vfs::Vfs::mount(mounts);
+        eawr::scene::VfsAssetCache cache(fallback.value());
+        cache.begin_galactic_gameplay(size * 2);
+        std::optional<units::SharedModelPreparation> preparation;
+        preparation.emplace(fallback.value(), catalog.value().catalog, 0);
+        cache.set_model_cache_budget(size);
+        expect(!preparation->stats().bounded && cache.model_stats().cache_budget_bytes == size,
+            "fallback applies a budget change immediately before a battle bracket");
+        {
+            eawr::scene::VfsAssetCache::ModelLoadScope first(fallback.value());
+            expect(cache.model_stats().cache_budget_bytes == std::numeric_limits<std::uint64_t>::max(),
+                "a battle inside fallback immediately opens unbounded sharing");
+        }
+        expect(cache.model_stats().cache_budget_bytes == size,
+            "a battle inside fallback restores the changed budget, not the pre-preparation budget");
+        if (second_battle_outlives_preparation) {
+            eawr::scene::VfsAssetCache::ModelLoadScope second(fallback.value());
+            preparation.reset();
+            expect(cache.model_stats().cache_budget_bytes == std::numeric_limits<std::uint64_t>::max(),
+                "closing fallback cannot replay a stale restore into the second open battle");
+            expect(cache.shared_model("data/art/models/a.alo").has_value()
+                && cache.shared_model("data/art/models/b.alo").has_value()
+                && cache.model_stats().successful_entries == 2
+                && cache.model_stats().unique_loads == 2 && cache.model_stats().cache_evictions == 0,
+                "the second battle stays unbounded without eviction or re-decode");
+        } else preparation.reset();
+        expect(cache.model_stats().cache_budget_bytes == size,
+            "fallback closure never changes the viewer's latest policy");
+    }
+    {
+        // No installed data: exercise the real ordered table loader with successful and failing synthetic files.
+        for (const auto name : {"test_frigate.alo", "test_turret.alo"}) {
+            std::ofstream file(tree.root / "art" / "models" / name, std::ios::binary);
+            file.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+        }
+        auto full_files = eawr::vfs::Vfs::mount(mounts);
+        auto bounded_files = eawr::vfs::Vfs::mount(mounts);
+        eawr::scene::VfsAssetCache full_cache(full_files.value());
+        units::LoadInput input;
+        input.catalog = &catalog.value().catalog; input.filesystem = &full_files.value();
+        input.types = {"Test_Frigate", "Test_Turret"};
+        input.model = [&](const std::string_view path) { return full_cache.model(path); };
+        input.digest = [&](const std::string_view path) { return full_cache.sha256(path); };
+        const auto full = units::load_unit_tables(input);
+        units::SharedModelPreparation preparation(bounded_files.value(), catalog.value().catalog, 0);
+        input.filesystem = &bounded_files.value();
+        input.model = [&](const std::string_view path) { return preparation.model(path); };
+        input.digest = [&](const std::string_view path) { return preparation.sha256(path); };
+        const auto bounded_tables = units::load_unit_tables(input);
+        expect(full.has_value() && bounded_tables.has_value(), "synthetic bounded and legacy table loads succeed");
+        expect(preparation.stats().projections != 0, "synthetic table comparison consumes a real projection");
+        if (full && bounded_tables) {
+            expect(units::canonical_encoding(full.value()) == units::canonical_encoding(bounded_tables.value())
+                && units::content_identity(full.value()) == units::content_identity(bounded_tables.value()),
+                "synthetic bounded tables and content identity equal legacy");
+            expect(full.value().inputs == bounded_tables.value().inputs
+                && same_rows(full.value().unresolved, bounded_tables.value().unresolved),
+                "synthetic bounded input digests and diagnostic order equal legacy");
+        }
+        // A battle, checkpoint restore, or live autoresolve may reuse a mounted store without a viewer phase reset.
+        for (const unsigned phase : {0U, 1U, 2U, 3U}) {
+            auto reused = eawr::vfs::Vfs::mount(mounts);
+            eawr::scene::VfsAssetCache cache(reused.value());
+            std::optional<eawr::scene::VfsAssetCache::ModelLoadScope> battle;
+            const auto held = cache.shared_model("data/art/models/a.alo");
+            if (phase == 0 || phase == 2) {
+                cache.begin_galactic_gameplay(size);
+                battle.emplace(reused.value());
+                expect(cache.shared_model("data/art/models/b.alo").has_value(), "battle model loads on reused mount");
+                if (phase == 0) battle.reset();
+                else cache.begin_galactic_preparation(); // isolate an active load_depth from the gameplay flag
+            } else if (phase == 1) {
+                cache.begin_model_load(size);
+                cache.end_model_load(size);
+            } else cache.set_model_cache_budget(0); // held keeps an evicted full payload alive
+            {
+                const auto entry_budget = cache.model_stats().cache_budget_bytes;
+                units::SharedModelPreparation retry(reused.value(), catalog.value().catalog, 0);
+                expect(!retry.stats().bounded && !retry.stats().fallback_reason.empty()
+                    && cache.model_stats().cache_budget_bytes == entry_budget,
+                    "battle/finished tactical/active load/external holder leaves BASE policy untouched");
+                input.filesystem = &reused.value();
+                input.digest = {};
+                input.model = [&](const std::string_view path) { return retry.model(path); };
+                const auto tables = units::load_unit_tables(input);
+                expect(tables.has_value(), "battle then table preparation on the same mount succeeds without a phase reset");
+                if (tables) {
+                    expect(std::any_of(tables.value().inputs.begin(), tables.value().inputs.end(), [](const auto& row) {
+                        return row.logical_path.ends_with(".alo");
+                    }), "reused-mount preparation actually reads a model input");
+                    expect(std::all_of(tables.value().inputs.begin(), tables.value().inputs.end(), [](const auto& row) {
+                        return !row.logical_path.ends_with(".alo") || row.sha256.empty();
+                    }), "unwired prepared model input digests remain empty as on BASE");
+                }
+                if (phase == 2) {
+                    battle.reset();
+                    expect(cache.model_stats().cache_budget_bytes == size,
+                        "a battle bracket closing during fallback immediately restores its entry policy");
+                }
+            }
+            expect(held.has_value(), "the external model owner survives the preparation fallback");
+        }
+    }
+    // Distinct authored paths to the same VFS identity must retain their separate loader report rows and LRU requests.
+    auto xml = units_xml("200", "Select_Test");
+    xml.insert(xml.rfind("</Objects>"), R"xml(<SpaceUnit Name="Alias_A"><Space_Model_Name>a.alo</Space_Model_Name></SpaceUnit>
+<SpaceUnit Name="Alias_B"><Space_Model_Name>./a.alo</Space_Model_Name></SpaceUnit>)xml");
+    write_fixture(tree.root, xml);
+    auto aliases = eawr::vfs::Vfs::mount(mounts);
+    auto aliased_catalog = eawr::data::load_catalog(aliases.value(), eawr::data::Profile::foc);
+    expect(aliased_catalog.has_value(), "aliased catalog loads");
+    if (!aliased_catalog) return;
+    eawr::scene::VfsAssetCache alias_probe(aliases.value());
+    {
+        units::SharedModelPreparation preparation(aliases.value(), aliased_catalog.value().catalog, 0);
+        expect(!preparation.stats().bounded && preparation.stats().reference_aliases, "alias preflight chooses legacy retention before decoding");
+        const auto* first = preparation.model("data/art/models/a.alo");
+        const auto* second = preparation.model("data/art/models/./a.alo");
+        expect(first && first == second && preparation.stats().aliases == 1, "alias requests retain shared identity and are counted");
+        expect(alias_probe.model_stats().unique_loads == 1, "alias fallback never adds a full decode");
+    }
+    // Land-only obstacle geometry and domain body tags must participate even when space body names do not alias.
+    xml = units_xml("200", "Select_Test");
+    xml.insert(xml.rfind("</Objects>"), R"xml(<SpaceUnit Name="Land_A"><Land_Model_Name>a.alo</Land_Model_Name></SpaceUnit>
+<SpaceUnit Name="Obstacle_Geometry"><Land_Model_Name>./a.alo</Land_Model_Name></SpaceUnit>
+<SpaceUnit Name="Obstacle"><Obstacle_Proxy_Type>Obstacle_Geometry</Obstacle_Proxy_Type></SpaceUnit>)xml");
+    write_fixture(tree.root, xml);
+    auto land_aliases = eawr::vfs::Vfs::mount(mounts);
+    auto land_catalog = eawr::data::load_catalog(land_aliases.value(), eawr::data::Profile::foc);
+    expect(land_catalog.has_value(), "land-only model alias catalog loads");
+    if (land_catalog) {
+        units::SharedModelPreparation land(land_aliases.value(), land_catalog.value().catalog, 0);
+        expect(!land.stats().bounded && land.stats().reference_aliases,
+            "preflight includes land domain names and obstacle proxy geometry references");
+    }
 }
 
 std::string hash_of(const std::span<const std::byte> bytes) {
@@ -481,9 +985,9 @@ void disk_classification_rules() {
     expect(units::slowest_disk(with_unknown) == DiskKind::unknown, "an unknown volume with solid state is unknown");
 }
 
-// Stock FoC through the real chain: tables built with the store equal tables built with VfsAssetCache.
-int installed(const std::filesystem::path& game_root) {
-    std::vector<eawr::vfs::LayerRoot> roots;
+// Installed content through the real chain: the bounded reader path keeps full-model tables and reports identical.
+int installed(const std::filesystem::path& game_root, const std::filesystem::path& mod_root = {}) {
+    auto roots = mod_root.empty() ? std::vector<eawr::vfs::LayerRoot>{} : eawr::vfs::mod_chain_roots(mod_root);
     roots.emplace_back("expansion", game_root / "corruption" / "Data");
     roots.emplace_back("base", game_root / "GameData" / "Data");
     auto chain = eawr::vfs::resolve_manifest_chain(roots);
@@ -492,12 +996,14 @@ int installed(const std::filesystem::path& game_root) {
     for (auto& layer : chain.value()) specs.push_back(std::move(layer.mount));
     auto filesystem = eawr::vfs::Vfs::mount(specs);
     if (!filesystem) { std::cerr << filesystem.error().message << '\n'; return 1; }
-    auto catalog = eawr::data::load_catalog(filesystem.value(), eawr::data::Profile::foc);
+    const auto profile = mod_root.empty() ? eawr::data::Profile::foc : eawr::data::Profile::remake;
+    auto catalog = eawr::data::load_catalog(filesystem.value(), profile);
     if (!catalog) { std::cerr << catalog.error().message << '\n'; return 1; }
     std::vector<std::string> types;
     for (const auto& definition : catalog.value().catalog.definitions())
         if (definition.namespace_winner && definition.category == eawr::data::Category::game_object) types.push_back(definition.id);
     units::LoadInput input;
+    input.campaign_scene = !mod_root.empty();
     input.catalog = &catalog.value().catalog;
     input.filesystem = &filesystem.value();
     input.types = types;
@@ -506,6 +1012,55 @@ int installed(const std::filesystem::path& game_root) {
     input.model = access.model;
     input.digest = access.sha256;
     const auto full = units::load_unit_tables(input);
+    // Use a fresh mount: the GC path starts with no full-model requests. The baseline wrapper's digest memo lets this
+    // compare the complete input reports as well as tables without introducing another hash reader into production.
+    for (const unsigned readers : {0U, 1U, 8U}) {
+        auto prepared_filesystem = eawr::vfs::Vfs::mount(specs);
+        expect(prepared_filesystem.has_value(), "installed preparation mount succeeds");
+        if (!prepared_filesystem) return 1;
+        units::SharedModelPreparation preparation(prepared_filesystem.value(), catalog.value().catalog,
+            eawr::scene::default_model_cache_budget_bytes);
+        std::optional<eawr::scene::ModelPrefetch> ahead;
+        if (readers != 0) {
+            eawr::scene::ModelPrefetchOptions options;
+            options.fixed_readers = readers;
+            options.window_bytes = 256ULL << 20U;
+            ahead.emplace(prepared_filesystem.value(), options);
+            input.model_hint = [&](const std::string& path) { preparation.hint(*ahead, path); };
+            input.model_taken = [&](const std::string& path) { ahead->taken(path); };
+            input.model_skipped = [&](const std::string& path) { ahead->skipped(path); };
+        }
+        input.filesystem = &prepared_filesystem.value();
+        input.model = [&](const std::string_view path) { return preparation.model(path); };
+        input.digest = [&](const std::string_view path) { return preparation.sha256(path); };
+        const auto prepared = units::load_unit_tables(input);
+        if (ahead) ahead->finish();
+        input.model_hint = {};
+        input.model_taken = {};
+        input.model_skipped = {};
+        expect(full.has_value() && prepared.has_value(), "installed shared preparation loads");
+        if (full && prepared) {
+            expect(units::canonical_encoding(full.value()) == units::canonical_encoding(prepared.value()),
+                "installed shared preparation keeps canonical tables and reports identical");
+            expect(full.value().inputs == prepared.value().inputs,
+                "installed shared preparation keeps ordered input paths, winning sources and digests");
+            expect(same_rows(full.value().unresolved, prepared.value().unresolved),
+                "installed shared preparation keeps unresolved order and text");
+            expect(units::content_identity(full.value()) == units::content_identity(prepared.value()),
+                "installed shared preparation keeps content identity on zero/one/eight readers");
+        }
+        const auto lifetime = preparation.stats();
+        std::cout << "installed shared preparation: readers=" << readers << " mod=" << !mod_root.empty()
+            << " bounded=" << lifetime.bounded << " requests=" << lifetime.requests
+            << " aliases=" << lifetime.aliases << " reference_aliases=" << lifetime.reference_aliases
+            << " projection_bytes=" << lifetime.projection_bytes << '\n';
+        eawr::scene::VfsAssetCache probe(prepared_filesystem.value());
+        std::cout << "installed shared decodes=" << probe.model_stats().unique_loads
+            << " serial full decodes=" << cache.model_stats().unique_loads << '\n';
+        if (readers == 0) expect(probe.model_stats().unique_loads == cache.model_stats().unique_loads,
+            "installed serial shared preparation adds no model decode versus the full baseline");
+    }
+    input.filesystem = &filesystem.value();
     units::SimulationModelStore store(filesystem.value());
     input.model = store.model_lookup();
     input.digest = store.digest_lookup();
@@ -550,6 +1105,7 @@ struct PrefetchLoad final {
     std::vector<std::uint8_t> encoding;
     std::array<std::uint8_t, 32> identity{};
     std::vector<units::Unresolved> unresolved;
+    std::vector<units::Unresolved> notes;
     eawr::scene::VfsAssetCache::ModelStats store;
     eawr::scene::ModelPrefetchStats prefetch;
     std::vector<std::string> unplanned_paths; // asked by the loader, never offered (lower-case)
@@ -558,7 +1114,7 @@ struct PrefetchLoad final {
 
 // The fixture's unit tables, loaded from disk files through VfsAssetCache on a freshly mounted VFS (a fresh model store).
 // readers == 0: no prefetch. Otherwise a ModelPrefetch with that many readers is wired in as skirmish_prepare wires it.
-PrefetchLoad load_with_prefetch(const std::filesystem::path& root, const unsigned readers) {
+PrefetchLoad load_with_prefetch(const std::filesystem::path& root, const unsigned readers, bool* reversed = nullptr) {
     PrefetchLoad result;
     const std::array mounts{eawr::vfs::MountSpec{"base", root, "data", {}}};
     auto mounted = eawr::vfs::Vfs::mount(mounts);
@@ -585,9 +1141,19 @@ PrefetchLoad load_with_prefetch(const std::filesystem::path& root, const unsigne
     };
     input.types = {"Skirmish_Test_Base", "Test_Frigate", "Test_Squadron", "Test_Squadron_Pair"};
     std::unique_ptr<eawr::scene::ModelPrefetch> prefetch;
+    std::atomic<unsigned> started{0};
+    std::atomic<bool> reversed_completion{false};
     if (readers != 0) {
         eawr::scene::ModelPrefetchOptions options;
         options.fixed_readers = readers;
+        // Keep the first decode behind the second until the latter has finished. A loader that
+        // commits completion order instead of request order will change the resulting tables.
+        // Block the first REQUESTED path (not whichever reader arrives first), so a reversal is proven.
+        const auto first_requested = lowered(units::planned_model_paths(input).front());
+        if (reversed) options.decode_hook = [&, first_requested](std::string_view path) {
+            if (lowered(path) == first_requested && started.fetch_add(1) == 0)
+                reversed_completion = wait_until([&] { return prefetch->stats().decoded != 0; });
+        };
         prefetch = std::make_unique<eawr::scene::ModelPrefetch>(mounted.value(), options);
         auto* raw_prefetch = prefetch.get();
         input.model_hint = [raw_prefetch, &offered, lowered](const std::string& path) {
@@ -596,6 +1162,11 @@ PrefetchLoad load_with_prefetch(const std::filesystem::path& root, const unsigne
         };
         input.model_taken = [raw_prefetch](const std::string& path) { raw_prefetch->taken(path); };
         input.model_skipped = [raw_prefetch](const std::string& path) { raw_prefetch->skipped(path); };
+        if (reversed) {
+            // Finish the second decode before the consumer can request and decode the first itself.
+            for (const auto& path : units::planned_model_paths(input)) prefetch->offer(path);
+            *reversed = wait_until([&] { return reversed_completion.load(); });
+        }
     }
     auto tables = units::load_unit_tables(input);
     if (prefetch) {
@@ -612,6 +1183,7 @@ PrefetchLoad load_with_prefetch(const std::filesystem::path& root, const unsigne
         result.encoding = units::canonical_encoding(tables.value());
         result.identity = units::content_identity(tables.value());
         result.unresolved = tables.value().unresolved;
+        result.notes = tables.value().notes;
     }
     return result;
 }
@@ -629,7 +1201,7 @@ void prefetched_tables_equal_plain_tables() {
         const auto fast = load_with_prefetch(tree.root, readers);
         expect(fast.loaded, "the prefetched load succeeds" + label);
         expect(fast.encoding == plain.encoding && fast.identity == plain.identity, "tables are bit-equal" + label);
-        expect(same_rows(fast.unresolved, plain.unresolved), "unresolved rows are equal" + label);
+        expect(same_rows(fast.unresolved, plain.unresolved) && same_rows(fast.notes, plain.notes), "diagnostic rows are equal" + label);
         expect(fast.store.unique_loads == plain.store.unique_loads && fast.store.entries == plain.store.entries,
             "each file is decoded once, as without a prefetch" + label);
         expect(fast.prefetch.readers == readers && fast.prefetch.planned >= 2, "the plan names the models" + label);
@@ -642,6 +1214,24 @@ void prefetched_tables_equal_plain_tables() {
             >= fast.prefetch.planned, "every offered model was asked for" + label);
         expect(fast.prefetch.unrequested == 0, "nothing was decoded and never asked for" + label);
     }
+    bool reversed = false;
+    const auto reordered = load_with_prefetch(tree.root, 2, &reversed);
+    expect(reversed, "the second model completed while the first was blocked");
+    expect(reordered.encoding == plain.encoding && reordered.identity == plain.identity
+        && same_rows(reordered.unresolved, plain.unresolved) && same_rows(reordered.notes, plain.notes),
+        "out-of-order completion preserves table and diagnostic order");
+
+    TempTree bad_tree;
+    write_fixture(bad_tree.root, units_xml("200", "Select_Test"));
+    write_tiny_models(bad_tree.root, {"test_frigate.alo", "test_turret.alo", "test_station.alo", "test_fighter.alo"});
+    { std::ofstream invalid(bad_tree.root / "art" / "models" / "test_station.alo", std::ios::binary | std::ios::trunc); invalid << "invalid"; }
+    const auto bad_plain = load_with_prefetch(bad_tree.root, 0);
+    bool bad_reversed = false;
+    const auto bad_parallel = load_with_prefetch(bad_tree.root, 2, &bad_reversed);
+    expect(bad_reversed && !bad_plain.unresolved.empty(), "the corrupt-model fixture reverses completion and reports a failure");
+    expect(bad_parallel.encoding == bad_plain.encoding && bad_parallel.identity == bad_plain.identity
+        && same_rows(bad_parallel.unresolved, bad_plain.unresolved) && same_rows(bad_parallel.notes, bad_plain.notes),
+        "a corrupt model preserves the serial failure and its order");
 }
 
 void prefetch_reader_policy() {
@@ -761,10 +1351,12 @@ int main(const int argc, char** argv) {
     if (argc == 2 && std::string_view(argv[1]) == "--installed") {
         const auto root = eawr::testing::environment("EAWR_EAW_GAME_ROOT");
         if (!root) return 77;
-        return installed(*root);
+        const auto mod = eawr::testing::environment("EAWR_REMAKE_MOD_ROOT");
+        return installed(*root, mod ? std::filesystem::path(*mod) : std::filesystem::path{});
     }
     projection_keeps_only_what_tables_read();
     tables_equal_full_and_projected();
+    shared_preparation_lifetime();
     store_reads_once_and_matches_the_cache();
     prefetch_answers_equal_serial();
     plan_covers_the_loaded_models();

@@ -198,32 +198,23 @@ void Loader::load_spawner(Object& object, UnitType& unit) {
         bool spawns = false;
         for (const auto& token : tokens(object.text("SpaceBehavior"))) spawns = spawns || iequals(token, "SPAWN_SQUADRON");
         const bool has_list = !object.list("Starting_Spawned_Units_Tech_0", report_).empty();
-        if (!input_.campaign_scene) {
-            for (const auto tag : {"Starting_Spawned_Units_Tech_1", "Starting_Spawned_Units_Tech_2",
-                                   "Starting_Spawned_Units_Tech_3", "Starting_Spawned_Units_Tech_4"}) {
-                if (!object.list(tag, report_).empty()) {
-                    report_.note(unit.id, tag, {}, "spawn list for a tech level other than Tech_0; not loaded (SK-23)");
-                }
-            }
-        }
         if (!spawns) {
             if (has_list) report_.note(unit.id, "Starting_Spawned_Units_Tech_0", {}, "list present without SPAWN_SQUADRON");
             return;
         }
         Spawner spawner;
         spawner.starting = spawn_list(object, "Starting_Spawned_Units_Tech_0", true);
-        if (spawner.starting.empty() && !input_.campaign_scene) {
-            report_.missing(unit.id, "Starting_Spawned_Units_Tech_0", {}, "SPAWN_SQUADRON without a starting list");
-        }
         spawner.delay_seconds = object.fixed("Spawned_Squadron_Delay_Seconds", report_, true);
         spawner.reserves = spawn_list(object, "Reserve_Spawned_Units_Tech_0", input_.campaign_scene);
-        if (input_.campaign_scene) {
-            spawner.campaign_starting[0] = spawner.starting;
-            spawner.campaign_reserves[0] = spawner.reserves;
-            for (unsigned tech = 1; tech < 6; ++tech) {
-                spawner.campaign_starting[tech] = spawn_list(object, "Starting_Spawned_Units_Tech_" + std::to_string(tech), true);
-                spawner.campaign_reserves[tech] = spawn_list(object, "Reserve_Spawned_Units_Tech_" + std::to_string(tech), true);
-            }
+        spawner.campaign_starting[0] = spawner.starting;
+        spawner.campaign_reserves[0] = spawner.reserves;
+        for (unsigned tech = 1; tech < 6; ++tech) {
+            spawner.campaign_starting[tech] = spawn_list(object, "Starting_Spawned_Units_Tech_" + std::to_string(tech), true);
+            spawner.campaign_reserves[tech] = spawn_list(object, "Reserve_Spawned_Units_Tech_" + std::to_string(tech), true);
+        }
+        if (!input_.campaign_scene && std::all_of(spawner.campaign_starting.begin(), spawner.campaign_starting.end(),
+                [](const auto& tier) { return tier.empty(); })) {
+            report_.missing(unit.id, "Starting_Spawned_Units_Tech_0", {}, "SPAWN_SQUADRON without a starting list");
         }
         unit.spawner = std::move(spawner);
     }
@@ -648,6 +639,7 @@ void Loader::load_team(Object& object, UnitType& unit) {
         load_abilities(*team, container);
         unit.team_abilities = std::move(container.abilities);
         unit.team_special_abilities = std::move(container.special_abilities);
+        unit.healing_blobs.insert(unit.healing_blobs.end(), container.healing_blobs.begin(), container.healing_blobs.end());
         unit.team_buzz_droids = std::move(container.buzz_droids);
         team->note_duplicates(report_);
     }

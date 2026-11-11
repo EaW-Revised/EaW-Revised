@@ -36,10 +36,21 @@ struct Room {
     std::optional<sim::MatchAgreement> host_identity, client_identity;
     // Online room mesh hooks (N4): the Start gate and the Lock before the commitment. Off unless `gate` is set.
     bool gate{}, mesh_ok{true}, lock_ok{true};
-    unsigned contexts{}, builds{}, locks{}, lock_polls{};
+    unsigned contexts{}, builds{}, locks{}, lock_polls{}, lock_calls{};
     bool async_lock{}, async_confirm{}, async_refuse{}, early_lock{};
-    explicit Room(unsigned count = 2, std::size_t workers = 1, net::LobbyLimits limits = {}, bool early = false)
+    // #6045: the offer hook answers "pending" for the peers in `held_offers` (a campaign derivation still running on a worker)
+    // and, once `offer_fails` is set, fails with its own diagnostic instead.
+    std::set<unsigned> held_offers;
+    bool offer_fails{};
+    unsigned offer_calls{};
+    bool concurrent_prepare{}, bad_offer{};
+    std::string bad_input_domain, bad_state_domain;
+    unsigned bad_mounts{};
+    bool alias_mount_names{};
+    std::map<unsigned, unsigned> offers_by_peer, discarded;
+    explicit Room(unsigned count = 2, std::size_t workers = 1, net::LobbyLimits limits = {}, bool early = false, bool concurrent = false)
         : network(count), executor(std::make_shared<eawr::platform::ThreadWorkerAdapter>(workers)), streams(count, nullptr), early_lock(early) {
+        concurrent_prepare = concurrent;
         for (unsigned peer = 0; peer < count; ++peer) transports.push_back(std::make_unique<eawr::testing::FakeTransport>(network, peer));
         sessions.push_back(require(net::LobbySession::host(*transports[0], "test-room", std::min(count, net::max_lobby_seats),
             selection(0), 1, {"data/art/maps/test.ted", {0}}, hooks(0), limits)));
@@ -53,6 +64,32 @@ struct Room {
     std::uint64_t revision() { return host().snapshot().revision; }
     net::LobbyHooks hooks(unsigned peer) {
         net::LobbyHooks value;
+        if (concurrent_prepare) {
+            value.preparation_mounts = [this, peer](const net::LobbySnapshot&, const net::SetupOffer* prepared) {
+                std::vector<eawr::core::ContentLayerIdentity> layers{
+                    {"Fixture leaf", sim::identity_domain("leaf", "content A").digest},
+                    {"Fixture parent", sim::identity_domain("parent", "content B").digest}};
+                if (peer == 1 && alias_mount_names) { layers[0].name = "Workshop copy"; layers[1].name = "Manual folder"; }
+                if (peer == 1 && ((bad_mounts == 1 && !prepared) || (bad_mounts == 2 && prepared))) layers[0].digest[0] ^= 1;
+                if (peer == 1 && bad_mounts == 3) std::swap(layers[0], layers[1]);
+                if (peer == 1 && bad_mounts == 4 && !prepared) return Result<std::vector<eawr::core::ContentLayerIdentity>>::failure(net::lobby_diagnostic(net::LobbyReason::setup_failed, ""));
+                if (peer == 1 && bad_mounts == 5 && !prepared) return Result<std::vector<eawr::core::ContentLayerIdentity>>::failure(net::lobby_diagnostic(net::LobbyReason::setup_failed, " 	 "));
+                return Result<std::vector<eawr::core::ContentLayerIdentity>>::success(std::move(layers));
+            };
+            value.preparation_inputs = [this, peer](const net::LobbySnapshot&, const std::vector<net::SetupSeat>&) {
+                sim::MatchIdentity identity;
+                for (const auto* domain : {"build", "mod-order", "mod-bytes", "roster", "seats", "seed", "options", "rules"})
+                    identity.domains.push_back(sim::identity_domain(domain, peer == 1 && bad_input_domain == domain ? "different" : "same"));
+                return Result<std::vector<sim::IdentityDomain>>::success(sim::compute_match_identity(std::move(identity)).domains);
+            };
+            value.preparation_domains = [this, peer](const net::SetupOffer&) {
+                sim::MatchIdentity identity;
+                for (const auto* domain : {"gc-ai-controllers", "gc-prepared-owner", "gc-prepared-provider", "gc-tick-zero"})
+                    identity.domains.push_back(sim::identity_domain(domain, peer == 1 && bad_state_domain == domain ? "different" : "same"));
+                return Result<std::vector<sim::IdentityDomain>>::success(sim::compute_match_identity(std::move(identity)).domains);
+            };
+            value.discard_preparation = [this, peer] { ++discarded[peer]; };
+        }
         value.validate = [this](const net::LobbySnapshot& snapshot, bool starting) {
             if (snapshot.game.map != "data/art/maps/test.ted" || snapshot.game.options.size() != 1
                 || snapshot.game.options[0] > 5 || (starting && invalid_start))
@@ -73,7 +110,11 @@ struct Room {
             }
             return Result<void>::success();
         };
-        value.offer = [this](const net::LobbySnapshot& snapshot, const std::vector<net::SetupSeat>& roster) {
+        value.offer = [this, peer](const net::LobbySnapshot& snapshot, const std::vector<net::SetupSeat>& roster) {
+            ++offer_calls;
+            ++offers_by_peer[peer];
+            if (offer_fails) return Result<net::SetupOffer>::failure(net::lobby_diagnostic(net::LobbyReason::setup_failed, "synthetic derivation failure"));
+            if (held_offers.contains(peer)) return Result<net::SetupOffer>::failure(net::start_pending_diagnostic("derivation running"));
             if (fail_credential_offer) {
                 eawr::core::Diagnostic error; error.code = "EAWR-NET-1022"; error.message = "Partial credential row delivery failed.";
                 return Result<net::SetupOffer>::failure(std::move(error));
@@ -88,6 +129,7 @@ struct Room {
             auto selected = offer(); selected.seed = initial.seed;
             if (host_identity) { selected.identity = *host_identity; initial.match_identity = host_identity->content; }
             selected.setup = require(net::encode_skirmish_setup(initial)); selected.seats = roster;
+            if (bad_offer && peer == 1) ++selected.input_delay;
             return Result<net::SetupOffer>::success(std::move(selected));
         };
         value.setup = [this, peer](net::MessageTransport& transport, const net::LobbySnapshot&) {
@@ -110,6 +152,7 @@ struct Room {
         };
         value.lock_at_start = early_lock && peer == 0;
         value.lock_room_progress = [this] {
+            ++lock_calls;
             if (!async_lock) return Result<bool>::success(true);
             ++lock_polls;
             if (async_refuse) {
@@ -214,16 +257,21 @@ void codec() {
     expect(repaired.text.find('\0') == std::string::npos, "embedded NUL text is sanitized at intake");
     invalid = snapshot; invalid.seats[1].selection.name = "GuEsT-0";
     expect(!net::encode_lobby_frame(invalid), "case-insensitive duplicate guest names refused");
-    invalid = snapshot; invalid.mounted_mods = {1, 1, 0, 0, 0, 0};
+    invalid = snapshot; invalid.mounted_mods = {3, 1, 0, 0, 0, 0};
     const auto with_mods = require(net::encode_lobby_frame(invalid));
     expect(std::get<net::LobbySnapshot>(require(net::decode_lobby_frame(with_mods))).mounted_mods == invalid.mounted_mods,
         "mounted description survives the lobby snapshot");
+    auto old_mods = with_mods;
+    old_mods[old_mods.size() - 6] = 1;
+    const auto old_result = net::decode_lobby_frame(old_mods);
+    expect(!old_result && old_result.error().message.find("mod list version 1, this build needs version 2") != std::string::npos,
+        "old lobby mod description gives a clear version diagnostic");
     auto forged_mods = with_mods;
     forged_mods[forged_mods.size() - 2] = 1;
     expect(!net::decode_lobby_frame(forged_mods), "an oversized mod count in a received snapshot is refused");
-    invalid.mounted_mods = {1, 1, 1, 1, 0, 0};
+    invalid.mounted_mods = {3, 1, 1, 1, 0, 0};
     expect(!net::encode_lobby_frame(invalid), "excessive mounted mod count is refused");
-    invalid.mounted_mods = {1, 1, 1, 0, 0, 0, 1, 255, 255, 255, 255};
+    invalid.mounted_mods = {3, 1, 1, 0, 0, 0, 1, 255, 255, 255, 255};
     expect(!net::encode_lobby_frame(invalid), "excessive mounted mod string is refused");
 }
 void authority_and_revisions() {
@@ -916,8 +964,421 @@ void early_freeze_cancellation() {
     expect(!start && start.error().code == "EAWR-NET-1774" && refused.host().snapshot() == before,
         "Proved admission race leaves the exact staging revision editable");
 }
+// #6045: the host's Start waits on an asynchronous offer hook with the room locked, and publishes when it answers.
+void asynchronous_host_start() {
+    {
+        Room room; room.all_ready();
+        room.held_offers = {0};
+        const auto before = room.host().snapshot();
+        require(room.host().start(room.revision()));
+        expect(room.host().start_pending() && room.host().snapshot().phase == net::LobbyPhase::staging,
+            "#6045 a pending Start stays in staging on the wire");
+        room.rounds(30);
+        expect(room.host().start_pending() && room.client().snapshot().phase == net::LobbyPhase::staging && room.client().snapshot() == room.host().snapshot(),
+            "#6045 every pump keeps the room serviced and the guest is not told Start before the offer exists");
+        expect(room.offer_calls > 1, "#6045 each pump asks the offer hook again");
+        // Locked: the host's own edits and a guest's edit are refused with the reason.
+        const auto locked = room.host().set_game({"data/art/maps/test.ted", {1}}, room.revision());
+        expect(!locked && locked.error().message.find("preparing") != std::string::npos, "#6045 host edits are refused while the Start is pending");
+        expect(!room.host().start(room.revision()), "#6045 a second Start is refused while one is pending");
+        require(room.client().request(net::LobbyAction::select, room.revision(), selection(5)));
+        room.rounds(3);
+        expect(room.client().notice() && room.client().notice()->message.find("preparing") != std::string::npos,
+            "#6045 a guest's edit is refused and says why the room is locked");
+        bool told = false;
+        for (const auto& line : room.client().chat_history()) told = told || line.text.find("preparing the campaign") != std::string::npos;
+        expect(told, "#6045 the room is told once that the host is preparing");
+        expect(room.host().snapshot().revision == before.revision && room.host().snapshot().game == before.game, "#6045 the locked room did not change");
+        // The derivation finishes: Start publishes on the next pump and the match proceeds as usual.
+        room.held_offers.clear();
+        room.rounds(3);
+        expect(!room.host().start_pending() && room.host().snapshot().phase == net::LobbyPhase::starting
+            && room.client().snapshot().phase == net::LobbyPhase::starting, "#6045 the answered offer publishes Start on both peers");
+        for (unsigned peer = 1; peer < room.sessions.size(); ++peer) require(room.sessions[peer].accept_setup());
+        for (unsigned i = 0; i < 50 && room.client().snapshot().phase != net::LobbyPhase::committed; ++i) room.round();
+        expect(room.host().snapshot().phase == net::LobbyPhase::committed && room.client().snapshot().phase == net::LobbyPhase::committed,
+            "#6045 a Start that waited commits like any other");
+    }
+    {
+        // Cancel: the room is editable again and everyone is told.
+        Room room; room.all_ready();
+        room.held_offers = {0};
+        require(room.host().start(room.revision()));
+        room.rounds(5);
+        require(room.host().cancel_start());
+        room.rounds(3);
+        expect(!room.host().start_pending() && room.host().snapshot().phase == net::LobbyPhase::staging, "#6045 Cancel ends the pending Start");
+        expect(!room.host().cancel_start(), "#6045 Cancel with nothing pending is refused");
+        bool told = false;
+        for (const auto& line : room.client().chat_history()) told = told || line.text.find("Start was cancelled") != std::string::npos;
+        expect(told, "#6045 the room is told the Start was cancelled");
+        require(room.host().set_game({"data/art/maps/test.ted", {1}}, room.revision()));
+        room.held_offers.clear();
+        room.all_ready();
+        require(room.host().start(room.revision()));
+        room.rounds(3);
+        expect(room.host().snapshot().phase == net::LobbyPhase::starting, "#6045 after Cancel a new Start publishes normally");
+    }
+    {
+        // A guest leaving or withdrawing readiness cancels the wait; no Start is published for a room that changed.
+        for (const bool leave : {true, false}) {
+            Room room; room.all_ready();
+            room.held_offers = {0};
+            require(room.host().start(room.revision()));
+            room.rounds(3);
+            require(room.client().request(leave ? net::LobbyAction::leave : net::LobbyAction::unready, room.revision()));
+            room.held_offers.clear();
+            room.rounds(5);
+            expect(!room.host().start_pending() && room.host().snapshot().phase == net::LobbyPhase::staging,
+                "#6045 a guest leaving or withdrawing readiness cancels the pending Start even when the offer is ready");
+            expect(room.host().notice().has_value(), "#6045 the host keeps a notice saying why the Start was cancelled");
+        }
+    }
+    {
+        // The derivation fails: the wait ends with the failure's own message, the room stays open.
+        Room room; room.all_ready();
+        room.held_offers = {0};
+        require(room.host().start(room.revision()));
+        room.rounds(3);
+        room.held_offers.clear(); room.offer_fails = true;
+        room.rounds(3);
+        expect(!room.host().start_pending() && room.host().snapshot().phase == net::LobbyPhase::staging
+            && room.host().notice() && room.host().notice()->message.find("synthetic derivation failure") != std::string::npos,
+            "#6045 a failed derivation ends the wait and reports its failure");
+    }
+    {
+        // #6117 review: a resumed Start refused by the room Lock (EAWR-NET-1774, the proved admission race) is not silent: the host
+        // gets the refusal as its notice and the room is told, exactly as the synchronous Start reports it.
+        Room room(2, 1, {}, true); room.async_lock = room.async_refuse = true; room.all_ready();
+        room.held_offers = {0};
+        require(room.host().start(room.revision()));
+        expect(room.host().start_pending(), "#6045 the early-freeze room's Start waits on the offer hook");
+        room.held_offers.clear();
+        room.rounds(3);
+        expect(!room.host().start_pending() && room.host().snapshot().phase == net::LobbyPhase::staging
+            && room.host().notice() && room.host().notice()->message.find("Start raced a player joining.") != std::string::npos,
+            "#6045 a resumed Start refused by the Lock reports the refusal to the host");
+        bool told = false;
+        for (const auto& line : room.client().chat_history()) told = told || line.text.find("Start was cancelled") != std::string::npos;
+        expect(told, "#6045 and the room is told the Start was cancelled");
+    }
+    {
+        // Closing the room while waiting.
+        Room room; room.all_ready();
+        room.held_offers = {0};
+        require(room.host().start(room.revision()));
+        require(room.host().close());
+        expect(!room.host().start_pending() && room.host().snapshot().phase == net::LobbyPhase::closed, "#6045 closing the room ends the wait");
+    }
+}
+
+// #6045: a guest's frozen setup waits on the offer hook without freezing the room, keeps the host's setup frames queued and
+// proceeds when the hook answers.
+void asynchronous_guest_setup() {
+    Room room; room.all_ready();
+    room.held_offers = {1};
+    require(room.host().start(room.revision()));
+    expect(!room.host().start_pending() && room.host().snapshot().phase == net::LobbyPhase::starting, "#6045 the host publishes Start (its offer is ready)");
+    room.rounds(40);
+    expect(room.client().snapshot().phase == net::LobbyPhase::starting && room.client().setup_pending() && !room.client().setup_phase(),
+        "#6045 the guest is frozen for Start with its own setup pending, and its pump keeps returning");
+    expect(room.offer_calls > 2, "#6045 the guest's pump asks the offer hook again");
+    expect(!room.client().accept_setup(), "#6045 there is nothing to accept while the guest's setup is pending");
+    room.held_offers.clear();
+    room.rounds(3);
+    expect(!room.client().setup_pending() && room.client().setup_phase() == net::SetupPhase::reviewing_offer,
+        "#6045 the answered offer builds the guest's setup and the host's queued offer is reviewed");
+    require(room.client().accept_setup());
+    for (unsigned i = 0; i < 50 && room.client().snapshot().phase != net::LobbyPhase::committed; ++i) room.round();
+    expect(room.host().snapshot().phase == net::LobbyPhase::committed && room.client().snapshot().phase == net::LobbyPhase::committed,
+        "#6045 a guest that waited commits like any other");
+    // The host cancelling the attempt while the guest waits clears the guest's pending setup.
+    Room cancelled; cancelled.all_ready();
+    cancelled.held_offers = {1};
+    require(cancelled.host().start(cancelled.revision()));
+    cancelled.rounds(5);
+    require(cancelled.host().kick(1, cancelled.host().snapshot().revision));
+    cancelled.rounds(3);
+    expect(!cancelled.client().setup_pending(), "#6045 a pending guest setup ends when the room does");
+}
+void concurrent_campaign_preparation() {
+    for (const auto workers : {1U, 8U}) for (const auto count : {2U, 3U, net::max_lobby_seats}) for (const bool host_first : {false, true}) {
+        Room room(count, workers, {}, false, true);
+        room.alias_mount_names = true;
+        for (unsigned peer = 0; peer < count; ++peer) room.held_offers.insert(peer);
+        room.network.fault = [](auto, auto, std::span<const std::uint8_t> bytes) {
+            eawr::testing::FakeDelivery delivery;
+            if (!bytes.empty() && bytes.front() == net::lobby_prepared_kind) {
+                delivery.duplicate = true; delivery.ordered_delay = 2; delivery.duplicate_delay = 2;
+            }
+            return delivery;
+        };
+        room.all_ready(); require(room.host().start(room.revision())); room.rounds(5);
+        expect(room.host().start_pending() && room.contexts == 0 && room.builds == 0,
+            "manifest freezes the room without starting setup or simulation");
+        for (unsigned peer = 0; peer < count; ++peer) {
+            expect(room.offers_by_peer[peer] > 0 && !room.sessions[peer].result_ready(), "every admitted peer prepares before any offer finishes");
+            if (peer) expect(room.sessions[peer].setup_pending() && !room.sessions[peer].accept_setup(), "guest cannot accept an unprepared setup");
+        }
+        if (host_first) room.held_offers.erase(0);
+        else for (unsigned peer = 1; peer < count; ++peer) room.held_offers.erase(peer);
+        room.rounds(10);
+        expect(room.host().start_pending() && room.contexts == 0, "either completion order waits for every peer's claim");
+        for (unsigned peer = 1; peer < count; ++peer)
+            require(room.sessions[peer].request(net::LobbyAction::snapshot, room.sessions[peer].snapshot().revision));
+        room.rounds(10);
+        expect(room.host().start_pending() && room.contexts == 0,
+            "snapshot refreshes while either side prepares cannot release setup before unanimous claims");
+        room.held_offers.clear(); room.rounds(20);
+        expect(!room.host().start_pending() && room.contexts == count, "matching unanimous preparation enables ordinary setup");
+        for (unsigned peer = 1; peer < count; ++peer) require(room.sessions[peer].accept_setup());
+        room.rounds(80);
+        for (const auto& session : room.sessions) expect(session.result_ready(), "all peers pass existing setup and tick-zero barriers after prepared agreement");
+    }
+    for (const auto* domain : {"build", "mod-order", "mod-bytes", "roster", "seats", "seed", "options", "rules",
+             "gc-ai-controllers", "gc-prepared-owner", "gc-prepared-provider", "gc-tick-zero"}) {
+        Room room(2, 1, {}, false, true);
+        if (std::string_view(domain).starts_with("gc-")) room.bad_state_domain = domain;
+        else room.bad_input_domain = domain;
+        room.all_ready(); require(room.host().start(room.revision())); room.rounds(12);
+        expect(room.host().snapshot().phase == net::LobbyPhase::staging && room.builds == 0,
+            "manifest/state mismatch cancels before any adapter is built");
+        expect(room.host().notice() && room.host().notice()->message.find(domain) != std::string::npos
+            && room.host().notice()->message.find("peer 1") != std::string::npos, "mismatch diagnostic identifies peer and domain");
+        expect(room.discarded[0] && room.discarded[1], "mismatch discards both candidates");
+    }
+    for (const auto bad : {1U, 2U, 3U}) {
+        Room room(2, 1, {}, false, true); room.bad_mounts = bad;
+        room.all_ready(); require(room.host().start(room.revision())); room.rounds(12);
+        expect(room.host().snapshot().phase == net::LobbyPhase::staging && room.contexts == 0 && room.builds == 0,
+            "per-layer content/order mismatch refuses before setup and play");
+        expect(room.host().notice() && room.host().notice()->message.find("Fixture leaf") != std::string::npos
+            && room.host().notice()->message.find("peer 1") != std::string::npos,
+            "preflight and prepared tactical mismatches name the differing mod and peer");
+    }
+    {
+        Room room(2, 1, {}, false, true); room.bad_offer = true;
+        room.all_ready(); require(room.host().start(room.revision())); room.rounds(12);
+        expect(room.host().snapshot().phase == net::LobbyPhase::staging && room.builds == 0
+            && room.host().notice() && room.host().notice()->message.find("sealed offer") != std::string::npos,
+            "a final offer difference refuses even if additional state claims match");
+    }
+}
+
+// Review #6288: a Start that prepares first takes the early roster lock once, not again after unanimous claims.
+void concurrent_preparation_locks_once() {
+    unsigned calls[2]{};
+    for (const bool concurrent : {false, true}) {
+        Room room(2, 1, {}, true, concurrent); room.all_ready();
+        require(room.host().start(room.revision())); room.rounds(20);
+        if (concurrent) expect(room.lock_calls == 1, "preparation freezes the roster exactly once, before the guests' claims arrive");
+        for (unsigned peer = 1; peer < 2; ++peer) require(room.sessions[peer].accept_setup());
+        room.rounds(80);
+        for (const auto& session : room.sessions) expect(session.result_ready(), "Start with an early roster lock completes");
+        calls[concurrent] = room.lock_calls;
+    }
+    expect(calls[true] == calls[false], "preparing before Start asks the service to lock the same number of times as the ordinary Start");
+}
+
+void concurrent_preparation_cleanup() {
+    {
+        Room room(2, 1, {}, false, true); room.held_offers = {0, 1};
+        std::optional<net::LobbyPrepare> changed;
+        room.network.fault = [&](auto, auto, std::span<const std::uint8_t> bytes) {
+            eawr::testing::FakeDelivery delivery;
+            if (!bytes.empty() && bytes.front() == net::lobby_prepare_kind) {
+                changed = std::get<net::LobbyPrepare>(require(net::decode_lobby_frame(bytes))); delivery.drop = true;
+            }
+            return delivery;
+        };
+        room.all_ready(); require(room.host().start(room.revision()));
+        expect(changed.has_value(), "host published a preparation manifest before work");
+        auto snapshot = std::get<net::LobbySnapshot>(require(net::decode_lobby_frame(changed->snapshot)));
+        snapshot.game.options[0] = 1; changed->snapshot = require(net::encode_lobby_frame(snapshot));
+        room.network.fault = {}; room.inject(0, 1, *changed); room.rounds(6);
+        expect(room.host().snapshot().phase == net::LobbyPhase::staging && room.offers_by_peer[1] == 0
+            && room.host().notice() && room.host().notice()->message.find("manifest") != std::string::npos,
+            "changed frozen choices are refused before guest preparation and cancel the entire attempt");
+    }
+    for (const bool malformed : {false, true}) {
+        Room room(2, 1, {}, false, true); room.held_offers = {0};
+        std::optional<net::LobbyPrepared> captured;
+        room.network.before_send = [&](auto, auto, std::span<const std::uint8_t> bytes) {
+            if (!bytes.empty() && bytes.front() == net::lobby_prepared_kind)
+                captured = std::get<net::LobbyPrepared>(require(net::decode_lobby_frame(bytes)));
+        };
+        room.all_ready(); require(room.host().start(room.revision())); room.rounds(5);
+        expect(captured.has_value(), "guest prepared claim is available before the host finishes");
+        room.network.before_send = {};
+        if (malformed) {
+            auto bytes = require(net::encode_lobby_frame(*captured)); bytes.back() ^= 1;
+            require(room.transports[1]->send(0, bytes));
+        } else {
+            captured->domains.front().digest[0] ^= 1; room.inject(1, 0, *captured);
+        }
+        room.rounds(5);
+        expect(room.host().snapshot().phase == net::LobbyPhase::staging && room.builds == 0,
+            "malformed or conflicting duplicate claims cancel everyone before setup");
+    }
+    for (const auto action : {net::LobbyAction::unready, net::LobbyAction::leave}) {
+        Room room(3, 1, {}, false, true); room.held_offers = {0, 1, 2}; room.all_ready();
+        require(room.host().start(room.revision())); room.rounds(4);
+        require(room.client().request(action, room.revision())); room.rounds(4);
+        room.held_offers.clear(); room.rounds(4);
+        expect(room.host().snapshot().phase == net::LobbyPhase::staging && room.builds == 0 && !room.host().start_pending(),
+            "withdrawal/departure wins over any later preparation result");
+    }
+    {
+        Room room(2, 1, {}, false, true); room.held_offers = {0};
+        std::optional<net::LobbyPrepare> old_manifest; std::optional<net::LobbyPrepared> old_claim;
+        room.network.before_send = [&](auto, auto, std::span<const std::uint8_t> bytes) {
+            if (bytes.empty() || (bytes.front() != net::lobby_prepare_kind && bytes.front() != net::lobby_prepared_kind)) return;
+            const auto decoded = require(net::decode_lobby_frame(bytes));
+            if (const auto* manifest = std::get_if<net::LobbyPrepare>(&decoded)) old_manifest = *manifest;
+            if (const auto* claim = std::get_if<net::LobbyPrepared>(&decoded)) old_claim = *claim;
+        };
+        room.all_ready(); require(room.host().start(room.revision())); room.rounds(8);
+        expect(old_manifest && old_claim, "old attempt generated its own manifest and guest claim");
+        const auto first_attempt = room.host().snapshot().start_attempt;
+        room.network.before_send = {};
+        require(room.host().cancel_start()); room.rounds(4);
+        room.all_ready(); require(room.host().start(room.revision())); room.rounds(4);
+        expect(first_attempt != room.host().snapshot().start_attempt, "retry always creates a fresh attempt");
+        room.inject(0, 1, *old_manifest); room.inject(1, 0, *old_claim);
+        auto rebound = *old_claim; rebound.revision = room.revision(); room.inject(1, 0, rebound);
+        room.inject(0, 1, net::LobbySetupFrame{"test-room", room.revision(), {net::setup_start_kind}, first_attempt});
+        room.rounds(4);
+        expect(room.host().start_pending() && room.builds == 0, "old manifests, claims and setup envelopes cannot complete a retry");
+        room.held_offers.clear(); room.rounds(10);
+        require(room.client().accept_setup()); room.rounds(50);
+        expect(room.client().result_ready(), "clean retry can still complete after stale traffic is rejected");
+    }
+    {
+        Room room(3, 1, {}, false, true); room.all_ready();
+        room.network.fail_send = [](auto from, auto to, std::span<const std::uint8_t> bytes) {
+            return from == 0 && to == 2 && !bytes.empty() && bytes.front() == net::lobby_prepared_kind;
+        };
+        require(room.host().start(room.revision()));
+        unsigned failures{};
+        for (unsigned round = 0; round < 12; ++round) {
+            ++room.network.round;
+            for (unsigned peer = 0; peer < room.sessions.size(); ++peer) {
+                auto pumped = room.sessions[peer].pump(room.network.round);
+                if (!pumped) { expect(peer == 0, "only the failed host release reports a send failure"); ++failures; }
+            }
+        }
+        expect(failures == 1 && room.host().snapshot().phase == net::LobbyPhase::staging && room.contexts == 0
+            && !room.host().result_ready() && !room.client().result_ready(),
+            "partial unanimous-release delivery cancels the attempt without creating setup for a subset");
+    }
+    {
+        Room room(2, 1, {}, false, true); room.held_offers = {0, 1}; room.all_ready();
+        require(room.host().start(room.revision())); room.rounds(4);
+        const auto attempt = room.host().snapshot().start_attempt;
+        require(room.client().request(net::LobbyAction::leave, room.revision())); room.rounds(4);
+        room.sessions[1] = require(net::LobbySession::join(*room.transports[1], "test-room", 0, room.hooks(1)));
+        require(room.host().admit(1, "new-admission", selection(1), 2, room.revision())); room.rounds(4);
+        room.all_ready(); require(room.host().start(room.revision())); room.rounds(4);
+        expect(room.host().snapshot().start_attempt != attempt, "reconnected transport index receives a new preparation attempt");
+        room.held_offers.clear(); room.rounds(12); require(room.client().accept_setup()); room.rounds(50);
+        expect(room.client().result_ready(), "disconnect/rejoin retries with the new admitted seat binding");
+    }
+    {
+        net::LobbyLimits limits; limits.preparation_timeout_ms = 20;
+        Room room(2, 1, limits, false, true); room.held_offers = {1}; room.all_ready();
+        require(room.host().start(room.revision())); room.rounds(30);
+        expect(room.host().snapshot().phase == net::LobbyPhase::staging && room.builds == 0 && room.host().notice()
+            && room.host().notice()->message.find("timed out") != std::string::npos, "missing prepared claim times out without subset commit");
+    }
+    {
+        // #6288 review: a hook's empty refusal text still reaches the host at once, with a fixed message.
+        Room room(2, 1, {}, false, true); room.bad_mounts = 4; room.all_ready();
+        require(room.host().start(room.revision())); room.rounds(12);
+        expect(room.host().snapshot().phase == net::LobbyPhase::staging && room.builds == 0 && room.host().notice()
+            && room.host().notice()->message.find("peer 1: The campaign could not be prepared on this computer.") != std::string::npos,
+            "an empty guest refusal message cancels the attempt immediately with the fixed text");
+    }
+    {
+        // #6288 review round 3: a whitespace-only refusal text is replaced by the same fixed text.
+        Room room(2, 1, {}, false, true); room.bad_mounts = 5; room.all_ready();
+        require(room.host().start(room.revision())); room.rounds(12);
+        expect(room.host().snapshot().phase == net::LobbyPhase::staging && room.builds == 0 && room.host().notice()
+            && room.host().notice()->message.find("peer 1: The campaign could not be prepared on this computer.") != std::string::npos,
+            "a whitespace-only guest refusal message cancels the attempt immediately with the fixed text");
+    }
+    {
+        // The host's own pending derivation still expires: the 30-minute bound is the only limit once nothing is exempt.
+        net::LobbyLimits limits; limits.preparation_timeout_ms = 20;
+        Room room(2, 1, limits, false, true); room.held_offers = {0, 1}; room.all_ready();
+        require(room.host().start(room.revision())); room.rounds(30);
+        expect(room.host().snapshot().phase == net::LobbyPhase::staging && room.builds == 0 && room.host().notice()
+            && room.host().notice()->message.find("timed out") != std::string::npos, "a held host offer times out without subset commit");
+    }
+    {
+        Room room(3, 1, {}, false, true); room.all_ready();
+        room.network.fail_send = [](auto, auto to, std::span<const std::uint8_t> bytes) {
+            return to == 2 && !bytes.empty() && bytes.front() == net::lobby_prepare_kind;
+        };
+        expect(!room.host().start(room.revision()), "partial manifest broadcast reports its failure");
+        room.rounds(6);
+        expect(room.host().snapshot().phase == net::LobbyPhase::staging && !room.host().result_ready()
+            && !room.client().result_ready() && room.builds == 0, "partial broadcast cannot commit the surviving subset");
+    }
+    {
+        Room room(2, 1, {}, false, true); room.held_offers = {0, 1}; room.all_ready();
+        require(room.host().start(room.revision())); room.rounds(4); room.network.open[1] = false;
+        room.rounds(4);
+        expect(room.host().snapshot().phase == net::LobbyPhase::staging && room.builds == 0, "disconnect cancels preparation before setup");
+    }
+    {
+        Room room(2, 1, {}, true, true); room.all_ready(); room.held_offers = {0, 1};
+        require(room.host().start(room.revision())); room.rounds(4); require(room.host().cancel_start()); room.rounds(4);
+        expect(room.host().snapshot().phase == net::LobbyPhase::closed, "cancellation after irreversible roster lock requires room recreation");
+    }
+}
+
+void preparation_codec() {
+    Room room(2, 1, {}, false, true); room.all_ready(); room.held_offers = {0, 1};
+    std::vector<Bytes> frames;
+    room.network.before_send = [&](auto, auto, std::span<const std::uint8_t> bytes) {
+        if (!bytes.empty() && (bytes.front() == net::lobby_prepare_kind || bytes.front() == net::lobby_prepared_kind))
+            frames.emplace_back(bytes.begin(), bytes.end());
+    };
+    require(room.host().start(room.revision())); room.rounds(3); room.held_offers.erase(1); room.rounds(3);
+    for (const auto& bytes : frames) {
+        expect(require(net::encode_lobby_frame(require(net::decode_lobby_frame(bytes)))) == bytes, "preparation codec round trip is canonical");
+        for (std::size_t size = 0; size < bytes.size(); ++size)
+            expect(!net::decode_lobby_frame(std::span(bytes).first(size)), "truncated preparation frame is refused");
+        auto old = bytes; old[1] = 2;
+        const auto refused = net::decode_lobby_frame(old);
+        expect(!refused && refused.error().message.find("version 3") != std::string::npos, "mixed lobby protocol refuses explicitly");
+        auto trailing = bytes; trailing.push_back(0); expect(!net::decode_lobby_frame(trailing), "trailing preparation bytes are refused");
+    }
+    expect(frames.size() >= 2, "both preparation frame kinds were exercised");
+    const auto decoded = require(net::decode_lobby_frame(frames.back()));
+    auto claim = std::get<net::LobbyPrepared>(decoded);
+    const auto original = require(net::encode_lobby_frame(claim));
+    expect(!claim.layers.empty(), "prepared fixture carries actual layer claims");
+    claim.layers.front().name = "Same content installed manually";
+    const auto renamed = require(net::encode_lobby_frame(claim));
+    expect(std::equal(original.end() - 32, original.end(), renamed.end() - 32),
+        "local mod labels do not enter the prepared content checksum");
+    auto tampered = original; tampered[tampered.size() - 33] ^= 1;
+    expect(!net::decode_lobby_frame(tampered), "changed layer digest without a matching claim checksum is refused");
+    claim.layers.front().digest = {};
+    expect(!net::encode_lobby_frame(claim), "unavailable consumed-content checksum is refused");
+    claim = std::get<net::LobbyPrepared>(decoded);
+    claim.layers.resize(257, claim.layers.front());
+    expect(!net::encode_lobby_frame(claim), "oversized preparation layer list is refused");
+    claim = std::get<net::LobbyPrepared>(decoded);
+    claim.domains.push_back(claim.domains.front());
+    expect(!net::encode_lobby_frame(claim), "duplicate or unordered claim domains are refused");
+}
+
 int main() {
     try {
+        concurrent_campaign_preparation(); concurrent_preparation_locks_once(); concurrent_preparation_cleanup(); preparation_codec();
+        asynchronous_host_start(); asynchronous_guest_setup();
         revised_layer_join(); early_freeze_cancellation(); cancellation_during_roster_confirmation(); asynchronous_roster_lock(); credential_delivery_retry(); atomic_game_configuration(); codec(); authority_and_revisions(); chat_contracts(); recovery_and_budgets(); send_failures_and_envelopes();
         admission_kick_close(); concurrent_staging_departures(); cancel_send_failure(); editable_team_rules(); start_races(); guest_waits_for_own_barrier(); committed_guest_barrier_failure_is_typed(); mesh_refusal_and_start_gate(); retained_transport_maps_room_peers();
         std::string baseline, nine_baseline, close_three_baseline, close_nine_baseline;

@@ -1329,6 +1329,138 @@ void stock_interdiction() {
     expect(!tactical::TacticalSession::create(c.tactical, invalid), "unknown absent prevention actor remains invalid");
     invalid = binding; invalid.retreat->prevention.back().ability_slot = 99;
     expect(!tactical::TacticalSession::create(c.tactical, invalid), "unbound prevention ability slot remains invalid");
+    {
+        auto passive_setup = c.tactical;
+        auto passive = binding;
+        passive.retreat->prevention.clear();
+        passive_setup.units.front().contained.front().type_id = 777;
+        auto second_carrier = std::find_if(passive_setup.units.begin(), passive_setup.units.end(),
+            [](const auto& unit) { return unit.entity_id == 25; });
+        tactical::CarriedObject second_rider; second_rider.entity_id = 26; second_rider.type_id = 777; second_rider.parent = 25;
+        second_carrier->contained.push_back(second_rider);
+        tactical::CommandBonusProfile source;
+        source.type = 777; source.battlefield = true; source.retreat_prevention = true;
+        source.enabled_players = {1}; source.bonus.applicable = {777};
+        passive.economy.command_bonuses.push_back(source);
+        std::vector<std::string> reference_passive;
+        for (const auto workers : eawr::platform::determinism_worker_counts()) {
+            eawr::platform::ThreadWorkerAdapter executor(workers);
+            auto session = checked(tactical::TacticalSession::create(passive_setup, passive));
+            const auto refusal = [&](const tactical::PlayerId player) {
+                const auto views = session.retreat_views();
+                return std::find_if(views.begin(), views.end(), [&](const auto& row) { return row.player == player; })->refusal;
+            };
+            expect(refusal(1) == tactical::RetreatRefusal::prevention && refusal(2) == tactical::RetreatRefusal::none,
+                "WRP-02: a carried source blocks its own player, not the enemy");
+            okay(session.submit({{0, 1, 1}, {}, tactical::RetreatPayload{tactical::RetreatAction::start}}));
+            std::vector<std::string> hashes{checked(session.step(executor)).state_sha256};
+            expect(session.retreat_state().phase == tactical::RetreatPhase::idle,
+                "WRP-02: owner retreat request is refused");
+            auto restored = checked(tactical::TacticalSession::create(passive_setup, passive));
+            okay(restored.load_checkpoint_state(checked(session.save_checkpoint_state())));
+            for (int tick = 0; tick < 3; ++tick) {
+                hashes.push_back(checked(session.step(executor)).state_sha256);
+                expect(checked(restored.step(executor)).state_sha256 == hashes.back(), "WRP-03: checkpoint continues with source");
+            }
+            okay(session.stage_remove(20));
+            expect(refusal(1) == tactical::RetreatRefusal::prevention,
+                "WRP-03: a second bearer continues to prevent retreat");
+            okay(session.stage_remove(25));
+            expect(refusal(1) == tactical::RetreatRefusal::none,
+                "WRP-03: removing the last carried source releases its owner");
+            // Construct the otherwise unreachable WRP-04 boundary: the source is
+            // present after an escape has already begun. Keep the real checkpoint
+            // ledger and replace only its encoded retreat state.
+            auto escape_setup = passive_setup;
+            escape_setup.cinematic_seats = {{1, false}, {2, false}, {3, false}};
+            auto escaped = checked(tactical::TacticalSession::create(escape_setup, passive));
+            auto bytes = checked(escaped.save_checkpoint_state());
+            const auto idle = tactical::encode_retreat_state(escaped.retreat_state());
+            tactical::RetreatState flight; flight.phase = tactical::RetreatPhase::escaping;
+            flight.player = 1; flight.deadline = 1; flight.cinematic_duration = 150; flight.actors = {20};
+            const auto flying = tactical::encode_retreat_state(flight);
+            std::vector<std::uint8_t> needle(8, 0); needle[0] = static_cast<std::uint8_t>(idle.size());
+            needle.insert(needle.end(), idle.begin(), idle.end());
+            const auto position = std::search(bytes.begin(), bytes.end(), needle.begin(), needle.end());
+            expect(position != bytes.end() && std::search(position + 1, bytes.end(), needle.begin(), needle.end()) == bytes.end(),
+                "WRP-04: checkpoint contains one retreat state");
+            const auto offset = static_cast<std::size_t>(position - bytes.begin());
+            bytes.erase(bytes.begin() + offset, bytes.begin() + offset + needle.size());
+            std::vector<std::uint8_t> replacement(8, 0); replacement[0] = static_cast<std::uint8_t>(flying.size());
+            replacement.insert(replacement.end(), flying.begin(), flying.end());
+            bytes.insert(bytes.begin() + offset, replacement.begin(), replacement.end());
+            okay(escaped.load_checkpoint_state(bytes));
+            const auto flight_views = escaped.retreat_views();
+            expect(std::find_if(flight_views.begin(), flight_views.end(), [](const auto& row) { return row.player == 1; })->refusal
+                == tactical::RetreatRefusal::prevention, "WRP-04: source remains active during an already-started escape");
+            while (escaped.retreat_state().phase == tactical::RetreatPhase::escaping && escaped.completed_tick() < 200)
+                checked(escaped.step(executor));
+            const auto escaped_units = escaped.units();
+            expect(escaped.retreat_state().phase == tactical::RetreatPhase::escaped
+                && std::any_of(escaped_units.begin(), escaped_units.end(), [](const auto& unit) { return unit.entity_id == 20; }),
+                "WRP-04: escaping bearer remains until battle teardown");
+            // The checkpoint's command-source row starts with rider and host IDs.
+            // The battle-decided gate masks prevention after escape, so inspect
+            // that retained row directly at the terminal boundary.
+            std::vector<std::uint8_t> source_ids;
+            for (const std::uint64_t id : {23ULL, 20ULL})
+                for (unsigned byte = 0; byte < 8; ++byte)
+                    source_ids.push_back(static_cast<std::uint8_t>(id >> (8 * byte)));
+            const auto terminal = checked(escaped.save_checkpoint_state());
+            const auto source_row = std::search(terminal.begin(), terminal.end(), source_ids.begin(), source_ids.end());
+            expect(source_row != terminal.end()
+                && std::search(source_row + 1, terminal.end(), source_ids.begin(), source_ids.end()) == terminal.end(),
+                "WRP-04: escaped rider's source remains in the ledger until teardown");
+            auto destroyed = checked(tactical::TacticalSession::create(passive_setup, passive));
+            okay(destroyed.stage_remove(20));
+            okay(destroyed.submit({{0, 1, 1}, {25}, tactical::DamagePayload{f(10000)}}));
+            checked(destroyed.step(executor));
+            const auto destroyed_views = destroyed.retreat_views();
+            const auto owner_view = std::find_if(destroyed_views.begin(), destroyed_views.end(),
+                [](const auto& row) { return row.player == 1; });
+            expect(owner_view->refusal == tactical::RetreatRefusal::none,
+                "WRP-03: destruction of the last rider with its carrier removes prevention");
+            std::vector<std::uint8_t> destroyed_source_ids;
+            for (const std::uint64_t id : {26ULL, 25ULL})
+                for (unsigned byte = 0; byte < 8; ++byte)
+                    destroyed_source_ids.push_back(static_cast<std::uint8_t>(id >> (8 * byte)));
+            const auto after_destruction = checked(destroyed.save_checkpoint_state());
+            expect(std::search(after_destruction.begin(), after_destruction.end(), destroyed_source_ids.begin(),
+                destroyed_source_ids.end()) == after_destruction.end(),
+                "WRP-03: destroyed rider's source is removed from the ledger");
+            // WRP-03 (debug build): a hero rider dies with its carrier and is never re-homed. Only upgrade
+            // dummies relocate (WGT-51, WGT-116), and those are held in the economy ledgers, not carried here.
+            {
+                auto split = checked(tactical::TacticalSession::create(passive_setup, passive));
+                okay(split.submit({{0, 1, 1}, {25}, tactical::DamagePayload{f(10000)}}));
+                checked(split.step(executor));
+                const auto remaining = split.units();
+                const auto first_carrier = std::find_if(remaining.begin(), remaining.end(),
+                    [](const auto& unit) { return unit.entity_id == 20; });
+                expect(std::none_of(remaining.begin(), remaining.end(), [](const auto& unit) { return unit.entity_id == 25; })
+                    && first_carrier != remaining.end() && first_carrier->contained.size() == 1
+                    && first_carrier->contained.front().entity_id == 23,
+                    "WRP-03: a destroyed carrier's hero rider is not re-homed to the other eligible flagship");
+                const auto split_views = split.retreat_views();
+                expect(std::find_if(split_views.begin(), split_views.end(), [](const auto& row) { return row.player == 1; })->refusal
+                    == tactical::RetreatRefusal::prevention, "WRP-03: the surviving carrier's own rider keeps its source");
+                const auto ledger_row = [](const std::uint64_t rider, const std::uint64_t host) {
+                    std::vector<std::uint8_t> ids;
+                    for (const std::uint64_t id : {rider, host})
+                        for (unsigned byte = 0; byte < 8; ++byte) ids.push_back(static_cast<std::uint8_t>(id >> (8 * byte)));
+                    return ids;
+                };
+                const auto saved = checked(split.save_checkpoint_state());
+                const auto has_row = [&](const std::vector<std::uint8_t>& ids) {
+                    return std::search(saved.begin(), saved.end(), ids.begin(), ids.end()) != saved.end();
+                };
+                expect(has_row(ledger_row(23, 20)) && !has_row(ledger_row(26, 25)) && !has_row(ledger_row(26, 20)),
+                    "WRP-03: the dead rider's source is gone and no source moved to the other carrier");
+            }
+            if (reference_passive.empty()) reference_passive = hashes;
+            else expect(hashes == reference_passive, "WRP-02: passive source matches at 1/2/4/8 workers");
+        }
+    }
     std::vector<std::string> reference;
     for (const auto workers : eawr::platform::determinism_worker_counts()) {
         eawr::platform::ThreadWorkerAdapter executor(workers);

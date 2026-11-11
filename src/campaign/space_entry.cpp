@@ -393,9 +393,11 @@ core::Result<void> SpaceEntryPreparation::select_initial_forces() {
         if (type->transport || type->superweapon || std::find(initial.begin(), initial.end(), force->id) == initial.end()) continue;
         const auto* profile = durability_table.value().find(type->purchase_type ? type->purchase_type : battle::type_id(type->tactical));
         if (!type->source_flagship_rating && !profile) {
-            // Project rule, not a retail rule: retail rates a type with the tag absent by its default hull, but a type
-            // with no positive Tactical_Health builds no durability row here. It rates zero, so it is never the combat
-            // flagship (a side whose ratings are all zero has none, WGT-119), and the entry says so once.
+            // The debug build rates a type with the tag absent by its default hull (100), which the stock entry
+            // supplies as the source rating (flagship_rating_source). A type here has no usable source rating at all:
+            // an authored non-positive hull without shields. The debug build rates that zero (maximum health plus
+            // maximum shields), so it is never the combat flagship (a side whose ratings are all zero has none,
+            // WGT-119), and the entry says so once.
             auto note = "space entry: " + type->tactical + " has no durability profile (no positive Tactical_Health "
                 "in the effective data); it is not considered for combat flagship";
             if (std::find(plan.notes.begin(), plan.notes.end(), note) == plan.notes.end()) plan.notes.push_back(std::move(note));
@@ -698,6 +700,23 @@ core::Result<void> SpaceEntryPreparation::bind_scene_owners() {
 
 } // namespace
 
+units::UnitType flagship_rating_source(const units::UnitType& source) {
+    auto rated = source;
+    if (rated.kind == units::UnitKind::squadron && rated.team_hull) {
+        // WGT-119 / WSQ-60: the container's own health, not its craft sum.
+        rated.hull = rated.team_hull; rated.shield_points = rated.team_shield_points;
+        rated.shielded = rated.team_shield_points && *rated.team_shield_points > Fixed{};
+    } else if (!rated.hull) {
+        // Debug-build object type default maximum health: 100 before any data is read (WGT-119).
+        rated.hull = Fixed::from_raw(100 * Fixed::scale);
+    }
+    return rated;
+}
+
+Fixed flagship_shield_rating(const units::UnitType& rated) {
+    return rated.shielded && rated.shield_points && rated.shield_points->raw() > 0 ? *rated.shield_points : Fixed{};
+}
+
 core::Result<SpaceEntryPlan> prepare_space_entry(const ConflictRecord& record,
     const SpaceEntryInputs& input, sim::EntityId first_free, std::uint64_t session_seed) {
     SpaceEntryPreparation preparation(record, input, first_free, session_seed);
@@ -848,6 +867,10 @@ core::Result<SpaceFormationResult> form_space_entry(battle::BattleStart& scene,
             auto* object = find(force->id); if (!object || !registered.insert(force->id).second) continue;
             const auto* binding = type_of(input, force->type); const auto* type = input.map.tables->find(object->type);
             if (!binding || !type) return fail<SpaceFormationResult>("formation registration is unbound");
+            // The prebattle cinematic is about who attacks, not about the class (#6075). The debug build's
+            // formation pass (WGT-23) runs its cinematic step over every registered fleet member, whatever class it
+            // has: an object with no valid class only misses the bucket switch.
+            attacker |= force->owner == plan.conflict.invader;
             const auto* leader = type;
             if (type->kind == units::UnitKind::squadron && !type->members.empty()) leader = input.map.tables->find(type->members.front().craft);
             if (!leader) {
@@ -867,7 +890,6 @@ core::Result<SpaceFormationResult> form_space_entry(battle::BattleStart& scene,
                 : ship_class == "CAPITAL" ? 0U
                 : ship_class == "FIGHTER" || ship_class == "BOMBER" ? 3U : 1U;
             buckets[bucket].push_back(object);
-            attacker |= force->owner == plan.conflict.invader;
         }
         auto& small = buckets[3];
         // WGT-45: balanced interleave, retaining registration order within each kind.

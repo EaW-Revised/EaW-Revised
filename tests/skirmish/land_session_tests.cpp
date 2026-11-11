@@ -3,6 +3,7 @@
 #include "eawr/platform/sim_workers.hpp"
 #include "eawr/platform/live_session.hpp"
 #include "eawr/presentation/live/land_ground.hpp"
+#include "eawr/skirmish/land_fog.hpp"
 #include "eawr/skirmish/land_terrain.hpp"
 #include "eawr/vfs/vfs.hpp"
 #include "land_test_support.hpp"
@@ -223,6 +224,29 @@ void live_contracts() {
     expect(live->wait_for(90, std::chrono::seconds(30)), "live land move/stop reaches driven tick");
     live->stop();
     expect(!live->failure() && live->rejected_orders().empty(), "live land commands are admitted");
+    const auto motion = live->land_motion();
+    expect(motion && motion->tick == 90 && motion->members.size() == live->land_roster().size(),
+        "land motion view copies the completed member state");
+    if (motion) for (const auto& member : motion->members) {
+        expect(member.entity != 0 && !member.spread_out && !member.stop_point,
+            "land motion view retains identity and the unpublished inputs default false");
+    }
+    const auto motion_history = live->land_motion_after(0);
+    expect(motion_history.size() == 90 && motion_history.front().tick == 1 && motion_history.back().tick == 90,
+        "land motion history preserves each completed tick in order");
+    expect(std::any_of(motion_history.begin(), motion_history.end(), [](const auto& frame) {
+        return std::any_of(frame.members.begin(), frame.members.end(), [](const auto& member) {
+            return member.has_path_target && member.turn_rate_limit.raw() > 0;
+        });
+    }), "land motion history carries the current path target and maximum turn rate");
+    std::vector<platform::LiveLandMotion> reused_motion;
+    const auto partial_count = live->land_motion_through(0, 2, reused_motion);
+    expect(partial_count == 2 && reused_motion[0].tick == 1 && reused_motion[1].tick == 2,
+        "bounded motion sampling stops at the presented tick");
+    const auto* retained_members = reused_motion[0].members.data();
+    const auto repeat_count = live->land_motion_through(0, 1, reused_motion);
+    expect(repeat_count == 1 && reused_motion[0].members.data() == retained_members,
+        "bounded motion sampling reuses roster storage");
     const auto recording = live->record();
     const auto hashes = take(platform::headless_tick_hashes(recording, tables));
     expect(hashes == live->tick_hashes(), "viewer feed land hashes equal headless replay");
@@ -321,7 +345,9 @@ void contracts() {
     expect(take(space_session.save_land_checkpoint_state()).empty(), "space raw land checkpoint bytes are absent");
     auto parsed = take(checkpoint::parse_checkpoint(checkpoint_bytes(session)));
     const auto* section = parsed.find(checkpoint::SectionId::land_state);
-    expect(section && section->version == 9 && !section->required, "land services use the optional allocated section");
+    expect(section && section->version == checkpoint::land_state_section_version && !section->required,
+        "land services use the optional allocated section");
+
     auto missing = parsed;
     std::erase_if(missing.sections, [](const auto& s) { return s.id == static_cast<std::uint16_t>(checkpoint::SectionId::land_state); });
     expect(!checkpoint::load_tactical_checkpoint(take(checkpoint::write_checkpoint(missing)),
@@ -462,7 +488,7 @@ CornerResult corner_formation(const sim::PartitionExecutor& executor, bool resto
 }
 
 // WLPA-88/89: a move order given to a squad that is walking does not stop it. The result of the search from the end of
-// its bounded segment is spliced in; a corner too sharp for the slowest member falls back to turning in place.
+// its bounded segment is spliced in; the corner keeps the walk at its turn speed (an authored minimum fraction would stop it).
 struct ReorderResult { Bytes state, checkpoint; bool never_stopped{true}, turned{}, reached{}, old_end{}; };
 ReorderResult reorder_while_walking(const sim::PartitionExecutor& executor, bool restore, Fixed turn_rate, bool backward = false) {
     auto field = make_field(std::vector<std::string>(40, std::string(48, '.')));
@@ -503,7 +529,8 @@ void reorder_contracts() {
         expect(!baseline.old_end, "a perpendicular re-order does not reach the old endpoint");
         if (smooth) expect(baseline.never_stopped && !baseline.turned,
             "WLPA-88 a smooth re-order keeps the squad walking: it never stops or turns in place");
-        else expect(baseline.turned, "WLPA-89 a corner too sharp for the slowest member falls back to turning in place");
+        else expect(baseline.reached && !baseline.turned,
+            "WLPA-89 a slow turn rate slows the corner (WLPA-90) but never falls back to a stop without an authored minimum");
         const auto restored = reorder_while_walking(serial, true, turn_rate);
         expect(restored.state == baseline.state && restored.checkpoint == baseline.checkpoint,
             "save/restore across the re-order equals uninterrupted motion");
@@ -524,6 +551,7 @@ void reorder_contracts() {
 std::map<sim::EntityId, LandSearch::Checkpoint> archived_land_searches(const TacticalSession& session) {
     const auto bytes = take(session.save_land_checkpoint_state());
     checkpoint_detail::Reader in(bytes);
+    in.fire_range_bonuses = true; in.script_invulnerable = true; // hidden garrison occupants carry whole live units (version 16)
     std::uint16_t id{}, version{};
     std::array<std::uint8_t, 32> terrain{};
     std::uint32_t clear_bit{};
@@ -531,7 +559,15 @@ std::map<sim::EntityId, LandSearch::Checkpoint> archived_land_searches(const Tac
     LandMovement::Checkpoint movement;
     std::map<sim::EntityId, LandPathRequest> requests;
     session_detail::LandCombatState combat;
-    in(id, version, terrain, clear_bit, occupancy, movement, requests, combat);
+    std::vector<sim::EntityId> dynamic_children; // the economy's created objects precede the searches (version 11)
+    std::map<sim::EntityId, LandFormationOrder> formations; // the pending formation orders follow them (version 12)
+    std::vector<session_detail::LandLanding> landings; // version 13: companies on their way down, the landed ids and the counter
+    std::vector<sim::EntityId> landed;
+    std::uint64_t next_landing{};
+    std::map<sim::EntityId, session_detail::LandWalkingFormation> walking_formations; // version 15
+    std::map<sim::EntityId, session_detail::LandGarrisonEntry> garrison_entries; // version 16: the garrison records follow the walking formations
+    in(id, version, terrain, clear_bit, occupancy, movement, requests, combat, dynamic_children, formations, landings, landed,
+        next_landing, walking_formations, garrison_entries);
     std::map<sim::EntityId, LandSearch::Checkpoint> searches;
     const auto count = in.count();
     for (std::uint64_t i = 0; i < count; ++i) {
@@ -711,6 +747,300 @@ void stress(bool repulsion = true) {
     }
 }
 
+
+// LC-54..57 (#5893): the land step runs the shared tactical economy and pad services on authored profiles.
+constexpr sim::tactical::TypeId pad_type = 20, station_type = 21, site_type = 30, turret_type = 40, upgrade_type = 50;
+struct EconomyCase { TacticalSetup setup; TacticalContent content; };
+
+// A pad (id 5) and an income station (id 6), both static roots of player 1 with their own occupation, on any terrain.
+EconomyCase economy_case(const std::shared_ptr<const LandTerrain>& terrain, const std::uint32_t pad_column,
+    const std::uint32_t pad_row, const std::uint32_t station_row) {
+    EconomyCase result;
+    result.content = content(terrain, 1);
+    result.setup = setup();
+    result.setup.players.push_back({3, 3, 3, 0}); // the declared neutral player pad capture requires
+    const auto place = [&](sim::EntityId id, TypeId type, std::uint32_t row) {
+        UnitState unit; unit.entity_id = id; unit.type_id = type; unit.owner = 1;
+        unit.position = {land_cell_centre(pad_column, terrain->spacing()), land_cell_centre(row, terrain->spacing()), whole(17)};
+        result.setup.units.push_back(unit);
+        result.content.land.static_objects.push_back(type);
+        LandOccupation occupation; occupation.object = id; occupation.primary_passability = wall;
+        for (std::uint32_t y = row - 1; y <= row + 1; ++y) for (std::uint32_t x = pad_column - 1; x <= pad_column + 1; ++x)
+            occupation.primary_cells.push_back(y * terrain->width() + x);
+        result.content.land.occupations.push_back(std::move(occupation));
+    };
+    place(5, pad_type, pad_row);
+    place(6, station_type, station_row);
+    for (const TypeId type : {pad_type, station_type, site_type, turret_type}) {
+        DurabilityProfile health; health.type_id = type; health.max_hull = whole(type == turret_type ? 600 : 300);
+        result.content.durability.profiles.push_back(health);
+    }
+    auto& economy = result.content.economy;
+    economy.players = {{1, whole(1000), 0}, {2, whole(1000), 0}};
+    StationMenu pad_menu; pad_menu.station = pad_type; pad_menu.faction = 1; pad_menu.station_producer = false;
+    pad_menu.options = {{site_type, BuildKind::structure, BuildQueue::units, whole(100), 30, 30, 0, true}};
+    StationMenu station_menu; station_menu.station = station_type; station_menu.faction = 1;
+    BuildOption upgrade; upgrade.type = upgrade_type; upgrade.kind = BuildKind::upgrade; upgrade.queue = BuildQueue::upgrades;
+    upgrade.price = whole(200); upgrade.build_frames = upgrade.ai_build_frames = 60; upgrade.available = true;
+    station_menu.options = {upgrade};
+    economy.menus = {pad_menu, station_menu};
+    UpgradeProfile profile; profile.type = upgrade_type; economy.upgrades = {profile};
+    IncomeProfile stream; stream.source = station_type; stream.per_frame = Fixed::from_raw(Fixed::scale); economy.income = {stream};
+    economy.pads.neutral = 3;
+    economy.pads.capture = {{pad_type, whole(100), whole(5), {1, 2}, false, true, true}};
+    economy.pads.construction = {{site_type, turret_type, whole(100), 1, 1}};
+    economy.pads.influence = {{pad_type, false}, {site_type, false}, {turret_type, false}};
+    return result;
+}
+
+std::size_t count_events(const TacticalTick& tick, EventKind kind) {
+    return static_cast<std::size_t>(std::count_if(tick.snapshot->events().begin(), tick.snapshot->events().end(),
+        [kind](const auto& event) { return event.kind == kind; }));
+}
+
+struct EconomyOutcome { Bytes state, checkpoint; };
+EconomyOutcome economy_run(const EconomyCase& input, const sim::PartitionExecutor& executor, const bool restore) {
+    auto session = take(TacticalSession::create(input.setup, input.content));
+    expect(session.ledgers().size() == 2 && session.ledgers()[0].credits == whole(1000) && session.pads().size() == 1
+        && session.pads().begin()->first == 5, "LC-54: the land session opens its ledgers and registers the pad from the authored rows");
+    // Player 1 builds on its pad; player 2 cannot (no menu of its faction on that pad); the upgrade is bought, cancelled
+    // with a full refund, and bought again.
+    must(session.submit({{0, 1, 1}, {5}, PadBuildPayload{site_type}}));
+    must(session.submit({{0, 2, 1}, {5}, PadBuildPayload{site_type}}));
+    must(session.submit({{3, 1, 2}, {6}, BuyPayload{upgrade_type}}));
+    must(session.submit({{6, 1, 3}, {}, CancelPayload{1, 0}}));
+    must(session.submit({{8, 1, 4}, {6}, BuyPayload{upgrade_type}}));
+    const auto identities = checkpoint::tactical_identities(input.setup.content_identity);
+    sim::EntityId site = 0;
+    for (std::uint64_t tick = 0; tick < 120; ++tick) {
+        const auto stepped = take(session.step(executor));
+        const auto completed = tick + 1;
+        const auto& player = session.ledgers()[0];
+        if (tick == 0) {
+            expect(count_events(stepped, EventKind::pad_construction_started) == 1 && stepped.diagnostics.size() == 1
+                && stepped.diagnostics[0].code == diagnostic_codes::command_rejected,
+                "LC-55: the pad build starts and the other faction's request is rejected with a diagnostic");
+            site = session.pads().at(5).under_construction;
+            expect(site != 0 && session.construction().size() == 1 && session.unit_state(site)
+                && session.unit_state(site)->type_id == site_type && session.unit_state(site)->owner == 1,
+                "LC-55: the construction site exists as a unit of the builder");
+        }
+        if (completed == 1) expect(player.credits == whole(901), "the price is debited once and one frame of income is paid");
+        if (completed == 5) expect(player.queues[1].size() == 1 && player.credits == whole(1000 - 100 - 200 + 5),
+            "the upgrade purchase debits its price into the upgrade queue");
+        if (completed == 8) expect(player.queues[1].empty() && player.credits == whole(1000 - 100 + 8),
+            "cancelling the queued upgrade refunds its full price");
+        if (completed == 30) expect(session.pads().at(5).constructed == 0 && session.pads().at(5).under_construction == site,
+            "the site stays under construction until its deadline");
+        if (completed == 31) {
+            const auto built = session.pads().at(5).constructed;
+            expect(count_events(stepped, EventKind::pad_construction_completed) == 1 && built != 0 && built != site
+                && session.pads().at(5).under_construction == 0 && session.construction().empty()
+                && !session.unit_state(site) && session.unit_state(built) && session.unit_state(built)->type_id == turret_type
+                && session.unit_state(built)->owner == 1 && session.durability_state(built)->hull == whole(600),
+                "LC-55: completion replaces the site by the constructed turret with the hull the site grew");
+        }
+        if (restore && (tick == 0 || tick == 10 || tick == 29 || tick == 30 || tick == 70)) {
+            const auto saved = checkpoint_bytes(session);
+            auto resumed = take(checkpoint::load_tactical_checkpoint(saved, identities, factory(input.content), executor));
+            expect(resumed.work.resimulated_ticks == 0 && checkpoint_bytes(resumed.session) == saved,
+                "a land checkpoint inside a build, a queue or after completion restores its created objects exactly");
+            session = std::move(resumed.session);
+        }
+    }
+    const auto& owner = session.ledgers()[0];
+    expect(owner.credits == whole(1000 + 120 - 100 - 200) && owner.queues[1].empty() && owner.completed.size() == 1
+        && owner.completed[0].type == upgrade_type && session.ledgers()[1].credits == whole(1000),
+        "income streams pay the owner every frame and the second upgrade completes");
+    auto replay = take(parse_replay(take(write_replay(session.record()))));
+    auto playback = take(TacticalSession::from_replay(replay, input.content));
+    for (std::uint64_t tick = 0; tick < replay.final_tick_count; ++tick) take(playback.step(executor));
+    expect(playback.canonical_state_bytes() == session.canonical_state_bytes(), "the economy routes replay to the same land state");
+    return {session.canonical_state_bytes(), checkpoint_bytes(session)};
+}
+
+// The enemy squad (ids 3 and 4) stands 130 units north of the pad, inside gun range, and kills what is built on it.
+// The player's own squads (ids 1 and 2) are far away. A shot does 6 and a built object has 8 hull, so it takes two hits.
+EconomyCase battle_case(const std::shared_ptr<const LandTerrain>& terrain, const std::uint32_t seconds, const bool pad_targetable) {
+    auto result = economy_case(terrain, 15, 9, 15);
+    auto& economy = result.content.economy;
+    economy.pads.construction.front().seconds = seconds;
+    economy.pads.capture.front().rebuild_frames = 15; // LC-56: the rebuild cooldown, 15 frames in this fixture
+    for (auto& unit : result.setup.units) if (unit.entity_id == 5 || unit.entity_id == 6) unit.position.z = {};
+    result.setup.units[0].position = {whole(60), whole(700), {}};
+    result.setup.units[1].position = {whole(60), whole(740), {}};
+    result.setup.units[2].position = {whole(310), whole(60), {}};
+    result.setup.units[3].position = {whole(350), whole(60), {}};
+    auto& rules = result.content;
+    DamageRules damage;
+    damage.shield_recharge_frames = 30; damage.damage_types = 1; damage.armor_types = 1; damage.armor_mods = {whole(1)};
+    rules.durability.damage = damage;
+    rules.durability.profiles.clear();
+    for (const TypeId type : std::array<TypeId, 5>{12, pad_type, station_type, site_type, turret_type}) {
+        DurabilityProfile health; health.type_id = type; health.allow_diminishing_firepower = false;
+        health.max_hull = whole(type == 12 ? 4 : type == station_type || (type == pad_type && !pad_targetable) ? 300 : 8);
+        rules.durability.profiles.push_back(health);
+    }
+    CombatProfile gun;
+    gun.type_id = 12; gun.max_attack_distance = whole(150); gun.living_projectile_collision = true;
+    gun.collision = CollisionBox{{whole(-2), whole(-2), whole(-2)}, {whole(2), whole(2), whole(4)}};
+    WeaponProfile weapon;
+    weapon.range = whole(150); weapon.min_recharge_hundredths = weapon.max_recharge_hundredths = 100;
+    weapon.pulse_count = 1;
+    ShotProfile shot; shot.damage = whole(6); shot.speed = whole(4); shot.max_travel = whole(500);
+    weapon.shot = shot; gun.weapons.push_back(weapon);
+    rules.combat.profiles.push_back(gun);
+    rules.combat.footprints.push_back({12, whole(2), whole(2), whole(2)});
+    for (const TypeId type : std::array<TypeId, 3>{pad_type, site_type, turret_type}) {
+        if (type == pad_type && !pad_targetable) continue;
+        if (type != pad_type && pad_targetable) continue; // the pad case shoots the pad alone
+        auto body = gun; body.type_id = type; body.weapons.clear();
+        rules.combat.profiles.push_back(body);
+        rules.combat.footprints.push_back({type, whole(2), whole(2), whole(2)});
+    }
+    return result;
+}
+
+struct BattleResult {
+    Bytes state;
+    std::uint64_t death{};
+    bool built{}, pad_present{}, rejected{}, clean{};
+    std::uint32_t owner{};
+    std::uint64_t cooldown_until{};
+};
+BattleResult economy_battle(const EconomyCase& input, const sim::PartitionExecutor& executor, const bool restore) {
+    auto session = take(TacticalSession::create(input.setup, input.content));
+    must(session.submit({{0, 1, 1}, {5}, PadBuildPayload{site_type}}));
+    const auto identities = checkpoint::tactical_identities(input.setup.content_identity);
+    BattleResult result;
+    bool started = false;
+    for (std::uint64_t tick = 0; tick < 260; ++tick) {
+        take(session.step(executor));
+        if (const auto pad = session.pads().find(5); pad != session.pads().end()) {
+            started = started || pad->second.under_construction != 0;
+            result.built = result.built || pad->second.constructed != 0;
+            if (started && result.death == 0 && pad->second.under_construction == 0 && pad->second.constructed == 0)
+                result.death = tick;
+        }
+        // A save at every third frame: inside the build, while an enemy squad holds the site or the turret as its
+        // target, on the frame a built object dies, and after the pad changed hands or died.
+        if (restore && tick % 3 == 0) {
+            const auto saved = checkpoint_bytes(session);
+            auto resumed = take(checkpoint::load_tactical_checkpoint(saved, identities, factory(input.content), executor));
+            expect(resumed.work.resimulated_ticks == 0 && checkpoint_bytes(resumed.session) == saved,
+                "a land checkpoint taken during a pad battle restores exactly");
+            session = std::move(resumed.session);
+        }
+    }
+    result.pad_present = session.pads().contains(5);
+    if (result.pad_present) {
+        result.owner = session.unit_state(5)->owner;
+        result.cooldown_until = session.pads().at(5).cooldown_until;
+        // The player cannot build again on the pad it lost: the build is rejected and nothing is created.
+        must(session.submit({{session.completed_tick(), 1, 2}, {5}, PadBuildPayload{site_type}}));
+        const auto again = take(session.step(executor));
+        result.rejected = count_events(again, EventKind::order_rejected) == 1 && session.construction().empty();
+    }
+    // units() returns a vector by value: take one copy so begin and end belong to the same vector.
+    const auto survivors = session.units();
+    result.clean = session.construction().empty() && std::none_of(survivors.begin(), survivors.end(),
+        [](const UnitState& unit) { return unit.type_id == site_type || unit.type_id == turret_type; });
+    result.state = session.canonical_state_bytes();
+    return result;
+}
+
+void battle_contracts() {
+    auto field = make_field(std::vector<std::string>(40, std::string(48, '.')));
+    const sim::InlineExecutor serial;
+    // A turret killed on its pad: the pad goes to the neutral player and starts its rebuild cooldown (WBP-28).
+    const auto turret = battle_case(field.terrain, 1, false);
+    const auto killed = economy_battle(turret, serial, true);
+    expect(killed.built && killed.death != 0 && killed.pad_present && killed.owner == 3 && killed.clean
+        && killed.cooldown_until == killed.death + 15 && killed.rejected,
+        "LC-55/56: a killed turret neutralizes its pad, starts the rebuild cooldown and leaves no object behind");
+    // A site killed while it is being built.
+    const auto site = battle_case(field.terrain, 4, false);
+    const auto unfinished = economy_battle(site, serial, true);
+    expect(!unfinished.built && unfinished.death != 0 && unfinished.pad_present && unfinished.owner == 3 && unfinished.clean
+        && unfinished.cooldown_until == unfinished.death + 15 && unfinished.rejected,
+        "LC-55/56: a killed construction site neutralizes its pad and starts the rebuild cooldown");
+    // The pad itself killed while a site stands on it: the site goes with it.
+    const auto pad = battle_case(field.terrain, 4, true);
+    const auto destroyed = economy_battle(pad, serial, true);
+    expect(!destroyed.pad_present, "LC-55: the enemy squad kills the pad");
+    expect(destroyed.clean, "LC-55: a killed pad takes its construction site with it");
+    for (const auto* input : {&turret, &site, &pad}) {
+        const auto baseline = economy_battle(*input, serial, false);
+        expect(economy_battle(*input, serial, true).state == baseline.state,
+            "a land pad battle with a save every third frame ends in the state of the straight run");
+        for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+            platform::ThreadWorkerAdapter threads(workers);
+            expect(economy_battle(*input, threads, false).state == baseline.state,
+                "land pad battle state equals on 1/2/4/8 workers");
+        }
+    }
+}
+
+// WPR-33: a buy with a prerequisite reads the ownership census, which a restore does not carry. The same buys give the
+// same state with and without a save between them.
+void prerequisite_contracts() {
+    auto field = make_field(std::vector<std::string>(40, std::string(48, '.')));
+    auto input = economy_case(field.terrain, 15, 9, 15);
+    BuildOption gated; gated.type = 51; gated.kind = BuildKind::upgrade; gated.queue = BuildQueue::upgrades;
+    gated.price = whole(50); gated.build_frames = gated.ai_build_frames = 10; gated.available = true;
+    gated.requirements.prerequisites = {pad_type};
+    input.content.economy.menus[1].options.push_back(gated);
+    UpgradeProfile profile; profile.type = 51; input.content.economy.upgrades.push_back(profile);
+    const sim::InlineExecutor serial;
+    const auto buy_twice = [&](const bool restore) {
+        auto session = take(TacticalSession::create(input.setup, input.content));
+        must(session.submit({{2, 1, 1}, {6}, BuyPayload{51}}));
+        must(session.submit({{5, 1, 2}, {6}, BuyPayload{51}}));
+        const auto identities = checkpoint::tactical_identities(input.setup.content_identity);
+        for (std::uint64_t tick = 0; tick < 8; ++tick) {
+            take(session.step(serial));
+            if (restore && tick == 3) {
+                auto resumed = take(checkpoint::load_tactical_checkpoint(checkpoint_bytes(session), identities,
+                    factory(input.content), serial));
+                session = std::move(resumed.session);
+            }
+        }
+        expect(session.ledgers()[0].queues[1].size() == 2 && session.ledgers()[0].credits == whole(1000 - 50 - 50 + 8),
+            "a buy whose prerequisite the player owns is accepted before and after a save");
+        return session.canonical_state_bytes();
+    };
+    expect(buy_twice(false) == buy_twice(true), "the same buys give the same state with and without a save between them");
+}
+
+void economy_contracts() {
+    auto field = make_field(std::vector<std::string>(40, std::string(48, '.')));
+    const auto input = economy_case(field.terrain, 15, 9, 15);
+    const sim::InlineExecutor serial;
+    const auto baseline = economy_run(input, serial, false);
+    for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+        platform::ThreadWorkerAdapter threads(workers);
+        const auto result = economy_run(input, threads, true);
+        expect(result.state == baseline.state && result.checkpoint == baseline.checkpoint,
+            "land economy state and checkpoints equal on 1/2/4/8 workers with restore boundaries");
+        test_support::ReverseOrderExecutor reverse(workers);
+        const auto reversed = economy_run(input, reverse, true);
+        expect(reversed.state == baseline.state && reversed.checkpoint == baseline.checkpoint,
+            "reverse partition execution preserves the land economy state");
+    }
+    // The routes the economy does not take on land stay refused, and a content without rows keeps the old behaviour.
+    auto session = take(TacticalSession::create(input.setup, input.content));
+    // LC-42..51 (#5894): the land command surface takes Reinforce; a content with no reinforcement rules refuses it by reason.
+    expect(static_cast<bool>(session.submit({{0, 1, 9}, {}, ReinforcePayload{}})), "land reinforcement is a land command");
+    bool refused = false;
+    for (const auto& event : take(session.step(serial)).snapshot->events())
+        refused = refused || (event.kind == EventKind::order_rejected && event.sequence == 9 && event.reason == RejectReason::cannot_produce);
+    expect(refused, "a land content without reinforcement rules refuses Reinforce with cannot_produce");
+    auto plain = take(TacticalSession::create(setup(), content(field.terrain)));
+    expect(plain.ledgers().empty() && plain.pads().empty(), "a land content without economy rows has no ledgers or pads");
+    battle_contracts();
+    prerequisite_contracts();
+}
+
 // Chief request 11-06: one stock map, two forced stuck squads, run at workers 1 and 8 with the state hash compared every
 // tick. Squad 0 has a member that can never move (WLPA-93: the leader is held by the lag cap, then released and walks on).
 // Squad 2 is a hard body walking into an idle hard body that cannot be pushed, with its route lock refused (WLPA-92: the pair
@@ -839,15 +1169,121 @@ int installed() {
     auto playback = take(TacticalSession::from_replay(take(parse_replay(take(write_replay(reference.record())))), tables));
     for (int i = 0; i < 64; ++i) take(playback.step(serial));
     expect(playback.canonical_state_bytes() == baseline, "stock land terrain session replay round trips");
+    // LC-54..57: the same pad, build, queue and income sequence on the stock map's decoded terrain. The pad rows are
+    // authored synthetic profiles (the land loader reads no pad types yet); the field, the cells and the squads are stock.
+    {
+        auto input = economy_case(terrain, terrain->width() * 2 / 3, terrain->height() / 3, terrain->height() / 3 + 8);
+        for (std::size_t i = 0; i < 4; ++i) {
+            input.setup.units[i].position.x = land_cell_centre(terrain->width() / 3, terrain->spacing());
+            input.setup.units[i].position.y = land_cell_centre(terrain->height() / 3 + static_cast<std::uint32_t>(i) * 3, terrain->spacing());
+        }
+        const auto economy_baseline = economy_run(input, serial, false);
+        for (const std::size_t workers : {1U, 4U, 8U}) {
+            platform::ThreadWorkerAdapter executor(workers);
+            const auto result = economy_run(input, executor, true);
+            expect(result.state == economy_baseline.state && result.checkpoint == economy_baseline.checkpoint,
+                "stock land terrain economy session is equal across workers with restore boundaries");
+        }
+    }
     stock_guard_case(terrain, tables, initial);
     std::cout << "stock land session map=data/art/maps/_mp_land_naboo.ted width=" << terrain->width() << " height=" << terrain->height() << '\n';
     return checks.finish();
 }
+// LC-85..87: a land content with a fog grid and sensor rows fogs the session. The grid covers the terrain, the members
+// reveal circles of their authored range, and the state (cells, anchors, checkpoint) is equal for every worker count.
+TacticalContent fogged(const std::shared_ptr<const LandTerrain>& terrain, const std::int64_t range) {
+    auto result = content(terrain);
+    result.fog = take(skirmish::land_fog_rules(terrain->width(), terrain->height(), terrain->spacing(), whole(15), whole(6)));
+    SensorProfile sensor;
+    sensor.type_id = 12; sensor.reveal_range = whole(range);
+    result.sensors.push_back(sensor);
+    return result;
+}
+
+std::uint64_t instance_mask(const TacticalSession& session, const sim::EntityId id) {
+    for (const auto& instance : session.snapshot()->instances())
+        if (instance.entity_id == id) return instance.visible_to;
+    throw std::runtime_error("land fog test: no published instance for the entity");
+}
+
+// The mask an enemy squad's members have for player 1 (bit 0) when it stands `distance` units from player 1's squad.
+struct SeenResult { std::size_t seen{}, total{}; std::size_t revealed_cells{}; };
+SeenResult seen_enemy_members(const std::shared_ptr<const LandTerrain>& terrain, const std::int64_t distance,
+    const std::int64_t range) {
+    auto input = setup();
+    input.units.resize(2);
+    input.units[0].position = {whole(100), whole(100), {}};
+    input.units[1].owner = 2;
+    input.units[1].position = {whole(100 + distance), whole(100), {}};
+    const auto rules = fogged(terrain, range);
+    auto session = take(TacticalSession::create(input, rules));
+    SeenResult result;
+    const auto members = session.land_movement()->members();
+    const auto squads = session.land_movement()->squads();
+    for (const auto& member : members) {
+        if (squads[member.squad].object != 2) continue; // player 2's squad is the second root
+        ++result.total;
+        if ((instance_mask(session, member.object) & 1U) != 0U) ++result.seen;
+    }
+    const auto values = session.fog_cells()->values(0);
+    result.revealed_cells = static_cast<std::size_t>(std::count_if(values.begin(), values.end(), [](const auto value) { return value != 0; }));
+    return result;
+}
+
+void fog_contracts() {
+    auto field = make_field(std::vector<std::string>(48, std::string(48, '.')));
+    // 48 x 48 samples of 20: 960 units over 15 divides exactly into 64 square cells of 15.
+    const auto rules = fogged(field.terrain, 130);
+    expect(rules.fog && rules.fog->cells_wide == 64 && rules.fog->cells_tall == 64 && rules.fog->cell_size == whole(15)
+            && rules.fog->map_left == Fixed{} && rules.fog->map_top == whole(960),
+        "the land fog grid spans the terrain from its low corner, row 0 at the top");
+    const auto near_enemy = seen_enemy_members(field.terrain, 90, 130);
+    const auto far_enemy = seen_enemy_members(field.terrain, 600, 130);
+    expect(near_enemy.total >= 1 && near_enemy.seen == near_enemy.total,
+        "enemy members inside a member's authored reveal circle are visible to its player");
+    expect(far_enemy.total == near_enemy.total && far_enemy.seen == 0,
+        "enemy members outside every reveal circle are fogged");
+    expect(near_enemy.revealed_cells > 100 && near_enemy.revealed_cells < 64 * 64 / 2 && far_enemy.revealed_cells > 100,
+        "the first tick marks a bounded circle per revealer in the player's grid");
+    // A range of 0 still reveals the floor of 10 units, which is one cell; it never reveals the enemy 90 away.
+    const auto floored = seen_enemy_members(field.terrain, 90, 0);
+    expect(floored.seen == 0 && floored.revealed_cells > 0 && floored.revealed_cells < near_enemy.revealed_cells,
+        "a reveal range below the floor still reveals a floor-sized circle");
+    // No fog grid: the same session without rules keeps the previous unfogged land session.
+    auto plain = content(field.terrain);
+    auto without = take(TacticalSession::create(setup(), plain));
+    expect(without.fog_cells() == nullptr, "a land content without fog rules has no fog cells");
+
+    const auto fog_tables = fogged(field.terrain, 130);
+    const auto initial = setup();
+    const auto baseline = run(initial, fog_tables, sim::InlineExecutor{}, false);
+    const auto plain_run = run(initial, content(field.terrain), sim::InlineExecutor{}, false);
+    expect(baseline.state != plain_run.state, "land fog changes the canonical state hash");
+    for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+        platform::ThreadWorkerAdapter threads(workers);
+        const auto result = run(initial, fog_tables, threads, true);
+        expect(result.state == baseline.state && result.checkpoint == baseline.checkpoint,
+            "land fog state and checkpoints equal on 1/2/4/8 workers with restore boundaries");
+        test_support::ReverseOrderExecutor reverse(workers);
+        const auto reversed = run(initial, fog_tables, reverse, true);
+        expect(reversed.state == baseline.state && reversed.checkpoint == baseline.checkpoint,
+            "reverse partition execution preserves land fog state and checkpoints");
+    }
+    // The revealers move with their squads: the last grid is not the first one.
+    auto moving = take(TacticalSession::create(initial, fog_tables));
+    commands(moving);
+    const auto first_cells = std::vector<std::uint8_t>(moving.fog_cells()->values(0).begin(), moving.fog_cells()->values(0).end());
+    sim::InlineExecutor serial;
+    for (int tick = 0; tick < 200; ++tick) take(moving.step(serial));
+    const auto later = moving.fog_cells()->values(0);
+    expect(std::vector<std::uint8_t>(later.begin(), later.end()) != first_cells, "a moving revealer changes its player's grid");
+}
+
 }
 
 int main(int argc, char** argv) {
     try {
         if (argc == 2 && std::string_view(argv[1]) == "--installed") return installed();
-        contracts(); live_contracts(); corner_formation_contracts(); reorder_contracts(); maze_reorder_contracts(); victory_contracts(); stress(false); stress(); return checks.finish();
+        contracts(); live_contracts(); fog_contracts(); corner_formation_contracts(); reorder_contracts(); maze_reorder_contracts(); victory_contracts(); economy_contracts(); stress(false); stress(); return checks.finish();
     } catch (const std::exception& error) { std::cerr << "FAIL: " << error.what() << '\n'; return 1; }
 }

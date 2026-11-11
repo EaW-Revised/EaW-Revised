@@ -44,6 +44,7 @@ public:
     void build(audio::GalacticBuildCue cue, std::string_view type, bool local_builder);
     // An authored GUI SFX event by name (command-bar Click_SFX / Mouse_Over_SFX).
     void ui_sound(std::string_view name) { play_event(name); }
+    void ability_sound(std::string_view name, audio::Vec3 position);
     void negative_feedback();
     void advisor_urgent();
     // WGP-182: presenter seams; the caller owns rebuild/reveal admission,

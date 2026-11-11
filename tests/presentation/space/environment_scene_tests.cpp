@@ -124,6 +124,20 @@ void test_transforms() {
 }
 
 void test_surfaces_and_billboards() {
+    auto invented = quad_model("InventedArithmetic.fx", 0);
+    const auto off = space::scene_surfaces(invented);
+    const auto active = space::scene_surfaces(invented, {}, [](const assets::Submesh&) { return true; });
+    expect(off.size() == 1 && !off[0].native_geometry && !off[0].problem.empty()
+        && active.size() == 1 && active[0].native_geometry && active[0].route == space::SceneRoute::unsupported
+        && near(active[0].model.meshes[0].submeshes[0].vertices[0].position, {99.0F, 0.0F, -1.0F}),
+        "opt-in native preparation qualifies rigid geometry without inventing a named adapter");
+    expect(space::surface_radius(off) == 0.0F && space::surface_radius(active) > 0.0F,
+        "only actually prepared native geometry contributes to environment framing");
+    invented.meshes[0].submeshes[0].indices[0] = 65000U;
+    std::size_t preparations{};
+    const auto invalid = space::scene_surfaces(invented, {}, [&](const assets::Submesh&) { ++preparations; return true; });
+    expect(invalid.size() == 1 && !invalid[0].native_geometry && preparations == 0,
+        "native admission never bypasses malformed triangle geometry");
     const assets::Model plain = quad_model("MeshAdditive.fx", 0);
     auto surfaces = space::scene_surfaces(plain);
     expect(surfaces.size() == 1 && surfaces[0].problem.empty() && surfaces[0].route == space::SceneRoute::meshadditive,

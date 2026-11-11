@@ -22,6 +22,7 @@ add_test(NAME ci_replay_numbers_contract COMMAND "${Python3_EXECUTABLE}" "${CMAK
 
 
 
+
 add_test(NAME ci_native_cpp_fixture COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_native_cpp_fixture.py")
 add_test(NAME ci_game_data_tests COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_game_data_tests.py")
 
@@ -74,7 +75,16 @@ add_test(
 # The release packager (tools/release, docs/releasing.md) on a stand-in build tree.
 
 
+add_test(
+    NAME ci_sign_release_stub
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_sign_release_stub.py"
+)
 
+add_test(
+    NAME ci_release_version
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_release_version.py"
+)
+set_tests_properties(ci_release_version PROPERTIES ENVIRONMENT "EAWR_CMAKE_COMMAND=${CMAKE_COMMAND}")
 
 # Contracts added by the melee, menu, minimap and galactic HUD work.
 eawr_add_python_contract(python_performance_melee_parity_analyze tests.performance.test_melee_parity_analyze)
@@ -111,6 +121,7 @@ add_test(NAME ci_kit_engine COMMAND "${Python3_EXECUTABLE}"
          "${CMAKE_CURRENT_SOURCE_DIR}/test_kit_engine.py")
 add_test(NAME ci_engine_signature_pins COMMAND "${Python3_EXECUTABLE}"
          "${CMAKE_CURRENT_SOURCE_DIR}/test_engine_signature_pins.py")
+
 
 
 

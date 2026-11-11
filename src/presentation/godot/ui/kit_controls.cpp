@@ -1,4 +1,5 @@
 #include "kit_internal.hpp"
+#include "eawr/presentation/ui/combo_popup.hpp"
 
 namespace eawr::presentation::godot_backend {
 using namespace kit_detail;
@@ -297,10 +298,32 @@ EawrUiCombo::EawrUiCombo() {
 }
 
 void EawrUiCombo::scale_retail_list() {
-    if (!retail_list_) return;
     // A popup is a separate Window: it does not inherit the menu CanvasItem scale.
     // Its contents use the same scale as the owning combo before minimum-size layout.
-    get_popup()->set_content_scale_factor(std::max(0.01F, static_cast<float>(get_global_transform_with_canvas().get_scale().x)));
+    PopupMenu* popup = get_popup();
+    const Vector2 canvas_scale = get_global_transform_with_canvas().get_scale();
+    const float scale = std::max(0.01F, std::min(canvas_scale.x, canvas_scale.y));
+    popup->set_content_scale_factor(scale);
+    const Ref<Font> font = popup->get_theme_font("font");
+    if (font.is_null()) return;
+    float row = std::ceil(font->get_height(popup->get_theme_font_size("font_size")));
+    for (int i = 0; i < popup->get_item_count(); ++i) {
+        row = std::max(row, size_of(popup->get_item_icon(i)).y);
+    }
+    for (const char* name : {"checked", "unchecked", "radio_checked", "radio_unchecked"}) {
+        row = std::max(row, size_of(popup->get_theme_icon(name)).y);
+    }
+    row += static_cast<float>(popup->get_theme_constant("v_separation"));
+    const float frame = popup->get_theme_stylebox("panel")->get_minimum_size().y;
+    const Vector2 viewport = get_viewport_rect().size;
+    const int height = presentation::ui::combo_popup_height(list_height_, scale, frame, row, viewport.y);
+    // PopupMenu owns the clipped ScrollContainer and moves its Window into the
+    // usable parent rectangle. The maximum applies before its shrink-wrap pass.
+    popup->set_max_size(Vector2i(std::max(1, static_cast<int>(std::floor(viewport.x))), height));
+}
+
+void EawrUiCombo::set_list_height(const float height) {
+    list_height_ = std::max(0.0F, height);
 }
 
 void EawrUiCombo::set_forced_state(const KitState state) {

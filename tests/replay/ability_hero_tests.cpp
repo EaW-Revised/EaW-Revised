@@ -1281,6 +1281,313 @@ void test_arriving_beam_autofire() {
 
 void test_hero_wingmen() {
     using K = tactical::AbilityKind;
+    // FS-52: team requests preserve earlier successes and stop at the first failure.
+    for (const unsigned failed : {0U, 1U, 3U}) {
+        std::vector<std::string> reference;
+        for (const auto workers : {1U, 8U}) {
+            auto initial = setup();
+            initial.units = {{1, plain_type, 2, at(1000, 0), math::identity_quat(), {}},
+                {10, xwing_squadron, 1, at(0, 0), math::identity_quat(), {}},
+                {11, xwing_type, 1, at(0, 0), math::identity_quat(), {}},
+                {12, xwing_type, 1, at(10, 0), math::identity_quat(), {}},
+                {13, xwing_type, 1, at(20, 0), math::identity_quat(), {}}};
+            initial.squadrons = {{10, {11, 12, 13}}};
+            auto movement = hangar_motion();
+            movement.squadrons.spawners.clear();
+            movement.squadrons.squadrons.front().members = {xwing_type, xwing_type, xwing_type};
+            movement.squadrons.squadrons.front().offsets = {at(0, 0), at(10, 0), at(20, 0)};
+            tactical::AbilityProfile ability; ability.kind = K::interdict;
+            tactical::AbilityTable table; table.profiles = {unit_of(xwing_type, ability)};
+            auto health = durability();
+            health.profiles = {{plain_type, units(1000), {}, false, {}},
+                {xwing_type, units(1000), {}, false, {}}};
+            auto created = tactical::TacticalSession::create(initial, {}, health, movement, std::nullopt, {}, {}, table);
+            expect(static_cast<bool>(created), "FS-52: team dispatch fixture creates");
+            if (!created) continue;
+            auto world = std::move(created).value();
+            const auto activate = tactical::AbilityPayload{K::interdict, tactical::AbilityAction::activate};
+            if (failed < 3) expect(static_cast<bool>(world.submit(command(0, 1, 0, 11 + failed, activate))),
+                "FS-52: member preactivation is submitted");
+            expect(static_cast<bool>(world.submit(command(1, 1, 0, 10, activate))), "FS-52: team request is submitted");
+            const eawr::platform::ThreadWorkerAdapter executor(workers);
+            std::vector<std::string> hashes;
+            for (unsigned frame = 0; frame < 2; ++frame) {
+                auto step = world.step(executor);
+                expect(static_cast<bool>(step), "FS-52: team request step succeeds");
+                if (step) hashes.push_back(step.value().state_sha256);
+            }
+            for (unsigned index = 0; index < 3; ++index) {
+                const auto state = world.ability_state(11 + index);
+                const bool expected = failed == 3 || index <= failed;
+                expect(state && state->slots.front().active == expected,
+                    "FS-52: members before failure activate and later members are untouched");
+            }
+            if (workers == 1) reference = hashes;
+            else expect(hashes == reference, "FS-52: team request matches on 1/8 workers");
+        }
+    }
+    // FS-52: replenishment uses the same ordered, stop-on-failure team routing.
+    for (const unsigned failed : {0U, 1U, 3U}) {
+        std::vector<std::string> reference;
+        for (const auto workers : {1U, 8U}) {
+            auto initial = setup();
+            initial.units = {{1, plain_type, 2, at(1000, 0), math::identity_quat(), {}},
+                {10, xwing_squadron, 1, at(0, 0), math::identity_quat(), {}},
+                {11, xwing_type, 1, at(0, 0), math::identity_quat(), {}},
+                {12, 23, 1, at(10, 0), math::identity_quat(), {}},
+                {13, 24, 1, at(20, 0), math::identity_quat(), {}}};
+            initial.squadrons = {{10, {11, 12, 13}}};
+            auto movement = hangar_motion();
+            movement.squadrons.spawners.clear();
+            const auto craft = movement.squadrons.craft.front();
+            for (const tactical::TypeId type : {23U, 24U}) {
+                auto next = craft; next.type_id = type; movement.squadrons.craft.push_back(next);
+            }
+            auto original = movement.squadrons.squadrons.front();
+            original.members = {xwing_type, 23, 24}; original.offsets = {at(0, 0), at(10, 0), at(20, 0)};
+            movement.squadrons.squadrons.front() = original;
+            tactical::AbilityTable table;
+            for (unsigned index = 0; index < 3; ++index) {
+                const tactical::TypeId member_type = index == 0 ? xwing_type : 22 + index;
+                auto team = original; team.type_id = 30 + index;
+                team.members = {member_type, 23, 24};
+                team.members.resize(4 + index, member_type == xwing_type ? 23 : xwing_type);
+                team.offsets.resize(4 + index, at(30, 0));
+                movement.squadrons.squadrons.push_back(team);
+                tactical::AbilityProfile refill; refill.kind = K::replenish_wingmen;
+                refill.replenish_team = team.type_id; refill.recharge_frames = 100;
+                table.profiles.push_back(unit_of(member_type, refill));
+            }
+            auto health = durability();
+            health.profiles = {{plain_type, units(1000), {}, false, {}}, {xwing_type, units(1000), {}, false, {}},
+                {23, units(1000), {}, false, {}}, {24, units(1000), {}, false, {}}};
+            auto created = tactical::TacticalSession::create(initial, {}, health, movement, std::nullopt, {}, {}, table);
+            expect(static_cast<bool>(created), "FS-52: replenishment team fixture creates");
+            if (!created) continue;
+            auto world = std::move(created).value();
+            const auto refill = tactical::AbilityPayload{K::replenish_wingmen, tactical::AbilityAction::activate};
+            if (failed < 3) expect(static_cast<bool>(world.submit(command(0, 1, 0, 11 + failed, refill))), "FS-52: cooldown setup submits");
+            expect(static_cast<bool>(world.submit(command(1, 1, 0, 10, refill))), "FS-52: team refill submits");
+            const eawr::platform::ThreadWorkerAdapter executor(workers);
+            std::vector<std::string> hashes;
+            for (unsigned tick = 0; tick < 2; ++tick) {
+                auto step = world.step(executor); expect(static_cast<bool>(step), "FS-52: refill step succeeds");
+                if (step) hashes.push_back(step.value().state_sha256);
+            }
+            const auto expected = failed == 0 ? 4U : failed == 1 ? 5U : 6U;
+            expect(!world.squadrons().empty() && world.squadrons().front().members.size() == expected,
+                "FS-52: refill stops after the first failed member");
+            if (workers == 1) reference = hashes;
+            else expect(hashes == reference, "FS-52: refill team results match on 1/8 workers");
+        }
+    }
+    // FS-52/WHE-63: a full team is a failed member request, so ordered dispatch stops there. Member 0's team is
+    // full (three authored members, three present); members 1 and 2 could still grow the team, and must not be asked.
+    for (const bool creation : {false, true}) {
+        std::vector<std::string> reference;
+        for (const auto workers : {1U, 2U, 4U, 8U}) {
+            auto initial = setup();
+            initial.units = {{1, plain_type, 2, at(1000, 0), math::identity_quat(), {}},
+                {10, xwing_squadron, 1, at(0, 0), math::identity_quat(), {}},
+                {11, xwing_type, 1, at(0, 0), math::identity_quat(), {}},
+                {12, 23, 1, at(10, 0), math::identity_quat(), {}},
+                {13, 24, 1, at(20, 0), math::identity_quat(), {}}};
+            initial.squadrons = {{10, {11, 12, 13}}};
+            auto movement = hangar_motion();
+            movement.squadrons.spawners.clear();
+            const auto craft = movement.squadrons.craft.front();
+            for (const tactical::TypeId type : {23U, 24U}) {
+                auto next = craft; next.type_id = type; movement.squadrons.craft.push_back(next);
+            }
+            auto original = movement.squadrons.squadrons.front();
+            original.members = {xwing_type, 23, 24}; original.offsets = {at(0, 0), at(10, 0), at(20, 0)};
+            movement.squadrons.squadrons.front() = original;
+            tactical::AbilityTable table;
+            for (unsigned index = 0; index < 3; ++index) {
+                const tactical::TypeId member_type = index == 0 ? xwing_type : 22 + index;
+                auto team = original; team.type_id = 30 + index;
+                team.members = {member_type, 23, 24};
+                if (index > 0) {
+                    team.members.resize(3 + 2 * index, member_type == xwing_type ? 23 : xwing_type);
+                    team.offsets.resize(3 + 2 * index, at(30, 0));
+                }
+                movement.squadrons.squadrons.push_back(team);
+                tactical::AbilityProfile refill; refill.kind = K::replenish_wingmen;
+                refill.replenish_team = team.type_id; refill.recharge_frames = 100;
+                table.profiles.push_back(unit_of(member_type, refill));
+            }
+            if (creation) {
+                tactical::UnitAbilityProfile container; container.type_id = xwing_squadron;
+                tactical::AbilityProfile team_refill; team_refill.kind = K::replenish_wingmen;
+                container.default_member_abilities = {team_refill};
+                table.profiles.push_back(container);
+                std::sort(table.profiles.begin(), table.profiles.end(), [](const auto& left, const auto& right) {
+                    return left.type_id < right.type_id;
+                });
+            }
+            auto health = durability();
+            health.profiles = {{plain_type, units(1000), {}, false, {}}, {xwing_type, units(1000), {}, false, {}},
+                {23, units(1000), {}, false, {}}, {24, units(1000), {}, false, {}}};
+            auto created = tactical::TacticalSession::create(initial, {}, health, movement, std::nullopt, {}, {}, table);
+            expect(static_cast<bool>(created), "FS-52: full-team replenishment fixture creates");
+            if (!created) continue;
+            auto world = std::move(created).value();
+            if (!creation) {
+                const auto refill = tactical::AbilityPayload{K::replenish_wingmen, tactical::AbilityAction::activate};
+                expect(static_cast<bool>(world.submit(command(0, 1, 0, 10, refill))), "FS-52: full-team refill submits");
+            }
+            const eawr::platform::ThreadWorkerAdapter executor(workers);
+            std::vector<std::string> hashes;
+            for (unsigned tick = 0; tick < 2; ++tick) {
+                auto step = world.step(executor); expect(static_cast<bool>(step), "FS-52: full-team refill step succeeds");
+                if (step) hashes.push_back(step.value().state_sha256);
+            }
+            expect(!world.squadrons().empty() && world.squadrons().front().members.size() == 3,
+                "FS-52: a full first team stops member dispatch before later members grow it");
+            if (workers == 1) reference = hashes;
+            else expect(hashes == reference, "FS-52: full-team dispatch matches on 1/2/4/8 workers");
+        }
+    }
+    for (const unsigned failed : {0U, 1U, 3U}) {
+        std::vector<std::string> reference;
+        for (const auto workers : {1U, 8U}) {
+            auto initial = setup();
+            initial.units = {{1, plain_type, 2, at(1000, 0), math::identity_quat(), {}},
+                {10, xwing_squadron, 1, at(0, 0), math::identity_quat(), {}},
+                {11, xwing_type, 1, at(0, 0), math::identity_quat(), {}},
+                {12, 23, 1, at(10, 0), math::identity_quat(), {}},
+                {13, 24, 1, at(20, 0), math::identity_quat(), {}}};
+            initial.squadrons = {{10, {11, 12, 13}}};
+            auto movement = hangar_motion();
+            movement.squadrons.spawners.clear();
+            const auto base_craft = movement.squadrons.craft.front();
+            for (const tactical::TypeId type : {23U, 24U}) {
+                auto craft = base_craft; craft.type_id = type; movement.squadrons.craft.push_back(craft);
+            }
+            movement.squadrons.squadrons.front().members = {xwing_type, 23, 24};
+            movement.squadrons.squadrons.front().offsets = {at(0, 0), at(10, 0), at(20, 0)};
+            auto health = durability();
+            health.profiles = {{plain_type, units(1000), {}, false, {}}, {xwing_type, units(1000), {}, false, {}},
+                {23, units(1000), {}, false, {}}, {24, units(1000), {}, false, {}}};
+            tactical::AbilityTable table;
+            tactical::UnitAbilityProfile container; container.type_id = xwing_squadron;
+            tactical::AbilityProfile team_well; team_well.kind = K::interdict;
+            container.default_member_abilities = {team_well};
+            for (unsigned index = 0; index < 3; ++index) {
+                tactical::AbilityProfile well; well.kind = K::interdict; well.active_by_default = index == failed;
+                table.profiles.push_back(unit_of(index == 0 ? xwing_type : 22 + index, well));
+            }
+            table.profiles.push_back(container);
+            std::sort(table.profiles.begin(), table.profiles.end(), [](const auto& left, const auto& right) {
+                return left.type_id < right.type_id;
+            });
+            auto created = tactical::TacticalSession::create(initial, {}, health, movement, std::nullopt, {}, {}, table);
+            expect(static_cast<bool>(created), "FS-52: creation team fixture creates");
+            if (!created) continue;
+            auto world = std::move(created).value();
+            for (unsigned index = 0; index < 3; ++index) {
+                const auto state = world.ability_state(11 + index);
+                expect(state && state->slots.front().active == (failed == 3 || index <= failed),
+                    "FS-52: creation dispatch stops at the first unsuccessful member");
+            }
+            const eawr::platform::ThreadWorkerAdapter executor(workers);
+            auto step = world.step(executor);
+            expect(static_cast<bool>(step), "FS-52: creation fixture steps");
+            if (step) {
+                const std::vector<std::string> hashes{step.value().state_sha256};
+                if (workers == 1) reference = hashes;
+                else expect(hashes == reference, "FS-52: creation dispatch matches on 1/8 workers");
+            }
+        }
+    }
+    {
+        std::vector<std::string> reference;
+        for (const auto workers : {1U, 8U}) {
+            auto initial = setup();
+            initial.units = {{1, plain_type, 2, at(1000, 0), math::identity_quat(), {}},
+                {11, xwing_type, 1, at(0, 0), math::identity_quat(), {}}};
+            auto movement = hangar_motion();
+            movement.squadrons.spawners.clear();
+            movement.squadrons.squadrons.front().members = {xwing_type, xwing_type, xwing_type};
+            movement.squadrons.squadrons.front().offsets = {at(0, 0), at(10, 0), at(20, 0)};
+            tactical::AbilityProfile refill; refill.kind = K::replenish_wingmen;
+            // Zero recharge changes nothing here: each unit is requested once per call, and a born wingman already
+            // sits on the new, full team, so its own default finds nothing to add (a born container is bounded below).
+            refill.replenish_team = xwing_squadron; refill.active_by_default = true; refill.recharge_frames = 0;
+            tactical::AbilityTable table; table.profiles = {unit_of(xwing_type, refill)};
+            auto health = durability();
+            health.profiles = {{plain_type, units(1000), {}, false, {}}, {xwing_type, units(1000), {}, false, {}}};
+            auto empty = initial;
+            empty.units.pop_back();
+            auto staged = tactical::TacticalSession::create(empty, {}, health, movement, std::nullopt, {}, {}, table);
+            expect(static_cast<bool>(staged), "FS-51: staged creation fixture creates");
+            if (staged) {
+                auto external = std::move(staged).value();
+                auto spawned = external.stage_spawn(initial.units.back());
+                expect(spawned && external.squadrons().size() == 1 && external.squadrons().front().members.size() == 3,
+                    "FS-51: externally created leader replenishes before creation returns");
+            }
+            auto created = tactical::TacticalSession::create(initial, {}, health, movement, std::nullopt, {}, {}, table);
+            expect(static_cast<bool>(created), "FS-51: default replenishment fixture creates");
+            if (!created) continue;
+            auto world = std::move(created).value();
+            expect(world.squadrons().size() == 1 && world.squadrons().front().members.size() == 3,
+                "FS-51: default replenishment forms a team before the first step");
+            const eawr::platform::ThreadWorkerAdapter executor(workers);
+            const auto step = world.step(executor);
+            expect(static_cast<bool>(step), "FS-51: replenishment fixture steps");
+            if (step) {
+                const std::vector<std::string> hashes{step.value().state_sha256};
+                if (workers == 1) reference = hashes;
+                else expect(hashes == reference, "FS-51: default replenishment matches on 1/8 workers");
+            }
+        }
+    }
+    // FS-51: data whose team container re-creates its own team type is refused with a diagnostic, never looped.
+    // A born container is outside every team, so only the per-call birth bound ends this chain.
+    for (const bool manual : {false, true}) {
+        std::string reference_message;
+        for (const auto workers : {1U, 2U, 4U, 8U}) {
+            auto initial = setup();
+            initial.units = {{1, plain_type, 2, at(1000, 0), math::identity_quat(), {}},
+                {11, xwing_type, 1, at(0, 0), math::identity_quat(), {}}};
+            auto movement = hangar_motion();
+            movement.squadrons.spawners.clear();
+            movement.squadrons.squadrons.front().members = {xwing_type, xwing_type, xwing_type};
+            movement.squadrons.squadrons.front().offsets = {at(0, 0), at(10, 0), at(20, 0)};
+            tactical::AbilityProfile leader_refill; leader_refill.kind = K::replenish_wingmen;
+            leader_refill.replenish_team = xwing_squadron; leader_refill.active_by_default = !manual;
+            tactical::AbilityProfile loop_refill = leader_refill; loop_refill.active_by_default = true;
+            tactical::AbilityTable table;
+            table.profiles = {unit_of(xwing_type, leader_refill), unit_of(xwing_squadron, loop_refill)};
+            std::sort(table.profiles.begin(), table.profiles.end(), [](const auto& left, const auto& right) {
+                return left.type_id < right.type_id;
+            });
+            auto health = durability();
+            health.profiles = {{plain_type, units(1000), {}, false, {}}, {xwing_type, units(1000), {}, false, {}},
+                {xwing_squadron, units(1000), {}, false, {}}};
+            auto created = tactical::TacticalSession::create(initial, {}, health, movement, std::nullopt, {}, {}, table);
+            std::string message;
+            if (!manual) {
+                expect(!created && created.error().code == tactical::diagnostic_codes::resource_limit,
+                    "FS-51: a self-replenishing team container refuses creation with a resource limit");
+                if (!created) message = created.error().message;
+            } else {
+                expect(static_cast<bool>(created), "FS-51: the manual self-replenish fixture creates");
+                if (!created) continue;
+                auto world = std::move(created).value();
+                const auto refill = tactical::AbilityPayload{K::replenish_wingmen, tactical::AbilityAction::activate};
+                expect(static_cast<bool>(world.submit(command(0, 1, 0, 11, refill))), "FS-51: the manual refill submits");
+                const eawr::platform::ThreadWorkerAdapter executor(workers);
+                const auto step = world.step(executor);
+                expect(!step && step.error().message.find("creation default chain exceeds its birth bound") != std::string::npos,
+                    "FS-51: a manual refill into a self-replenishing container is refused by the birth bound");
+                if (!step) message = step.error().message;
+            }
+            if (workers == 1U) reference_message = message;
+            else expect(message == reference_message, "FS-51: the bound refuses identically on 1/2/4/8 workers");
+        }
+    }
     constexpr tactical::TypeId escort = 23;
     for (const unsigned parent_kind : {0U, 1U, 2U}) for (const bool ordinary : {false, true}) for (const bool guard : {false, true}) {
         const bool parent = parent_kind == 1;

@@ -180,6 +180,7 @@ bool LiveFogView::create_plane(const space::FogFieldLayout& layout) {
     mesh_->set_size(Vector2(static_cast<float>(layout.width()), static_cast<float>(layout.height())));
     mesh_->set_material(material_);
     instance_ = rendering->instance_create2(mesh_->get_rid(), scenario_);
+    rendering->instance_set_visible(instance_, !movie_hidden_);
     rendering->instance_geometry_set_cast_shadows_setting(instance_, RenderingServer::SHADOW_CASTING_SETTING_OFF);
     // Source (x, y, z) is render (x, z, -y).
     const double centre_x = layout.left + layout.width() / 2.0;
@@ -307,6 +308,12 @@ void LiveFogView::frame(const LiveSessionView& live, const std::optional<camera:
     held_cells_ = field_->held_cells();
     fogged_cells_ = field_->fogged_cells();
     max_held_cells_ = std::max(max_held_cells_, held_cells_);
+}
+
+void LiveFogView::set_movie_hidden(const bool hidden) {
+    movie_hidden_ = hidden;
+    if (auto* rendering = RenderingServer::get_singleton(); rendering && instance_.is_valid())
+        rendering->instance_set_visible(instance_, !hidden);
 }
 
 void LiveFogView::release() {

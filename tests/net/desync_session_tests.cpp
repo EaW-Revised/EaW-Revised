@@ -20,6 +20,7 @@
 
 #include <array>
 #include <algorithm>
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -43,6 +44,32 @@ void expect(bool condition, const std::string& message) {
 }
 using eawr::testing::result_code_colon::require;
 Fixed units(std::int64_t value) { return Fixed::from_raw(value * Fixed::scale); }
+
+void monitor_frame_identity() {
+    tactical::TacticalSetup initial;
+    initial.seed = 714;
+    initial.players = {{1, 1, 1, tactical::player_flag_commandable}};
+    initial.units = {{1, 1, 1}};
+    auto world = require(tactical::TacticalSession::create(initial));
+    for (std::uint64_t tick = 0; tick < 120; ++tick) {
+        if (tick % 3 == 0) require(world.submit({{tick, 1, tick}, {1}, tactical::StopPayload{}}));
+        if (tick % 5 == 0) require(world.submit_object_turn({tick, {1, tick, tactical::AbilityKind::invulnerability}}));
+    }
+    sim::InlineExecutor executor;
+    for (unsigned tick = 0; tick < 120; ++tick) {
+        require(world.step(executor));
+        auto old = world.record();
+        const auto completed = world.completed_tick();
+        std::erase_if(old.commands, [completed](const auto& command) { return command.key.tick + 1 != completed; });
+        std::erase_if(old.object_turns, [completed](const auto& command) { return command.tick + 1 != completed; });
+        auto current = world.record_last_tick();
+        const auto bytes = [](const auto& replay) -> Bytes {
+            if (replay.commands.empty() && replay.object_turns.empty()) return {};
+            return require(tactical::write_replay(replay));
+        };
+        expect(bytes(old) == bytes(current), "monitor frame differs from old path at tick " + std::to_string(tick));
+    }
+}
 
 tactical::TacticalSetup setup() {
     tactical::TacticalSetup result;
@@ -72,6 +99,49 @@ tactical::TacticalContent content() {
     profile.type_id = 1; profile.category_bits = 1; profile.max_attack_distance = units(500);
     profile.weapons = {weapon}; result.combat.profiles = {profile};
     return result;
+}
+
+void monitor_benchmark() {
+    auto initial = setup();
+    initial.units.clear();
+    for (std::uint32_t id = 1; id <= 64; ++id) {
+        tactical::UnitState unit;
+        unit.entity_id = id; unit.type_id = 1; unit.owner = 1;
+        unit.position = {units(static_cast<std::int64_t>(id) * 30), {}, {}};
+        initial.units.push_back(unit);
+    }
+    auto world = require(tactical::TacticalSession::create(initial, content()));
+    sim::InlineExecutor executor;
+    using Clock = std::chrono::steady_clock;
+    const auto started = Clock::now();
+    for (std::uint64_t tick = 0; tick < 50'000; ++tick) {
+        for (std::uint64_t command = 0; command < 4; ++command)
+            require(world.submit({{tick, 1, tick * 4 + command}, {static_cast<sim::EntityId>(command + 1)}, tactical::StopPayload{}}));
+        require(world.step(executor));
+        if (tick != 999 && tick != 49'999) continue;
+        constexpr unsigned samples = 10;
+        double old_ms{}, new_ms{};
+        for (unsigned sample = 0; sample < samples; ++sample) {
+            auto start = Clock::now();
+            auto old = world.record();
+            const auto completed = world.completed_tick();
+            std::erase_if(old.commands, [completed](const auto& command) { return command.key.tick + 1 != completed; });
+            std::erase_if(old.object_turns, [completed](const auto& command) { return command.tick + 1 != completed; });
+            const auto old_bytes = require(tactical::write_replay(old));
+            auto end = Clock::now();
+            old_ms += std::chrono::duration<double, std::milli>(end - start).count();
+            start = Clock::now();
+            const auto current = world.record_last_tick();
+            const auto new_bytes = require(tactical::write_replay(current));
+            end = Clock::now();
+            new_ms += std::chrono::duration<double, std::milli>(end - start).count();
+            expect(old_bytes == new_bytes, "benchmark frames differ");
+        }
+        const auto elapsed = std::chrono::duration<double>(Clock::now() - started).count();
+        std::cout << "monitor benchmark tick=" << tick + 1 << " units=64 commands_per_tick=4 ticks_per_second="
+                  << static_cast<double>(tick + 1) / elapsed << " old_ms=" << old_ms / samples
+                  << " new_ms=" << new_ms / samples << '\n';
+    }
 }
 std::vector<std::uint8_t> read_bytes(const std::filesystem::path& path) {
     std::ifstream file(path, std::ios::binary);
@@ -522,10 +592,15 @@ void resync_hold_overlap() {
 
 int main(int argc, char** argv) {
     try {
+        if (argc == 2 && std::string(argv[1]) == "--monitor-benchmark") {
+            monitor_benchmark();
+            return 0;
+        }
 #if defined(EAWR_TEST_GNS)
         if (!net::GnsTransport::available()) { std::cout << "GNS disabled: desync test skipped\n"; return 77; }
 #endif
         expect(argc == 2, "usage: desync_session_tests artifact-directory");
+        monitor_frame_identity();
         [[maybe_unused]] const auto baseline = run_case(argv[1], 2000);
         run_case(argv[1], 90, 48);
         run_case(argv[1], 90, 0);

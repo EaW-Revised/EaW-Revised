@@ -25,4 +25,29 @@ void lower_current_thread_priority() {
 #endif
 }
 
+unsigned long current_process_id() {
+#ifdef _WIN32
+    return static_cast<unsigned long>(GetCurrentProcessId());
+#else
+    return static_cast<unsigned long>(getpid());
+#endif
+}
+
+void set_hash_thread_background(bool background, bool background_io) {
+#ifdef _WIN32
+    if (background) {
+        if (!background_io || !SetThreadPriority(GetCurrentThread(), THREAD_MODE_BACKGROUND_BEGIN))
+            SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+    } else {
+        SetThreadPriority(GetCurrentThread(), THREAD_MODE_BACKGROUND_END);
+        SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_NORMAL);
+    }
+#else
+    // Linux cannot restore a raised nice value without privileges. Workers yield
+    // cooperatively instead, so switching to a waiting screen remains reversible.
+    static_cast<void>(background);
+    static_cast<void>(background_io);
+#endif
+}
+
 } // namespace eawr::mods

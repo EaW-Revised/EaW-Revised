@@ -29,6 +29,7 @@ namespace eawr::platform { class TacticalFeed; }
 namespace eawr::presentation::godot_backend {
 
 class LanMatch;
+struct SavedBattlePreparation;
 
 namespace live_session {
 
@@ -160,6 +161,10 @@ struct Options final {
     double ticks_per_frame{0.5};                          // --eawr-live-step
     std::optional<std::size_t> workers;                   // --eawr-live-workers
     particles::ParticleDetail particle_detail{};          // independent presentation settings
+    // True when --eawr-live-particle-detail / --eawr-live-particle-heat chose the value; otherwise
+    // the saved Advanced video settings may (#6560). The local LOD is a flag only.
+    bool particle_global_given{};
+    bool particle_heat_given{};
     std::optional<std::size_t> particle_workers;          // --eawr-live-particle-workers (#638)
     // --eawr-live-speed 0..4: the tactical speed setting (#459 TP-05, default 2).
     std::uint32_t speed_step{ui::default_speed_step};
@@ -174,6 +179,9 @@ struct Options final {
     std::optional<std::uint64_t> save_tick;
     std::filesystem::path save_path;
     std::filesystem::path load_path;
+    // A saved battle the host already prepared for exactly this `load_path` (the queue step, skirmish_prepare.hpp). The
+    // first load stage takes it only for the same mounted content and path; otherwise it prepares the battle itself.
+    std::shared_ptr<SavedBattlePreparation> saved_preparation;
     // --eawr-live-fault-tick: a test hook that throws on the simulation thread right
     // before this tick runs (#316 review 2).
     std::optional<std::uint64_t> fault_tick;

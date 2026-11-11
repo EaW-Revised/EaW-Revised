@@ -3,6 +3,7 @@
 #include "space_environment_internal.hpp"
 #include "startup_trace.hpp"
 #include "render_profile_viewport.hpp"
+#include "shader_activation_owner.hpp"
 #include "eawr/diagnostics/owner_census.hpp"
 
 namespace eawr::presentation::godot_backend {
@@ -180,6 +181,8 @@ bool SpaceEnvironment::State::write_report() const {
            "and is not called\"},\n";
     if (options.write_hud_report) options.write_hud_report(output);
     startup_trace.write(output);
+    write_shader_activation_report(output, options.shader_receipt.get());
+    write_shader_route_report(output, renderer.get());
     output << "  \"cpu_recipe_memory\":{\"phase\":\"report\",\"scope\":\"vector_capacity_excluding_strings_allocator_gpu\",\"retained\":";
     assets::write_retained_payload(output, renderer ? renderer->recipe_memory() : assets::RetainedPayload{});
     output << "},\n";

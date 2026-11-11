@@ -23,6 +23,10 @@ namespace eawr::sim::galactic {
 
 inline constexpr std::size_t mp_roster_max_ai_configuration = 4096;
 inline constexpr std::size_t mp_roster_max_text = 256;
+// The battle-vote timeout a roster may carry, in seconds: whatever still fits below the campaign's tick horizon, so a saved
+// game's own value always validates. The lobby host's choice is narrower (net::galactic_lobby_min/max_vote_timeout).
+inline constexpr std::uint32_t mp_roster_max_vote_timeout_seconds =
+    static_cast<std::uint32_t>((galactic_max_ticks - 1) / galactic_frames_per_second);
 
 struct MpRosterPlayer {
     PlayerId player{};
@@ -40,6 +44,9 @@ struct MpRoster {
     bool custom{};
     std::int64_t credits{}, starting_tech{}, maximum_tech{};
     bool allow_heroes{true};
+    // Seconds a battle vote waits between different human sides (#6156). 0: the campaign's own constant applies
+    // (rosters that did not come from a lobby); a lobby always agrees an explicit value.
+    std::uint32_t vote_timeout_seconds{};
     std::vector<MpRosterPlayer> players; // strictly ascending player ID
     std::vector<Seat> seats;             // strictly ascending seat ID; humans first by convention, AI/script seats after
     std::vector<TeamLead> teams;         // strictly ascending human side ID
@@ -72,6 +79,8 @@ template<class T> core::Result<T> refuse(std::string message) {
     if (roster.custom ? (roster.credits < 0 || roster.starting_tech < 0 || roster.maximum_tech < roster.starting_tech)
                       : (roster.credits != 0 || roster.starting_tech != 0 || roster.maximum_tech != 0 || !roster.allow_heroes))
         return refuse<void>("custom options are out of range or set without the custom flag");
+    if (roster.vote_timeout_seconds > mp_roster_max_vote_timeout_seconds)
+        return refuse<void>("battle vote timeout is beyond the campaign's lifetime");
     if (roster.players.size() < 2 || roster.players.size() > galactic_max_players)
         return refuse<void>("a campaign roster lists two to " + std::to_string(galactic_max_players) + " factions");
     std::set<FactionId> faction_ids;

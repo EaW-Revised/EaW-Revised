@@ -1,3 +1,4 @@
+#include "../support/runtime_path.hpp"
 #include <system_error>
 #include <utility>
 #include "../support/check.hpp"
@@ -49,7 +50,7 @@ std::vector<std::byte> read_hex(const std::filesystem::path& path) {
 }
 
 void test_pglua() {
-    const auto root = std::filesystem::path(EAWR_SCRIPT_FIXTURES);
+    const auto root = eawr::testing::runtime_path("EAWR_TEST_SOURCE_ROOT", "tests/script/fixtures", EAWR_SCRIPT_FIXTURES);
     const auto minimal = read_hex(root / "minimal-valid.pglua.hex");
     auto converted = eawr::script::convert_pglua(minimal, "synthetic/minimal.pglua");
     if (!converted) std::cerr << "minimal conversion: " << converted.error().code << ' ' << converted.error().message << '\n';

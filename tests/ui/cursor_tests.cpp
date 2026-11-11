@@ -33,6 +33,10 @@ using namespace eawr;
 namespace ui = presentation::ui;
 using test::ui::expect;
 void states() {
+    expect(ui::hide_battlecam_cursor(true, true, false), "battlecam hides cursor in an active tactical handoff");
+    expect(!ui::hide_battlecam_cursor(false, true, false), "ending battlecam restores cursor ownership");
+    expect(!ui::hide_battlecam_cursor(true, false, false), "blocked tactical world retains cursor ownership");
+    expect(!ui::hide_battlecam_cursor(true, true, true), "modal retains cursor ownership during battlecam");
     {
         ui::CursorInput special;
         special.special_weapon = 0;
@@ -133,6 +137,24 @@ void states() {
     state.repair = true;
     check("POINTER_REPAIR_HARDPOINT");
 }
+void tactical_cursor_selection_unchanged() {
+    // CU-04..06: tactical camera grabs and ordinary actions retain their established IDs.
+    ui::CursorInput tactical;
+    expect(ui::battle_cursor(tactical) == "POINTER_NORMAL", "tactical idle pointer");
+    tactical.camera_pan = true;
+    expect(ui::battle_cursor(tactical) == "POINTER_MAP_SCROLLING_MODE", "tactical middle pan pointer");
+    tactical.camera_pan = false;
+    tactical.camera_rotate = true;
+    expect(ui::battle_cursor(tactical) == "POINTER_MAP_ROTATING_MODE", "tactical ctrl-middle rotate pointer");
+    tactical.camera_rotate = false;
+    tactical.movable_selection = true;
+    expect(ui::battle_cursor(tactical) == "POINTER_MOVE", "tactical move pointer after grab");
+    tactical.own_selection = true;
+    tactical.hostile = true;
+    expect(ui::battle_cursor(tactical) == "POINTER_ATTACK", "tactical attack pointer after grab");
+    tactical.hud = true;
+    expect(ui::battle_cursor(tactical) == "POINTER_NORMAL", "tactical HUD pointer");
+}
 void animation() {
     expect(ui::cursor_frame(0.175, 10, 4) == 0, "delay includes the zero countdown service");
     expect(ui::cursor_frame(0.177, 10, 4) == 1, "animation advances after eleven services");
@@ -205,6 +227,6 @@ void loader() {
 }
 }
 int main() {
-    states(); animation(); steady_history(); loader();
+    states(); tactical_cursor_selection_unchanged(); animation(); steady_history(); loader();
     return eawr::test::ui::failures() ? 1 : 0;
 }

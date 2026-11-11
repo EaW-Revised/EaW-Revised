@@ -9,5 +9,6 @@ eawr_add_galactic_area_case(
 )
 
 eawr_add_python_contract(python_presentation_renderer_live_launch_slot_roster tests.presentation.renderer.test_live_launch_slot_roster)
+set_property(TEST python_presentation_renderer_live_launch_slot_roster APPEND PROPERTY LABELS compiler-test)
 eawr_add_python_contract(python_presentation_renderer_gc_space_cycle tests.presentation.renderer.test_viewer_gc_space_cycle)
 set_tests_properties(python_presentation_renderer_gc_space_cycle PROPERTIES LABELS gpu)

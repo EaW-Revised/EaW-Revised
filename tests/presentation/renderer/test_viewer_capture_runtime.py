@@ -27,7 +27,7 @@ class CaptureRuntime(unittest.TestCase):
                          "capture replaces the previous faction's choices with the new owner's list")
         ground = data["ground_hud"]
         self.assertEqual(ground["count"], "1")
-        self.assertTrue(ground["count_visible"])
+        self.assertTrue(ground["caption"]["visible"], "the focused shell's Base Layout text")
         self.assertTrue(any(row["object"] == 7001 and row["enabled"]
                             for row in ground["widgets"]),
                         "pre-fix symptom: invading ground troops are hidden after capture")

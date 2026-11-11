@@ -1237,3 +1237,36 @@ exclusive cursor to audio. The caller supplies the real summary-open state,
 dialog popup/SFX flags and local faction mission event. An open-summary refresh,
 popup, generic objective insertion, icon announce or teletype reveal cannot
 substitute for that request. No synthetic mission notice is published here.
+
+
+### Planet destruction target effects
+
+| Rule | Behaviour | Evidence |
+| --- | --- | --- |
+| WGP-193 | Successful planet destruction first applies ruins and refreshes the planet model, then requests the shared ability audiovisual effects. This request is unconditional on local ownership. The target sound uses `SFXEvent_Target_Affected`; a 3D event uses the target position, while a 2D event has no positional attachment. The target particle uses `Target_Particle_Effect` and the target object; the shared particle path can use an authored usable bone, otherwise the target origin. Particle scene selection follows WGP-01b, scaling follows the resolved particle `Scale_Factor`, and `Particle_Lifetime_Frames` uses 30 frames per second before the BP-16 detach/drain lifecycle. | debug build EGP-21; WGCH-115; WGP-01b/03/08; BP-16 |
+
+EGP-21 is the private planet-destruction application and common target-effect
+walk (`out/research/gc-6251-effects/decompile/index.json`, plus the common
+sound path in `out/research/gc-6250-removal`). It establishes effect qualification
+and target binding, not a new frame-service order.
+
+The remake publishes one transient success notice per human observer with the
+actual ability bearer's type, target and committed galactic frame. These notices
+are neither saved nor hashed; reconstructing a ruined planet does not recreate
+an explosion. The viewer consumes its exclusive event cursor once, resolves the
+named ability through the source type's inherited `Abilities` list, and requests
+the authored sound and particle independently. An unavailable sound does not
+prevent the particle, and absent particle art does not prevent the sound.
+Particle layers, positive scale and positive lifetime come from the resolved
+particle type. Emission stops at the authored lifetime, surviving particles
+drain, and the existing bounded effect owner releases all resources. WGP-03
+continues to control elapsed render time during strategic pause. Authored object
+expiry uses the displayed logical frame; expiry when animations are explicitly
+allowed during pause remains WGP-50's unverified cadence seam.
+
+`Target_Particle_Bone_Name` remains a separate attachment-provider seam: this GC
+adapter uses the target planet origin and does not claim a model-bone transform.
+Owner-side audiovisual fields and other ability handlers are also outside this
+target-effect binding. The authored-parameter contract changes both target
+references, particle scale, lifetime and layer; the live destruction case checks
+single delivery, a refused repeat, sound delivery and final resource release.

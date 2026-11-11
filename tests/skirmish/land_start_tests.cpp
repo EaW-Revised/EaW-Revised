@@ -1,6 +1,7 @@
 #include "eawr/skirmish/land_start.hpp"
 #include "eawr/vfs/vfs.hpp"
 #include "eawr/skirmish/land_content.hpp"
+#include "eawr/core/text.hpp"
 #include "eawr/platform/sim_workers.hpp"
 #include "eawr/script/foc/tactical_ai.hpp"
 #include "eawr/sim/tactical/session.hpp"
@@ -18,7 +19,9 @@
 #include <iostream>
 #include <map>
 #include <memory>
+#include <optional>
 #include <set>
+#include <sstream>
 #include <vector>
 
 namespace {
@@ -202,7 +205,7 @@ void authored_open_ground_rear(const skirmish::LandStart& built) {
     field.passability.assign(256 * 256, authored.land.clear_bit);
     field.movement_masks.assign(authored.land_terrain->movement_masks().begin(), authored.land_terrain->movement_masks().end());
     content.land_terrain = std::make_shared<const LandTerrain>(take(LandTerrain::build(std::move(field))));
-    content.land.static_objects.clear(); content.land.occupations.clear();
+    content.land.static_objects.clear(); content.land.occupations.clear(); content.land.initial_pad_children.clear();
     const sim::InlineExecutor serial;
     for (const auto& company : authored.land.companies) {
         if (company.company.members.size() < 2) continue;
@@ -309,6 +312,8 @@ void contracts() {
     for (int i = 0; i < 48 * 48; ++i) for (unsigned b = 0; b < 4; ++b)
         inputs.map.raw_passability.push_back(static_cast<std::byte>(b == 0 ? 1 : 0));
     inputs.common.match_defaults.max_tech = 5;
+    // The stock gameconstants.xml values; a start never defaults them (land_fog_rules refuses zero).
+    inputs.common.land_fog_cell_size = whole(15); inputs.common.land_fog_regrow_seconds = whole(6);
     inputs.common.map = fixture.map; inputs.common.map_sha256 = fixture.map_sha256; inputs.common.tables = &tables;
     inputs.common.factions = {{"Mod_Dawn", true, true, false}, {"Mod_Dusk", true, true, false}, {"Mod_Neutral", false, true, true}, {"Mod_Absent", false, false, false}};
     for (std::uint32_t i = 0; i < 8; ++i) inputs.common.lobby_colours.push_back({"mod-colour", {static_cast<std::uint8_t>(i), 0, 0}});
@@ -336,6 +341,61 @@ void contracts() {
     expect(authored_inputs.last_known_capacity.size() == 8 && authored_inputs.last_known_capacity.at(8) == 50, "default land content covers eight seats");
     expect(adapter_inputs(tables).unverified_passability_bits.size() == authored_inputs.unverified_passability_bits.size(), "default land content is deterministic");
     const auto authored_start = take(skirmish::build_land_start(fixture, inputs, authored_inputs));
+    {
+        auto capture_tables = tables;
+        units::UnitType active; active.id = "Influencing"; active.influences_capture = true;
+        units::UnitType inactive; inactive.id = "NonInfluencing"; inactive.influences_capture = false;
+        capture_tables.units = {active, inactive};
+        auto capture_inputs = inputs; capture_inputs.common.tables = &capture_tables;
+        const auto built = take(skirmish::build_land_start(fixture, capture_inputs, explicit_bindings(capture_tables)));
+        const std::array<Player, 3> players{{{1, 1, 1, 0}, {2, 2, 2, 0}, {3, 3, 3, 0}}};
+        const CaptureProfile point{900, whole(100), Fixed{}, {1, 2}};
+        const std::array<CaptureCandidate, 2> candidates{{
+            {{1, 1, {}}, skirmish::type_id(active.id)}, {{2, 2, {}}, skirmish::type_id(inactive.id)}}};
+        PadState state{};
+        expect(service_capture(point, state, 3, 3, players, candidates, built.content.economy.pads, 99, {}) == 1,
+            "LC-53: a non-influencing enemy on the point does not contest the influencing unit");
+        state = {};
+        expect(service_capture(point, state, 3, 3, players, std::span{candidates}.last(1), built.content.economy.pads, 99, {}) == 3,
+            "LC-53: a non-influencing unit alone cannot capture");
+    }
+    // LC-85/86: the start carries the land fog grid over the whole 48 x 48 sample terrain (960 units, 64 cells of 15,
+    // row 0 at the top) and the sensor rows of the land types that reveal; the constants come from the start inputs.
+    {
+        const auto& grid = authored_start.content.fog;
+        expect(grid && grid->cells_wide == 64 && grid->cells_tall == 64 && grid->cell_size == whole(15)
+                && grid->map_left == Fixed{} && grid->map_top == whole(960) && grid->ramp_down_step == 21,
+            "the land start binds a fog grid over the whole terrain from DesiredLandFOWCellSize and LandFOWRegrowTime");
+        expect(authored_start.content.sensors.empty(), "land types without a reveal behaviour produce no sensor rows");
+        auto coarse = inputs;
+        coarse.common.land_fog_cell_size = whole(30); coarse.common.land_fog_regrow_seconds = whole(12);
+        const auto coarse_start = take(skirmish::build_land_start(fixture, coarse, authored_inputs));
+        const auto& coarse_grid = coarse_start.content.fog;
+        expect(coarse_grid && coarse_grid->cells_wide == 32 && coarse_grid->cell_size == whole(30) && coarse_grid->ramp_down_step == 10,
+            "the authored land fog constants decide the grid and the ramp");
+        expect(coarse_start.start.identity.sha256 != authored_start.start.identity.sha256,
+            "the fog constants are part of the land match identity");
+        auto unread = inputs;
+        unread.common.land_fog_cell_size = Fixed{};
+        expect(!skirmish::build_land_start(fixture, unread, authored_inputs), "a land start without the fog constants is refused, not defaulted");
+        auto lopsided = inputs;
+        lopsided.map.terrain->height = 25; lopsided.map.terrain->samples.resize(48 * 25);
+        lopsided.map.raw_passability.resize(48 * 25 * 4);
+        const auto refused = skirmish::build_land_start(fixture, lopsided, authored_inputs);
+        expect(!refused && refused.error().message.find("square") != std::string::npos,
+            "a terrain whose axes get different cell sizes is refused with a named reason");
+        auto sensor_tables = tables;
+        units::UnitType revealer;
+        revealer.id = "Mod_Aurora_Member"; revealer.kind = units::UnitKind::ship;
+        revealer.reveal = true; revealer.fow_reveal_range = whole(130); revealer.multisample_fow = true;
+        sensor_tables.units.push_back(revealer);
+        auto sensor_inputs = inputs; sensor_inputs.common.tables = &sensor_tables;
+        const auto sensed = take(skirmish::build_land_start(fixture, sensor_inputs, explicit_bindings(sensor_tables)));
+        expect(sensed.content.sensors.size() == 1 && sensed.content.sensors[0].type_id == skirmish::type_id("Mod_Aurora_Member")
+                && sensed.content.sensors[0].reveals && sensed.content.sensors[0].reveal_range == whole(130)
+                && sensed.content.sensors[0].multisample && sensed.content.sensors[0].dense_multiplier == Fixed::from_raw(Fixed::scale / 2),
+            "a land type's reveal inputs become its sensor row");
+    }
     auto static_inputs = inputs;
     units::LandStaticObject prop;
     prop.id = "mod-prop"; prop.xml_type = "Props_Generic"; prop.land_obstacle = true;
@@ -586,6 +646,15 @@ struct TurningResult {
     bool operator==(const TurningResult&) const = default;
 };
 
+// The authored Dantooine fixture names its member by identity. Members are numbered above the last roster root, so every
+// reinforcement point and prebuilt child the map places moves the member's identity up by one.
+sim::EntityId fixture_member(const skirmish::LandStart& built, const sim::EntityId authored) {
+    const auto& points = built.content.land.point_objects;
+    const auto shift = std::count_if(built.start.setup.units.begin(), built.start.setup.units.end(),
+        [&](const auto& unit) { return std::binary_search(points.begin(), points.end(), unit.type_id); });
+    return authored + static_cast<sim::EntityId>(shift + built.content.land.initial_pad_children.size());
+}
+
 TurningResult turning_move(const skirmish::LandStart& built, const sim::PartitionExecutor& executor,
     bool naboo, bool restore, bool trace, bool verify_replay, bool repulsion = true) {
     auto session = take(TacticalSession::create(built.start.setup, built.content));
@@ -603,8 +672,8 @@ TurningResult turning_move(const skirmish::LandStart& built, const sim::Partitio
     sim::math::Vec2 member_before;
     if (!naboo) {
         const auto members = session.land_movement()->members();
-        const auto member = std::find_if(members.begin(), members.end(), [](const auto& m) { return m.object == 1103; });
-        if (member == members.end()) throw std::runtime_error("Dantooine expected-limit fixture has no member 1103");
+        const auto member = std::find_if(members.begin(), members.end(), [&](const auto& m) { return m.object == fixture_member(built, 1103); });
+        if (member == members.end()) throw std::runtime_error("Dantooine expected-limit fixture has no member 1103 (shifted by its points)");
         member_before = member->position;
     }
     const auto target = naboo ? own[0].position : sim::math::Vec3{before.x, before.y, {}};
@@ -664,7 +733,7 @@ TurningResult turning_move(const skirmish::LandStart& built, const sim::Partitio
         expect(measured && distance > whole(10), "stock turning squad moves more than ten units within 150 ticks beside idle companies");
     } else {
         const auto members = session.land_movement()->members();
-        const auto member = std::find_if(members.begin(), members.end(), [](const auto& m) { return m.object == 1103; });
+        const auto member = std::find_if(members.begin(), members.end(), [&](const auto& m) { return m.object == fixture_member(built, 1103); });
         const bool member_measured = member != members.end() && sim::math::try_length(
             {Fixed::from_raw(member->position.x.raw() - member_before.x.raw()),
              Fixed::from_raw(member->position.y.raw() - member_before.y.raw())}, member_progress);
@@ -737,8 +806,84 @@ void naboo_turning_move(const vfs::Vfs& filesystem, const data::Catalog& catalog
         "stock land start with combat content builds deterministically");
     const auto domain = std::find_if(built.start.identity.domains.begin(), built.start.identity.domains.end(),
         [](const auto& row) { return row.name == "land-content"; });
-    expect(domain != built.start.identity.domains.end() && domain->version == 3,
-        "the land-content identity domain is version 3 with active combat");
+    expect(domain != built.start.identity.domains.end() && domain->version == 5,
+        "the land-content identity domain is version 5 with active combat, the land fog grid and the static sensor rows");
+}
+
+// LC-44..53 (#5894): the reinforcement points the stock land maps author reach the start through the loader, as data.
+void reinforcement_points(const vfs::Vfs& filesystem, const data::Catalog& catalog, scene::VfsAssetCache& cache,
+    const std::vector<skirmish::SetupMap>& maps) {
+    std::size_t maps_with_points{}, chosen_count{};
+    const skirmish::SetupMap* chosen = nullptr;
+    for (const auto& map : maps) {
+        if (!map.unavailable.empty() || map.teams.size() < 2) continue;
+        skirmish::Fixture fixture; fixture.map = map.path;
+        fixture.slots = {{1, "Rebel", map.teams[0].team, true, {}}, {2, "Empire", map.teams[1].team, true, {}}};
+        units::UnitTables empty;
+        const auto discovered = skirmish::read_land_start_inputs(fixture, filesystem, catalog, empty);
+        if (!discovered) continue;
+        std::size_t authored{};
+        for (const auto& placement : discovered.value().common.placements) {
+            // The placement flag comes from the type's own Behavior list; stock points are Marker objects.
+            if (!placement.reinforcement_point) continue;
+            const auto& rows = discovered.value().static_tables.land_static_objects;
+            const auto row = std::find_if(rows.begin(), rows.end(), [&](const auto& value) { return core::iequals(value.id, placement.type); });
+            expect(row != rows.end() && row->reinforcement_point, "every placed reinforcement point has a loaded static row");
+            ++authored;
+        }
+        if (authored == 0) continue;
+        ++maps_with_points;
+        if (chosen == nullptr) { chosen = &map; chosen_count = authored; }
+    }
+    std::cout << "stock land maps with authored reinforcement points: " << maps_with_points << "\n";
+    expect(maps_with_points > 0, "the stock land maps author reinforcement points (placed objects with the REINFORCEMENT_POINT behaviour)");
+    if (chosen == nullptr) return;
+    skirmish::Fixture fixture; fixture.map = chosen->path;
+    fixture.slots = {{1, "Rebel", chosen->teams[0].team, true, {}}, {2, "Empire", chosen->teams[1].team, true, {}}};
+    units::UnitTables empty;
+    const auto discovered = take(skirmish::read_land_start_inputs(fixture, filesystem, catalog, empty));
+    fixture.map_sha256 = discovered.common.map_sha256;
+    units::LoadInput load;
+    load.domain = BattleDomain::land; load.catalog = &catalog; load.filesystem = &filesystem;
+    load.model = cache.access().model;
+    std::set<std::string> requested;
+    for (const auto& faction : discovered.factions) requested.insert(faction.forces.begin(), faction.forces.end());
+    load.types.assign(requested.begin(), requested.end());
+    auto tables = take(units::load_unit_tables(load));
+    for (const auto& company : tables.land_companies)
+        for (const auto& member : company.members) requested.insert(member.type);
+    load.types.assign(requested.begin(), requested.end());
+    tables = take(units::load_unit_tables(load));
+    const auto inputs = take(skirmish::read_land_start_inputs(fixture, filesystem, catalog, tables));
+    auto gates = adapter_inputs(tables);
+    gates.last_known_capacity = {{1, 50}, {2, 50}};
+    const auto built = take(skirmish::build_land_start(fixture, inputs, gates));
+    const auto& land = built.content.land;
+    const auto is_point = [&](TypeId type) { return std::binary_search(land.point_objects.begin(), land.point_objects.end(), type); };
+    const auto placed = static_cast<std::size_t>(std::count_if(built.start.setup.units.begin(), built.start.setup.units.end(),
+        [&](const auto& unit) { return is_point(unit.type_id); }));
+    expect(placed >= chosen_count, "every reinforcement point the map places is a unit of the land start");
+    expect(land.reinforcement.enabled && land.reinforcement.multiplayer && land.reinforcement.caps.size() == 2
+            && !land.reinforcement.points.empty() && !land.reinforcement.capacities.empty(),
+        "the land start carries the enabling radii, the capacities and one company cap per seat");
+    expect(std::all_of(land.reinforcement.points.begin(), land.reinforcement.points.end(), [](const auto& row) { return row.enabling_radius.raw() > 0; }),
+        "every enabling row names a positive authored radius");
+    expect(built.content.economy.pads.neutral != 0
+            && std::any_of(built.content.economy.pads.capture.begin(), built.content.economy.pads.capture.end(), [&](const auto& row) {
+                   return is_point(row.type) && row.captures; })
+            && std::all_of(built.content.economy.pads.capture.begin(), built.content.economy.pads.capture.end(), [&](const auto& row) {
+                   return !row.captures || (is_point(row.type) && row.radius.raw() > 0 && row.transition_seconds.raw() > 0 && !row.affiliation.empty()); }),
+        "the capturable points carry their authored capture profile against the declared neutral player");
+    // The session runs: the pass over the points and the roster is equal at 1 and at 8 workers.
+    const sim::InlineExecutor serial;
+    auto reference = take(TacticalSession::create(built.start.setup, built.content));
+    for (int i = 0; i < 90; ++i) take(reference.step(serial));
+    platform::ThreadWorkerAdapter threads(8);
+    auto parallel = take(TacticalSession::create(built.start.setup, built.content));
+    for (int i = 0; i < 90; ++i) take(parallel.step(threads));
+    expect(parallel.canonical_state_bytes() == reference.canonical_state_bytes() && !reference.pads().empty(),
+        "a stock land battle with reinforcement points steps to one state at 1 and 8 workers and registers the points as pads");
+    std::cout << "stock land reinforcement points: map=" << chosen->path << " authored=" << chosen_count << " placed=" << placed << "\n";
 }
 
 // #3776 L3 witness: the setup screen's selection becomes land FixtureOptions, and those options build the land start.
@@ -816,6 +961,443 @@ void domain_lists(const vfs::Vfs& filesystem, const data::Catalog& catalog) {
     expect(passthrough.size() == plain.size(), "a non-space query is passed through unchanged");
 }
 
+// LC-85..87 on a stock map: the start's fog grid fills the terrain, the stock land types supply sensor rows, and a
+// session built from it marks the spawned companies' circles in their owners' grids without fogging everything out.
+std::size_t stock_sampling_structures{}; // multisampling structure types met over all stock maps (LC-89, #6183)
+void stock_fog(const skirmish::LandStart& built, const skirmish::LandStartInputs& inputs, const std::uint32_t players) {
+    expect(inputs.common.land_fog_cell_size == whole(15) && inputs.common.land_fog_regrow_seconds == whole(6),
+        "the stock land constants are DesiredLandFOWCellSize 15 and LandFOWRegrowTime 6");
+    const auto& terrain = *inputs.map.terrain;
+    const auto cells = [&](const std::uint32_t samples) {
+        const std::uint64_t cell = static_cast<std::uint64_t>(inputs.common.land_fog_cell_size.raw() / Fixed::scale);
+        return std::min<std::uint64_t>((std::uint64_t{samples} * 20 + cell - 1) / cell, 512);
+    };
+    const auto& grid = built.content.fog;
+    expect(grid && grid->cells_wide == cells(terrain.width) && grid->cells_tall == cells(terrain.height)
+            && grid->cell_size.raw() <= whole(15).raw() && grid->map_top == whole(static_cast<std::int64_t>(terrain.height) * 20),
+        "the stock land start binds a fog grid over the whole terrain");
+    expect(std::any_of(built.content.sensors.begin(), built.content.sensors.end(), [](const auto& row) { return row.reveals; }),
+        "stock land types supply reveal sensor rows");
+    auto session = take(TacticalSession::create(built.start.setup, built.content));
+    const auto* fog = session.fog_cells();
+    expect(fog != nullptr, "a stock land session has fog cells");
+    if (!fog) return;
+    std::size_t players_with_cells = 0;
+    const auto live = session.units();
+    for (std::size_t index = 0; index < built.start.setup.players.size(); ++index) {
+        const auto values = fog->values(index);
+        const auto revealed = static_cast<std::size_t>(std::count_if(values.begin(), values.end(), [](const auto v) { return v != 0; }));
+        if (revealed > 0) ++players_with_cells;
+        // A team reveals what its revealers' circles cover and nothing else. Every live object of the team with a reveal row
+        // contributes at most the bounding square of its circle (range floored at 10, radius in cells = range / cell + 0.5).
+        // This replaces an arbitrary "under half the map" bound: stock structures (range 300, 22 or more per team) reveal
+        // far more than the companies alone, as authored.
+        std::uint64_t cover = 0;
+        const auto& self = built.start.setup.players[index];
+        for (const auto& unit : live) {
+            const auto owner = std::find_if(built.start.setup.players.begin(), built.start.setup.players.end(),
+                [&](const auto& player) { return player.player_id == unit.owner; });
+            const auto sensor = std::find_if(built.content.sensors.begin(), built.content.sensors.end(),
+                [&](const auto& row) { return row.type_id == unit.type_id && row.reveals; });
+            if (owner == built.start.setup.players.end() || owner->team_id != self.team_id || sensor == built.content.sensors.end()) continue;
+            const auto range = std::max(sensor->reveal_range.raw(), whole(10).raw());
+            const auto radius = static_cast<std::uint64_t>((range * 2 + grid->cell_size.raw()) / (2 * grid->cell_size.raw()));
+            cover += (2 * radius + 1) * (2 * radius + 1);
+        }
+        std::cout << "stock land fog player=" << self.player_id << " revealed=" << revealed << " of " << values.size()
+            << " cover_bound=" << cover << "\n";
+        // The neutral player may see everything: Dantooine places Secondary_Abandoned_Sensor (Land_FOW_Reveal_Range 10000). The
+        // bound is for the players that play.
+        if (self.commandable()) expect(revealed < values.size() / 2, "a stock land player starts with less than half the map revealed");
+        expect(static_cast<std::uint64_t>(revealed) <= cover, "a stock land player never reveals more than its team's reveal circles can cover");
+    }
+    expect(players_with_cells >= players, "every commandable stock land player starts with a revealed circle");
+    // LC-86 (#6183): a placed or pre-built structure of the session that reveals shows its own cell to its owner at tick 0.
+    std::size_t revealing{}, shown{};
+    const auto& statics = built.content.land.static_objects;
+    for (const auto& unit : built.start.setup.units) {
+        if (std::find(statics.begin(), statics.end(), unit.type_id) == statics.end()) continue;
+        const auto sensor = std::find_if(built.content.sensors.begin(), built.content.sensors.end(),
+            [&](const auto& row) { return row.type_id == unit.type_id && row.reveals; });
+        const auto owner = std::find_if(built.start.setup.players.begin(), built.start.setup.players.end(),
+            [&](const auto& player) { return player.player_id == unit.owner; });
+        if (sensor == built.content.sensors.end() || owner == built.start.setup.players.end()) continue;
+        ++revealing;
+        if (fog->revealed(static_cast<std::size_t>(owner - built.start.setup.players.begin()), unit.position)) ++shown;
+    }
+    std::cout << "stock land structures that reveal: " << revealing << " shown to their owner at tick 0: " << shown << "\n";
+    expect(revealing > 0, "a stock land start places structures of the session that carry a REVEAL sensor row");
+    expect(shown == revealing, "every revealing stock structure shows its own cell to its owner at tick 0");
+    // LC-89 (#6183): a multisampling stock structure authors no hard extents, so its fog box is its model's collision box.
+    std::size_t sampling{}, boxed{};
+    for (const auto type : statics) {
+        const auto sensor = std::find_if(built.content.sensors.begin(), built.content.sensors.end(),
+            [&](const auto& row) { return row.type_id == type && row.multisample; });
+        if (sensor == built.content.sensors.end()) continue;
+        ++sampling;
+        if (sensor->half_extents.x > Fixed{} && sensor->half_extents.y > Fixed{}) ++boxed;
+    }
+    std::cout << "stock land multisampling structure types: " << sampling << " with a fog box: " << boxed << "\n";
+    expect(boxed == sampling, "every multisampling stock structure of the session has a non-empty fog box");
+    stock_sampling_structures += sampling; // not every map places one (Alderaan places none); the maps together must
+    std::cout << "stock land fog " << grid->cells_wide << 'x' << grid->cells_tall << " cell_raw=" << grid->cell_size.raw() << '\n';
+}
+
+// LE-LOADER (installed data): the map's build pads, their menus and their prices come from the data; a pad without CAPTURE_POINT
+// is an inert pad profile; the land economy rows win (LC-46); and a build on a base pad runs end to end: the pad is revealed to its
+// owner (#6183), the request is accepted, the price is debited, the child grows and the constructed object replaces it.
+void stock_pads(const skirmish::LandStart& built, const skirmish::LandStartInputs& inputs, const skirmish::Fixture& fixture,
+    const skirmish::LandContentInputs& gates, const units::UnitTables* capture_pad) {
+    const auto& economy = built.content.economy;
+    const auto& pad_tables = inputs.pad_tables;
+    expect(!pad_tables.units.empty() && !economy.pads.capture.empty(), "a stock land map loads its build pads and their pad rules");
+    std::size_t pads{}, inert{}, menus{}, options{};
+    for (const auto& pad : pad_tables.units) {
+        if (!pad.build_pad) continue;
+        ++pads;
+        const auto* profile = economy.pads.point(skirmish::type_id(pad.id));
+        // No land pad captures until the land capture service (LE-CAPTURE): a CAPTURE_POINT pad keeps its capture inputs but is inert too.
+        expect(profile != nullptr && profile->build_pad && !profile->captures,
+            "every stock pad has an inert pad profile (no land pad captures yet)");
+        if (profile && !profile->captures) {
+            ++inert;
+            std::vector<FactionId> expected_affiliation;
+            if (pad.capture_point) {
+                auto names = pad.affiliation;
+                std::replace(names.begin(), names.end(), ',', ' ');
+                std::istringstream tokens(names);
+                std::string name;
+                while (tokens >> name) for (const auto& faction : inputs.common.factions)
+                    if (core::iequals(name, faction.name)) expected_affiliation.push_back(battle::faction_id(name));
+                std::sort(expected_affiliation.begin(), expected_affiliation.end());
+            }
+            expect(profile->radius == pad.capture_radius.value_or(Fixed{}) && profile->affiliation == expected_affiliation,
+                "a stock pad carries its type radius and matching capture-point affiliations");
+        }
+        for (const auto& group : pad.production.buildable) {
+            const auto menu = std::find_if(economy.menus.begin(), economy.menus.end(), [&](const auto& row) {
+                return row.station == skirmish::type_id(pad.id) && row.faction == battle::faction_id(group.faction); });
+            expect(menu != economy.menus.end() && !menu->station_producer && menu->options.size() == group.types.size(),
+                "a stock pad has one build menu per authored faction group with the authored entries");
+            if (menu == economy.menus.end()) continue;
+            ++menus;
+            for (std::size_t index = 0; index < group.types.size() && index < menu->options.size(); ++index) {
+                const auto* child = pad_tables.find(group.types[index]);
+                const auto& option = menu->options[index];
+                if (!child) continue;
+                ++options;
+                const auto seconds = child->production.build_time_seconds ? child->production.build_time_seconds->trunc_to_integer() : 0;
+                expect(option.type == skirmish::type_id(group.types[index]) && option.kind == BuildKind::structure
+                        && option.price == child->production.build_cost_multiplayer.value_or(Fixed{})
+                        && option.build_frames == static_cast<std::uint32_t>(seconds) * 30,
+                    "a stock build option takes its price and time from the construction child's data");
+            }
+        }
+    }
+    std::cout << "stock pads map=" << fixture.map << " pads=" << pads << " inert=" << inert << " menus=" << menus
+        << " options=" << options << '\n';
+    expect(pads > 0 && inert > 0 && menus > 0 && options > 0, "the stock map has inert pads with menus and priced options");
+    // Census of what the map places: every distinct start type with its count, whether it is a pad, and how many reached the session.
+    {
+        std::map<std::string, std::array<std::size_t, 3>> census; // placed, in session, pad
+        for (const auto& unit : built.start.units) {
+            auto& row = census[unit.type];
+            ++row[0];
+            row[2] = pad_tables.find(unit.type) && pad_tables.find(unit.type)->build_pad ? 1 : 0;
+            if (std::any_of(built.start.setup.units.begin(), built.start.setup.units.end(),
+                    [&](const auto& state) { return state.entity_id == unit.state.entity_id; })) ++row[1];
+        }
+        for (const auto& [type, row] : census)
+            std::cout << "stock census map=" << fixture.map << " type=" << type << " placed=" << row[0] << " session=" << row[1]
+                << (row[2] ? " pad" : "") << '\n';
+    }
+    // A map that places a capture-point pad (Skirmish_Build_Pad is one) still starts: no land pad captures yet, so no neutral player is needed.
+    if (capture_pad != nullptr) {
+        auto with_capture = inputs;
+        skirmish::merge_land_pad_types(with_capture.pad_tables, *capture_pad);
+        const auto started = take(skirmish::build_land_start(fixture, with_capture, gates));
+        const auto* profile = started.content.economy.pads.point(skirmish::type_id("Skirmish_Build_Pad"));
+        expect(profile != nullptr && profile->build_pad && !profile->captures,
+            "a land start whose pads include the capture-point Skirmish_Build_Pad loads and the pad never captures");
+    }
+    // LC-46: the land rows keep the start credits and the land cap (the builder's own rows are not used).
+    for (const auto& player : economy.players)
+        expect(player.credits == built.start.match.credits && player.start_tech == 1,
+            "the land economy rows keep the lobby credits and the land start tech");
+    expect(built.start.match.pre_built_base, "the stock pad case enables prebuilt bases");
+    if (built.start.match.pre_built_base) {
+        expect(!built.content.land.initial_pad_children.empty(), "prebuilt stock structure pads have a starting child");
+        auto prebuilt = take(TacticalSession::create(built.start.setup, built.content));
+        expect(!prebuilt.outcome(), "the stock prebuilt start has no immediate victory outcome");
+        for (const auto& ledger : prebuilt.ledgers())
+            expect(ledger.credits == built.start.match.credits, "prebuilt children do not debit their owners");
+        bool income_child = false;
+        for (const auto& [parent, child] : built.content.land.initial_pad_children) {
+            const auto state = prebuilt.pads().find(parent);
+            const auto unit = prebuilt.unit_state(child);
+            const auto parent_unit = prebuilt.unit_state(parent);
+            expect(state != prebuilt.pads().end() && state->second.constructed == child && unit,
+                "a starting child is linked to its pad");
+            expect(unit && parent_unit && unit->owner == parent_unit->owner,
+                "a starting child belongs to its pad owner");
+            if (unit && unit->owner == 1 && economy.stream(unit->type_id)) income_child = true;
+        }
+        expect(income_child, "a prebuilt stock child supplies an authored income stream");
+        const auto initial = prebuilt.ledgers().front().credits;
+        std::int64_t own_rate{};
+        for (const auto& unit : built.start.setup.units) {
+            const auto* stream = economy.stream(unit.type_id);
+            if (unit.owner == 1 && stream && stream->automatic && stream->initially_enabled)
+                own_rate += stream->per_frame.raw();
+        }
+        const sim::InlineExecutor income_executor;
+        for (int tick = 0; tick < 30; ++tick) take(prebuilt.step(income_executor));
+        expect(prebuilt.ledgers().front().credits > initial, "the stock prebuilt source pays income");
+        if (fixture.slots.size() == 2)
+            expect(own_rate > 0 && prebuilt.ledgers().front().credits.raw() - initial.raw() == own_rate * 30,
+                "stock income over 30 frames equals its authored per-frame stream rates");
+        expect(!prebuilt.outcome(), "the idle stock prebuilt start retains an undecided victory outcome");
+        auto without = fixture;
+        without.match = built.start.match;
+        without.match->pre_built_base = false;
+        const auto off = take(skirmish::build_land_start(without, inputs, gates));
+        expect(off.content.land.initial_pad_children.empty(), "prebuilt off leaves starting children absent");
+        if (fixture.slots.size() == 2) {
+            auto hq_fixture = fixture;
+            hq_fixture.victory_condition = VictoryCondition::enemy_hq_destroyed;
+            const auto hq_start = take(skirmish::build_land_start(hq_fixture, inputs, gates));
+            auto setup = hq_start.start.setup;
+            auto rules = hq_start.content;
+            rules.fog.reset(); // Isolate the HQ victory rule from stock visibility and sensor ranges.
+            std::array<sim::EntityId, 2> children{}, parents{};
+            for (const auto& [parent, child] : rules.land.initial_pad_children) {
+                const auto unit = std::find_if(setup.units.begin(), setup.units.end(),
+                    [&](const auto& row) { return row.entity_id == child; });
+                if (unit != setup.units.end() && unit->owner >= 1 && unit->owner <= 2
+                    && std::binary_search(rules.victory.starbase_types.begin(), rules.victory.starbase_types.end(), unit->type_id)) {
+                    children[unit->owner - 1] = child;
+                    parents[unit->owner - 1] = parent;
+                }
+            }
+            expect(children[0] != 0 && children[1] != 0, "both players have a prebuilt HQ victory child");
+            if (children[0] && children[1]) {
+                const auto enemy = std::find_if(setup.units.begin(), setup.units.end(),
+                    [&](const auto& row) { return row.entity_id == children[1]; });
+                const auto enemy_type = enemy->type_id;
+                expect(std::none_of(off.start.setup.units.begin(), off.start.setup.units.end(), [&](const auto& row) {
+                    return row.owner == 2 && row.type_id == enemy_type;
+                }), "prebuilt off has no enemy HQ child");
+                std::erase_if(setup.units, [&](const auto& row) {
+                    return row.entity_id != children[0] && row.entity_id != children[1]
+                        && row.entity_id != parents[0] && row.entity_id != parents[1];
+                });
+                std::erase_if(rules.land.initial_pad_children, [&](const auto& link) {
+                    return link.second != children[0] && link.second != children[1];
+                });
+                std::erase_if(rules.land.occupations, [&](const auto& row) {
+                    return row.object != children[0] && row.object != children[1]
+                        && row.object != parents[0] && row.object != parents[1];
+                });
+                auto attacker = std::find_if(setup.units.begin(), setup.units.end(),
+                    [&](const auto& row) { return row.entity_id == children[0]; });
+                const auto target = std::find_if(setup.units.begin(), setup.units.end(),
+                    [&](const auto& row) { return row.entity_id == children[1]; });
+                attacker->position = target->position;
+                attacker->position.x = Fixed::from_raw(target->position.x.raw() + 50 * Fixed::scale);
+                rules.durability = {};
+                DamageRules damage;
+                damage.shield_recharge_frames = 30; damage.damage_types = 1; damage.armor_types = 1;
+                damage.armor_mods = {whole(1)}; rules.durability.damage = damage;
+                for (const auto type : {attacker->type_id, target->type_id}) {
+                    if (std::none_of(rules.durability.profiles.begin(), rules.durability.profiles.end(),
+                            [&](const auto& row) { return row.type_id == type; })) {
+                        DurabilityProfile health; health.type_id = type; health.max_hull = whole(4);
+                        health.allow_diminishing_firepower = false; rules.durability.profiles.push_back(health);
+                    }
+                }
+                std::sort(rules.durability.profiles.begin(), rules.durability.profiles.end(),
+                    [](const auto& a, const auto& b) { return a.type_id < b.type_id; });
+                rules.combat = {};
+                CombatProfile gun;
+                gun.type_id = attacker->type_id; gun.max_attack_distance = whole(150); gun.living_projectile_collision = true;
+                gun.collision = CollisionBox{{whole(-2), whole(-2), whole(-2)}, {whole(2), whole(2), whole(4)}};
+                WeaponProfile weapon;
+                weapon.range = whole(150); weapon.min_recharge_hundredths = weapon.max_recharge_hundredths = 100;
+                weapon.pulse_count = 1;
+                ShotProfile shot; shot.damage = whole(4); shot.speed = whole(4); shot.max_travel = whole(500);
+                weapon.shot = shot; gun.weapons.push_back(weapon); rules.combat.profiles.push_back(gun);
+                if (target->type_id != attacker->type_id) {
+                    auto body = gun; body.type_id = target->type_id; body.weapons.clear();
+                    rules.combat.profiles.push_back(body);
+                }
+                std::sort(rules.combat.profiles.begin(), rules.combat.profiles.end(),
+                    [](const auto& a, const auto& b) { return a.type_id < b.type_id; });
+                for (const auto& profile : rules.combat.profiles)
+                    rules.combat.footprints.push_back({profile.type_id, whole(2), whole(2), whole(2)});
+                auto battle = take(TacticalSession::create(setup, rules));
+                expect(!battle.outcome(), "the prebuilt HQ start has no immediate winner");
+                expect(static_cast<bool>(battle.submit({{0, 1, 1}, {children[0]}, AttackPayload{children[1]}})),
+                    "the attack on the enemy HQ is submitted");
+                bool destroyed = false;
+                const sim::InlineExecutor executor;
+                for (int frame = 0; frame < 180 && !battle.outcome(); ++frame) {
+                    const auto tick = take(battle.step(executor));
+                    for (const auto& event : tick.snapshot->events())
+                        destroyed |= event.kind == EventKind::unit_destroyed && event.unit == children[1];
+                }
+                expect(destroyed && battle.outcome() && battle.outcome()->winner == 1
+                        && battle.outcome()->deciding_unit == children[1],
+                    "destroying the prebuilt enemy HQ decides the HQ victory for its opponent");
+            }
+        }
+        std::size_t retained{}, removed{};
+        for (const auto& unit : built.start.units) {
+            const auto* type = inputs.pad_tables.find(unit.type);
+            if (!type || !type->build_pad || std::none_of(built.start.markers.begin(), built.start.markers.end(),
+                    [&](const auto& marker) { return marker.record == unit.record && marker.use == battle::MarkerUse::base_position; })) continue;
+            const bool exists = std::any_of(off.start.units.begin(), off.start.units.end(), [&](const auto& other) {
+                return other.record == unit.record && other.state.owner == unit.state.owner && other.type == unit.type; });
+            if (!type->respects_prebuilt_base) {
+                expect(exists, "prebuilt off retains every opt-out marker pad");
+                if (exists) ++retained;
+            } else {
+                expect(!exists, "prebuilt off omits each prebuilt structure marker pad");
+                if (!exists) ++removed;
+            }
+        }
+        expect(retained > 0 && removed > 0, "the stock map exercises both prebuilt marker-pad cases");
+        if (fixture.slots.size() == 2 && !built.content.land.initial_pad_children.empty()) {
+            const auto parent_id = built.content.land.initial_pad_children.front().first;
+            const auto parent = std::find_if(built.start.units.begin(), built.start.units.end(),
+                [&](const auto& unit) { return unit.state.entity_id == parent_id; });
+            auto multi = inputs;
+            if (parent != built.start.units.end()) {
+                const auto pad = std::find_if(multi.pad_tables.units.begin(), multi.pad_tables.units.end(),
+                    [&](const auto& unit) { return core::iequals(unit.id, parent->type); });
+                if (pad != multi.pad_tables.units.end()) {
+                    const auto group = std::find_if(pad->production.buildable.begin(), pad->production.buildable.end(),
+                        [&](const auto& row) { return core::iequals(row.faction, fixture.slots[parent->state.owner - 1].faction); });
+                    if (group != pad->production.buildable.end() && group->types.size() == 1) {
+                        const auto second = std::find_if(multi.pad_tables.units.begin(), multi.pad_tables.units.end(),
+                            [&](const auto& unit) { return unit.under_construction && !core::iequals(unit.id, group->types.front()); });
+                        expect(second != multi.pad_tables.units.end(), "the stock fixture supplies a second construction type");
+                        if (second != multi.pad_tables.units.end()) {
+                            group->types.push_back(second->id);
+                            const auto multiple = take(skirmish::build_land_start(fixture, multi, gates));
+                            expect(std::none_of(multiple.content.land.initial_pad_children.begin(), multiple.content.land.initial_pad_children.end(),
+                                    [&](const auto& entry) { return entry.first == parent_id; }),
+                                "a multi-entry pad does not assume a starting selection");
+                        }
+                    } else expect(false, "the selected stock starting pad has one faction entry");
+                } else expect(false, "the selected stock starting pad has a loaded type");
+            } else expect(false, "the selected stock starting pad exists in the start census");
+        }
+    }
+    // End to end: player 1 builds on one of its own pads, the available option with the shortest build time.
+    const PlayerId owner = 1;
+    const auto faction = battle::faction_id(fixture.slots.front().faction);
+    sim::EntityId pad_entity{};
+    const BuildOption* option = nullptr;
+    const StationMenu* own_menu = nullptr;
+    for (const auto& unit : built.start.setup.units) {
+        if (unit.owner != owner) continue;
+        if (std::any_of(built.content.land.initial_pad_children.begin(), built.content.land.initial_pad_children.end(),
+                [&](const auto& link) { return link.first == unit.entity_id; })) continue;
+        for (const auto& menu : economy.menus) {
+            if (menu.station != unit.type_id || menu.faction != faction) continue;
+            for (const auto& candidate : menu.options)
+                if (candidate.kind == BuildKind::structure && candidate.available && candidate.price <= built.start.match.credits
+                    && std::any_of(economy.pads.construction.begin(), economy.pads.construction.end(), [&](const auto& child) {
+                        return child.type == candidate.type && economy.stream(child.constructed) == nullptr; })
+                    && (option == nullptr || candidate.build_frames < option->build_frames)) {
+                    option = &candidate; own_menu = &menu; pad_entity = unit.entity_id;
+                }
+        }
+        if (option) break;
+    }
+    expect(option != nullptr, "player 1 starts with a build pad that offers an affordable structure");
+    if (!option) return;
+    auto session = take(TacticalSession::create(built.start.setup, built.content));
+    auto control = take(TacticalSession::create(built.start.setup, built.content));
+    const sim::InlineExecutor serial;
+    const auto allowed = session.pad_build_allowed(owner, pad_entity);
+    expect(allowed && allowed.value(), "a stock base pad is revealed to its owner at tick 0, so a build on it is allowed");
+    const auto credits = [&]() {
+        for (const auto& row : session.ledgers()) if (row.player == owner) return row.credits;
+        return Fixed{};
+    };
+    const auto price = option->price;
+    const auto frames = option->build_frames;
+    // A type that is not on the pad's menu for the builder's faction is refused: nothing grows, nothing is debited.
+    const BuildOption* foreign = nullptr;
+    for (const auto& menu : economy.menus)
+        for (const auto& candidate : menu.options)
+            if (foreign == nullptr && menu.faction != faction && candidate.kind == BuildKind::structure && own_menu->find(candidate.type) == nullptr)
+                foreign = &candidate;
+    expect(foreign != nullptr, "another faction's pad menu offers a structure that player 1's menu does not");
+    if (foreign) {
+        const auto refused = session.submit({{0, owner, 1}, {pad_entity}, PadBuildPayload{foreign->type}});
+        expect(static_cast<bool>(refused), "the command of an unlisted structure is queued for admission");
+        take(session.step(serial));
+        take(control.step(serial));
+        const auto idle = session.pads().find(pad_entity);
+        const auto unchanged = std::find_if(control.ledgers().begin(), control.ledgers().end(),
+            [&](const auto& row) { return row.player == owner; });
+        expect(idle != session.pads().end() && idle->second.under_construction == 0 && idle->second.constructed == 0
+                && unchanged != control.ledgers().end() && credits() == unchanged->credits,
+            "a structure that is not on the pad's menu for the builder's faction is refused: nothing is built or debited");
+    }
+    const auto submitted = session.submit({{session.completed_tick(), owner, 2}, {pad_entity}, PadBuildPayload{option->type}});
+    expect(static_cast<bool>(submitted), "the pad build request is accepted");
+    if (!submitted) return;
+    sim::EntityId child{};
+    std::uint64_t grown_at{};
+    std::optional<TacticalSession> restored_session;
+    for (std::uint64_t tick = 0; tick < frames + 150; ++tick) {
+        take(session.step(serial));
+        take(control.step(serial));
+        if (restored_session) take(restored_session->step(serial));
+        const auto state = session.pads().find(pad_entity);
+        if (state == session.pads().end()) break;
+        if (!restored_session && state->second.under_construction != 0 && tick >= frames / 2) {
+            const auto saved = take(checkpoint::save_tactical_checkpoint(session, session.pending_commands(),
+                checkpoint::default_seats(session.record().setup), checkpoint::tactical_identities(built.start.setup.content_identity)));
+            auto restored = take(checkpoint::load_tactical_checkpoint(saved, checkpoint::tactical_identities(built.start.setup.content_identity),
+                [&](const TacticalReplay& replay) { return TacticalSession::from_replay(replay, built.content); }, serial));
+            expect(restored.session.canonical_state_bytes() == session.canonical_state_bytes(),
+                "a stock loaded pad restores during construction");
+            restored_session.emplace(std::move(restored.session));
+        }
+        if (state->second.constructed != 0) { child = state->second.constructed; grown_at = tick; break; }
+    }
+    std::cout << "stock pad build: price=" << price.raw() / Fixed::scale << " frames=" << frames << " done at tick " << grown_at << '\n';
+    const auto control_ledger = std::find_if(control.ledgers().begin(), control.ledgers().end(),
+        [&](const auto& row) { return row.player == owner; });
+    expect(control_ledger != control.ledgers().end() && control_ledger->credits.raw() - credits().raw() == price.raw(),
+        "the price of the pad build is debited once alongside ordinary income");
+    expect(child != 0 && session.unit_state(child) && session.unit_state(child)->owner == owner,
+        "the constructed object replaces the construction child, owned by the builder");
+    expect(grown_at + 1 >= frames && grown_at <= frames + 90, "the construction takes the authored time");
+    expect(restored_session.has_value(), "the stock pad was saved while construction was pending");
+    if (restored_session)
+        expect(restored_session->canonical_state_bytes() == session.canonical_state_bytes(),
+            "a stock pad restored mid-construction completes identically");
+    std::vector<std::uint8_t> pad_baseline;
+    for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+        auto parallel = take(TacticalSession::create(built.start.setup, built.content));
+        platform::ThreadWorkerAdapter executor(workers);
+        expect(static_cast<bool>(parallel.submit({{0, owner, 1}, {pad_entity}, PadBuildPayload{option->type}})),
+            "the stock pad digest case submits its build");
+        for (int tick = 0; tick < 40; ++tick) take(parallel.step(executor));
+        const auto pad = parallel.pads().find(pad_entity);
+        expect(pad != parallel.pads().end() && pad->second.under_construction != 0,
+            "the stock pad digest case exercises active construction");
+        const auto state = parallel.canonical_state_bytes();
+        if (pad_baseline.empty()) pad_baseline = state;
+        else expect(state == pad_baseline, "stock pad construction agrees on 1/2/4/8 workers");
+    }
+}
+
 int installed() {
     const auto root = testing::environment("EAWR_EAW_GAME_ROOT");
     if (!root || root->empty()) { std::cout << "SKIPPED: no game data\n"; return 77; }
@@ -827,6 +1409,7 @@ int installed() {
     const auto maps = take(skirmish::land_setup_maps(filesystem, loaded.catalog));
     scene::VfsAssetCache cache(filesystem); const auto access = cache.access();
     live_stock_move(filesystem, loaded.catalog, cache);
+    reinforcement_points(filesystem, loaded.catalog, cache, maps);
     units::LoadInput all_load; all_load.domain = BattleDomain::land; all_load.catalog = &loaded.catalog;
     all_load.filesystem = &filesystem; all_load.model = access.model;
     for (const auto& definition : loaded.catalog.definitions()) {
@@ -853,6 +1436,10 @@ int installed() {
             "LC-83 stock generic-team company is admitted without a container speed cap");
         if (binding) std::cout << "stock generic-team admitted: " << name << '\n';
     }
+    // LE-LOADER: the stock capture-point pad, merged into one map's pad rules to prove a map that places it still starts.
+    units::LoadInput capture_load; capture_load.domain = BattleDomain::land; capture_load.catalog = &loaded.catalog;
+    capture_load.filesystem = &filesystem; capture_load.model = access.model; capture_load.types = {"Skirmish_Build_Pad"};
+    const auto capture_pad = take(units::load_unit_tables(capture_load));
     for (const std::uint32_t players : {2U, 8U}) {
         const auto map_name = players == 2 ? "_mp_land_alderaan" : "_mp_land_dantooine";
         const auto selected = std::find_if(maps.begin(), maps.end(), [&](const auto& map) {
@@ -869,6 +1456,8 @@ int installed() {
         units::UnitTables empty;
         const auto discovered = take(skirmish::read_land_start_inputs(fixture, filesystem, loaded.catalog, empty));
         fixture.map_sha256 = discovered.common.map_sha256;
+        fixture.match = discovered.common.match_defaults;
+        fixture.match->pre_built_base = true;
         units::LoadInput load; load.domain = BattleDomain::land; load.catalog = &loaded.catalog;
         load.filesystem = &filesystem; load.model = access.model;
         for (const auto& faction : discovered.factions) for (const auto& type : faction.forces)
@@ -915,11 +1504,38 @@ int installed() {
             << " bound-authored-offsets=" << bound_authored_offsets << " bound-model-fallback-offsets=" << bound_test_offsets
             << " scale-only-refused=" << scale_only_refused << " raw-passability-bits=explicit-unverified-input\n";
         const auto authored = take(skirmish::build_land_start(fixture, inputs, gates));
+        stock_fog(authored, inputs, players);
+        stock_pads(authored, inputs, fixture, gates, players == 2 ? &capture_pad : nullptr);
+        {
+            // The live land path carries the option in the match, not in Fixture::pre_built_base: with it off, the completed
+            // children's static rows (HQ relevance among them) must not load, while the prebuilt-on read has them.
+            auto off_fixture = fixture;
+            off_fixture.match->pre_built_base = false;
+            const auto off_inputs = take(skirmish::read_land_start_inputs(off_fixture, filesystem, loaded.catalog, tables));
+            const auto has_row = [](const skirmish::LandStartInputs& read, sim::tactical::TypeId type) {
+                return std::any_of(read.static_tables.land_static_objects.begin(), read.static_tables.land_static_objects.end(),
+                    [&](const auto& row) { return skirmish::type_id(row.id) == type; });
+            };
+            std::size_t children_with_rows{};
+            for (const auto& [parent, child] : authored.content.land.initial_pad_children) {
+                (void)parent;
+                const auto unit = std::find_if(authored.start.units.begin(), authored.start.units.end(),
+                    [&](const auto& row) { return row.state.entity_id == child; });
+                if (unit == authored.start.units.end()) continue;
+                if (has_row(inputs, unit->state.type_id) && !has_row(off_inputs, unit->state.type_id)) ++children_with_rows;
+                expect(!has_row(off_inputs, unit->state.type_id), "prebuilt off loads no static row for a completed pad child");
+            }
+            expect(authored.content.land.initial_pad_children.empty() || children_with_rows > 0,
+                "prebuilt on loads the completed children's static rows that prebuilt off omits");
+        }
         if (players == 2) authored_open_ground_rear(authored);
         else compare_turning(authored, false);
         std::vector<std::string> selected_types;
         for (const auto& company : tables.land_companies) selected_types.push_back(company.id);
-        const auto bindings = take(skirmish::build_land_bindings(tables, selected_types, gates));
+        // The authored overload also binds the map's pad types: bind the same merged tables on the explicit path.
+        auto bound_tables = tables;
+        skirmish::merge_land_pad_types(bound_tables, inputs.pad_tables);
+        const auto bindings = take(skirmish::build_land_bindings(bound_tables, selected_types, gates));
         expect(authored.start.setup.content_identity == take(skirmish::build_land_start(fixture, inputs, bindings)).start.setup.content_identity,
             "stock L3 authored overload equals the explicit binding path");
         if (players == 2) {
@@ -936,6 +1552,7 @@ int installed() {
     naboo_turning_move(filesystem, loaded.catalog, cache);
     domain_lists(filesystem, loaded.catalog);
     setup_to_land_start(filesystem, loaded.catalog, cache, maps);
+    expect(stock_sampling_structures > 0, "the stock maps place multisampling structures, so the fog box check above is not vacuous");
     return checks.finish();
 }
 

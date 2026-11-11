@@ -477,11 +477,15 @@ void projectile_defence_tables() {
         const auto end = xml.find("</Unit_Abilities_Data>", begin);
         const auto type = "<Type>" + std::string(kind) + "</Type>";
         const std::string radius = "<Effective_Radius>750</Effective_Radius>";
+        const bool jammer = std::string_view(kind) == "sensor_jamming";
         xml.replace(begin, end + std::string_view{"</Unit_Abilities_Data>"}.size() - begin,
             "<Unit_Abilities_Data SubObjectList=\"Yes\"><Unit_Ability>"
                 + (radius_first ? radius + type : type + radius)
                 + "<Expiration_Seconds>30</Expiration_Seconds><Recharge_Seconds>75</Recharge_Seconds>"
-                + "</Unit_Ability></Unit_Abilities_Data>");
+                + (jammer ? "<GUI_Activated_Ability_Name>fixture_jammer</GUI_Activated_Ability_Name>" : "")
+                + "</Unit_Ability></Unit_Abilities_Data>"
+                + (jammer ? "<Abilities SubObjectList=\"Yes\"><Sensor_Jamming_Ability Name=\"fixture_jammer\">"
+                    "<Activation_Style>User_Input</Activation_Style></Sensor_Jamming_Ability></Abilities>" : ""));
         write_fixture(tree.root, xml);
         const auto loaded = load(tree.root, models(-40.0F));
         expect(loaded.tables.has_value(), "WPJ-17/WHE-32: defence radius XML loads in either child order");
@@ -496,6 +500,15 @@ void projectile_defence_tables() {
             && profile->abilities[0].effective_radius == Fixed::from_raw(raw(750))
             && profile->abilities[0].expiration_frames == 900 && profile->abilities[0].recharge_frames == 2250,
             "WPJ-17/WHE-31/32: XML radius and timers bind to the production ability profile");
+        if (jammer) {
+            auto changed = *loaded.tables;
+            for (auto& candidate : changed.units)
+                if (candidate.id == "Test_Frigate") candidate.abilities[0].gui_activated_ability_name = "missing";
+            const auto unresolved = eawr::units::ability_table(changed);
+            const auto* missing = unresolved ? unresolved.value().find(eawr::assets::object_type_crc("Test_Frigate")) : nullptr;
+            expect(missing && !eawr::sim::tactical::ability_slot(*missing, eawr::sim::tactical::AbilityKind::sensor_jamming),
+                "WAB-36: unresolved GUI name cannot activate the jammer");
+        }
     }
 }
 

@@ -25,6 +25,7 @@ namespace eawr::assets {
 // What the texture holds, which decides how a smaller level is made.
 enum class ChainKind : std::uint8_t {
     colour, // the box average as it is
+    compensated_light, // match generated levels from level 2 to the top-level luminance ranks
     // A tangent-space normal map (rgb = xyz as 2 * (rgb / 255 - 0.5), alpha untouched, e.g. gloss).
     normal,
 };

@@ -48,7 +48,8 @@ std::size_t program_bytes(const Program& program) {
     std::size_t bytes = sizeof(program) + program.material.program.capacity() + program.material.technique.capacity()
         + program.material.pass_name.capacity() + plan_bytes(program.vertex.updates) + plan_bytes(program.fragment.updates)
         + (program.vertex.uniforms.capacity() + program.fragment.uniforms.capacity()) * sizeof(Uniform)
-        + program.textures.capacity() * sizeof(Texture);
+        + program.textures.capacity() * sizeof(Texture) + program.parameters.capacity() * sizeof(ParameterRecipe);
+    for (const auto& parameter : program.parameters) bytes += parameter.name.capacity();
     for (const auto* values : {&program.material.bindings, &program.instance_defaults}) {
         bytes += values->capacity() * sizeof(MaterialBinding);
         for (const auto& binding : *values) {
@@ -94,11 +95,12 @@ const runtime::ReflectedInterface& interface_port(const runtime::StageArtifact& 
     require(interpolation == port.interpolation && found->centroid == port.centroid, "interpolation disagrees with reflection");
     return *found;
 }
-std::string vertex_input(const runtime::ReflectedInterface& item, const lower::Port& port) {
+std::string vertex_input(const runtime::ReflectedInterface& item, const lower::Port& port, bool& extended) {
     const auto type = port.type;
     require(item.source.availability == runtime::AssociationAvailability::public_backend_metadata
         && item.source.semantic.has_value(), "vertex input lacks a qualified source semantic association", diagnostic_codes::semantic);
     const auto& semantic = *item.source.semantic;
+    if (port.read_mask && semantic.usage != 0U && (semantic.usage != 5U || semantic.index != 0U)) extended = true;
     require(semantic.index == 0U || (semantic.usage == 5U && semantic.index == 1U), "unsupported vertex semantic index", diagnostic_codes::semantic);
     require(type.scalar == lower::Scalar::floating, "unsupported vertex input scalar");
     const auto vector = [&](const std::string& value, std::uint32_t components) {
@@ -140,7 +142,7 @@ std::string varying(const lower::Port& port) {
     return "eawr_link_" + std::to_string(*port.layout.location);
 }
 void reconcile_ports(const runtime::StageArtifact& artifact, const lower::LoweredStage& stage,
-    std::string& declarations, std::string& body, bool vertex) {
+    std::string& declarations, std::string& body, bool vertex, bool& extended) {
     std::string arguments;
     bool position{}, color{};
     std::set<std::tuple<lower::Direction, std::optional<std::uint32_t>, std::uint32_t>> locations;
@@ -155,7 +157,7 @@ void reconcile_ports(const runtime::StageArtifact& artifact, const lower::Lowere
             const auto& reflected = interface_port(artifact, port);
             require(locations.emplace(port.direction, port.layout.location, port.layout.component.value_or(0U)).second,
                 "duplicate stage port location");
-            if (vertex && input) body += " = " + vertex_input(reflected, port);
+            if (vertex && input) body += " = " + vertex_input(reflected, port, extended);
             else if (vertex || input) {
                 const auto name = varying(port);
                 if (vertex) declarations += std::string(port.interpolation == lower::Interpolation::flat ? "varying flat " : "varying ")
@@ -205,10 +207,12 @@ void reconcile_ports(const runtime::StageArtifact& artifact, const lower::Lowere
     for (const auto& port : stage.ports) {
         const auto local = std::string(vertex ? "eawr_va" : "eawr_fa") + std::to_string(index++);
         if (port.direction != lower::Direction::output) continue;
+        // Compatibility switches triangle draws to points when POINT_SIZE is used.
+        // The qualified producer default stays local to the translated stage.
+        if (port.builtin == lower::Builtin::point_size) continue;
         if (port.builtin == lower::Builtin::position) body += "    POSITION = " + local + ";\n"
             "    POSITION.y *= sign(PROJECTION_MATRIX[1][1]);\n"
             "    POSITION.z = CLIP_SPACE_FAR < 0.0 ? " + depth_expression(true) + " : " + depth_expression(false) + ";\n";
-        else if (port.builtin == lower::Builtin::point_size) body += "    POINT_SIZE = " + local + ";\n";
         else if (vertex) body += "    " + varying(port) + " = " + local + ";\n";
         else body += "    ALBEDO = " + local + ".rgb;\n";
     }
@@ -465,9 +469,25 @@ Result<Program> assemble(const assets::EffectView& effect, const runtime::StageA
         std::string vbody, fbody;
         out.vertex = uniforms(effect, vp, vertex, vs.value(), std::move(vu).value(), declarations, out);
         out.fragment = uniforms(effect, fp, fragment, fs.value(), std::move(fu).value(), declarations, out);
-        reconcile_ports(vertex, vs.value(), declarations, vbody, true);
-        reconcile_ports(fragment, fs.value(), declarations, fbody, false);
-        out.material.program = "shader_type spatial;\nrender_mode unshaded, skip_vertex_transform;\n" + declarations
+        std::set<std::size_t> parameters;
+        for (const auto* stage : {&out.vertex, &out.fragment}) for (const auto& uniform : stage->updates.uniforms)
+            for (const auto& dependency : uniform.operand.parameters)
+                if (!dependency.engine_input) parameters.insert(dependency.parameter);
+        require(parameters.size() <= limits.uniforms, "surface parameter recipe budget exceeded", diagnostic_codes::limit);
+        for (const auto index : parameters) {
+            require(index < effect.parameters.size() && effect.parameters[index].value < effect.values.size(), "surface parameter is invalid");
+            const auto& value = effect.values[effect.parameters[index].value];
+            require(value.type < effect.types.size(), "surface parameter type is invalid");
+            const auto& type = effect.types[value.type];
+            out.parameters.push_back({index, std::string(type.name), {type.kind, type.value_class,
+                type.rows, type.columns, std::max(1U, type.array_count)}});
+        }
+        reconcile_ports(vertex, vs.value(), declarations, vbody, true, out.extended_vertex_inputs);
+        reconcile_ports(fragment, fs.value(), declarations, fbody, false, out.extended_vertex_inputs);
+        // The mesh upload swaps winding, and native clip positions apply the
+        // target Y correction. Baseline source CCW culling therefore maps to
+        // Godot front culling rather than its implicit back-cull default.
+        out.material.program = "shader_type spatial;\nrender_mode unshaded, cull_front, skip_vertex_transform;\n" + declarations
             + vs.value().function_source + fs.value().function_source
             + "void vertex() {\n" + vbody + "}\nvoid fragment() {\n" + fbody + "}\n";
         require(out.material.program.size() <= limits.source_bytes, "assembled material exceeds source byte budget");

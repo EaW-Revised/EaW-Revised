@@ -14,20 +14,64 @@ out as covered. That is how `Layer_Z_Adjust` slipped (per-unit flight height: cr
 
 ## The universe
 
-`plan/inventories/xml-tags.json`, FoC profile: every element without an element below it and every attribute of every
-effective FoC XML file. `tools/inventory/tag_registry.py` reads it and
+The required set is the unconditional union of the FoC profile in
+`plan/inventories/xml-tags.json`, exact authored pairs from every declared target
+profile in `docs/tag-coverage/coverage-universe.json`, and the engine catalog's
+typed owner/tag obligations. `tools/inventory/tag_registry.py` reads it and
 
 - keys each tag by **(class, tag path)**: the class is the XML element the object is written as (`SpaceUnit`, `HardPoint`,
   `Goals`, `GameConstants`), the tag path what is below it (`Max_Speed`, `Abilities/Stun_Ability/Stun_Range`,
   `@Name`), ASCII case folded as FoC matches names;
 - collapses the segments that are data, not tags, to `*`: goal, function-set and AI-template names, dialog control names
-  (`GUIDialogs/Textures/*/Frame_Left`), planet, terrain and hint names, equation, enum and movement-class names. The FoC profile has 14,783 inventory rows
-  (of 53,564 across all profiles), which become 8,202 stock-authored pairs.
+  (`GUIDialogs/Textures/*/Frame_Left`), planet, terrain and hint names, equation, enum and movement-class names.
 
-The game-data tier checks the inventory itself: every element and attribute name in the effective FoC XML must be in the
-inventory, so a stale inventory cannot hide a new tag from the gate. The check is name-level: a name the inventory already
-has, authored on a class it was not authored on before (a mod putting `Max_Speed` on a new object type), is not seen until the
-inventory is regenerated.
+The committed inventory also retains explicit project-owned UI definitions;
+they are required pairs, not observations of stock authoring. Reviewed engine
+defaults retain their existing catalog-evidence and consumer checks.
+
+### Offline corpus refresh
+
+`coverage-profiles.json` declares every target and its layers in leaf-first order.
+`coverage-parser-owners.json` maps reviewed table kinds to canonical parser owners.
+`coverage-universe.json` records exact pairs, canonical owners, source profile IDs,
+recovery flags, ordered chains, XML content and mount-manifest fingerprints. It
+also retains each catalog owner/tag/value-type obligation separately. It contains
+identifiers and opaque hashes, with no asset text, binary details or local roots.
+Area and owning-lane fields are backlog triage, not evidence of applicability.
+
+CI reads these committed files and never mounts installed mods. A new catalog
+entry or missing owner mapping fails immediately with its owner/tag. Regenerating
+the manifest after a new authored class/path then fails the ordinary missing-row
+check until that exact pair has a status. Generic parser-owner acknowledgment
+does not cover an authored concrete class. Unauthored catalog entries remain
+parser-owner obligations, without inventing a product of every tag and class.
+
+The refresh runs separately on an installed corpus. Supply a local JSON map from
+each declared layer ID to its installed directory, plus `stock` to an extracted
+effective stock XML directory (containing `data/`). Mod directories contain `Data/`.
+Only those roots are read; root-level paths and unavailable/empty corpora fail.
+
+```sh
+python tools/inventory/coverage_universe.py check-refresh --roots out/coverage-roots.local.json --schema-root <schema-checkout>
+python tools/inventory/coverage_universe.py refresh --roots out/coverage-roots.local.json --schema-root <schema-checkout>
+python tools/inventory/tag_registry.py check
+```
+
+`check-refresh` fails on changed content (even with unchanged tag names), mount
+declarations, profile membership or chain precedence. Run it during installed
+corpus maintenance and before accepting refreshed pins; CI alone cannot discover
+an upstream mod update. Refresh selects loose files before active archives, then
+leaf mods before parents, with stock fallback used for registry type hints.
+Unreferenced winning XML remains distinguishable as authoring rather than proven
+engine acceptance. Malformed XML is recovered only as flagged authoring candidates.
+
+The initial backlog uses ticket-only `todo` rows (legacy EAWR-6215), counted as
+unimplemented. To explicitly create new backlog rows after inspecting a refresh,
+run `python tools/inventory/coverage_universe.py seed`; it changes only absent
+pairs, preserves existing statuses and writes deterministic, sorted area shards.
+It never runs automatically in the gate. Applying a parameter requires its own
+consumer evidence and class/kind scope; a form-level ability audit cannot prove
+every parameter or a squadron's display copy is applied (AB-15).
 
 ## The registry
 
@@ -60,16 +104,16 @@ particular nested context or application by the remake. ML-28's context and
 warning distinctions still apply. Misspellings remain `unknown`.
 The inventory manifest fingerprints the catalog and classifier source.
 
-The registry covers those 8,202 stock-authored pairs plus six reviewed `engine_default` pairs,
-8,208 in all: `SpaceUnit`, `SpaceBuildable` and `SpecialStructure` each have
-`Turret_XY_Only` and `Turret_Rotate_To_Rest_Delay_Sec` defaults. Other catalog entries
-do not add rows automatically. Recognition alone never implies `applied` or `foc-ignores`.
+The registry also retains six reviewed `engine_default` pairs:
+`SpaceUnit`, `SpaceBuildable` and `SpecialStructure` each have
+`Turret_XY_Only` and `Turret_Rotate_To_Rest_Delay_Sec` defaults. Catalog entries
+add required obligations, never automatic implementation statuses. Recognition
+alone never implies `applied` or `foc-ignores`.
 
-Reviewed mod-only pairs can name `inventory_profile` (for example, `remake`) on
-their registry row. The gate admits only that row's exact class/tag pairs from
-the named committed inventory profile; a missing profile, class or tag fails.
-Other mod tags do not enter the stock coverage requirement automatically. These
-rows still need ordinary status evidence and consumers; profile recognition does
+Reviewed mod-only pairs can name `inventory_profile` on their registry row as
+provenance. A missing profile, class or tag fails that claim; profile declarations
+in the coverage manifest require their pairs independently of any registry row.
+These rows still need ordinary status evidence and consumers; profile recognition does
 not establish application. The galactic shard additionally registers
 `Campaign/AI_Victory_Planet_Names`, `Campaign/Story_Name` and
 `Planet/Idle_Anim_00_Rate_Mod` this way.

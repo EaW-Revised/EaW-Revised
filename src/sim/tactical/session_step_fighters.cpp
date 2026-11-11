@@ -588,7 +588,13 @@ core::Result<void> session_detail::Tick::retire_fighter_state(detail::MapStage<S
         const auto hangar = spawners.find(state.spawner);
         const auto* spawner = survivor(state.spawner);
         if (hangar != spawners.end() && spawner != nullptr) {
-            squadron_lost(*squadron_table.find_spawner(spawner->state.type_id, spawner->state.owner), spawners.at(hangar->first), state.entry, frame);
+            const auto& hangar_state = spawners.at(hangar->first);
+            const auto* profile = hangar_state.selected_tech
+                ? squadron_table.find_spawner_at_tech(spawner->state.type_id, spawner->state.owner, *hangar_state.selected_tech)
+                : squadron_table.find_spawner(spawner->state.type_id, spawner->state.owner);
+            if (!profile) return core::Result<void>::failure(detail::diagnostic(diagnostic_codes::invalid_setup,
+                "hangar binding disagrees with content"));
+            squadron_lost(*profile, spawners.at(hangar->first), state.entry, frame);
         }
         iterator = minds.erase(iterator);
     }
@@ -662,6 +668,43 @@ core::Result<void> session_detail::Tick::fighters() {
     return core::Result<void>::success();
 }
 
+core::Result<void> session_detail::Tick::request_survivor_defaults(const std::span<const EntityId> created) {
+    if (impl_->setup.domain != BattleDomain::space || created.empty()) return core::Result<void>::success();
+    auto& survivors = surviving_.value().survivors.value();
+    const auto relevant = std::any_of(created.begin(), created.end(), [&](const EntityId id) {
+        const auto unit = std::lower_bound(survivors.begin(), survivors.end(), id,
+            [](const auto& row, const EntityId value) { return row.state.entity_id < value; });
+        const auto* profile = unit == survivors.end() || unit->state.entity_id != id ? nullptr : impl_->abilities.find(unit->state.type_id);
+        return profile && (!profile->default_member_abilities.empty()
+            || std::any_of(profile->abilities.begin(), profile->abilities.end(), [](const auto& ability) {
+                return ability.active_by_default && ability.kind == AbilityKind::replenish_wingmen;
+            }));
+    });
+    if (!relevant) return core::Result<void>::success();
+    UnitStage staged(std::move(survivors));
+    auto& next_id = staging_.value().next_id.value();
+    const auto first_added = next_id;
+    auto& groups = fighters_ ? fighters_->squadrons.value() : staging_.value().arrived_squadrons.value();
+    Impl::EconomyStage stage{staging_.value().ledgers.value(), staging_.value().arrivals.value(),
+        staging_.value().shares.value(), staging_.value().crafts.value(), craft_prep_.value().minds.value(),
+        groups, staging_.value().born_spawners, staging_.value().earners.value(), next_id,
+        impl_->pad_stage.values, impl_->construction_stage.values, staging_.value().pad_requests.value(),
+        impl_->pad_stage, impl_->construction_stage, pending_economy_cues_, &gather_.value().reinforcement_work.value()};
+    const auto applied = impl_->request_creation_defaults(created, staged, stage, tick);
+    if (applied && first_added != invalid_entity_id) {
+        for (auto id = first_added; id != next_id && id != invalid_entity_id; ++id) {
+            const auto found = staged.find(id);
+            if (found == staged.end()) continue;
+            const auto transform = unit_transform(found->second);
+            if (!transform) return core::Result<void>::failure(transform.error());
+            systems_.value().instances.value().push_back(impl_->instance_for(found->second, transform.value(), tick + 1));
+            track_victory_change(nullptr, &found->second.state, false);
+        }
+    }
+    survivors = staged.release();
+    return applied;
+}
+
 core::Result<void> session_detail::Tick::hangars() {
     if (impl_->setup.domain != BattleDomain::space) return core::Result<void>::success();
     auto& minds = craft_prep_.value().minds.value();
@@ -696,12 +739,35 @@ core::Result<void> session_detail::Tick::hangars() {
         std::vector<std::pair<EntityId, SpawnerState>> hangars(spawners.begin(), spawners.end());
         std::vector<std::optional<SpawnDecision>> decisions(hangars.size());
         std::vector<std::optional<std::uint32_t>> free_bays(hangars.size());
+        std::vector<std::uint8_t> invalid_profiles(hangars.size());
         const auto serviced_hangars = executor.execute_phase("hangars", tick_partition_count, [&](const std::size_t partition) {
             const auto range = partition_range(partition, hangars.size());
             for (auto index = range.begin; index < range.end; ++index) {
-                const auto& unit = *survivor(hangars[index].first);
-                const auto& profile = *squadron_table.find_spawner(unit.state.type_id, unit.state.owner);
+                const auto* found_unit = survivor(hangars[index].first);
+                if (!found_unit) { invalid_profiles[index] = 1; continue; }
+                const auto& unit = *found_unit;
                 const bool service_due = frame == hangars[index].second.next_service_frame;
+                auto& state = hangars[index].second;
+                if (service_due && (!state.ready || state.entries.empty())
+                    && squadron_table.tech_spawners.contains(unit.state.type_id)) {
+                    const auto& accounts = staging_->ledgers.value();
+                    const auto account = std::find_if(accounts.begin(), accounts.end(), [&](const auto& row) {
+                        return row.player == unit.state.owner;
+                    });
+                    // WSL-11/FC-28: an empty setup retries after tech changes; a populated one retains its tier.
+                    // Same-frame tech ordering awaits an FD row.
+                    const auto tech = account == accounts.end() ? 0U : std::min(account->tech_level, 6U);
+                    if (state.selected_tech != tech) state.ready = false;
+                    state.selected_tech = tech;
+                }
+                const auto* resolved_profile = state.selected_tech
+                    ? squadron_table.find_spawner_at_tech(unit.state.type_id, unit.state.owner, *state.selected_tech)
+                    : squadron_table.find_spawner(unit.state.type_id, unit.state.owner);
+                if (!resolved_profile || (state.ready && state.entries.size() != resolved_profile->entries.size())) {
+                    invalid_profiles[index] = 1;
+                    continue;
+                }
+                const auto& profile = *resolved_profile;
                 const bool no_controller = impl_->setup.controllers && service_due
                     && std::any_of(impl_->setup.controllers->factions.begin(), impl_->setup.controllers->factions.end(),
                         [&](const auto& row) { return row.player == unit.state.owner; })
@@ -720,10 +786,17 @@ core::Result<void> session_detail::Tick::hangars() {
                     squadron_lost(profile, hangars[index].second, ship.entry, frame);
                     return true;
                 });
+                const auto* modes = impl_->abilities.find(unit.state.type_id);
+                const bool manual = modes && ability_slot(*modes, AbilityKind::deploy_squad)
+                    && impl_->abilities.human(unit.state.owner);
+                const auto request = deploy_squad_requests_.find(hangars[index].first);
+                const bool deploying = request != deploy_squad_requests_.end();
                 decisions[index] = service_spawner(profile, hangars[index].second, impl_->setup.seed, frame,
-                    hangars[index].first, intact, arrivals.contains(hangars[index].first) || !unit.state.garrison_enabled || no_controller);
-                if (!decisions[index] && service_due && profile.starbase
-                    && !arrivals.contains(hangars[index].first) && hangars[index].second.next_spawn_frame <= frame) {
+                    hangars[index].first, intact, arrivals.contains(hangars[index].first) || !unit.state.garrison_enabled || no_controller,
+                    manual, deploying ? std::optional(request->second) : std::nullopt, unit.state.garrison_enabled);
+                if (!decisions[index] && (service_due || deploying) && profile.starbase
+                    && (deploying || (!hangars[index].second.ready_to_deploy
+                        && !arrivals.contains(hangars[index].first) && hangars[index].second.next_spawn_frame <= frame))) {
                     const auto pending = allied_pending(unit.state.owner);
                     if (pending != garrisons.end()) {
                         const bool eligible = !impl_->setup.controllers
@@ -731,6 +804,10 @@ core::Result<void> session_detail::Tick::hangars() {
                                 [&](const auto& row) { return row.player == pending->setup.player; })
                             || impl_->output_controller(pending->setup.player, {}, 0).value != 0;
                         if (eligible) free_bays[index] = free_garrison_bay(profile, impl_->setup.seed, frame, hangars[index].first, intact);
+                        if (manual && !deploying && free_bays[index]) {
+                            hangars[index].second.ready_to_deploy = true;
+                            free_bays[index].reset();
+                        }
                     }
                 }
             }
@@ -738,11 +815,17 @@ core::Result<void> session_detail::Tick::hangars() {
         if (!serviced_hangars) {
             return core::Result<void>::failure(serviced_hangars.error());
         }
+        if (std::any_of(invalid_profiles.begin(), invalid_profiles.end(), [](const auto invalid) { return invalid != 0; }))
+            return core::Result<void>::failure(detail::diagnostic(diagnostic_codes::invalid_setup,
+                "hangar binding disagrees with content"));
         for (std::size_t index = 0; index < hangars.size(); ++index) {
             spawners.assign(hangars[index].first, std::move(hangars[index].second));
             if (!decisions[index] && !free_bays[index]) continue;
             const auto spawner = *survivor(hangars[index].first); // copied: launches grow `survivors`
-            const auto& profile = *squadron_table.find_spawner(spawner.state.type_id, spawner.state.owner);
+            const auto& hangar_state = spawners.at(hangars[index].first);
+            const auto& profile = *(hangar_state.selected_tech
+                ? squadron_table.find_spawner_at_tech(spawner.state.type_id, spawner.state.owner, *hangar_state.selected_tech)
+                : squadron_table.find_spawner(spawner.state.type_id, spawner.state.owner));
             const auto first_added = survivors.size();
             auto pending = garrisons.end();
             if (!decisions[index]) {
@@ -777,18 +860,23 @@ core::Result<void> session_detail::Tick::hangars() {
             }
             if (pending != garrisons.end()) {
                 pending->pending.erase(pending->pending.begin());
-                spawners.at(hangars[index].first).next_spawn_frame = frame + profile.delay_frames;
+                if (!deploy_squad_requests_.contains(hangars[index].first))
+                    spawners.at(hangars[index].first).next_spawn_frame = frame + profile.delay_frames;
             }
             for (auto added = first_added; added < survivors.size(); ++added) {
                 track_victory_change(nullptr, &survivors[added].state, false);
+                const auto& born = survivors[added].state;
+                if (const auto* born_profile = squadron_table.find_spawner(born.type_id, born.owner);
+                    born_profile != nullptr && (!born_profile->entries.empty() || born_profile->starbase
+                        || squadron_table.tech_spawners.contains(born.type_id)))
+                    spawners.emplace(born.entity_id, initial_spawner(impl_->setup.seed, frame + 1, born.entity_id));
                 if (pending != garrisons.end()) {
-                    const auto& born = survivors[added].state;
-                    if (const auto* born_profile = squadron_table.find_spawner(born.type_id, born.owner);
-                        born_profile != nullptr && (!born_profile->entries.empty() || born_profile->starbase))
-                        spawners.emplace(born.entity_id, initial_spawner(impl_->setup.seed, frame + 1, born.entity_id));
                     if (impl_->economy.stream(born.type_id) != nullptr) earners.emplace_back(born.entity_id, born.owner);
                 }
             }
+            std::vector<EntityId> created;
+            for (auto added = first_added; added < survivors.size(); ++added) created.push_back(survivors[added].state.entity_id);
+            if (auto defaults = request_survivor_defaults(created); !defaults) return defaults;
         }
     }
 
@@ -811,6 +899,8 @@ core::Result<void> session_detail::Tick::hangars() {
             }
             if (impl_->economy.stream(request.type) != nullptr) earners.emplace_back(id, request.owner);
             next_id = id == std::numeric_limits<EntityId>::max() ? invalid_entity_id : id + 1;
+            const std::array<EntityId, 1> created{id};
+            if (auto defaults = request_survivor_defaults(created); !defaults) return defaults;
         }
         respawns.erase(respawns.begin());
     }

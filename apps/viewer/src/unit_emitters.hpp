@@ -167,6 +167,7 @@ public:
     [[nodiscard]] core::Result<void> set_particle_detail(const particles::ParticleDetail detail) {
         return registry_->set_detail(detail);
     }
+    [[nodiscard]] particles::ParticleDetail particle_detail() const noexcept { return registry_->detail(); }
     void measure_preparation(bool enabled) noexcept {
         measure_preparation_ = enabled;
         emitter_prepare_ms_ = clone_prepare_ms_ = 0.0;

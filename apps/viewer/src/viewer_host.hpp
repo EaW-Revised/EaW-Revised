@@ -26,6 +26,7 @@
 #include <godot_cpp/classes/input_event.hpp>
 #include <godot_cpp/classes/node3d.hpp>
 #include <godot_cpp/variant/rid.hpp>
+#include <godot_cpp/variant/dictionary.hpp>
 #include <godot_cpp/variant/packed_string_array.hpp>
 
 #include <filesystem>
@@ -36,12 +37,17 @@
 
 namespace eawr::presentation::godot_backend {
 
+struct SavedBattlePreparation;
+
 class ViewerHost final : public godot::Node3D {
     GDCLASS(ViewerHost, godot::Node3D)
 
 public:
     ViewerHost();
     ~ViewerHost() override;
+
+    // CPU-only engine test seam; uses the production prewarm array builder.
+    static godot::Dictionary prewarm_mesh_layout(bool skinned);
 
     void _ready() override;
     void _process(double delta) override;
@@ -70,6 +76,9 @@ private:
     std::optional<int> preview_vsync_;
     std::optional<int> preview_max_fps_;
     void ready_battle_setup();
+    void begin_front_end_startup();
+    unsigned startup_splash_frames_{};
+    bool startup_splash_pending_{};
     bool ready_requested_mode();
     void ready_replay_scene();
     void process_campaign_frame(const double delta);
@@ -140,6 +149,22 @@ private:
     // once the screen has drawn (EawrLoadingScreen::frames).
     void open_skirmish_loading();
     void start_skirmish_battle();
+    std::string queue_saved_battle(const presentation::ui::SavedGameRequest& request);
+    std::string queue_saved_battle_checked(const presentation::ui::SavedGameRequest& request);
+    void open_saved_battle_loading();
+    void start_saved_battle();
+    struct PendingBattleSave final {
+        std::filesystem::path path;
+        std::string map;
+        std::optional<std::array<float, 5>> camera;
+        bool from_front_end{};
+        bool fresh_front_end{};
+        // What the queue step built for this save, for the battle's first load stage (skirmish_prepare.hpp).
+        std::shared_ptr<SavedBattlePreparation> prepared;
+    };
+    std::optional<PendingBattleSave> pending_battle_save_;
+    bool saved_loading_prepared_{};
+    bool saved_battle_from_front_end_{};
     // MNU-41: the Load Game page chose a recording; the replay mode takes the window over.
     void start_replay_battle(const UiGalleryMode::ReplayRequest& request, bool interactive);
 

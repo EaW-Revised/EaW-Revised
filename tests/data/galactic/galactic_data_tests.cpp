@@ -102,6 +102,7 @@ constexpr std::string_view planets_xml = R"xml(<?xml version="1.0"?>
     <Variant_Of_Existing_Type>Alpha</Variant_Of_Existing_Type>
     <Galactic_Position>-5.5, 0, 1</Galactic_Position>
     <Planet_Credit_Value>TBD</Planet_Credit_Value>
+    <The_Force>   </The_Force><Force_Strength></Force_Strength>
     <Max_Space_Base>2 bases</Max_Space_Base>
     <Planet_Surface_Accessible>No</Planet_Surface_Accessible>
     <Planet_Groundbase_Stealth>Yes</Planet_Groundbase_Stealth>
@@ -114,6 +115,7 @@ constexpr std::string_view planets_xml = R"xml(<?xml version="1.0"?>
   <Planet Name="Delta">
     <Behavior>PLANET</Behavior>
     <Galactic_Position>0, 0, 0</Galactic_Position>
+    <The_Force> </The_Force><Force_Strength>  </Force_Strength>
   </Planet>
 </Planets>)xml";
 
@@ -484,6 +486,12 @@ void world_contracts(const galactic::GalacticData& data) {
         && beta->planet_credit_value == Fixed::from_raw(raw(60)) && beta->max_space_base == 2
         && beta->planet_surface_accessible == false && beta->space_tactical_map == "_Space_Planet_Alpha.ted",
         "AU-80/81/83: a variant planet inherits, and a TBD value keeps the base's");
+    // ML-24: a blank or whitespace-only value is empty for every object-type tag, so it is an omission, not an authored name.
+    expect(beta && beta->force_alignment == "Light" && beta->force_strength == decimal("0.75"),
+        "ML-24: a variant's blank The_Force/Force_Strength keeps the base's values");
+    const auto* delta = data.planet("Delta");
+    expect(delta && delta->force_alignment.empty() && !delta->force_strength,
+        "ML-24: a blank alignment/strength on a base planet loads as omitted (setup binds the type default)");
     expect(has_issue(data, IssueKind::trailing_text, "Beta", "Max_Space_Base", "2 bases"), "trailing text on a count");
     expect(gamma && !gamma->galactic_position && gamma->planet_credit_value == Fixed{}
         && has_issue(data, IssueKind::bad_value, "Gamma", "Galactic_Position", "1.0, 2.0")

@@ -441,6 +441,8 @@ core::Result<void> session_detail::Tick::prepare_dogfight_cells(std::map<EntityI
         const auto* their_container = live_unit(moving, theirs->first);
         const auto* their_shot = their_container != nullptr ? impl_->ion_slot(*their_container) : nullptr;
         if (their_shot != nullptr && their_shot->active) continue;
+        const auto* lucky = their_container ? impl_->lucky_slot(*their_container) : nullptr;
+        if (lucky && lucky->active) continue;
         bool near = false;
         for (const auto& squadron : impl_->squadrons) {
             if (squadron.container != container) continue;

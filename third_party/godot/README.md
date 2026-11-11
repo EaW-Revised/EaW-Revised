@@ -20,17 +20,18 @@ The source lives in a public fork, not in this repository; nothing here is built
 |---|---|---|
 | `5fc215c1e8abe37f98dbf92efc283f3befb05ea0` | [Godot PR 123391](https://github.com/godotengine/godot/pull/123391) (open) | Quit with the Separate render thread: `RenderingDevice::finalize()` ran on the main thread after the render worker stopped ("This function (finalize) can only be called from the render thread", 2 leaked ObjectDB instances, a driver crash in [Godot issue 124799](https://github.com/godotengine/godot/issues/124799)). Issues [Godot issue 119000](https://github.com/godotengine/godot/issues/119000), Godot issue 124799. |
 | `fad06b57944fbf17833fe3c65dc9ff1d7446c639` | none (EAWR-authored) for [Godot issue 122206](https://github.com/godotengine/godot/issues/122206) | `RenderingServerDefault::texture_2d_update` queues an `Image::duplicate()` snapshot instead of the caller's Image, so the render thread never reads an Image the text server is still writing (`_texture_2d_update`: `p_image.is_null() \|\| p_image->is_empty()`). Not an upstream fix; drop when upstream fixes Godot issue 122206. |
+| `5b733a90f6516916dc19d530ecdd433fdd0bc4ee` | none (EAWR-authored, owner decision 2026-11-10, "B1") | `RESPV_ENABLED` 1 -> 0 in `drivers/vulkan/rendering_device_driver_vulkan.cpp`: re-spirv off, so the driver no longer keeps a retained copy of every shader's SPIR-V (about 2.35 GB less private memory in the PF measurement). Not an upstream fix. |
 
 Godot issue 122206 has no upstream fix PR as of 2026-10-24.
 
 ## Shipped runtime
 
 The player and debug archives bundle the patched exe, not the official one (owner-delegated switch, 2026-10-24). It is the editor
-build of fork commit `fad06b579` (`--version`: `4.7.2.stable.eawr.fad06b579`), built with MSVC and `lto=full`
-(`python tools/offload/godot_build.py --sha fad06b57944fbf17833fe3c65dc9ff1d7446c639 --label patched-ltofull --scons-extra lto=full`).
+build of fork commit `5b733a90f` (`--version`: `4.7.2.stable.eawr.5b733a90f`; B1 pin 2026-11-10, previous pin `fad06b579`), built with MSVC and `lto=full`
+(`python tools/offload/godot_build.py --sha 5b733a90f6516916dc19d530ecdd433fdd0bc4ee --label patched-ltofull-b1 --scons-extra lto=full`).
 The official exe is MinGW with LTO; the MSVC `lto=full` build matched it in Safe mode on two GPU hosts (PF engine-4 parity),
-the MSVC build without LTO did not. Assets live on the fork release `eawr-4.7.2-fad06b579`
-(https://github.com/Thom-Ernst/godot/releases/tag/eawr-4.7.2-fad06b579): `Godot_v4.7.2-stable-eawr-fad06b579_win64.exe.zip`
+the MSVC build without LTO did not. Assets live on the fork release `eawr-4.7.2-5b733a90f`
+(https://github.com/Thom-Ernst/godot/releases/tag/eawr-4.7.2-5b733a90f): `Godot_v4.7.2-stable-eawr-5b733a90f_win64.exe.zip`
 (the GUI exe, named `Godot_v4.7.2-stable_win64.exe` inside), `..._win64_console.exe.zip`, `SHA512-SUMS.txt`, `SHA256-SUMS.txt`.
 Three pins change together with any new build: SHA-512 of the zip in `tools/release/fetch_pinned_godot.ps1`, SHA-256 of the exe in
 `tools/release/package_release.py`, the identity in `apps/viewer/tools/export_package.py` (which still accepts the stock official

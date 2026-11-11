@@ -73,6 +73,7 @@ struct Derived {
     std::vector<core::LoadNote> load_notes;
     Digest tick_zero{};
     std::vector<std::vector<std::uint8_t>> ai_configuration;
+    core::PreparedContentIdentity provider_identity{};
 };
 
 // Controller kind a faction has at tick zero: the roster's human sides hold their factions, everyone else is AI.
@@ -96,10 +97,12 @@ core::Result<Derived> derive_local(const MpLocalContent& local, const gc::MpRost
             return refuse<Derived>("campaign " + roster.campaign + " is not a multiplayer campaign");
     }
     Derived out;
+    out.provider_identity = local.service_identity;
     auto& options = out.options;
     options.seed = terms.seed;
     options.mode = CampaignSetupMode::multiplayer;
     options.rules_flavour = flavour;
+    if (roster.vote_timeout_seconds) options.vote_timeout_seconds = roster.vote_timeout_seconds;
     if (roster.custom) options.custom = CampaignCustomOptions{roster.credits, roster.starting_tech, roster.maximum_tech, roster.allow_heroes};
     for (const auto& player : roster.players) options.players.push_back({{player.player, player.faction_id, player.flags}, player.faction, player.active});
     options.seats = roster.seats;
@@ -182,6 +185,7 @@ core::Result<Derived> derive_local(const MpLocalContent& local, const gc::MpRost
         out.session = std::move(prepared.value().session);
         out.runtime_services = std::move(prepared.value().runtime_services);
         out.load_notes = std::move(prepared.value().load_notes);
+        out.provider_identity = prepared.value().provider_identity;
         if (!out.session || out.session->completed_tick() != 0)
             return refuse<Derived>("campaign preparation did not return a tick-zero session");
         const core::gc_load::Scope hash_scope("mp.derive_local.tick_zero_hash");
@@ -325,9 +329,26 @@ MpAgreement agreement_from_derived(const MpLocalContent& local, const gc::MpRost
     out.session = std::move(value.session);
     out.runtime_services = std::move(value.runtime_services);
     out.load_notes = std::move(value.load_notes);
+    out.provider_identity = value.provider_identity;
+    out.provider_identity_required = static_cast<bool>(local.prepare_session) || static_cast<bool>(local.services);
     return out;
 }
 } // namespace
+
+core::Result<std::vector<sim::IdentityDomain>> prepared_mp_domains(const MpAgreement& agreement) {
+    using Result = core::Result<std::vector<sim::IdentityDomain>>;
+    if (!agreement.session || agreement.resume || agreement.session->completed_tick() != 0)
+        return refuse<std::vector<sim::IdentityDomain>>("prepared identity requires an unstepped new campaign");
+    if ((agreement.provider_identity_required || agreement.runtime_services) && agreement.provider_identity.digest == Digest{})
+        return refuse<std::vector<sim::IdentityDomain>>("runtime provider content identity is unavailable");
+    auto saved = checkpoint::save_game_checkpoint(*agreement.session, checkpoint::game_identities(agreement.session->galaxy().setup()));
+    if (!saved) return Result::failure(saved.error());
+    auto domains = agreement.content.domains;
+    domains.push_back(domain("gc-prepared-owner", core::sha256(saved.value())));
+    domains.push_back(domain("gc-prepared-provider", agreement.provider_identity.digest));
+    sim::MatchIdentity identity; identity.domains = std::move(domains);
+    return Result::success(sim::compute_match_identity(std::move(identity)).domains);
+}
 
 core::Result<gc::MpRoster> seal_mp_roster(const MpLocalContent& local, gc::MpRoster draft, const MpSessionTerms& terms) {
     using Result = core::Result<gc::MpRoster>;

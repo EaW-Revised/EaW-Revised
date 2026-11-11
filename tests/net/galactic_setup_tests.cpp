@@ -3,6 +3,7 @@
 // before a shared step; the skirmish proposal bytes keep their documented layout.
 #include "setup_test_support.hpp"
 #include "eawr/net/galactic_checkpoint_transfer.hpp"
+#include "eawr/net/galactic_checkpoint_worker.hpp"
 #include "eawr/core/sha256.hpp"
 #include "fake_transport.hpp"
 
@@ -10,10 +11,19 @@
 #include "eawr/net/galactic_setup.hpp"
 #include "eawr/sim/world.hpp"
 
+#include "eawr/net/tcp_transport.hpp"
+#include "eawr/net/gns_transport.hpp"
+
 #include <array>
+#include <atomic>
+#include <chrono>
 #include <iostream>
 #include <map>
 #include <set>
+#include <span>
+#include <stdexcept>
+#include <string_view>
+#include <thread>
 
 namespace {
 using namespace setup_test;
@@ -500,20 +510,28 @@ void payload_codec() {
     const auto proposal = make_offer(*cohort[0], two_sides());
     const auto payload = require(net::decode_galactic_setup(proposal.setup));
     expect(require(net::encode_galactic_setup(payload)) == proposal.setup, "payload is canonical");
+    {   // #6156: the host's battle-vote timeout rides the agreed roster and a peer that disagrees is a different offer.
+        auto timed = payload; timed.roster.vote_timeout_seconds = 45;
+        const auto bytes = require(net::encode_galactic_setup(timed));
+        expect(bytes != proposal.setup && require(net::decode_galactic_setup(bytes)).roster.vote_timeout_seconds == 45,
+            "the vote timeout round trips through the setup payload");
+        timed.roster.vote_timeout_seconds = gc::mp_roster_max_vote_timeout_seconds + 1U;
+        expect(!net::encode_galactic_setup(timed), "a timeout beyond the campaign's lifetime is refused");
+    }
     for (std::size_t size = 0; size < proposal.setup.size(); ++size)
         expect(!net::decode_galactic_setup(std::span(proposal.setup).first(size)), "every truncated payload is refused");
     auto trailing = proposal.setup; trailing.push_back(0);
     expect(!net::decode_galactic_setup(trailing), "trailing byte refused");
     auto wrong_magic = proposal.setup; wrong_magic[0] ^= 1;
     expect(!net::decode_galactic_setup(wrong_magic), "wrong magic refused");
-    auto wrong_version = proposal.setup; wrong_version[4] = 3;
+    auto wrong_version = proposal.setup; wrong_version[4] = 4;
     expect(!net::decode_galactic_setup(wrong_version), "unknown payload version refused");
     for (std::size_t index = 8; index < proposal.setup.size(); ++index) {
         auto flipped = proposal.setup; flipped[index] ^= 0x80;
         const auto decoded = net::decode_galactic_setup(flipped);
         expect(!decoded || require(net::encode_galactic_setup(decoded.value())) == flipped, "any accepted mutation re-encodes to itself");
     }
-    auto resume = payload; resume.start = net::GalacticStart::checkpoint; resume.initial_tick = 77;
+    auto resume = payload; resume.start = net::GalacticStart::checkpoint; resume.initial_tick = 1'000'001;
     resume.checkpoint_digest.fill(1); resume.state_digest.fill(2); resume.frontier_digest.fill(3); resume.terms_digest.fill(4);
     expect(require(net::decode_galactic_setup(require(net::encode_galactic_setup(resume)))) == resume,
         "resume start, nonzero tick and four agreement digests round-trip in wire v2");
@@ -524,6 +542,23 @@ void payload_codec() {
     auto bad_quota = payload; bad_quota.command_quota += 1;
     expect(!net::encode_galactic_setup(bad_quota), "quotas other than the session limits are refused");
     expect(require(net::decode_setup_offer(require(net::encode_setup_offer(proposal)))).setup == proposal.setup, "offer round trip keeps the payload");
+    auto tactical_offer = offer(); tactical_offer.final_tick_count = net::max_session_ticks + 1;
+    expect(!net::encode_setup_offer(tactical_offer), "tactical offers retain their one-million-tick limit");
+    auto long_offer = proposal; long_offer.final_tick_count = gc::galactic_max_ticks;
+    expect(require(net::decode_setup_offer(require(net::encode_setup_offer(long_offer)))).final_tick_count == gc::galactic_max_ticks,
+        "GC setup agrees the full campaign tick limit");
+    long_offer.final_tick_count += 1;
+    expect(!net::encode_setup_offer(long_offer), "GC setup refuses ticks beyond the simulation limit");
+    auto old_offer = require(net::encode_setup_offer(proposal)); old_offer[1] = 3;
+    const auto old_digest = eawr::core::sha256(std::span(old_offer).first(old_offer.size() - 32));
+    std::copy(old_digest.begin(), old_digest.end(), old_offer.end() - 32);
+    const auto old_refusal = net::decode_setup_offer(old_offer);
+    expect(!old_refusal && old_refusal.error().message.find("matching builds") != std::string::npos,
+        "old GC setup revisions are refused with a clear matching-build message");
+    auto wrong_tactical_revision = require(net::encode_setup_offer(offer())); wrong_tactical_revision[1] = 4;
+    const auto tactical_digest = eawr::core::sha256(std::span(wrong_tactical_revision).first(wrong_tactical_revision.size() - 32));
+    std::copy(tactical_digest.begin(), tactical_digest.end(), wrong_tactical_revision.end() - 32);
+    expect(!net::decode_setup_offer(wrong_tactical_revision), "tactical revision 4 is refused");
     const auto encoded = require(net::encode_setup_offer(proposal));
     for (std::size_t size = 0; size < encoded.size(); size += 17)
         expect(!net::decode_setup_offer(std::span(encoded).first(size)), "every truncated offer is refused");
@@ -726,6 +761,744 @@ void skirmish_layout_pinned() {
     expect(net::galactic_setup_domain != net::tactical_setup_domain, "the campaign domain is a new domain id");
 }
 
+// #6130: a 3.9 MB co-op save (60 chunks) must cross a reliable link in a handful of rounds, not one
+// four-chunk window per three rounds (about 45 rounds). One round is one host frame here.
+struct PacingFixture {
+    std::shared_ptr<const Bytes> file;
+    net::SaveManifest manifest;
+};
+PacingFixture pacing_fixture(std::size_t byte_count = 60 * net::save_chunk_bytes) {
+    auto cohort = peers_of(2);
+    const auto new_game = make_offer(*cohort[0], two_sides());
+    PacingFixture fixture;
+    fixture.file = std::make_shared<const Bytes>(byte_count, std::uint8_t{29});
+    auto payload = require(net::decode_galactic_setup(new_game.setup));
+    payload.start = net::GalacticStart::checkpoint; payload.initial_tick = 137;
+    payload.state_digest = payload.roster.tick_zero; payload.checkpoint_digest = eawr::core::sha256(*fixture.file);
+    payload.frontier_digest.fill(3); payload.terms_digest.fill(4);
+    fixture.manifest.epoch = 1; fixture.manifest.byte_length = fixture.file->size(); fixture.manifest.peers = {0, 1};
+    fixture.manifest.offer = new_game; fixture.manifest.offer.setup = require(net::encode_galactic_setup(payload));
+    return fixture;
+}
+
+// The same 3.9 MB save over a real loopback TCP pair, as two lobby frames' worth of work per round: each round is one
+// host pump plus whatever the sockets deliver in the next few milliseconds. The save must cross in about a dozen
+// rounds and well under a second.
+void checkpoint_transfer_over_tcp() {
+    const auto fixture = pacing_fixture();
+    const auto& file = fixture.file;
+    const auto restore = [&](const auto&, std::span<const std::uint8_t> bytes) {
+        expect(bytes.size() == file->size(), "the TCP receiver restores the whole file");
+        return eawr::core::Result<void>::success();
+    };
+    net::TcpOptions options; options.build_identity = "checkpoint-pacing-test";
+    auto host = require(net::TcpTransport::host("127.0.0.1", 0, options));
+    options.seat = 1;
+    auto guest = require(net::TcpTransport::connect("127.0.0.1", host->port(), options));
+    const auto started = std::chrono::steady_clock::now();
+    const auto elapsed_ms = [&] {
+        return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - started).count());
+    };
+    while (host->link(1) != net::LinkState::open || guest->link(0) != net::LinkState::open) {
+        static_cast<void>(host->poll()); static_cast<void>(guest->poll());
+        if (elapsed_ms() > 5000) { expect(false, "the loopback pair connects"); return; }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    net::GalacticCheckpointTransfer send, receive;
+    const auto transfer_started = std::chrono::steady_clock::now();
+    require(send.select(*host, fixture.manifest, file, restore, 0));
+    std::uint64_t rounds = 0;
+    const auto drain = [&](std::uint64_t now) {
+        // Deliver what the sockets carry: the lobby's frame boundary lets a round trip finish inside one frame on a LAN.
+        // Quiet means no frame arrived and nothing is still queued for a socket, for a few consecutive polls.
+        for (int quiet = 0, polls = 0; quiet < 3 && polls < 5000; ++polls) {
+            bool any = false;
+            while (auto frame = guest->poll()) { any = true; static_cast<void>(receive.receive(*guest, *frame, restore, now)); }
+            while (auto frame = host->poll()) { any = true; static_cast<void>(send.receive(*host, *frame, restore, now)); }
+            any = any || host->has_pending_output() || guest->has_pending_output();
+            quiet = any ? 0 : quiet + 1;
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    };
+    for (std::uint64_t round = 1; round < 200 && !send.view().agreed && !send.view().refusal; ++round) {
+        rounds = round;
+        const auto now = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - transfer_started).count());
+        static_cast<void>(send.pump(*host, now));
+        drain(now);
+        static_cast<void>(receive.pump(*guest, now));
+        drain(now);
+    }
+    const auto total_ms = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - transfer_started).count());
+    std::cout << "checkpoint tcp pacing: bytes=" << file->size() << " rounds=" << rounds << " ms=" << total_ms << '\n';
+    expect(send.view().agreed && receive.view().restored && !send.view().refusal && !receive.view().refusal,
+        "a 3.9 MB save transfers over a real TCP pair");
+    expect(rounds <= 12, "a 3.9 MB save crosses a real TCP pair in about a dozen pump rounds");
+    expect(total_ms < 1000, "a 3.9 MB save crosses a loopback TCP pair well under a second");
+}
+
+// #6130: TCP alone missed the native GNS rate cap. Exercise the real checkpoint protocol over GNS too.
+// Retain the protocol's whole-blob SHA-256 check and measure the complete transfer to agreement.
+// The 250 ms case records the remaining frame dependency before the dedicated worker is installed.
+void checkpoint_transfer_over_gns(bool slow_frame) {
+    using Clock = std::chrono::steady_clock;
+    using namespace std::chrono_literals;
+    const auto fixture = pacing_fixture(10 * 1024 * 1024);
+    const auto expected_hash = eawr::core::sha256(*fixture.file);
+    unsigned restores{};
+    const auto restore = [&](const auto&, std::span<const std::uint8_t> bytes) {
+        expect(bytes.size() == fixture.file->size() && eawr::core::sha256(bytes) == expected_hash,
+            "GNS restores the byte-identical 10 MiB checkpoint");
+        ++restores;
+        return eawr::core::Result<void>::success();
+    };
+    net::GnsOptions options; options.build_identity = "checkpoint-gns-pacing-test";
+    options.timeout = 10s;
+    auto host = require(net::GnsTransport::host("127.0.0.1", 0, options));
+    options.seat = 1;
+    auto guest = require(net::GnsTransport::connect("127.0.0.1", host->port(), options));
+    const auto connect_deadline = Clock::now() + 10s;
+    while (host->link(1) != net::LinkState::open || guest->link(0) != net::LinkState::open) {
+        static_cast<void>(host->poll()); static_cast<void>(guest->poll());
+        expect(Clock::now() < connect_deadline, "the GNS checkpoint pair connects");
+        std::this_thread::sleep_for(1ms);
+    }
+    // Before a save exists, idle pumps must not manufacture application traffic.
+    for (int i = 0; i < 20; ++i) {
+        expect(!host->poll() && !guest->poll(), "higher GNS rates do not generate lobby or battle frames");
+        std::this_thread::sleep_for(1ms);
+    }
+    net::GalacticCheckpointTransfer send, receive;
+    const auto started = Clock::now();
+    const auto now_ms = [&] {
+        return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - started).count());
+    };
+    require(send.select(*host, fixture.manifest, fixture.file, restore, now_ms()));
+    std::uint64_t frames{}, progress_samples{}, previous_received{};
+    while (!send.view().agreed) {
+        ++frames;
+        require(send.pump(*host, now_ms()));
+        while (auto frame = guest->poll()) require(receive.receive(*guest, *frame, restore, now_ms()));
+        require(receive.pump(*guest, now_ms()));
+        while (auto frame = host->poll()) require(send.receive(*host, *frame, restore, now_ms()));
+        const auto received = receive.view().received;
+        expect(received >= previous_received, "GNS checkpoint progress never goes backwards");
+        if (received > previous_received) ++progress_samples;
+        previous_received = received;
+        expect(now_ms() < 60'000, "the GNS checkpoint transfer has a bounded deadline");
+        if (!send.view().agreed) std::this_thread::sleep_for(slow_frame ? 250ms : 1ms);
+    }
+    const auto elapsed = now_ms();
+    const auto sent = send.view(), received = receive.view();
+    std::cout << "checkpoint gns pacing: bytes=" << fixture.file->size() << " frame_ms=" << (slow_frame ? 250 : 1)
+        << " frames=" << frames << " progress_samples=" << progress_samples
+        << " host_wire_ms=" << sent.last_chunk_ms - sent.first_chunk_ms
+        << " guest_wire_ms=" << received.last_chunk_ms - received.first_chunk_ms
+        << " elapsed_ms=" << elapsed << std::endl;
+    expect(received.restored && !sent.refusal && !received.refusal && restores == 2,
+        "GNS checkpoint reaches whole-file agreement at both endpoints");
+    expect(progress_samples > 1 && received.received == fixture.file->size(), "GNS checkpoint publishes incremental progress");
+    if (!slow_frame) expect(elapsed < 2000, "a 10 MiB checkpoint crosses real GNS loopback in under two seconds");
+    // A subsequent small battle-sized frame must arrive once, in order, with no manufactured backlog.
+    const Bytes battle_frame{17, 31, 47};
+    require(host->send(1, battle_frame));
+    std::optional<net::Received> tail;
+    const auto tail_deadline = Clock::now() + 2s;
+    while (!tail) {
+        expect(!host->poll(), "the drained checkpoint leaves no guest application backlog");
+        tail = guest->poll();
+        expect(Clock::now() < tail_deadline, "ordinary traffic after the checkpoint is not starved");
+        std::this_thread::sleep_for(1ms);
+    }
+    expect(tail->from == 0 && tail->frame == battle_frame, "ordinary battle-sized traffic follows the checkpoint unchanged");
+    expect(!guest->poll(), "the rate change does not duplicate battle traffic");
+}
+
+// The foreground deliberately sleeps for 250 ms. No native poll or protocol pump runs there.
+void checkpoint_transfer_threaded(bool use_gns) {
+    using Clock = std::chrono::steady_clock;
+    using namespace std::chrono_literals;
+    const auto fixture = pacing_fixture(10 * 1024 * 1024);
+    const auto expected_hash = eawr::core::sha256(*fixture.file);
+    std::unique_ptr<net::MessageTransport> host, guest;
+    if (use_gns) {
+        net::GnsOptions options; options.build_identity = "checkpoint-thread-test";
+        auto opened = require(net::GnsTransport::host("127.0.0.1", 0, options));
+        guest = require(net::GnsTransport::connect("127.0.0.1", opened->port(), options)); host = std::move(opened);
+    } else {
+        net::TcpOptions options; options.build_identity = "checkpoint-thread-test";
+        auto opened = require(net::TcpTransport::host("127.0.0.1", 0, options));
+        guest = require(net::TcpTransport::connect("127.0.0.1", opened->port(), options)); host = std::move(opened);
+    }
+    const auto connected_by = Clock::now() + 10s;
+    while (host->link(1) != net::LinkState::open || guest->link(0) != net::LinkState::open) {
+        static_cast<void>(host->poll()); static_cast<void>(guest->poll());
+        expect(Clock::now() < connected_by, "threaded checkpoint pair connects"); std::this_thread::sleep_for(1ms);
+    }
+    const Bytes ordinary{17, 31, 47}; require(host->send(1, ordinary));
+    net::GalacticCheckpointWorker sender, receiver;
+    sender.start(*host); receiver.start(*guest);
+    const auto started = Clock::now();
+    require(sender.select(*host, fixture.manifest, fixture.file,
+        [](const auto&, auto) { return eawr::core::Result<void>::success(); }, 0));
+    unsigned ui_frames{}, restores{};
+    std::uint64_t previous{}, progress_samples{};
+    while (!sender.view().agreed || !receiver.view().restored) {
+        std::this_thread::sleep_for(250ms); ++ui_frames;
+        const auto progress = receiver.view();
+        expect(progress.received >= previous, "threaded byte counters are monotone");
+        if (progress.received > previous) ++progress_samples;
+        previous = progress.received;
+        receiver.service_restore([&](const auto&, auto bytes) {
+            expect(bytes->size() == fixture.file->size() && eawr::core::sha256(*bytes) == expected_hash,
+                "threaded transfer publishes the byte-identical whole blob");
+            ++restores; return eawr::core::Result<bool>::success(true);
+        });
+        expect(!sender.view().refusal && !receiver.view().refusal && !sender.failure() && !receiver.failure(),
+            "threaded checkpoint has no refusal or worker failure");
+        expect(Clock::now() - started < 5s, "threaded checkpoint completes within a bounded deadline");
+    }
+    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - started).count();
+    const auto sent = sender.view(), received = receiver.view();
+    const auto wire = sent.last_chunk_ms - sent.first_chunk_ms;
+    std::cout << "checkpoint threaded: transport=" << (use_gns ? "gns" : "tcp")
+        << " bytes=" << fixture.file->size() << " frame_ms=250 ui_frames=" << ui_frames
+        << " host_wire_ms=" << wire << " guest_wire_ms=" << received.last_chunk_ms - received.first_chunk_ms
+        << " elapsed_ms=" << elapsed << " progress_samples=" << progress_samples << std::endl;
+    // The wire budget excludes foreground restore publication and its next 250 ms ACK observation.
+    // The outer five-second deadline still bounds the complete UI-mediated handshake.
+    expect(wire < 2000 && received.last_chunk_ms - received.first_chunk_ms < 2000,
+        "10 MiB wire transfer stays under two seconds with 250 ms foreground frames");
+    expect(elapsed < 4000, "foreground restore publication and ACK observation finish within four seconds");
+    expect(restores == 1 && received.restored && received.received == fixture.file->size() && progress_samples > 0,
+        "foreground observes progress and publishes one completed restore");
+    sender.stop(); receiver.stop();
+    const auto tail = receiver.poll_foreground();
+    expect(tail && tail->from == 0 && tail->frame == ordinary && !receiver.poll_foreground(),
+        "the I/O worker preserves unrelated application traffic exactly once");
+}
+
+void checkpoint_worker_restart(unsigned stopped_mutation) {
+    using Clock = std::chrono::steady_clock;
+    using namespace std::chrono_literals;
+    const auto fixture = pacing_fixture(4 * net::save_chunk_bytes);
+    eawr::testing::FakeNetwork network(2);
+    eawr::testing::FakeTransport host(network, 0), guest(network, 1);
+    std::atomic<bool> poll_entered{}, release_poll{}, send_entered{}, release_send{};
+    std::atomic<unsigned> native_polls{};
+    class SelectionGate final : public net::MessageTransport {
+    public:
+        SelectionGate(net::MessageTransport& native, std::atomic<bool>& entered, std::atomic<bool>& released)
+            : native_(native), entered_(entered), released_(released) {}
+        eawr::core::Result<void> send(net::PeerIndex peer, std::span<const std::uint8_t> bytes) override { return native_.send(peer, bytes); }
+        std::optional<net::Received> poll() override { return native_.poll(); }
+        net::LinkState link(net::PeerIndex peer) const override { return native_.link(peer); }
+        net::PeerIndex self() const override {
+            if (!entered_.exchange(true))
+                while (!released_.load()) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            return native_.self();
+        }
+        std::uint32_t peer_count() const override { return native_.peer_count(); }
+    private:
+        net::MessageTransport& native_; std::atomic<bool>& entered_; std::atomic<bool>& released_;
+    } gated_host(host, send_entered, release_send);
+    net::GalacticCheckpointWorker sender, receiver;
+    struct ReleaseGates {
+        std::atomic<bool>& poll; std::atomic<bool>& selection;
+        ~ReleaseGates() { poll = true; selection = true; }
+    } release{release_poll, release_send};
+    network.before_poll = [&](net::PeerIndex peer) {
+        ++native_polls;
+        if (peer == 0 && !release_poll.load()) {
+            poll_entered = true;
+            while (!release_poll.load()) std::this_thread::sleep_for(1ms);
+        }
+        ++network.round;
+    };
+    const auto wait = [&](const auto& ready) {
+        const auto deadline = Clock::now() + 3s;
+        while (!ready()) {
+            expect(Clock::now() < deadline, "restart reaches its controlled command boundary");
+            std::this_thread::sleep_for(1ms);
+        }
+    };
+    const auto restore = [](const auto&, auto) { return eawr::core::Result<void>::success(); };
+    sender.start(gated_host);
+    wait([&] { return poll_entered.load(); });
+    auto newer = fixture.manifest; ++newer.epoch;
+    require(sender.select(host, fixture.manifest, fixture.file, restore, 0));
+    require(sender.select(host, newer, fixture.file, restore, 0));
+    release_poll = true;
+    wait([&] { return send_entered.load(); });
+    // Stop while the first selection reads native identity, with the newer command queued.
+    std::atomic<bool> stopping{};
+    std::jthread stopper([&] { stopping = true; sender.stop(); });
+    while (!stopping.load()) std::this_thread::yield();
+    std::this_thread::sleep_for(20ms);
+    release_send = true;
+    stopper.join();
+    const auto retained = sender.manifest();
+    expect(retained != nullptr, "stop retains the applied manifest");
+    const auto retained_epoch = retained->epoch;
+    expect(sender.manifest() == sender.manifest(), "stopped manifest reads reuse an owned immutable snapshot");
+    if (stopped_mutation == 1) {
+        ++newer.epoch;
+        const auto now = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+            Clock::now().time_since_epoch()).count());
+        require(sender.select(host, newer, fixture.file, restore, now));
+        expect(sender.view().epoch == newer.epoch && !sender.view().refusal,
+            "a stopped direct selection supersedes the pending command");
+    } else if (stopped_mutation == 2) {
+        sender.cancel(host, "stopped_cancel");
+        expect(sender.view().refusal.has_value(), "stopped cancellation is applied directly");
+        const auto polls_before_restart = native_polls.load();
+        sender.start(gated_host);
+        wait([&] { return native_polls.load() > polls_before_restart; });
+        sender.stop(); // final publication proves the restarted worker drained any retained commands
+        expect(sender.view().epoch == retained_epoch && sender.view().refusal.has_value(),
+            "a queued selection cannot resurrect a transfer cancelled while stopped");
+        return;
+    }
+    sender.start(gated_host); receiver.start(guest);
+    // Deduplication permits pending work on a normal restart and preserves a newer stopped selection.
+    require(sender.select(host, newer, fixture.file, restore, 0));
+    wait([&] {
+        receiver.service_restore([](const auto&, auto) { return eawr::core::Result<bool>::success(true); });
+        return sender.view().epoch == newer.epoch && sender.view().agreed && receiver.view().restored;
+    });
+    const auto current = sender.manifest();
+    expect(current && current->epoch == newer.epoch && retained->epoch == retained_epoch,
+        "owned manifest snapshots remain valid across replacement and repeated reads");
+    sender.stop(); receiver.stop(); sender.reset();
+    expect(!sender.manifest() && retained->epoch == retained_epoch,
+        "reset releases the selected manifest without invalidating an owned snapshot");
+}
+
+void checkpoint_worker_received_restart(bool direct_receive) {
+    using Clock = std::chrono::steady_clock;
+    using namespace std::chrono_literals;
+    const auto now = [] {
+        return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+            Clock::now().time_since_epoch()).count());
+    };
+    const auto fixture = pacing_fixture(4 * net::save_chunk_bytes);
+    eawr::testing::FakeNetwork network(2);
+    eawr::testing::FakeTransport host(network, 0), guest(network, 1);
+    net::GalacticCheckpointTransfer sender;
+    const auto restore = [](const auto&, auto) { return eawr::core::Result<void>::success(); };
+    require(sender.select(host, fixture.manifest, fixture.file, restore, now()));
+    require(sender.pump(host, now())); require(sender.pump(host, now()));
+    ++network.round;
+    std::vector<net::Received> frames;
+    while (auto frame = guest.poll()) frames.push_back(std::move(*frame));
+    expect(frames.size() == 5, "the queued stream contains its manifest and four chunks");
+    std::atomic<bool> entered{}, released{};
+    network.before_poll = [&](net::PeerIndex peer) {
+        if (peer == 1 && !released.load()) {
+            entered = true;
+            while (!released.load()) std::this_thread::sleep_for(1ms);
+        }
+        ++network.round;
+    };
+    net::GalacticCheckpointWorker receiver;
+    struct ReleasePoll {
+        std::atomic<bool>& flag;
+        ~ReleasePoll() { flag = true; }
+    } release{released};
+    const auto wait = [&](const auto& ready) {
+        const auto deadline = Clock::now() + 3s;
+        while (!ready()) {
+            expect(Clock::now() < deadline, "queued receive restart completes without a lost frame");
+            std::this_thread::sleep_for(1ms);
+        }
+    };
+    unsigned restores{};
+    const auto restored = [&](const auto&, auto bytes) {
+        expect(*bytes == *fixture.file, "restarted queued frames restore the byte-identical blob");
+        ++restores; return eawr::core::Result<bool>::success(true);
+    };
+    receiver.start(guest);
+    wait([&] { return entered.load(); });
+    const auto queued = frames.size() - (direct_receive ? 1U : 0U);
+    for (std::size_t index = 0; index < queued; ++index)
+        require(receiver.receive_async(guest, frames[index], restored, now()));
+    std::atomic<bool> stopping{};
+    std::jthread stopper([&] { stopping = true; receiver.stop(); });
+    while (!stopping.load()) std::this_thread::yield();
+    std::this_thread::sleep_for(20ms); released = true; stopper.join();
+    expect(receiver.view().received == 0, "stop leaves the consumed wire frames queued for handover");
+    if (direct_receive) require(receiver.receive_async(guest, frames.back(), restored, now()));
+    else require(receiver.pump(guest, now()));
+    receiver.start(guest);
+    wait([&] {
+        receiver.service_restore(restored);
+        {
+            const std::lock_guard lock(net::checkpoint_io_mutex());
+            while (auto frame = host.poll()) require(sender.receive(host, *frame, restore, now()));
+            require(sender.pump(host, now()));
+        }
+        return sender.view().agreed && receiver.view().restored;
+    });
+    receiver.stop();
+    expect(restores == 1, "stopped pump or receive preserves ordered frames and exactly one restore");
+}
+
+// Stress the actual queued command / publication / join paths. Fake transport callbacks run
+// under the same native gate as real sockets, including injected departures and corruption.
+void checkpoint_worker_stress() {
+    using Clock = std::chrono::steady_clock;
+    using namespace std::chrono_literals;
+    const auto fixture = pacing_fixture(4 * net::save_chunk_bytes);
+    const auto restore = [](const auto&, auto) { return eawr::core::Result<void>::success(); };
+    for (unsigned iteration = 0; iteration < 64; ++iteration) {
+        eawr::testing::FakeNetwork network(2);
+        bool corrupted{};
+        std::atomic<bool> throw_guest{};
+        std::atomic<bool> inside_ack{}, release_ack{};
+        network.before_send = [&](net::PeerIndex from, net::PeerIndex, std::span<const std::uint8_t> bytes) {
+            if (iteration % 6 != 0 || from != 1 || bytes.size() < 17 || bytes.front() != net::save_progress_kind) return;
+            std::uint64_t acknowledged{};
+            for (unsigned byte = 0; byte < 8; ++byte) acknowledged |= std::uint64_t{bytes[9 + byte]} << (8 * byte);
+            if (acknowledged <= net::save_chunk_bytes) return;
+            inside_ack = true;
+            while (!release_ack.load()) std::this_thread::sleep_for(1ms);
+        };
+        network.before_poll = [&](net::PeerIndex peer) {
+            if (peer == 1 && throw_guest.exchange(false)) throw std::runtime_error("injected native poll failure");
+            ++network.round;
+            if (iteration % 6 == 3 && peer == 1 && !corrupted) {
+                for (auto& queued : network.inbox[peer]) {
+                    if (queued.received.frame.size() > 32 && queued.received.frame.front() == net::save_chunk_kind) {
+                        queued.received.frame[20] ^= 1; corrupted = true; break;
+                    }
+                }
+            }
+        };
+        eawr::testing::FakeTransport host(network, 0), guest(network, 1);
+        std::atomic<bool> paused{true};
+        class PausedGuest final : public net::MessageTransport {
+        public:
+            PausedGuest(net::MessageTransport& native, std::atomic<bool>& pause) : native_(native), pause_(pause) {}
+            eawr::core::Result<void> send(net::PeerIndex peer, std::span<const std::uint8_t> bytes) override { return native_.send(peer, bytes); }
+            std::optional<net::Received> poll() override {
+                if (pause_.load() && delivered_ >= 2) return {};
+                auto frame = native_.poll(); if (frame) ++delivered_; return frame;
+            }
+            net::LinkState link(net::PeerIndex peer) const override { return native_.link(peer); }
+            net::PeerIndex self() const override { return native_.self(); }
+            std::uint32_t peer_count() const override { return native_.peer_count(); }
+        private:
+            net::MessageTransport& native_; std::atomic<bool>& pause_; unsigned delivered_{};
+        } incoming(guest, paused);
+        net::GalacticCheckpointWorker sender, receiver;
+        struct ReleaseAck {
+            std::atomic<bool>& released;
+            ~ReleaseAck() { released = true; }
+        } releasing_ack{release_ack};
+        sender.start(host); receiver.start(incoming);
+        require(sender.select(host, fixture.manifest, fixture.file, restore, 0));
+        const auto deadline = Clock::now() + 2s;
+        while (receiver.view().received == 0) {
+            expect(Clock::now() < deadline, "stress starts with a partially received checkpoint");
+            std::this_thread::sleep_for(1ms);
+        }
+        expect(receiver.view().received < fixture.file->size(), "cancel and leave occur with chunks still in flight");
+        if (iteration % 6 == 0) {
+            paused = false;
+            while (!inside_ack.load()) {
+                expect(Clock::now() < deadline, "receiver processes a second chunk before concurrent cancellation");
+                std::this_thread::sleep_for(1ms);
+            }
+            // The receiver is still inside that chunk's ACK send when cancellation is queued.
+            sender.cancel(host, "stress_cancel"); release_ack = true;
+        }
+        else if (iteration % 6 == 1) {
+            const std::lock_guard lock(net::checkpoint_io_mutex()); network.open[1] = false;
+        } else if (iteration % 6 == 2) {
+            sender.cancel(host, "selection_cleared"); sender.reset();
+            auto newer = fixture.manifest; ++newer.epoch;
+            require(sender.select(host, newer, fixture.file, restore, 0));
+        }
+        if (iteration % 6 == 4) {
+            const std::lock_guard lock(net::checkpoint_io_mutex()); network.open[0] = false;
+        }
+        if (iteration % 6 == 5) throw_guest = true;
+        paused = false;
+        const bool replacement = iteration % 6 == 2;
+        const auto unsettled = [&] {
+            if (replacement) return !(sender.view().epoch == fixture.manifest.epoch + 1 && sender.view().agreed && receiver.view().restored);
+            if (iteration % 6 == 0) return !sender.view().refusal || !receiver.view().refusal;
+            return !sender.view().refusal && !receiver.view().refusal && !sender.view().agreed && !sender.failure() && !receiver.failure();
+        };
+        while (unsettled()) {
+            // A cancelled or departed guest cannot publish a successful foreground restore.
+            if (iteration % 6 != 0 && iteration % 6 != 1)
+                receiver.service_restore([](const auto&, auto) { return eawr::core::Result<bool>::success(true); });
+            expect(Clock::now() < deadline, "cancel, departure, replacement and hash refusal terminate");
+            std::this_thread::sleep_for(1ms);
+        }
+        if (replacement) {
+            expect(receiver.view().epoch == fixture.manifest.epoch + 1 && receiver.view().restored,
+                "replacement completes only the new epoch after cancellation");
+            expect(receiver.take_cleared_epoch() == fixture.manifest.epoch,
+                "the foreground retains the old clear even when a newer manifest arrived in the same wire drain");
+            expect(receiver.view().epoch == fixture.manifest.epoch + 1 && receiver.view().restored,
+                "consuming the old clear cannot reset the newer verified transfer");
+        }
+        if (iteration % 6 == 3) expect(corrupted && receiver.view().refusal && !receiver.view().restored,
+            "the threaded receiver refuses a corrupted whole-file digest");
+        if (iteration % 6 == 1) expect(sender.view().refusal.has_value(), "guest departure cancels on the sender thread");
+        if (iteration % 6 == 0) expect(inside_ack.load() && sender.view().refusal.has_value(),
+            "cancellation overlaps receiver chunk processing and refuses the sender");
+        if (iteration % 6 == 4) expect(receiver.view().refusal.has_value(), "host departure cancels on the receiver thread");
+        if (iteration % 6 == 5) {
+            expect(receiver.failure().has_value(), "native worker exceptions are published to the foreground");
+            while (receiver.running()) {
+                expect(Clock::now() < deadline, "a failed worker stops reporting running");
+                std::this_thread::sleep_for(1ms);
+            }
+            const auto failed_pump = receiver.pump(incoming, 0);
+            expect(!failed_pump && failed_pump.error().code == receiver.failure()->code,
+                "fatal worker failure cannot resume protocol pumping on the foreground thread");
+        }
+        else expect(!sender.failure() && !receiver.failure(), "normal cancellation does not produce a worker exception");
+        const auto stopping = Clock::now(); sender.stop(); receiver.stop();
+        // Scheduling a stopped worker can take longer on a loaded host; the join remains bounded.
+        expect(Clock::now() - stopping < 2s, "join/leave stress has a bounded shutdown join");
+        // Reattach and immediately stop: no captured native pointer may escape the join.
+        sender.start(host); receiver.start(incoming); sender.stop(); receiver.stop();
+    }
+    std::cout << "checkpoint worker stress: 64 cancel/leave/reselect/corruption iterations passed\n";
+}
+
+// An acknowledgement alone, with no host pump, sends the next chunks: the sender refills the window in the frame the
+// acknowledgement arrives in, not on the next pump (#6130).
+void checkpoint_transfer_send_on_ack() {
+    const auto fixture = pacing_fixture(3 * net::save_window_chunks * net::save_chunk_bytes);
+    const auto& file = fixture.file;
+    const auto restore = [&](const auto&, std::span<const std::uint8_t> bytes) {
+        expect(bytes.size() == file->size(), "the receiver restores the whole file");
+        return eawr::core::Result<void>::success();
+    };
+    eawr::testing::FakeNetwork network(2);
+    eawr::testing::FakeTransport host(network, 0), guest(network, 1);
+    net::GalacticCheckpointTransfer send, receive;
+    require(send.select(host, fixture.manifest, file, restore, 0));
+    require(send.pump(host, 0)); require(send.pump(host, 0)); // the manifest and one window of chunks, no more
+    network.round = 1;
+    std::size_t delivered = 0;
+    while (auto frame = guest.poll()) {
+        delivered += frame->frame.front() == net::save_chunk_kind;
+        require(receive.receive(guest, *frame, restore, 1)); // each chunk makes the guest acknowledge
+    }
+    expect(delivered == net::save_window_chunks, "the first pumps queue exactly one window");
+    network.round = 2; // one fake millisecond per hop: the guest's acknowledgements are due now
+    std::size_t acked = 0;
+    while (auto frame = host.poll()) { // the acknowledgements reach the host; the host is NOT pumped again
+        acked += frame->frame.front() == net::save_progress_kind;
+        require(send.receive(host, *frame, restore, 2));
+    }
+    expect(acked == net::save_window_chunks, "the guest acknowledged every chunk");
+    network.round = 3; // the chunks the acknowledgements sent at round 2 are due now
+    std::size_t refilled = 0;
+    while (auto frame = guest.poll()) refilled += frame->frame.front() == net::save_chunk_kind;
+    expect(refilled == net::save_window_chunks, "the acknowledgements alone sent the next window, without a pump");
+}
+
+void checkpoint_transfer_large() {
+    const auto fixture = pacing_fixture(64U * 1024U * 1024U + 1U);
+    const auto restore = [&](const auto&, std::span<const std::uint8_t> bytes) {
+        expect(bytes.size() == fixture.file->size() && std::equal(bytes.begin(), bytes.end(), fixture.file->begin()),
+            "large checkpoint arrives byte-identical");
+        return eawr::core::Result<void>::success();
+    };
+    eawr::testing::FakeNetwork network(2);
+    eawr::testing::FakeTransport host(network, 0), guest(network, 1);
+    net::GalacticCheckpointTransfer send, receive;
+    require(send.select(host, fixture.manifest, fixture.file, restore, 0));
+    for (std::uint64_t round = 1; round < 5000 && !send.view().agreed; ++round) {
+        network.round = round;
+        require(send.pump(host, round));
+        while (auto frame = guest.poll()) require(receive.receive(guest, *frame, restore, round));
+        require(receive.pump(guest, round));
+        while (auto frame = host.poll()) require(send.receive(host, *frame, restore, round));
+    }
+    expect(send.view().agreed && receive.view().restored, "checkpoint above 64 MiB transfers and restores");
+}
+
+void checkpoint_transfer_pacing() {
+    const auto fixture = pacing_fixture();
+    const auto& file = fixture.file;
+    const auto& manifest = fixture.manifest;
+    const auto restore = [&](const auto&, std::span<const std::uint8_t> bytes) {
+        expect(bytes.size() == file->size(), "the receiver restores the whole file");
+        return eawr::core::Result<void>::success();
+    };
+    eawr::testing::FakeNetwork network(2);
+    eawr::testing::FakeTransport host(network, 0), guest(network, 1);
+    net::GalacticCheckpointTransfer send, receive;
+    require(send.select(host, manifest, file, restore, 0));
+    // Without acknowledgements the window is the bound: two pumps queue save_window_chunks chunks, no more.
+    require(send.pump(host, 0)); require(send.pump(host, 0));
+    const auto queued = std::count_if(network.inbox[1].begin(), network.inbox[1].end(), [](const auto& entry) {
+        return entry.received.frame.front() == net::save_chunk_kind;
+    });
+    expect(queued == static_cast<std::ptrdiff_t>(net::save_window_chunks),
+        "repeated pumps never queue more than the window of chunks without ACK progress");
+    std::uint64_t rounds = 0;
+    for (std::uint64_t round = 1; round < 200 && !send.view().agreed && !send.view().refusal; ++round) {
+        network.round = round; rounds = round;
+        static_cast<void>(send.pump(host, round));
+        while (auto frame = guest.poll()) static_cast<void>(receive.receive(guest, *frame, restore, round));
+        static_cast<void>(receive.pump(guest, round));
+        while (auto frame = host.poll()) static_cast<void>(send.receive(host, *frame, restore, round));
+    }
+    expect(send.view().agreed && receive.view().restored && !send.view().refusal && !receive.view().refusal,
+        "a 3.9 MB save transfers");
+    expect(rounds <= 12, "a 3.9 MB save needs about a dozen frames at most (the four-chunk window needed about 45)");
+    expect(net::save_window_chunks >= 16, "the window holds at least sixteen chunks");
+    const auto host_view = send.view(), guest_view = receive.view();
+    expect(host_view.chunks == 60 && guest_view.chunks == 60, "both seats report 60 chunks");
+    // The guest may finish inside the receive that delivers the last chunk, before its next pump: zero pumps is then correct.
+    expect(host_view.pumps > 0 && host_view.pumps <= rounds + 2 && guest_view.pumps <= rounds + 2, "pump counts are recorded (two extra pumps ran before the loop)");
+    expect(host_view.timed_chunks && guest_view.timed_chunks, "chunk timing is recorded on both seats");
+    expect(host_view.last_chunk_ms >= host_view.first_chunk_ms && guest_view.last_chunk_ms >= guest_view.first_chunk_ms,
+        "last chunk is not before the first");
+    expect(host_view.restored_ms >= host_view.last_chunk_ms && guest_view.restored_ms >= guest_view.last_chunk_ms
+        && host_view.restored_ms > 0 && guest_view.restored_ms > 0, "restore completes after the last chunk on both seats");
+    expect(host_view.last_chunk_ms - host_view.first_chunk_ms < 12, "the host's wire time is within the round budget");
+}
+
+// #6130 step 4: a lobby receiver restores on a private worker. The last chunk is acknowledged at once, the restore ACK waits
+// for the worker, the worker is polled from pump, and the verified file stays retained for the lobby afterwards.
+void checkpoint_transfer_async_restore() {
+    const auto fixture = pacing_fixture();
+    const auto& file = fixture.file;
+    const auto sync_restore = [&](const auto&, std::span<const std::uint8_t>) { return eawr::core::Result<void>::success(); };
+    eawr::testing::FakeNetwork network(2);
+    eawr::testing::FakeTransport host(network, 0), guest(network, 1);
+    net::GalacticCheckpointTransfer send, receive;
+    require(send.select(host, fixture.manifest, file, sync_restore, 0));
+    int polls = 0;
+    bool worker_done = false, ack_before_done = false;
+    std::shared_ptr<const Bytes> held;
+    const auto worker = [&](const net::SaveManifest&, std::shared_ptr<const Bytes> bytes) {
+        ++polls;
+        expect(bytes && bytes->size() == file->size(), "the worker sees the whole file");
+        if (held) expect(held == bytes, "every poll sees the one file allocation");
+        held = bytes; worker_done = polls >= 6;
+        return eawr::core::Result<bool>::success(worker_done);
+    };
+    for (std::uint64_t round = 1; round < 200 && !send.view().agreed && !send.view().refusal; ++round) {
+        network.round = round;
+        require(send.pump(host, round));
+        while (auto frame = guest.poll()) require(receive.receive_async(guest, *frame, worker, round));
+        require(receive.pump(guest, round));
+        while (auto frame = host.poll()) {
+            if (frame->frame.front() == net::save_restore_kind) ack_before_done = ack_before_done || !worker_done;
+            require(send.receive(host, *frame, sync_restore, round));
+        }
+        if (!worker_done) expect(!receive.view().restored, "the guest is not restored while its worker runs");
+    }
+    expect(send.view().agreed && receive.view().restored && !send.view().refusal && !receive.view().refusal,
+        "the host agrees once the guest's worker finished");
+    expect(polls >= 6 && !ack_before_done, "the restore ACK waits for the private worker");
+    expect(receive.restored_bytes() && receive.restored_bytes() == held && receive.restored_bytes()->size() == file->size(),
+        "the lobby keeps the one verified file allocation after the worker");
+    expect(receive.view().restored_ms >= receive.view().last_chunk_ms, "restore time is after the last chunk");
+}
+
+// A restore that outlasts the 30 s silence limit is not an idle peer (#6130): neither side refuses while it runs.
+void checkpoint_transfer_long_restore() {
+    const auto fixture = pacing_fixture();
+    const auto& file = fixture.file;
+    const auto sync_restore = [&](const auto&, std::span<const std::uint8_t>) { return eawr::core::Result<void>::success(); };
+    eawr::testing::FakeNetwork network(2);
+    eawr::testing::FakeTransport host(network, 0), guest(network, 1);
+    net::GalacticCheckpointTransfer send, receive;
+    require(send.select(host, fixture.manifest, file, sync_restore, 0));
+    constexpr std::uint64_t second = 1000, restore_seconds = 90;
+    std::uint64_t first_done_round = 0;
+    const auto worker = [&](const net::SaveManifest&, std::shared_ptr<const Bytes>) {
+        return eawr::core::Result<bool>::success(first_done_round != 0);
+    };
+    std::uint64_t last_chunk_round = 0;
+    for (std::uint64_t round = 1; round < 400 && !send.view().agreed && !send.view().refusal && !receive.view().refusal; ++round) {
+        network.round = round;
+        const auto now = round * second;
+        require(send.pump(host, now));
+        while (auto frame = guest.poll()) {
+            require(receive.receive_async(guest, *frame, worker, now));
+            if (receive.view().received == receive.view().total && !last_chunk_round) last_chunk_round = round;
+        }
+        if (last_chunk_round && round >= last_chunk_round + restore_seconds) first_done_round = round; // the worker finishes late
+        require(receive.pump(guest, now));
+        while (auto frame = host.poll()) require(send.receive(host, *frame, sync_restore, now));
+    }
+    expect(last_chunk_round != 0, "the guest received the whole file");
+    expect(!send.view().refusal && !receive.view().refusal, "a restore longer than the idle limit is not refused");
+    expect(send.view().agreed && receive.view().restored, "the host agrees once the slow restore finished");
+}
+
+// #6178 follow-up: the transfer reports every stage to its trace, so a stalled room shows where it stopped.
+void checkpoint_transfer_trace() {
+    auto cohort = peers_of(2);
+    const auto new_game = make_offer(*cohort[0], two_sides());
+    const auto file = std::make_shared<const Bytes>(25 * net::save_chunk_bytes + 5, std::uint8_t{31});
+    auto payload = require(net::decode_galactic_setup(new_game.setup));
+    payload.start = net::GalacticStart::checkpoint; payload.initial_tick = 137;
+    payload.state_digest = payload.roster.tick_zero; payload.checkpoint_digest = eawr::core::sha256(*file);
+    payload.frontier_digest.fill(3); payload.terms_digest.fill(4);
+    net::SaveManifest manifest; manifest.epoch = 1; manifest.byte_length = file->size(); manifest.peers = {0, 1};
+    manifest.offer = new_game; manifest.offer.setup = require(net::encode_galactic_setup(payload));
+    const auto restore = [&](const auto&, std::span<const std::uint8_t>) { return eawr::core::Result<void>::success(); };
+    for (const bool corrupt : {false, true}) {
+        eawr::testing::FakeNetwork network(2);
+        eawr::testing::FakeTransport host(network, 0), guest(network, 1);
+        net::GalacticCheckpointTransfer send, receive;
+        std::vector<std::string> host_events, guest_events, details;
+        send.set_trace([&](std::string_view event, const std::string& detail) { host_events.emplace_back(event); details.push_back(detail); });
+        receive.set_trace([&](std::string_view event, const std::string& detail) { guest_events.emplace_back(event); details.push_back(detail); });
+        require(send.select(host, manifest, file, restore, 0));
+        bool changed = false;
+        for (std::uint64_t round = 1; round < 200 && !send.view().agreed && !send.view().refusal; ++round) {
+            network.round = round;
+            static_cast<void>(send.pump(host, round));
+            while (auto frame = guest.poll()) {
+                if (corrupt && frame->frame.front() == net::save_chunk_kind && !changed && frame->frame.size() > 40) { frame->frame.back() ^= 1; changed = true; }
+                static_cast<void>(receive.receive(guest, *frame, restore, round));
+            }
+            while (auto frame = host.poll()) static_cast<void>(send.receive(host, *frame, restore, round));
+            static_cast<void>(receive.pump(guest, round));
+        }
+        const auto has = [](const std::vector<std::string>& events, std::string_view name) {
+            return std::find(events.begin(), events.end(), name) != events.end();
+        };
+        const auto count = [](const std::vector<std::string>& events, std::string_view name) {
+            return std::count(events.begin(), events.end(), name);
+        };
+        expect(has(host_events, "selected") && has(host_events, "manifest-sent") && has(host_events, "first-chunk"),
+            "the host traces selection, the manifest and the first chunk");
+        expect(has(guest_events, "manifest") && has(guest_events, "chunk"), "the guest traces the manifest and its chunks");
+        // 26 chunks: the guest reports chunk 0, 10, 20 and the final one at most; never one line per chunk.
+        expect(count(guest_events, "chunk") <= 4, "the guest traces every tenth chunk, not every chunk");
+        if (!corrupt) {
+            expect(has(guest_events, "restore-start") && has(guest_events, "restore-end"), "the guest traces its restore");
+            expect(has(host_events, "chunk-ack") && has(host_events, "peer-restored") && has(host_events, "agreed"),
+                "the host traces acknowledgements, the guest's restore and the agreement");
+            expect(!has(host_events, "refused") && !has(guest_events, "refused"), "a clean transfer traces no refusal");
+        } else {
+            expect(has(guest_events, "refused") || has(host_events, "refused"), "a corrupted chunk is traced as a refusal");
+            expect(!has(host_events, "agreed"), "a refused transfer is not agreed");
+        }
+        for (const auto& detail : details)
+            expect(detail.find("now=") != std::string::npos && detail.find("epoch=") != std::string::npos,
+                "every trace line carries the clock and the epoch");
+    }
+}
+
 void checkpoint_transfer_contracts() {
     auto cohort = peers_of(2);
     const auto new_game = make_offer(*cohort[0], two_sides());
@@ -868,7 +1641,9 @@ void checkpoint_transfer_contracts() {
         const auto chunks = std::count_if(network.inbox[1].begin(), network.inbox[1].end(), [](const auto& entry) {
             return entry.received.frame.front() == net::save_chunk_kind;
         });
-        expect(chunks == 4, "repeated pumps never queue more than four chunks without ACK progress");
+        // The fixture save is nine chunks and a bit: it fits the window, so repeated pumps send each chunk once.
+        expect(chunks == 10 && chunks <= static_cast<std::ptrdiff_t>(net::save_window_chunks),
+            "repeated pumps send each chunk of a save that fits the window exactly once");
         network.round = 1; auto incoming = guest.poll();
         expect(incoming && incoming->frame.front() == net::save_manifest_kind, "manifest precedes its bounded chunk window");
         if (incoming) {
@@ -944,9 +1719,25 @@ void recovery_transfer_contracts() {
 
 } // namespace
 
-int main() {
+int main(int argc, char** argv) {
     try {
-        checkpoint_transfer_contracts(); recovery_transfer_contracts();
+        if (argc == 2 && std::string_view(argv[1]) == "--large-checkpoint") { checkpoint_transfer_large(); return 0; }
+        if (argc == 2 && (std::string_view(argv[1]) == "--gns-checkpoint" || std::string_view(argv[1]) == "--gns-checkpoint-slow")) {
+            if (!net::GnsTransport::available()) { std::cout << "GNS disabled: checkpoint timing skipped\n"; return 77; }
+            checkpoint_transfer_over_gns(std::string_view(argv[1]) == "--gns-checkpoint-slow");
+            return 0;
+        }
+        if (argc == 2 && std::string_view(argv[1]) == "--gns-checkpoint-threaded") {
+            if (!net::GnsTransport::available()) return 77;
+            checkpoint_transfer_threaded(true); return 0;
+        }
+        if (argc == 2 && std::string_view(argv[1]) == "--checkpoint-worker") {
+            checkpoint_transfer_threaded(false);
+            for (unsigned mutation = 0; mutation < 3; ++mutation) checkpoint_worker_restart(mutation);
+            checkpoint_worker_received_restart(false); checkpoint_worker_received_restart(true);
+            checkpoint_worker_stress(); return 0;
+        }
+        checkpoint_transfer_contracts(); checkpoint_transfer_pacing(); checkpoint_transfer_trace(); checkpoint_transfer_send_on_ack(); checkpoint_transfer_over_tcp(); checkpoint_transfer_async_restore(); checkpoint_transfer_long_restore(); recovery_transfer_contracts();
         skirmish_layout_pinned(); payload_codec(); local_load_notes(); roster_refusals(); offer_refusals();
         agreement_rules_flavour(); agreement_two_peers(); agreement_eight_seats(); data_driven_factions();
         content_refusals(); incompatible_content(); seed_refusal(); forged_host_digest(); forged_controller_claim(); readiness();

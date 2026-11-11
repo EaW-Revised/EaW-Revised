@@ -26,8 +26,35 @@ struct LandLocomotionProfile {
     // WLPA-73: authored collision class; the contact selector reads it for generic-team members and single objects (a formation
     // squad's container carries its own class, WLPA-82).
     units::LandCollisionGroup collision_class{units::LandCollisionGroup::none};
+    // WLPA-90/91: `Min_Speed_Fraction_For_Turn` (a corner slower than this fraction of the top speed stops to turn; the
+    // type default 0 never does) and the effective `Close_Enough_Angle_For_Move_Start` in turns. The retail type value
+    // falls back to the game constant (stock 180 degrees) when unauthored. The land content adapter fills both from the
+    // tags; a hand-built profile keeps the stock constant, half a turn, which any heading error is within.
+    math::Fixed min_speed_fraction_for_turn{};
+    math::Fixed close_enough_angle{math::Fixed::from_raw(math::Fixed::scale / 2)};
+    // LR13-17 (#6115): the start transition clock. A `Walk_Transition` member plays its MOVESTART clip from standing and
+    // the walk is held until that clip is almost finished. `start_clock` says the land content adapter has read the clip
+    // (or found none), so the movement opens the start gate itself; false (a hand-built profile) leaves the gate to
+    // `LandMotionGates::start_almost_finished` alone. `start_clip_ticks` is the wait in whole logical frames, worked out at
+    // load from the clip's frame count, frame rate and `Max_Speed / Movement_Animation_Speed` (no float reaches the
+    // simulation); zero is no clip: the gate is open at once. The member's `transition_frame` counts the frames waited.
+    bool start_clock{};
+    std::uint32_t start_clip_ticks{};
     friend bool operator==(const LandLocomotionProfile&, const LandLocomotionProfile&) = default;
 };
+
+// WLPA-90: what limits a squad at a corner. The speed is per second, the rate in turns per second (the slowest member),
+// the deceleration is the smallest authored member value (the maximum speed per logical frame when none is authored:
+// a one-frame stop).
+struct LandTurnLimits {
+    math::Fixed maximum_speed{}, turn_rate{}, deceleration{}, minimum_fraction{}, close_enough{};
+    bool turns{}; // false: a member does not turn (or the squad has no speed): heading and speed are never limited
+};
+// WLPA-90: the fraction of the top speed a body may carry onto `segment` after turning from the unit heading `heading`.
+// With w the turn rate in radians per second, d the segment length and theta the corner angle: the smaller of
+// `w d / (2 sin theta)` and `clamp(d / 2, 20, 100) w / (1 - cos theta)`, over the top speed; zero when it is below
+// `minimum_fraction`. One for a straight continuation, a body that does not turn or a zero-length segment.
+[[nodiscard]] math::Fixed land_corner_fraction(math::Vec2 heading, math::Vec2 segment, const LandTurnLimits& limits);
 
 // WLPA-82: the authored UnitCollisionClass (WLPA-73), never the object kind, makes a moving/stopped pair
 // repulse: Infantry and Bike are soft. Every other class keeps the hard pair guard and the path-around.
@@ -41,6 +68,14 @@ struct LandMotionGates {
     bool start_almost_finished{}, stop_point{}, stop_almost_finished{}, turn_almost_finished{true};
     bool animation_prevents_movement{}, deployment_almost_finished{}, turret_aligned{true};
     friend bool operator==(const LandMotionGates&, const LandMotionGates&) = default;
+};
+
+// Transient per-member outputs of the last successful movement step; not checkpoint state.
+struct LandMemberMotionInput {
+    math::Fixed heading_error{}, turn_fraction{}; // turns, fraction of turn budget used
+    bool valid{};
+    bool turn_fraction_valid{}; // only members whose moving path consumes the LR13-24 turn budget publish it
+    friend bool operator==(const LandMemberMotionInput&, const LandMemberMotionInput&) = default;
 };
 
 struct LandMovingMember {
@@ -102,6 +137,14 @@ struct LandMovingSquad {
     math::Fixed mapped_axis{};
     bool has_mapped{};
     std::uint8_t straggler_wait_remaining{land_straggler_wait_visits};
+    // WLPA-90: the heading the first corner of `path` is measured from (the squad's facing when the path was installed),
+    // and whether the path ends at a splice anchor that a new path will continue (no end-point slowdown there).
+    math::Fixed turn_start_heading{};
+    bool awaiting_splice{};
+    // LMF-01: the lead squad of the formation this squad was last ordered into by a group move (zero: none) and its slot
+    // there (forward, side from the formation destination). Retained so a restored session knows its formations.
+    EntityId formation{};
+    math::Vec2 formation_slot{};
     friend bool operator==(const LandMovingSquad&, const LandMovingSquad&) = default;
 };
 
@@ -164,6 +207,8 @@ public:
     [[nodiscard]] std::size_t body_count() const noexcept { return bodies_.size(); }
     [[nodiscard]] std::span<const LandMovingSquad> squads() const noexcept { return state_.squads; }
     [[nodiscard]] std::span<const LandMovingMember> members() const noexcept { return state_.members; }
+    [[nodiscard]] std::span<const LandMemberMotionInput> member_motion_inputs() const noexcept { return member_motion_inputs_; }
+    [[nodiscard]] math::Fixed formation_deceleration(std::size_t squad) const { return turn_limits(squad).deceleration; }
     [[nodiscard]] bool install_path(std::size_t squad, LandPath path, std::uint64_t following_start);
     // WLPA-88: the node a walking container finishes its current segment at. Present only for a squad that is
     // translating on its own path (non-generic, following, no contact route, not turning, a node left to walk).
@@ -172,16 +217,25 @@ public:
     [[nodiscard]] std::optional<math::Vec2> bounded_splice_anchor(std::size_t squad) const;
     void cut_splice_anchor(std::size_t squad, math::Vec2 anchor);
     // WLPA-88/89: install a path that starts at splice_anchor() behind the squad's current position, keeping the walk.
-    // `sharp` leaves everything untouched: the first corner at the anchor is beyond the smooth-start gate and the caller
-    // falls back to the standing start. `rejected` is a stale anchor (the squad moved on, ended or yielded).
+    // `sharp` leaves everything untouched: the corner at the anchor has no turn speed (WLPA-89, or a single object's
+    // heading error is beyond its start gate) and the caller falls back to the standing start. `rejected` is a stale anchor (the squad moved on, ended or yielded).
     enum class SpliceResult : std::uint8_t { installed, sharp, rejected };
     [[nodiscard]] SpliceResult splice_path(std::size_t squad, LandPath path);
     [[nodiscard]] bool yield(std::size_t squad, EntityId blocker, std::uint64_t blocker_progress);
     // Explicit coordinator recovery uses observed blocker progress; pair service qualifies deadlock separately.
     [[nodiscard]] bool observe_progress(std::size_t squad, EntityId blocker, std::uint64_t progress);
     [[nodiscard]] bool drop_order(std::size_t squad);
+    // LMF-01: records (or, with a zero lead, clears) the formation membership of a squad. False for an unknown squad.
+    [[nodiscard]] bool set_formation(std::size_t squad, EntityId lead, math::Vec2 slot);
     // Sparse death commit: preserves surviving slots, removes contacts, and erases an empty squad.
     [[nodiscard]] bool remove_member(EntityId member);
+    struct DetachedSquad {
+        LandMovingSquad squad;
+        std::vector<LandMovingMember> members;
+    };
+    // Ordered lifecycle operations: detached squads do not participate in movement or contacts.
+    [[nodiscard]] std::optional<DetachedSquad> detach_squad(EntityId squad);
+    [[nodiscard]] bool restore_squad(DetachedSquad detached, math::Vec2 position);
     [[nodiscard]] bool set_gates(EntityId member, LandMotionGates gates);
     [[nodiscard]] bool set_walk_state(EntityId member, LandWalkState state);
     [[nodiscard]] bool set_animation_progress(EntityId member, math::Fixed transition_frame, math::Fixed deployment_frame);
@@ -193,7 +247,8 @@ public:
     // Preserves nonmember occupations. Dynamic members keep zero static restriction bits;
     // swept pair admission and the late retained-contact service own their local restrictions.
     [[nodiscard]] core::Result<void> step(LandOccupancy& occupancy, const PartitionExecutor& executor,
-        math::Fixed seconds, bool defer_occupancy = false);
+        math::Fixed seconds, bool defer_occupancy = false,
+        std::span<const std::optional<math::Fixed>> formation_speeds = {});
     // Session LR1-03/D5 barrier: motion once, late contacts, then occupancy publication.
     [[nodiscard]] core::Result<void> commit_occupancy(LandOccupancy& occupancy, const PartitionExecutor& executor);
     // Debug/reference oracle; scratch policy only, never serialized or hashed.
@@ -250,6 +305,8 @@ private:
     std::vector<std::uint32_t> member_visits_, squad_visits_, pair_visits_;
     StepWork work_;
     void invalidate_contacts(std::size_t squad);
+    // WLPA-90/91: the squad's corner limits from its members (read only; safe inside a partition).
+    [[nodiscard]] LandTurnLimits turn_limits(std::size_t squad) const;
     Checkpoint state_;
     // Only physical proposal fields are staged: no string/vector copies or allocations per member/tick.
     struct Proposal {
@@ -258,6 +315,8 @@ private:
         math::Vec2 position{};
         math::Fixed facing{}, speed{}, stop_velocity{};
         LandWalkState state{};
+        math::Fixed transition_frame{};
+        LandMemberMotionInput motion_input{};
         math::Fixed assigned_speed{};
         bool terrain_blocked{};
         math::Vec2 terrain_target{};
@@ -281,6 +340,7 @@ private:
         math::Fixed mapped_axis{}, rear_extent{}, assigned_speed{};
     };
     std::vector<Proposal> proposals_;
+    std::vector<LandMemberMotionInput> member_motion_inputs_;
     std::vector<math::Vec2> staged_slot_;
     std::vector<math::Fixed> staged_straggler_lag_;
     std::vector<SquadProposal> squad_proposals_;

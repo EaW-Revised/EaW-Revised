@@ -21,6 +21,7 @@ inline constexpr std::uint64_t kDefaultTreeEntryCap = 200'000;
 
 struct TreeFingerprint {
     std::string tree;            // lowercase sha256 hex, see tree_fingerprint
+    std::string portable_tree;   // path and size only, independent of file timestamps
     std::uint64_t files = 0;
     bool capped = false;         // stopped at `entry_cap` (codes::tree_walk_capped)
     bool incomplete = false;     // an entry could not be listed or stat'ed (codes::tree_walk_incomplete)

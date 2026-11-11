@@ -28,6 +28,7 @@ enum class TextureProcessing : std::uint8_t {
     colour_mip_chain,
     // The same for a tangent-space normal map (ChainKind::normal: averaged normals are scaled back to unit length).
     normal_mip_chain,
+    compensated_light_mip_chain, // single-level additive texture, with brightness-compensated lower levels
 };
 
 struct TexturePrefetchOptions final {

@@ -79,12 +79,13 @@
 - Audio pause and resume (TM-13) waits for the battle audio (battle audio foundation).
 - The camera's smoothing snap while paused (TM-11): the remake's camera keeps easing its distance
   while paused.
-- Multiplayer pause deliberately extends TM-04 as described by TP-MP01..04 below; fast forward remains unavailable.
+- Multiplayer pause deliberately extends TM-04 as described by TP-MP01..04 below; the 4x fast forward remains
+  unavailable in multiplayer, where the fast-forward button requests the shared 2x instead (TP-MP06).
 - In a LAN match the galactic clock bar's authored pause button drives the shared clock (TP-MP02) while the match
-  is running and no battle child holds the clock; its fast-forward button stays disabled with several humans. The
-  bar is the only galactic clock control: the developer Pause / Resume, 0.5x, 1x and 2x buttons and their Ctrl+1/2/3
-  keys are gone, so multiplayer has no 0.5x/2x speeds until the speed-request design (legacy EAWR-5355) lands. The pause
-  button's tooltip carries the shared-clock debounce.
+  is running and no battle child holds the clock. Its fast-forward button requests the shared 2x and back to 1x
+  (TP-MP06). The bar is the only galactic clock control: the developer Pause / Resume, 0.5x, 1x and 2x buttons and
+  their Ctrl+1/2/3 keys are gone. The pause button's tooltip carries the shared-clock debounce; the fast-forward
+  button's tooltip carries the speed budget and says that 2x is a request.
 
 ## Galactic fast forward
 
@@ -99,11 +100,15 @@ The factor is applied by the live pacer's wall-clock schedule (`LivePaceSchedule
 whose ticks cost more than the 8.3 ms interval is bound by its tick cost: the pacer then runs ticks back to back
 and drops the missed wall time beyond five overdue ticks instead of spiralling.
 
-- Paused, the button is disabled and its press does nothing (TM-06, TMC-03). Pausing from fast forward
-  returns the strategic speed to 1 first, so play resumes at normal speed (TM-05, TMC-04).
-- With more than one active human seat the clock controls stay disabled in the HUD (TM-04), and the sim
-  refuses the fast-forward factor from any seat (`not_authorized`), so a hand-made command cannot bypass
-  the button. Other speed values are not refused in multiplayer.
+- Paused, the button is disabled and its press does nothing (TM-06, TMC-03). In single player, pausing from fast
+  forward returns the strategic speed to 1 first, so play resumes at normal speed (TM-05, TMC-04); in a LAN match
+  the shared speed survives the pause (TP-MP06).
+- In a LAN match the 4x factor is never sent: the button requests the shared 2x instead, even with one human left
+  (TP-MP06). One request is in flight per seat: a second press waits until the agreed state answers, so a double
+  click cannot spend the speed budget. With more than one active human seat the sim refuses any strategic or battle (tactical)
+  factor above 2x from any seat (`not_authorized`), so a
+  hand-made command cannot bypass the button. Speeds up to 2x are not refused in multiplayer. A rejoin that makes
+  the session multi-human lowers a faster strategic speed to 2x in the same canonical step.
 
 
 ## Multiplayer pause: owner-requested project extension
@@ -115,9 +120,10 @@ multiplayer skirmish and Galactic Conquest on 2026-10-21. These project rules in
 |---|---|
 | TP-MP01 | Explicit pause/resume is a canonical sealed human-seat input at an agreed session boundary. Session ticks continue; actual tactical world ticks and galactic frames stop. Rendering, camera/input, transport polling, keepalives, relay renewal, hash votes and real loss detection continue. No pause flag disables NET-1507 or peer-loss deadlines. Resume rebases pacing, without making up frozen world time. |
 | TP-MP02 | One boolean player hold is shared by all active humans; AI, script, spectator and departed seats cannot request it. Redundant pause preserves the original actor. Any active human may resume once, without a quota. GC single-player nesting is unchanged, and a child/summary-owned galaxy hold survives player resume. During a GC child the tactical hold affects that child; the galaxy is already frozen. A disconnected actor's hold remains until another active human resumes; the last human's agreed departure clears the obsolete player hold for AI continuation. |
-| TP-MP03 | At most two effective pause starts per human seat in a rolling 1,350 session-tick window, expiring at age >=1,350. This is 45 nominal session seconds even while world time is frozen; a network admission stall does not advance the budget. Resume and redundant pause cost no slot. Existing GC shared speed changes continue to use this same budget. The authoritative limiter runs in canonical execution order and is hashed/reconstructed with the player hold. This deterministic project budget differs from MP-06's retail local wall-clock throttle. |
+| TP-MP03 | Pause has no budget in any mode, skirmish and Galactic Conquest alike, by owner decision (legacy EAWR-4574): a pause is refused only inside a one-session-second (30-tick) debounce after the same seat's previous pause or resume, against double clicks. Resume is never refused, and redundant pause is a no-op that costs nothing. The debounce counts session ticks, so it runs while world time is frozen; a network admission stall does not advance it. The authoritative limiter runs in canonical execution order and is hashed/reconstructed with the player hold. This is an owner-decided deviation: the debug build refuses network pause altogether (MP-33, TM-04), and its only multiplayer clock throttle is the local speed throttle of MP-06. Shared speed changes have their own budget (TP-MP06). |
 | TP-MP04 | Tactical orders admitted during pause wait in canonical order for the next actual world tick, and acquire that world tick when installed. The named `eawr-match-pause-v1` sealed input and `eawr-match-session-replay-v1` journal preserve control-only session boundaries, actor, refused attempts, queued orders and world-tick mapping. The ordinary tactical replay records world commands; its `.session` companion is saved beside it by CLI output and Save Replay. Playback/recovery through the adapter reconstructs the session without wall waits. Missing/older journal versions are explicitly refused; the world replay alone remains a world-only recording. Journal size is bounded to 64 MiB and an exhausted recording is reported as unavailable. |
 | TP-MP05 | The existing tactical pause shell shows persistent `Paused by <display name>` and Resume Game. The GC galaxy has the same persistent actor notice. The caption changes only from agreed state; pending requests have feedback. Recovery/loading/desync notices take precedence. Quit remains available. Fast forward is not enabled by this change. |
+| TP-MP06 | Shared speed (legacy EAWR-5355). Debug build, read 2026-11-07 (MP-06, MP-33, TM-01/04): in multiplayer any player may change the shared speed through the options sliders; there is no host or seat check, only a local throttle of fewer than 2 changes in the last 45000 ms. The options event applies both settings (0 to 4, so at most 60 frames a second = 2x) at its execution frame on every peer, and in multiplayer posts "<issuer name>: <game speed changed text>" in the issuer's colour, with the chat sound when the issuer is another player. The 4x fast-forward button does nothing in multiplayer. Pause and resume only flip the paused state, so the speed setting survives a pause. Project behaviour: in a LAN Galactic Conquest match the clock bar's fast-forward button sends the agreed `SetSpeed` 2x and, pressed again, 1x. Any active human may, within a budget of 2 speed changes per 10 session seconds per seat, counted at the sealed executing tick; this window is an owner decision (2026-11-07) and deliberately deviates from the debug build's 2 changes per 45 seconds. The sim refuses a strategic factor above 2x while several humans are active. The speed survives an agreed pause. Every seat shows "<name> set the galactic speed to 2x". Lockstep runs at the slowest seat and never skips a tick (MP-31), so 2x is a request: while the shared speed is not 1x the notice line names the requested factor and, when the measured agreed tick rate is below 95% of it, "running at N.Nx: the slowest player's computer sets the pace". Pacing only (TP-02): the speed sits in the snapshot clock and saves as before and changes no state hash; no new command, wire or save format. In a LAN Galactic Conquest battle (the retained child battle with the agreed clock) the battle's fast-forward button works the same way on the tactical speed: a press requests the shared 60 ticks a second and, pressed again, the nominal 30, through the agreed tactical `SetSpeed`, never the local 120 of TM-03; one request is in flight per seat, the button shows the agreed (or requested) 2x, and it is disabled while the battle is paused. The sim refuses a tactical factor above 2x while several humans are active, and a rejoin that makes the session multi-human lowers both speeds to 2x. In a skirmish LAN or online battle the fast-forward button requests the shared speed step 4 (60 ticks a second) and, pressed again, the default step 2 (30), through the agreed options input that the = / - keys already use; one request is in flight per seat, the local 2-per-10-second window applies, and the button is disabled while the shared pause holds. In every multiplayer battle the HUD names who changed the shared speed ("<name> set the battle speed to 2x", five presentation seconds; presentation state only, outside the hashes) and, while the agreed rate is not 30, shows "Battle speed 2x" or "Battle speed 2x requested, running at N.Nx: the slowest player's computer sets the pace" from the measured agreed tick rate. A peer restored by resync or rejoin replays every agreed options input while it catches up, so it paces at the shared speed and its HUD shows it. |
 
 The two/three-peer production-adapter contracts cover equal session digests, a ten-minute hold with frozen world
 state, queued orders, another human's resume, replay reconstruction while paused and after resume, quota edges,

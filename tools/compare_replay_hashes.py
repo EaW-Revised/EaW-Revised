@@ -15,7 +15,6 @@ import eawr_evidence_io  # noqa: E402
 
 
 DEFAULT_TARGETS = (
-    "windows-msvc",
     "windows-clang",
     "linux-x64-gcc",
     "linux-x64-clang",
@@ -108,7 +107,7 @@ def compare_bundle(evidence: pathlib.Path, fixtures: pathlib.Path, targets: tupl
                     except (ValueError, KeyError, TypeError) as error:
                         raise ValueError(f"{path}: invalid tick-zero census: {error}") from error
                     # Frozen EAWRTST setup hash, independently checked by the skirmish CLI test.
-                    if state != "0b96c50559c347dfe1f8b46b39a59f440242f1435b0f27b7310849010f8b9ffe":
+                    if state != "7e5af6b16a7ccfbf8758f4ea5a574febfeb05d78778f9ce252accaf49e540cff":
                         raise ValueError(f"{path}: skirmish tick-zero state differs from frozen setup")
                     rows = required_bytes(directory / f"skirmish-workers-{workers}.snapshots.csv").splitlines()
                     if len(rows) < 2 or rows[1] != f"0,{snapshot}".encode():

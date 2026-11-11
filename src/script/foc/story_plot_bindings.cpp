@@ -90,10 +90,14 @@ void stage_plot(BindingContext& context, Op op, std::string subplot, std::string
 } // namespace
 
 void register_story_plot_bindings(ScriptScheduler& scripts, const std::shared_ptr<Host>& host, std::vector<core::Diagnostic>& errors) {
+    register_story_plot_bindings(scripts, StoryPlotAccess([host] { return host->story_plots.get(); }), errors);
+}
+
+void register_story_plot_bindings(ScriptScheduler& scripts, StoryPlotAccess host, std::vector<core::Diagnostic>& errors) {
     const auto add = [&](auto registration) { if (!registration) errors.push_back(registration.error()); };
     add(scripts.register_binding("Get_Story_Plot", [host](BindingContext& context, const ValueList& arguments) -> core::Result<ValueList> {
         if (arguments.size() != 1 || !as_text(arguments[0])) return fail("Get_Story_Plot expects the sub-plot file name");
-        const auto& link = host->story_plots;
+        const auto* link = host();
         const auto found = link ? link->by_name.find(*as_text(arguments[0])) : std::map<std::string, std::uint32_t>::const_iterator{};
         if (!link || found == link->by_name.end()) {
             // WST-56: a warning and nothing. The plot is looked up by the name as written.
@@ -105,7 +109,7 @@ void register_story_plot_bindings(ScriptScheduler& scripts, const std::shared_pt
     const auto plot_method = [&](std::string_view name, Op op) {
         add(scripts.register_method(handle_story_plot, name, [host, op](BindingContext& context, const ValueList& arguments) -> core::Result<ValueList> {
             const auto* self = arguments.empty() ? nullptr : as_handle(arguments[0], handle_story_plot);
-            const auto* plot = self && host->story_plots ? plot_of(*host->story_plots, *self) : nullptr;
+            const auto* plot = self && host() ? plot_of(*host(), *self) : nullptr;
             if (!plot || arguments.size() != 1) return fail("plot method expects a loaded plot and no arguments");
             stage_plot(context, op, plot->name, {}, 0, {});
             return none();
@@ -116,7 +120,7 @@ void register_story_plot_bindings(ScriptScheduler& scripts, const std::shared_pt
     plot_method("Reset", Op::reset);
     add(scripts.register_method(handle_story_plot, "Get_Event", [host](BindingContext&, const ValueList& arguments) -> core::Result<ValueList> {
         const auto* self = arguments.empty() ? nullptr : as_handle(arguments[0], handle_story_plot);
-        const auto* plot = self && host->story_plots ? plot_of(*host->story_plots, *self) : nullptr;
+        const auto* plot = self && host() ? plot_of(*host(), *self) : nullptr;
         if (!plot || arguments.size() != 2 || !as_text(arguments[1])) return fail("Get_Event expects a loaded plot and an event name");
         const auto event = plot->events.find(upper(*as_text(arguments[1])));
         if (event == plot->events.end()) return fail("Get_Event: the plot has no event named " + *as_text(arguments[1])); // WST-56: a script error
@@ -125,10 +129,11 @@ void register_story_plot_bindings(ScriptScheduler& scripts, const std::shared_pt
     // Resolves an event object to its plot and event names; null when it names nothing loaded.
     const auto event_of = [host](const ValueList& arguments, const StoryPlotLink::Plot*& plot, std::string& event) {
         const auto* self = arguments.empty() ? nullptr : as_handle(arguments[0], handle_story_event);
-        if (!self || !host->story_plots) return false;
+        const auto* link = host();
+        if (!self || !link) return false;
         const auto plot_index = self->id >> 32, event_index = self->id & 0xffffffffU;
-        if (plot_index < 1 || plot_index > host->story_plots->plots.size()) return false;
-        plot = &host->story_plots->plots[plot_index - 1];
+        if (plot_index < 1 || plot_index > link->plots.size()) return false;
+        plot = &link->plots[plot_index - 1];
         for (const auto& [name, index] : plot->events) if (index + 1 == event_index) { event = name; return true; }
         return false;
     };
@@ -195,7 +200,10 @@ void register_story_plot_bindings(ScriptScheduler& scripts, const std::shared_pt
 }
 
 std::string commit_story_plot(const Host& host, const authoritative::ScriptCommand& command) {
-    const auto& link = host.story_plots;
+    return commit_story_plot(host.story_plots.get(), command);
+}
+
+std::string commit_story_plot(const StoryPlotLink* link, const authoritative::ScriptCommand& command) {
     if (!link || !link->apply) return "no plot engine is hosted";
     const auto& arguments = command.arguments;
     if (arguments.size() < 4 || !as_text(arguments[0]) || !as_text(arguments[1]) || !as_text(arguments[2])

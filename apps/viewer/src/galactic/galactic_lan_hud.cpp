@@ -12,12 +12,25 @@ void GalacticMode::State::service_lan_hud() {
         if (refusal.seat == options.lan_match->local_seat() && refusal.completed_tick > lan_clock_refusal_seen) {
             lan_clock_refusal_seen = refusal.completed_tick;
             pause_guard = galactic_view::PauseToggleGuard{};
+            speed_guard.reset();
         }
     }
     if (galactic_lan_gameplay_enabled(view) && game && !game->frame(sim::SeatId{galaxy->local.seat}).battle
         && galactic_view::lan_releases_departed_pause(view, options.lan_players, options.lan_match->local_seat())) request_pause(false);
-    auto text = lan_notice_model.notice(view, options.lan_players,
-        godot::Time::get_singleton()->get_ticks_msec());
+    if (displayed_snapshot)
+        speed_guard.observe(displayed_snapshot->clock().strategic_speed.raw(), sim::SeatId{galaxy->local.seat}, snapshot_events,
+            view.completed_tick);
+    const std::uint64_t now_ms = godot::Time::get_singleton()->get_ticks_msec();
+    auto text = lan_notice_model.notice(view, options.lan_players, now_ms);
+    if (speed_guard.target()) text += std::string(text.empty() ? "" : "\n") + "Waiting for the shared clock.";
+    // #5355: while the shared galactic speed is not 1x, say what really runs (lockstep follows the slowest seat).
+    const auto* clock = displayed_snapshot ? &displayed_snapshot->clock() : nullptr;
+    const auto requested = clock ? clock->strategic_speed.raw() : sim::math::Fixed::scale;
+    const bool galaxy_running = clock && clock->pause_depth == 0 && view.phase == GalacticLanPhase::running
+        && game && !game->frame(sim::SeatId{galaxy->local.seat}).battle;
+    lan_pace_meter.sample(view.completed_tick, now_ms, requested, galaxy_running);
+    if (galaxy_running) if (const auto line = galactic_view::lan_speed_line(requested, lan_pace_meter.ticks_per_second()); !line.empty())
+        text += (text.empty() ? "" : "\n") + line;
     if (!lan_notice_label) {
         auto* layer = memnew(godot::CanvasLayer);
         layer->set_layer(90);

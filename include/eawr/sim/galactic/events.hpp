@@ -14,17 +14,20 @@ namespace eawr::sim::galactic {
 // WGP-53/54: qualified feedback at its committed gameplay owner. Runtime
 // delivery only: these values are neither replay opcodes nor checkpoint state.
 struct GalacticFeedbackNotice {
-    enum class Kind { capture_reward, planet_corrupted, corruption_removed, enemy_approaching };
+    enum class Kind { capture_reward, planet_corrupted, corruption_removed, enemy_approaching, planet_destroyed };
     Kind kind{};
     PlayerId player{};
     PlanetId planet{};
     std::size_t preceding_events{}; // committed tick events before this notice
+    TypeId source_type{}; // authored effect owner, retained even when a supplied transport differs
+    std::uint64_t logical_frame{};
 };
 
 enum class GalacticEventKind : std::uint8_t {
     ability_prepared = 44, // request identity only; observer facts are published separately
     ability_settled = 45,
     ability_cancelled = 46,
+    corruption_removal_started = 47, // subject planet, value current source type; producer is the acting seat
     gambling_income_sampled = 36, // source, value: signed Q24 contribution
     black_market_purchased = 42, // subject current buyer, value independent market item
     formation_land = 43, // WGA-413: actor/planet notification, even on failed link
@@ -87,6 +90,11 @@ enum class GalacticRejectReason : std::uint8_t {
     production_admission = 14, // value: ProductionAdmission
     insufficient_credits = 15, // the mover cannot pay the bribe admission cost of the path (WGM-84)
     observer_input = 18, // invalid source, clock or supplied observer facts
+    // #6120: hero neutralization refuses for a reason the player can be told.
+    neutralize_unavailable = 21, // the ability is off, or the planet holds a hackable superweapon
+    neutralize_no_hero = 22,     // no other player's hero stands in orbit or on the ground of that planet
+    neutralize_allied_hero = 23, // every hero there belongs to an ally of the neutralizer
+    neutralize_not_targetable = 24, // heroes stand there but none has a neutralization price or permits this actor
 };
 
 // One event. `producer` is the seat whose command produced it; `subject` the object it is

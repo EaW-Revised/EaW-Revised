@@ -6,6 +6,7 @@
 #include <optional>
 #include <set>
 #include <span>
+#include <string>
 #include <vector>
 
 namespace eawr::sim::galactic::corruption_fixture {
@@ -117,6 +118,7 @@ struct MarketItem {
     Id id{}, faction{};
     int tech{}, tutorial_tech{};
     Fixed base_cost, tutorial_base_cost, uncommon_multiplier{one};
+    std::vector<std::string> ability_names{}; // WGEP-145, authored order
     friend bool operator==(const MarketItem&, const MarketItem&) = default;
 };
 struct MarketContext {

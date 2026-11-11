@@ -8,6 +8,9 @@
 namespace eawr::script::foc::tactical_ai_detail {
 
 using HostPtr = std::shared_ptr<detail::Host>;
+inline constexpr std::string_view pending_debit = "foc.pending_debit";
+inline constexpr std::string_view turn_grant = "foc.turn_grant";
+core::Result<void> resolve_commands(detail::Host& host, authoritative::ServiceReport& report);
 
 inline authoritative::RandomStream object_phase_random(std::uint64_t seed, std::uint64_t tick, std::uint64_t instance) {
     return {seed, tick | authoritative::object_phase_random_domain, instance};

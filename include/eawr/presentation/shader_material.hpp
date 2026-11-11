@@ -7,7 +7,7 @@
 #include "eawr/presentation/shader_techniques.hpp"
 
 namespace eawr::presentation::shader_material {
-inline constexpr std::uint32_t policy_version = 4U;
+inline constexpr std::uint32_t policy_version = 8U;
 namespace diagnostic_codes {
 inline constexpr std::string_view interface_mismatch = "EAWR-SHADER-MATERIAL-0001";
 inline constexpr std::string_view semantic = "EAWR-SHADER-MATERIAL-0002";
@@ -36,10 +36,19 @@ struct Texture final {
     std::string uniform, parameter, default_name;
     std::optional<shader_bindings::EngineInput> engine;
 };
+struct ParameterRecipe final {
+    std::size_t parameter{};
+    std::string name;
+    shader_bindings::NumericShape shape;
+};
 // Owned CPU program. Retains neither borrowed effect bytes nor compiler handles.
 struct Program final {
     MaterialDescription material;
+    // Actually read authored vectors/colour/secondary UV require a renderer
+    // payload whose precision and skin transforms are qualified separately.
+    bool extended_vertex_inputs{};
     Stage vertex, fragment;
+    std::vector<ParameterRecipe> parameters;
     std::vector<Texture> textures;
     std::vector<MaterialBinding> instance_defaults;
     std::size_t retained_bytes{};

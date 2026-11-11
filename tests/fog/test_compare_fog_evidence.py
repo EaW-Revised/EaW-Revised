@@ -14,7 +14,6 @@ from pathlib import Path
 
 
 TARGETS = (
-    "windows-msvc",
     "windows-clang",
     "linux-x64-gcc",
     "linux-x64-clang",
@@ -89,10 +88,10 @@ class ComparatorContracts(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
         return result.stdout + result.stderr
 
-    def test_exact_five_targets_and_fifteen_lanes_pass(self) -> None:
+    def test_exact_four_targets_and_twelve_lanes_pass(self) -> None:
         result = self.compare()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("5 named targets", result.stdout)
+        self.assertIn("4 named targets", result.stdout)
         self.assertIn("including tick 0", result.stdout)
 
     def test_missing_worker_lane_is_rejected(self) -> None:
@@ -101,7 +100,7 @@ class ComparatorContracts(unittest.TestCase):
         self.assertIn("workers-4.csv", message)
 
     def test_missing_tick_zero_is_rejected(self) -> None:
-        path = self.evidence / "fog-evidence-windows-msvc/workers-1.csv"
+        path = self.evidence / "fog-evidence-windows-clang/workers-1.csv"
         path.write_bytes(b"\n".join(self.oracle_bytes.splitlines()[:1] + self.oracle_bytes.splitlines()[2:]) + b"\n")
         message = self.assert_rejected()
         self.assertIn("first missing/out-of-order tick is 0", message)
@@ -128,7 +127,7 @@ class ComparatorContracts(unittest.TestCase):
 
     def test_copied_target_identity_is_rejected(self) -> None:
         directory = self.evidence / "fog-evidence-windows-clang"
-        write_lf_text(directory / "target.txt", "windows-msvc\n")
+        write_lf_text(directory / "target.txt", "linux-x64-gcc\n")
         message = self.assert_rejected()
         self.assertIn("target identity mismatch", message)
 

@@ -1,27 +1,363 @@
 {
   "manifest_id": "d16ae925c62fc1ae19e214e196f4f254ae95b6dd8e489bc8297ccae8a47d4bd2",
   "rows": [
-    {"example": {"column": 1, "line": 1, "logical_path": "data/xml/eawrhud.xml", "source_id": "synthetic:tests/ui/fixtures/eawr-hud.xml"}, "file_count": 1, "node_kind": "element", "object_type": "Eawr_Hud", "profile": "foc", "schema_ref": null, "status": "unknown", "tag_name": "Control", "tag_path": "Eawr_Hud/Control", "usage_count": 1},
-    {"example": {"column": 1, "line": 1, "logical_path": "data/xml/eawrhud.xml", "source_id": "synthetic:tests/ui/fixtures/eawr-hud.xml"}, "file_count": 1, "node_kind": "attribute", "object_type": "Eawr_Hud", "profile": "foc", "schema_ref": null, "status": "unknown", "tag_name": "Name", "tag_path": "Eawr_Hud/Control/@Name", "usage_count": 1},
-    {"example": {"column": 1, "line": 1, "logical_path": "data/xml/eawrhud.xml", "source_id": "synthetic:tests/ui/fixtures/eawr-hud.xml"}, "file_count": 1, "node_kind": "element", "object_type": "Eawr_Hud", "profile": "foc", "schema_ref": null, "status": "unknown", "tag_name": "Enabled", "tag_path": "Eawr_Hud/Control/Enabled", "usage_count": 1},
-    {"example": {"column": 1, "line": 1, "logical_path": "data/xml/eawrhud.xml", "source_id": "synthetic:tests/ui/fixtures/eawr-hud.xml"}, "file_count": 1, "node_kind": "element", "object_type": "Eawr_Hud", "profile": "foc", "schema_ref": null, "status": "unknown", "tag_name": "Size", "tag_path": "Eawr_Hud/Control/Size", "usage_count": 1},
-    {"example": {"column": 1, "line": 1, "logical_path": "data/xml/eawrhud.xml", "source_id": "synthetic:tests/ui/fixtures/eawr-hud.xml"}, "file_count": 1, "node_kind": "element", "object_type": "Eawr_Hud", "profile": "foc", "schema_ref": null, "status": "unknown", "tag_name": "Recipient_Size", "tag_path": "Eawr_Hud/Control/Recipient_Size", "usage_count": 1},
-    {"example": {"column": 1, "line": 1, "logical_path": "data/xml/eawrhud.xml", "source_id": "synthetic:tests/ui/fixtures/eawr-hud.xml"}, "file_count": 1, "node_kind": "element", "object_type": "Eawr_Hud", "profile": "foc", "schema_ref": null, "status": "unknown", "tag_name": "Caption", "tag_path": "Eawr_Hud/Control/Caption", "usage_count": 1},
-    {"example": {"column": 1, "line": 1, "logical_path": "data/xml/eawrhud.xml", "source_id": "synthetic:tests/ui/fixtures/eawr-hud.xml"}, "file_count": 1, "node_kind": "element", "object_type": "Eawr_Hud", "profile": "foc", "schema_ref": null, "status": "unknown", "tag_name": "Tooltip", "tag_path": "Eawr_Hud/Control/Tooltip", "usage_count": 1},
-    {"example": {"column": 1, "line": 1, "logical_path": "data/xml/eawrhud.xml", "source_id": "synthetic:tests/ui/fixtures/eawr-hud.xml"}, "file_count": 1, "node_kind": "element", "object_type": "Eawr_Hud", "profile": "foc", "schema_ref": null, "status": "unknown", "tag_name": "Normal_Texture", "tag_path": "Eawr_Hud/Control/Normal_Texture", "usage_count": 1},
-    {"example": {"column": 1, "line": 1, "logical_path": "data/xml/eawrhud.xml", "source_id": "synthetic:tests/ui/fixtures/eawr-hud.xml"}, "file_count": 1, "node_kind": "element", "object_type": "Eawr_Hud", "profile": "foc", "schema_ref": null, "status": "unknown", "tag_name": "Hover_Texture", "tag_path": "Eawr_Hud/Control/Hover_Texture", "usage_count": 1},
-    {"example": {"column": 1, "line": 1, "logical_path": "data/xml/eawrhud.xml", "source_id": "synthetic:tests/ui/fixtures/eawr-hud.xml"}, "file_count": 1, "node_kind": "element", "object_type": "Eawr_Hud", "profile": "foc", "schema_ref": null, "status": "unknown", "tag_name": "Pressed_Texture", "tag_path": "Eawr_Hud/Control/Pressed_Texture", "usage_count": 1},
-    {"example": {"column": 1, "line": 1, "logical_path": "data/xml/eawrhud.xml", "source_id": "synthetic:tests/ui/fixtures/eawr-hud.xml"}, "file_count": 1, "node_kind": "element", "object_type": "Eawr_Hud", "profile": "foc", "schema_ref": null, "status": "unknown", "tag_name": "Disabled_Texture", "tag_path": "Eawr_Hud/Control/Disabled_Texture", "usage_count": 1},
-    {"example": {"column": 1, "line": 1, "logical_path": "data/xml/eawrhud.xml", "source_id": "synthetic:tests/ui/fixtures/eawr-hud.xml"}, "file_count": 1, "node_kind": "element", "object_type": "Eawr_Hud", "profile": "foc", "schema_ref": null, "status": "unknown", "tag_name": "Candidate", "tag_path": "Eawr_Hud/Control/Candidate", "usage_count": 1},
-    {"example": {"column": 1, "line": 1, "logical_path": "data/xml/eawrhud.xml", "source_id": "synthetic:tests/ui/fixtures/eawr-hud.xml"}, "file_count": 1, "node_kind": "element", "object_type": "Eawr_Hud", "profile": "foc", "schema_ref": null, "status": "unknown", "tag_name": "Anchor", "tag_path": "Eawr_Hud/Control/Candidate/Anchor", "usage_count": 1},
-    {"example": {"column": 1, "line": 1, "logical_path": "data/xml/eawrhud.xml", "source_id": "synthetic:tests/ui/fixtures/eawr-hud.xml"}, "file_count": 1, "node_kind": "element", "object_type": "Eawr_Hud", "profile": "foc", "schema_ref": null, "status": "unknown", "tag_name": "Side", "tag_path": "Eawr_Hud/Control/Candidate/Side", "usage_count": 1},
-    {"example": {"column": 1, "line": 1, "logical_path": "data/xml/eawrhud.xml", "source_id": "synthetic:tests/ui/fixtures/eawr-hud.xml"}, "file_count": 1, "node_kind": "element", "object_type": "Eawr_Hud", "profile": "foc", "schema_ref": null, "status": "unknown", "tag_name": "Offset", "tag_path": "Eawr_Hud/Control/Candidate/Offset", "usage_count": 1},
-    {"example": {"column": 1, "line": 1, "logical_path": "data/xml/selectioncontrols.xml", "source_id": "synthetic:tests/ui/fixtures/revised-selectioncontrols.xml"}, "file_count": 1, "node_kind": "element", "object_type": "Selection_Controls", "profile": "foc", "schema_ref": null, "status": "unknown", "tag_name": "Selection_Advisor_Enabled", "tag_path": "Selection_Controls/Selection_Advisor_Enabled", "usage_count": 1},
-    {"example": {"column": 1, "line": 1, "logical_path": "data/xml/selectioncontrols.xml", "source_id": "synthetic:tests/ui/fixtures/revised-selectioncontrols.xml"}, "file_count": 1, "node_kind": "attribute", "object_type": "Selection_Controls", "profile": "foc", "schema_ref": null, "status": "unknown", "tag_name": "Name", "tag_path": "Selection_Controls/Selection_Action/@Name", "usage_count": 1},
-    {"example": {"column": 1, "line": 1, "logical_path": "data/xml/selectioncontrols.xml", "source_id": "synthetic:tests/ui/fixtures/revised-selectioncontrols.xml"}, "file_count": 1, "node_kind": "element", "object_type": "Selection_Controls", "profile": "foc", "schema_ref": null, "status": "unknown", "tag_name": "Default_Key", "tag_path": "Selection_Controls/Selection_Action/Default_Key", "usage_count": 1},
-    {"example": {"column": 1, "line": 1, "logical_path": "data/xml/selectioncontrols.xml", "source_id": "synthetic:tests/ui/fixtures/revised-selectioncontrols.xml"}, "file_count": 1, "node_kind": "element", "object_type": "Selection_Controls", "profile": "foc", "schema_ref": null, "status": "unknown", "tag_name": "Advisor_SFXEvent", "tag_path": "Selection_Controls/Selection_Action/Advisor_SFXEvent", "usage_count": 1},
-    {"example": {"column": 1, "line": 1, "logical_path": "data/xml/selectioncontrols.xml", "source_id": "synthetic:tests/ui/fixtures/revised-selectioncontrols.xml"}, "file_count": 1, "node_kind": "element", "object_type": "Selection_Controls", "profile": "foc", "schema_ref": null, "status": "unknown", "tag_name": "Default_Faction_SFXEvent", "tag_path": "Selection_Controls/Selection_Action/Default_Faction_SFXEvent", "usage_count": 1},
-    {"example": {"column": 1, "line": 1, "logical_path": "data/xml/selectioncontrols.xml", "source_id": "synthetic:tests/ui/fixtures/revised-selectioncontrols.xml"}, "file_count": 1, "node_kind": "element", "object_type": "Selection_Controls", "profile": "foc", "schema_ref": null, "status": "unknown", "tag_name": "Faction_SFXEvent", "tag_path": "Selection_Controls/Selection_Action/Faction_SFXEvent", "usage_count": 1},
+    {
+      "example": {
+        "column": 1,
+        "line": 1,
+        "logical_path": "data/xml/eawrhud.xml",
+        "source_id": "synthetic:tests/ui/fixtures/eawr-hud.xml"
+      },
+      "file_count": 1,
+      "node_kind": "element",
+      "object_type": "Eawr_Hud",
+      "profile": "foc",
+      "schema_ref": null,
+      "status": "unknown",
+      "tag_name": "Control",
+      "tag_path": "Eawr_Hud/Control",
+      "usage_count": 1
+    },
+    {
+      "example": {
+        "column": 1,
+        "line": 1,
+        "logical_path": "data/xml/eawrhud.xml",
+        "source_id": "synthetic:tests/ui/fixtures/eawr-hud.xml"
+      },
+      "file_count": 1,
+      "node_kind": "attribute",
+      "object_type": "Eawr_Hud",
+      "profile": "foc",
+      "schema_ref": null,
+      "status": "unknown",
+      "tag_name": "Name",
+      "tag_path": "Eawr_Hud/Control/@Name",
+      "usage_count": 1
+    },
+    {
+      "example": {
+        "column": 1,
+        "line": 1,
+        "logical_path": "data/xml/eawrhud.xml",
+        "source_id": "synthetic:tests/ui/fixtures/eawr-hud.xml"
+      },
+      "file_count": 1,
+      "node_kind": "element",
+      "object_type": "Eawr_Hud",
+      "profile": "foc",
+      "schema_ref": null,
+      "status": "unknown",
+      "tag_name": "Enabled",
+      "tag_path": "Eawr_Hud/Control/Enabled",
+      "usage_count": 1
+    },
+    {
+      "example": {
+        "column": 1,
+        "line": 1,
+        "logical_path": "data/xml/eawrhud.xml",
+        "source_id": "synthetic:tests/ui/fixtures/eawr-hud.xml"
+      },
+      "file_count": 1,
+      "node_kind": "element",
+      "object_type": "Eawr_Hud",
+      "profile": "foc",
+      "schema_ref": null,
+      "status": "unknown",
+      "tag_name": "Size",
+      "tag_path": "Eawr_Hud/Control/Size",
+      "usage_count": 1
+    },
+    {
+      "example": {
+        "column": 1,
+        "line": 1,
+        "logical_path": "data/xml/eawrhud.xml",
+        "source_id": "synthetic:tests/ui/fixtures/eawr-hud.xml"
+      },
+      "file_count": 1,
+      "node_kind": "element",
+      "object_type": "Eawr_Hud",
+      "profile": "foc",
+      "schema_ref": null,
+      "status": "unknown",
+      "tag_name": "Recipient_Size",
+      "tag_path": "Eawr_Hud/Control/Recipient_Size",
+      "usage_count": 1
+    },
+    {
+      "example": {
+        "column": 1,
+        "line": 1,
+        "logical_path": "data/xml/eawrhud.xml",
+        "source_id": "synthetic:tests/ui/fixtures/eawr-hud.xml"
+      },
+      "file_count": 1,
+      "node_kind": "element",
+      "object_type": "Eawr_Hud",
+      "profile": "foc",
+      "schema_ref": null,
+      "status": "unknown",
+      "tag_name": "Caption",
+      "tag_path": "Eawr_Hud/Control/Caption",
+      "usage_count": 1
+    },
+    {
+      "example": {
+        "column": 1,
+        "line": 1,
+        "logical_path": "data/xml/eawrhud.xml",
+        "source_id": "synthetic:tests/ui/fixtures/eawr-hud.xml"
+      },
+      "file_count": 1,
+      "node_kind": "element",
+      "object_type": "Eawr_Hud",
+      "profile": "foc",
+      "schema_ref": null,
+      "status": "unknown",
+      "tag_name": "Tooltip",
+      "tag_path": "Eawr_Hud/Control/Tooltip",
+      "usage_count": 1
+    },
+    {
+      "example": {
+        "column": 1,
+        "line": 1,
+        "logical_path": "data/xml/eawrhud.xml",
+        "source_id": "synthetic:tests/ui/fixtures/eawr-hud.xml"
+      },
+      "file_count": 1,
+      "node_kind": "element",
+      "object_type": "Eawr_Hud",
+      "profile": "foc",
+      "schema_ref": null,
+      "status": "unknown",
+      "tag_name": "Normal_Texture",
+      "tag_path": "Eawr_Hud/Control/Normal_Texture",
+      "usage_count": 1
+    },
+    {
+      "example": {
+        "column": 1,
+        "line": 1,
+        "logical_path": "data/xml/eawrhud.xml",
+        "source_id": "synthetic:tests/ui/fixtures/eawr-hud.xml"
+      },
+      "file_count": 1,
+      "node_kind": "element",
+      "object_type": "Eawr_Hud",
+      "profile": "foc",
+      "schema_ref": null,
+      "status": "unknown",
+      "tag_name": "Hover_Texture",
+      "tag_path": "Eawr_Hud/Control/Hover_Texture",
+      "usage_count": 1
+    },
+    {
+      "example": {
+        "column": 1,
+        "line": 1,
+        "logical_path": "data/xml/eawrhud.xml",
+        "source_id": "synthetic:tests/ui/fixtures/eawr-hud.xml"
+      },
+      "file_count": 1,
+      "node_kind": "element",
+      "object_type": "Eawr_Hud",
+      "profile": "foc",
+      "schema_ref": null,
+      "status": "unknown",
+      "tag_name": "Pressed_Texture",
+      "tag_path": "Eawr_Hud/Control/Pressed_Texture",
+      "usage_count": 1
+    },
+    {
+      "example": {
+        "column": 1,
+        "line": 1,
+        "logical_path": "data/xml/eawrhud.xml",
+        "source_id": "synthetic:tests/ui/fixtures/eawr-hud.xml"
+      },
+      "file_count": 1,
+      "node_kind": "element",
+      "object_type": "Eawr_Hud",
+      "profile": "foc",
+      "schema_ref": null,
+      "status": "unknown",
+      "tag_name": "Disabled_Texture",
+      "tag_path": "Eawr_Hud/Control/Disabled_Texture",
+      "usage_count": 1
+    },
+    {
+      "example": {
+        "column": 1,
+        "line": 1,
+        "logical_path": "data/xml/eawrhud.xml",
+        "source_id": "synthetic:tests/ui/fixtures/eawr-hud.xml"
+      },
+      "file_count": 1,
+      "node_kind": "element",
+      "object_type": "Eawr_Hud",
+      "profile": "foc",
+      "schema_ref": null,
+      "status": "unknown",
+      "tag_name": "Candidate",
+      "tag_path": "Eawr_Hud/Control/Candidate",
+      "usage_count": 1
+    },
+    {
+      "example": {
+        "column": 1,
+        "line": 1,
+        "logical_path": "data/xml/eawrhud.xml",
+        "source_id": "synthetic:tests/ui/fixtures/eawr-hud.xml"
+      },
+      "file_count": 1,
+      "node_kind": "element",
+      "object_type": "Eawr_Hud",
+      "profile": "foc",
+      "schema_ref": null,
+      "status": "unknown",
+      "tag_name": "Anchor",
+      "tag_path": "Eawr_Hud/Control/Candidate/Anchor",
+      "usage_count": 1
+    },
+    {
+      "example": {
+        "column": 1,
+        "line": 1,
+        "logical_path": "data/xml/eawrhud.xml",
+        "source_id": "synthetic:tests/ui/fixtures/eawr-hud.xml"
+      },
+      "file_count": 1,
+      "node_kind": "element",
+      "object_type": "Eawr_Hud",
+      "profile": "foc",
+      "schema_ref": null,
+      "status": "unknown",
+      "tag_name": "Side",
+      "tag_path": "Eawr_Hud/Control/Candidate/Side",
+      "usage_count": 1
+    },
+    {
+      "example": {
+        "column": 1,
+        "line": 1,
+        "logical_path": "data/xml/eawrhud.xml",
+        "source_id": "synthetic:tests/ui/fixtures/eawr-hud.xml"
+      },
+      "file_count": 1,
+      "node_kind": "element",
+      "object_type": "Eawr_Hud",
+      "profile": "foc",
+      "schema_ref": null,
+      "status": "unknown",
+      "tag_name": "Offset",
+      "tag_path": "Eawr_Hud/Control/Candidate/Offset",
+      "usage_count": 1
+    },
+    {
+      "example": {
+        "column": 1,
+        "line": 1,
+        "logical_path": "data/xml/selectioncontrols.xml",
+        "source_id": "synthetic:tests/ui/fixtures/revised-selectioncontrols.xml"
+      },
+      "file_count": 1,
+      "node_kind": "element",
+      "object_type": "Selection_Controls",
+      "profile": "foc",
+      "schema_ref": null,
+      "status": "unknown",
+      "tag_name": "Selection_Advisor_Enabled",
+      "tag_path": "Selection_Controls/Selection_Advisor_Enabled",
+      "usage_count": 1
+    },
+    {
+      "example": {
+        "column": 1,
+        "line": 1,
+        "logical_path": "data/xml/selectioncontrols.xml",
+        "source_id": "synthetic:tests/ui/fixtures/revised-selectioncontrols.xml"
+      },
+      "file_count": 1,
+      "node_kind": "attribute",
+      "object_type": "Selection_Controls",
+      "profile": "foc",
+      "schema_ref": null,
+      "status": "unknown",
+      "tag_name": "Name",
+      "tag_path": "Selection_Controls/Selection_Action/@Name",
+      "usage_count": 1
+    },
+    {
+      "example": {
+        "column": 1,
+        "line": 1,
+        "logical_path": "data/xml/selectioncontrols.xml",
+        "source_id": "synthetic:tests/ui/fixtures/revised-selectioncontrols.xml"
+      },
+      "file_count": 1,
+      "node_kind": "element",
+      "object_type": "Selection_Controls",
+      "profile": "foc",
+      "schema_ref": null,
+      "status": "unknown",
+      "tag_name": "Default_Key",
+      "tag_path": "Selection_Controls/Selection_Action/Default_Key",
+      "usage_count": 1
+    },
+    {
+      "example": {
+        "column": 1,
+        "line": 1,
+        "logical_path": "data/xml/selectioncontrols.xml",
+        "source_id": "synthetic:tests/ui/fixtures/revised-selectioncontrols.xml"
+      },
+      "file_count": 1,
+      "node_kind": "element",
+      "object_type": "Selection_Controls",
+      "profile": "foc",
+      "schema_ref": null,
+      "status": "unknown",
+      "tag_name": "Advisor_SFXEvent",
+      "tag_path": "Selection_Controls/Selection_Action/Advisor_SFXEvent",
+      "usage_count": 1
+    },
+    {
+      "example": {
+        "column": 1,
+        "line": 1,
+        "logical_path": "data/xml/selectioncontrols.xml",
+        "source_id": "synthetic:tests/ui/fixtures/revised-selectioncontrols.xml"
+      },
+      "file_count": 1,
+      "node_kind": "element",
+      "object_type": "Selection_Controls",
+      "profile": "foc",
+      "schema_ref": null,
+      "status": "unknown",
+      "tag_name": "Default_Faction_SFXEvent",
+      "tag_path": "Selection_Controls/Selection_Action/Default_Faction_SFXEvent",
+      "usage_count": 1
+    },
+    {
+      "example": {
+        "column": 1,
+        "line": 1,
+        "logical_path": "data/xml/selectioncontrols.xml",
+        "source_id": "synthetic:tests/ui/fixtures/revised-selectioncontrols.xml"
+      },
+      "file_count": 1,
+      "node_kind": "element",
+      "object_type": "Selection_Controls",
+      "profile": "foc",
+      "schema_ref": null,
+      "status": "unknown",
+      "tag_name": "Faction_SFXEvent",
+      "tag_path": "Selection_Controls/Selection_Action/Faction_SFXEvent",
+      "usage_count": 1
+    },
     {
       "example": {
         "column": 1,

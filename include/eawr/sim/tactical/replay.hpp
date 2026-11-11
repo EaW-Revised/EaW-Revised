@@ -3,6 +3,7 @@
 #include "eawr/core/result.hpp"
 #include "eawr/sim/match_identity.hpp"
 #include "eawr/sim/tactical/ai_level.hpp"
+#include "eawr/sim/tactical/abilities.hpp"
 #include "eawr/sim/tactical/types.hpp"
 #include "eawr/sim/tactical/economy.hpp"
 #include "eawr/sim/tactical/object_turn.hpp"
@@ -48,6 +49,7 @@ inline constexpr std::uint16_t replay_extension_native_scene = 15; // optional n
 inline constexpr std::uint16_t replay_extension_object_turn = 16; // #3644: object-turn uses follow the commands
 inline constexpr std::uint16_t replay_extension_battle_domain = 17; // BF-1: absent is space
 inline constexpr std::uint16_t replay_extension_controllers = 18; // ADR-020: versioned optional controller policy
+inline constexpr std::uint16_t replay_extension_market_purchases = 19; // WGEP-145
 inline constexpr std::size_t replay_max_bytes = 256U * 1024U * 1024U;
 
 // Recorded lobby settings are load-time metadata, never part of canonical simulation state.
@@ -115,6 +117,7 @@ struct CampaignBattleSetup {
     std::vector<EntityId> victory_leaders; // ascending original identities, including riders
     EntityId victory_station{}; // optional authored station-destruction condition
     std::vector<EntityId> reserve_order{}; // WGT-07: complete source order; empty uses ascending reserve ID
+    std::optional<MarketAbilityPolicy> market_abilities{}; // WGEP-145, absent bypasses the check
     friend bool operator==(const CampaignBattleSetup&, const CampaignBattleSetup&) = default;
 };
 struct CinematicSeat {

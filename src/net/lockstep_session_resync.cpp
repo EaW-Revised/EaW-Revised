@@ -1,5 +1,6 @@
 #include "lockstep_session_internal.hpp"
 #include "eawr/core/sha256.hpp"
+#include "eawr/sim/galactic/types.hpp"
 #include <algorithm>
 #include <limits>
 
@@ -295,7 +296,7 @@ std::string_view galactic_recovery_reason(GalacticRecoveryRefusal reason) noexce
 }
 GalacticRecoveryRefusal GalacticRecoveryLog::checkpoint(GalacticRecoveryAnchor anchor,
     std::shared_ptr<const std::vector<std::uint8_t>> bytes, std::vector<PeerSeat> seats) {
-    if (!anchor.epoch || anchor.completed_tick >= max_session_ticks || !recovery_nonzero(anchor.lineage)
+    if (!anchor.epoch || anchor.completed_tick >= sim::galactic::galactic_max_ticks || !recovery_nonzero(anchor.lineage)
         || !recovery_nonzero(anchor.state) || !bytes || bytes->empty() || bytes->size() > save_transfer_limit
         || seats.size() < 2 || seats.size() > max_match_seats || !limit_ || limit_ > 256U * 1024U * 1024U)
         return GalacticRecoveryRefusal::malformed;
@@ -315,7 +316,7 @@ GalacticRecoveryRefusal GalacticRecoveryLog::checkpoint(GalacticRecoveryAnchor a
 GalacticRecoveryRefusal GalacticRecoveryLog::append(std::uint64_t tick,
     std::span<const SeatInput> inputs, RecoveryDigest state) {
     if (!bytes_) return GalacticRecoveryRefusal::unavailable;
-    if (tick != frontier_.completed_tick || tick >= max_session_ticks || !recovery_nonzero(state))
+    if (tick != frontier_.completed_tick || tick >= sim::galactic::galactic_max_ticks || !recovery_nonzero(state))
         return GalacticRecoveryRefusal::malformed;
     const auto bytes = recovery_tick_bytes(inputs);
     if (!bytes) return GalacticRecoveryRefusal::limit;
@@ -375,7 +376,7 @@ GalacticRecoveryRefusal GalacticRecoveryWorker::start(GalacticRecoveryPackage pa
         || package.checkpoint.lineage != package.frontier.lineage
         || !recovery_nonzero(package.checkpoint.lineage) || !recovery_nonzero(package.checkpoint.state)
         || package.frontier.completed_tick < package.checkpoint.completed_tick
-        || package.frontier.completed_tick > max_session_ticks
+        || package.frontier.completed_tick > sim::galactic::galactic_max_ticks
         || package.ticks.size() != package.frontier.completed_tick - package.checkpoint.completed_tick
         || package.seats.size() < 2 || package.seats.size() > max_match_seats)
         return GalacticRecoveryRefusal::malformed;
@@ -462,7 +463,7 @@ std::optional<GalacticRecoveryWorker::Result> GalacticRecoveryWorker::take(const
 namespace eawr::net {
 namespace {
 using RecoveryBytes = std::vector<std::uint8_t>;
-constexpr std::size_t recovery_wire_limit = 256U * 1024U * 1024U;
+constexpr std::size_t recovery_wire_limit = save_transfer_limit + 192U * 1024U * 1024U;
 template<class T> core::Result<T> recovery_bad(GalacticRecoveryRefusal reason) {
     return core::Result<T>::failure(lockstep_detail::diagnostic(reconnect_errors::log,
         std::string(galactic_recovery_reason(reason))));
@@ -478,13 +479,13 @@ bool recovery_read_digest(std::span<const std::uint8_t>& bytes, RecoveryDigest& 
 }
 bool recovery_read_anchor(std::span<const std::uint8_t>& bytes, GalacticRecoveryAnchor& anchor) {
     return lockstep_detail::read(bytes, anchor.epoch, 8) && anchor.epoch
-        && lockstep_detail::read(bytes, anchor.completed_tick, 8) && anchor.completed_tick <= max_session_ticks
+        && lockstep_detail::read(bytes, anchor.completed_tick, 8) && anchor.completed_tick <= sim::galactic::galactic_max_ticks
         && recovery_read_digest(bytes, anchor.lineage) && recovery_nonzero(anchor.lineage)
         && recovery_read_digest(bytes, anchor.state) && recovery_nonzero(anchor.state);
 }
 }
 core::Result<RecoveryBytes> encode_galactic_recovery_request(const GalacticRecoveryRequest& request) {
-    if (!request.transfer_epoch || !request.seat.value || !request.anchor.epoch || request.anchor.completed_tick > max_session_ticks
+    if (!request.transfer_epoch || !request.seat.value || !request.anchor.epoch || request.anchor.completed_tick > sim::galactic::galactic_max_ticks
         || !recovery_nonzero(request.anchor.lineage) || !recovery_nonzero(request.anchor.state))
         return recovery_bad<RecoveryBytes>(GalacticRecoveryRefusal::malformed);
     RecoveryBytes bytes{gc_recovery_request_kind}; recovery_anchor_bytes(bytes, request.anchor);
@@ -504,10 +505,10 @@ core::Result<GalacticRecoveryRequest> decode_galactic_recovery_request(std::span
 }
 core::Result<RecoveryBytes> encode_galactic_recovery_control(const GalacticRecoveryControl& control) {
     if (!control.transfer_epoch || control.source == control.target || control.source >= max_match_seats
-        || control.target >= max_match_seats || control.barrier > max_session_ticks
+        || control.target >= max_match_seats || control.barrier > sim::galactic::galactic_max_ticks
         || control.stage > GalacticRecoveryStage::release || (control.removed && control.stage != GalacticRecoveryStage::release)
         || !control.frontier.epoch
-        || control.frontier.completed_tick > max_session_ticks || !recovery_nonzero(control.frontier.lineage)
+        || control.frontier.completed_tick > sim::galactic::galactic_max_ticks || !recovery_nonzero(control.frontier.lineage)
         || !recovery_nonzero(control.frontier.state)) return recovery_bad<RecoveryBytes>(GalacticRecoveryRefusal::malformed);
     RecoveryBytes bytes{gc_recovery_proof_kind};
     lockstep_detail::append(bytes, control.transfer_epoch, 8);
@@ -538,7 +539,7 @@ core::Result<RecoveryBytes> encode_galactic_recovery_log(const GalacticRecoveryP
     if (!package.checkpoint.epoch || package.checkpoint.epoch != package.frontier.epoch
         || package.checkpoint.lineage != package.frontier.lineage
         || package.checkpoint.completed_tick > package.frontier.completed_tick
-        || package.frontier.completed_tick > max_session_ticks
+        || package.frontier.completed_tick > sim::galactic::galactic_max_ticks
         || package.ticks.size() != package.frontier.completed_tick - package.checkpoint.completed_tick
         || package.seats.size() < 2 || package.seats.size() > max_match_seats)
         return recovery_bad<RecoveryBytes>(GalacticRecoveryRefusal::malformed);

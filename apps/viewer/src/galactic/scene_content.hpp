@@ -16,6 +16,14 @@ namespace eawr::viewer::galactic {
 
 enum class SceneLayer : std::uint8_t { world, background, midground, midforeground };
 [[nodiscard]] std::string_view to_string(SceneLayer layer) noexcept;
+struct DestructionEffectArt final {
+    std::string target_sfx, target_particle;
+    SceneLayer layer{SceneLayer::world};
+    std::optional<float> lifetime_seconds{};
+    float scale{1};
+};
+[[nodiscard]] DestructionEffectArt load_destruction_effect_art(
+    const data::Catalog&, std::string_view source_type, std::string_view ability_name);
 
 struct PlanetArt final {
     SceneLayer layer{SceneLayer::world};

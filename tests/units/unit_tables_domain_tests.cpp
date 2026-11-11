@@ -9,6 +9,7 @@
 #include <fstream>
 #include <iterator>
 #include <string>
+#include <tuple>
 #include <vector>
 
 namespace unit_tables_test_support {
@@ -85,9 +86,86 @@ void domain_tags() {
       </Combat_Bonus_Ability></Abilities>)");
     write_fixture(tree.root, xml);
     const auto assets = models(-40.0F);
+    {
+        const std::string tag = "<SpaceUnit Name=\"Test_Frigate\">";
+        for (const auto& [style, enabled, admitted] : std::vector<std::tuple<std::string, bool, bool>>{
+                 {"Combat_Automatic", true, true}, {"Space_Automatic", false, true},
+                 {"Global_Automatic", true, true}, {"Ground_Automatic", true, false},
+                 {"User_Input", true, false}, {"", true, false}}) {
+            auto variant = units_xml("3600", "Unit_Select_Test");
+            variant.insert(variant.find(tag) + tag.size(),
+                "<Abilities><Retreat_Prevention_Ability Name=\"Custom_Retreat\"><Activation_Style>" + style
+                + "</Activation_Style><Initially_Enabled>" + (enabled ? "Yes" : "No")
+                + "</Initially_Enabled></Retreat_Prevention_Ability></Abilities>");
+            write_fixture(tree.root, variant);
+            const auto loaded = load(tree.root, assets, "Normal_Default", BattleDomain::space, {}, true);
+            const auto* frigate = loaded.tables ? loaded.tables->find("Test_Frigate") : nullptr;
+            expect(frigate && (frigate->production.retreat_prevention.size() == 1) == admitted,
+                "WRP-01: authored activation style selects automatic space prevention");
+            if (frigate && admitted && !frigate->production.retreat_prevention.empty())
+                expect(frigate->production.retreat_prevention.front().name == "Custom_Retreat"
+                    && frigate->production.retreat_prevention.front().enabled == enabled,
+                    "WRP-01: authored name and initial enable state survive loading");
+        }
+        write_fixture(tree.root, xml);
+    }
     const auto space = load(tree.root, assets);
     expect(static_cast<bool>(space.tables), "BF-2: the space fixture loads");
     expect(space.tables->domain == BattleDomain::space, "BF-2: tables default to the space domain");
+    // B6243-01/04: admission uses authored mode, while the bonus retains its parameters.
+    for (const auto& [style, admitted] : std::vector<std::pair<std::string, bool>>{
+             {"Combat_Automatic", true}, {"Global_Automatic", false}, {"Skirmish_Automatic", false}, {"Ground_Automatic", false},
+             {"User_Input", false}, {"", false}}) {
+        auto variant = xml;
+        const auto at = variant.find("Space_Automatic");
+        variant.replace(at, std::string("Space_Automatic").size(), style);
+        write_fixture(tree.root, variant);
+        const auto loaded = load(tree.root, assets);
+        const auto* fighter = loaded.tables ? loaded.tables->find("Test_Fighter") : nullptr;
+        expect(fighter && (fighter->production.combat_bonuses.size() == 1) == admitted,
+               "B6243: automatic combat bonus admission follows its authored style");
+        if (fighter && admitted && fighter->production.combat_bonuses.size() == 1) {
+            const auto& bonus = fighter->production.combat_bonuses.front();
+            expect(bonus.stacking_category == 3 && bonus.types == std::vector<std::string>{"Test_Frigate"}
+                       && bonus.percentages[0] == Fixed::from_ratio(-1, 4).value(),
+                   "B6243: admitted bonus retains authored target, category and health percentage");
+        }
+    }
+    for (const auto& [amount, category, enabled] : std::vector<std::tuple<std::string, std::string, bool>>{
+             {"0.37", "7", true}, {"-0.12", "2", false}}) {
+        auto variant = xml;
+        auto replace_one = [&](const std::string& from, const std::string& to) {
+            variant.replace(variant.find(from), from.size(), to);
+        };
+        replace_one("Space_Automatic", "Combat_Automatic");
+        replace_one("-0.25", amount);
+        replace_one("<Stacking_Category>3</Stacking_Category>", "<Stacking_Category>" + category + "</Stacking_Category>");
+        replace_one("<Applicable_Unit_Types>Test_Frigate</Applicable_Unit_Types>",
+                    "<Applicable_Unit_Types>Test_Squadron</Applicable_Unit_Types>");
+        if (!enabled) replace_one("<Activation_Style>", "<Initially_Enabled>No</Initially_Enabled><Activation_Style>");
+        write_fixture(tree.root, variant);
+        const auto loaded = load(tree.root, assets);
+        const auto* fighter = loaded.tables ? loaded.tables->find("Test_Fighter") : nullptr;
+        expect(fighter && fighter->production.combat_bonuses.size() == 1,
+               "B6243: combat automatic retains perturbed bonus");
+        if (fighter && fighter->production.combat_bonuses.size() == 1) {
+            const auto& bonus = fighter->production.combat_bonuses.front();
+            expect(bonus.percentages[0] == Fixed::from_decimal(amount).value()
+                       && bonus.stacking_category == static_cast<std::uint32_t>(std::stoi(category))
+                       && bonus.types == std::vector<std::string>{"Test_Squadron"} && bonus.enabled == enabled,
+                   "B6243: perturbed value, category, recipient and enabled flag reach the bonus");
+        }
+    }
+    {
+        auto variant = xml;
+        variant.replace(variant.find("Space_Automatic"), std::string("Space_Automatic").size(), "Combat_Automatic");
+        write_fixture(tree.root, variant);
+        const auto loaded = load(tree.root, assets, "Normal_Default", BattleDomain::land);
+        const auto* fighter = loaded.tables ? loaded.tables->find("Test_Fighter") : nullptr;
+        expect(fighter && fighter->production.combat_bonuses.empty(),
+               "B6243: combat automatic remains unadmitted in land tables");
+    }
+    write_fixture(tree.root, xml);
     const auto space_identity = eawr::units::content_identity(*space.tables);
     const auto land_on_space_data = load(tree.root, assets, "Normal_Default", BattleDomain::land);
     expect(land_on_space_data.tables && !land_on_space_data.tables->units.empty()

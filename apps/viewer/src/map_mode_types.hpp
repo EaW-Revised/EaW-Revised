@@ -1,6 +1,12 @@
 #pragma once
 
+#include "eawr/platform/tactical_feed.hpp"
+#include "eawr/presentation/ui/time_controls.hpp"
 #include "attract_camera.hpp"
+#include "battlecam_chase.hpp"
+#include "battlecam_selection.hpp"
+#include "battlecam_shots.hpp"
+#include "battlecam_tec.hpp"
 #include "land_battle_scene.hpp"
 #include "land_overlay_view.hpp"
 #include "map_mode_assets.hpp"
@@ -10,9 +16,11 @@
 #include <string>
 
 namespace eawr::core::tick_profile { struct Recording; }
+namespace eawr::presentation::shader_activation { struct Generation; }
 
 namespace eawr::presentation::godot_backend {
 
+struct ShaderActivationReceipt;
 using namespace map_mode_detail;
 
 // The UI-05 font cache mounted from `directory` (empty when it is missing).
@@ -159,6 +167,8 @@ struct MapMode::State final {
     std::uint64_t map_free_generation_mark{};
     std::vector<std::pair<std::string, bool>> map_free_checks;
     std::shared_ptr<const vfs::Vfs> filesystem;
+    std::shared_ptr<const shader_activation::Generation> shader_generation;
+    std::shared_ptr<const ShaderActivationReceipt> shader_receipt;
     std::optional<FogMode> fog;
     std::uint64_t fog_renderer_stream{};
     std::vector<std::filesystem::path> fog_paths;
@@ -183,11 +193,10 @@ struct MapMode::State final {
     std::optional<TacticalHud::Options> hud_options;
     // MAT-10: the demo map's saved camera, drawn as a locked view (MapMode::Options::attract).
     std::optional<skirmish::AttractCamera> attract_camera;
-    // The attract's moving camera (a placeholder for FoC's battle camera, #3005): it starts at the
-    // saved camera above and is driven from the live battle each frame.
+    // The saved camera supplies the initial view before a battlecam subject is available.
     std::optional<AttractCamera> attract_motion;
-    std::vector<std::array<float, 3>> attract_ships;
     std::array<float, 3> attract_first_eye{};
+    std::array<float, 3> attract_last_eye{};
     std::size_t attract_camera_updates{};
     // attract_status(): each unit's first-sampled position (raw Q24 x, y, z) and hull.
     struct AttractSample final {
@@ -204,6 +213,8 @@ struct MapMode::State final {
     godot::Node3D* menu_host{};
     std::function<void()> menu_handler;
     bool menu_open{};
+    std::uint64_t shown_save_failures{};
+    std::optional<std::chrono::steady_clock::time_point> save_notice_until{};
     bool menu_paused{}; // the menu paused the battle and resumes it when it closes
     bool leave_to_menu{};
     // Escape / the options button. False when the battle is not in a state that has a menu.
@@ -284,8 +295,46 @@ struct MapMode::State final {
     // levels x1 and x2. Once per live frame, after the camera took this frame's level and before
     // the battle input draws: hides what the level hides and starts the fade on a level change.
     void sync_overview_ui();
-    void set_movie_mode(bool on);
+    [[nodiscard]] std::vector<BattlecamCandidate> movie_candidates();
+    [[nodiscard]] bool cinematics_allowed();
+    [[nodiscard]] bool begin_movie_shot(const LiveSessionView::VisibleUnit& subject);
+    [[nodiscard]] std::optional<AttractCameraPose> movie_pose(const LiveSessionView::VisibleUnit& subject) const;
+    [[nodiscard]] std::optional<float> movie_fov() const;
+    void enter_unit_preview();
+    void set_movie_mode(bool on, bool immediate = false);
+    void advance_movie(double delta);
+    // #6448 J1: re-evaluate the battlecam pose from the poses the live step just composed. Returns whether a pose was
+    // applied (false when the subject is not visible: the shot keeps its last pose).
+    bool apply_movie_pose();
+    // #6448 J1: the post-live camera hook (see EnvironmentView::set_finalize_camera): subject-attached camera inputs
+    // (battlecam pose, follow focus) read the frame's own poses. True when it moved one.
+    [[nodiscard]] bool finalize_camera();
+    bool finalize_camera_installed{};
     sim::EntityId movie_subject{};
+    BattlecamRandom movie_random{static_cast<std::uint32_t>(std::chrono::steady_clock::now().time_since_epoch().count())};
+    BattlecamShot movie_shot{};
+    std::optional<TecSequence> movie_tec;
+    struct MovieHardpoint final { std::uint32_t fire_bone{}, attachment_bone{}; sim::EntityId target{}; };
+    std::optional<MovieHardpoint> movie_hardpoint;
+    sim::EntityId movie_frigate_target{};
+    std::array<std::array<float, 3>, 3> movie_tec_rotation{};
+    std::array<float, 3> movie_anchor{};
+    double movie_elapsed{};
+    bool movie_key_down{}, movie_tab_down{};
+    bool movie_preview{}, preview_key_down{};
+    // --eawr-perf-movers diagnostics (report path only; nothing reads it without the trace): what aimed the drawn camera.
+    struct PerfCameraNote final {
+        std::optional<std::array<double, 3>> input; // the subject position the camera was last aimed at (SOURCE)
+        std::uint64_t shot_id{};                   // shots and previews started so far
+        std::string shot_type;
+        bool shot_cut{};                           // set when a shot starts or the preview jumps; cleared when a movers row is written
+    } perf_camera;
+    // --eawr-perf-screenshot-frames: the trace frame recorded last frame, whose picture is read back at the start of this one.
+    std::optional<std::uint64_t> perf_screenshot_pending;
+    void write_perf_screenshot();
+    float preview_azimuth{}, preview_elevation{30.0F}, preview_distance{}, preview_radius{}, preview_extent{};
+    std::optional<std::array<float, 7>> movie_weights;
+    std::optional<bool> in_game_cinematics;
     std::string overview_level;
     presentation::ui::OverviewUi overview_ui;
     std::unique_ptr<OverviewFadeView> overview_fade;
@@ -501,7 +550,7 @@ struct MapMode::State final {
     [[nodiscard]] bool fail_ready(std::string message);
     void parse_ready_arguments(std::string& lighting_argument, std::string& shadows_argument, std::string& environment_argument, std::string& bloom_argument, std::string& fog_argument_error);
     [[nodiscard]] bool configure_ready_options(std::string& lighting_argument, std::string& shadows_argument, std::string& environment_argument, std::string& bloom_argument, std::string& fog_argument_error);
-    [[nodiscard]] bool mount_ready_content(assets::ObjectTypeCatalog& placement_catalog, std::string& catalog_failure);
+    [[nodiscard]] bool mount_ready_content(godot::Node3D& host, assets::ObjectTypeCatalog& placement_catalog, std::string& catalog_failure);
     [[nodiscard]] bool configure_ready_camera(Node3D& host, const assets::Map& map, const terrain::Mesh& mesh, const assets::Vec3f& minimum, const assets::Vec3f& maximum);
     [[nodiscard]] bool activate_land_camera(Node3D& host, const assets::Map& map, eawr::viewer::MapCameraSource source);
     [[nodiscard]] bool prepare_ready_particles(Node3D& host, const assets::Map& map);
@@ -621,7 +670,7 @@ struct MapMode::State final {
     double timed_seconds{};
     void record_frame_trace(double delta, const core::tick_profile::Recording& ui_recording);
     void update_attract_camera(double delta, const std::optional<int>& finished);
-    void update_follow_camera(const std::optional<int>& finished);
+    bool update_follow_camera(const std::optional<int>& finished);
     [[nodiscard]] bool advance_map_camera(double delta);
     [[nodiscard]] std::optional<int> process_comparison_capture();
     [[nodiscard]] std::optional<int> draw_map_frame(double delta);
@@ -677,6 +726,12 @@ struct MapMode::State final {
     // mode's constants from the effective VFS. Empty `failure` on success.
     [[nodiscard]] std::optional<eawr::viewer::MapCameraSource> load_map_camera(
         camera::Mode mode, std::string& failure, const eawr::viewer::MapCameraConfig* generated = nullptr) const;
+    // #5355 (TP-MP06): the shared battle speed line: who changed it (five presentation seconds) and, while it is not 1x,
+    // what really runs. Presentation only; the label is written only when the notice text changed.
+    godot::Control* speed_notice{};
+    presentation::ui::SharedSpeedNotice speed_notice_text;
+    void update_speed_notice(bool running, const LanView& lan, const std::optional<platform::TacticalFeed::AgreedPacing>& agreed);
+    std::string shown_child_pause_notice; // #6276: skip unchanged child pause label writes
 };
 
 } // namespace eawr::presentation::godot_backend

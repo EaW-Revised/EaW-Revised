@@ -62,6 +62,23 @@ void test_corruption_actual_reservation_budget() {
     const auto recovered = tiny.spawn(registry, system, 3);
     expect(recovered && recovered.value() && tiny.refused() == 0, "freed budget admits effects on the next frame");
     if (recovered && recovered.value()) expect(bool(tiny.release(registry, *recovered.value())), "recovered effect releases");
+    for (const bool leave : {false, true}) {
+        system.leave_particles = leave;
+        const auto spawned = budget.spawn(registry, system, 99);
+        expect(spawned && spawned.value(), "one-shot lifetime fixture spawns");
+        if (!spawned || !spawned.value()) continue;
+        const auto handle = *spawned.value();
+        const auto reserved = budget.used();
+        const auto detached = budget.detach(registry, handle);
+        expect(bool(detached), "one-shot expiry uses the registry detach contract");
+        if (!detached) continue;
+        if (detached.value() == particles::EffectDetachState::draining) {
+            expect(budget.used() == reserved, "draining particles retain their charged reservation");
+            expect(bool(budget.release(registry, handle)), "finished one-shot releases its drain reservation");
+        }
+        expect(budget.used() == 0 && registry.live_effects() == 0 && registry.live_backend_resources() == 0,
+            "immediate and draining detach each return every budget slot and backend resource");
+    }
 }
 
 void test_legacy_sort_triangles_and_atlas() {
@@ -790,6 +807,32 @@ void test_release_and_replacement_lifecycle() {
 }
 
 void test_corruption_registry_settings() {
+    // A destruction born at logical frame 100 is first consumed while paused at 110.
+    // Compare against an untouched same-seed effect, including continuation after resume.
+    {
+        RecordingBackend paused_backend, control_backend;
+        particles::EffectRegistry paused_registry(paused_backend), control_registry(control_backend);
+        const auto paused_handle = paused_registry.spawn(mixed_system(), 21, 256);
+        const auto control_handle = control_registry.spawn(mixed_system(), 21, 256);
+        expect(paused_handle && control_handle, "delayed paused destruction fixtures spawn");
+        if (paused_handle && control_handle) {
+            expect(bool(eawr::viewer::galactic::catch_up_corruption_effect(
+                paused_registry, paused_handle.value(), 10.0 / 30.0, 0.0, test_camera())),
+                "paused delayed publication succeeds without catch-up");
+            for (int tick = 0; tick < 3; ++tick) {
+                const auto paused_frame = paused_registry.advance(paused_handle.value(), 0.0F, test_camera());
+                const auto control_frame = control_registry.advance(control_handle.value(), 0.0F, test_camera());
+                expect(paused_frame && control_frame && paused_frame.value().particles == 0
+                    && paused_frame.value().hash == control_frame.value().hash,
+                    "a paused tick does not birth or advance delayed destruction particles");
+            }
+            const auto resumed_frame = paused_registry.advance(paused_handle.value(), 0.25F, test_camera());
+            const auto control_frame = control_registry.advance(control_handle.value(), 0.25F, test_camera());
+            expect(resumed_frame && control_frame && resumed_frame.value().particles > 0
+                && resumed_frame.value().hash == control_frame.value().hash,
+                "resume retains the untouched effect age and RNG state");
+        }
+    }
     RecordingBackend backend; particles::EffectRegistry registry(backend);
     const auto handle = registry.spawn(mixed_system(), 21, 256);
     expect(bool(handle), "corruption registry fixture spawns");

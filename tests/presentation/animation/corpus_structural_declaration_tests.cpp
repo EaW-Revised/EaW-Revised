@@ -1,3 +1,4 @@
+#include "../../support/runtime_path.hpp"
 // Synthetic contracts of the structural-lead declaration probe
 // (corpus_structural_declaration.hpp).  No private asset is used: receipts are
 // hand-written in the R2 receipt's line format, and every catalog is written to
@@ -214,8 +215,8 @@ void test_pinned_constants() {
 // The tracked manifest yields the lead; the tracked 63 pairs still pass the
 // unchanged R0 guard, which refuses the lead, alone or added to them.
 void test_tracked_inputs() {
-    const auto metadata_bytes = read_file(EAWR_ASSOCIATION_FROZEN_MANIFEST);
-    const auto pairs_bytes = read_file(EAWR_DECLARATION_PAIRS);
+    const auto metadata_bytes = read_file(eawr::testing::runtime_path("EAWR_TEST_SOURCE_ROOT", "tests/presentation/animation/corpus_association_frozen.tsv", EAWR_ASSOCIATION_FROZEN_MANIFEST));
+    const auto pairs_bytes = read_file(eawr::testing::runtime_path("EAWR_TEST_SOURCE_ROOT", "tests/presentation/animation/corpus_declaration_pairs.tsv", EAWR_DECLARATION_PAIRS));
     expect(metadata_bytes.has_value() && pairs_bytes.has_value(), "tracked inputs are readable");
     if (!metadata_bytes || !pairs_bytes) return;
     const auto metadata = audit::load_frozen_metadata(metadata_bytes, sha256(*metadata_bytes));
@@ -335,7 +336,7 @@ void test_receipt_authentication() {
 // The receipt-fragment construction matches the real R2 format for the real
 // lead: this row head is copied from the retained receipt (line 7385).
 void test_real_row_format() {
-    const auto metadata_bytes = read_file(EAWR_ASSOCIATION_FROZEN_MANIFEST);
+    const auto metadata_bytes = read_file(eawr::testing::runtime_path("EAWR_TEST_SOURCE_ROOT", "tests/presentation/animation/corpus_association_frozen.tsv", EAWR_ASSOCIATION_FROZEN_MANIFEST));
     if (!metadata_bytes) return;
     const auto metadata = audit::load_frozen_metadata(metadata_bytes, sha256(*metadata_bytes));
     if (!metadata.metadata) return;

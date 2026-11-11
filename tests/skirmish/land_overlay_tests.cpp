@@ -1,5 +1,5 @@
 // Land movement debug overlay (owner pathing diagnosis, 11-04): the data builder and the movement trace lines. No GPU.
-#include "eawr/sim/tactical/land_debug_overlay.hpp"
+#include "eawr/platform/land_debug_overlay.hpp"
 #include "eawr/sim/tactical/land_movement.hpp"
 #include "eawr/sim/world.hpp"
 #include "land_test_support.hpp"

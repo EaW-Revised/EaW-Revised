@@ -183,8 +183,9 @@ def _parse_manifest(layer: Layer) -> tuple[list[tuple[Path, str, str]], list[str
     return found, missing
 
 
-def _read_meg(path: Path, prefix: str = "", hash_archive: bool = True) -> tuple[tuple[MegMember, ...], str]:
-    """The archive's members and the SHA-256 of its bytes ("" when hash_archive is off)."""
+def _read_meg(path: Path, prefix: str = "", hash_archive: bool = True, *,
+              member_limit: int = MAX_MEMBER_BYTES) -> tuple[tuple[MegMember, ...], str]:
+    """Index and optional archive hash; callers raising member_limit must bound payload reads separately."""
     size = path.stat().st_size
     digest = hashlib.sha256()
     with path.open("rb") as stream:
@@ -224,7 +225,7 @@ def _read_meg(path: Path, prefix: str = "", hash_archive: bool = True) -> tuple[
                 raise CorpusError(f"{path.name}: invalid filename index {name_index}")
             if offset > size or length > size - offset:
                 raise CorpusError(f"{path.name}: member outside archive bounds")
-            if length > MAX_MEMBER_BYTES:
+            if length > member_limit:
                 raise CorpusError(f"{path.name}: member exceeds 64 MiB policy")
             rows.append((name_index, offset, length))
         # Hash exact archive bytes without trusting offsets or rereading through members.

@@ -9,6 +9,7 @@ set(EAWR_PLATFORM_SOURCES
     "${CMAKE_CURRENT_LIST_DIR}/sim_workers.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/publish_files.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/load_notes.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/land_debug_overlay.cpp"
 )
 
 set(EAWR_PLATFORM_ROOT_ONLY_SOURCES

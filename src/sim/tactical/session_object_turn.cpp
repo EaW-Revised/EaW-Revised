@@ -64,6 +64,8 @@ bool object_turn_supports(const AbilityKind kind) noexcept {
     case AbilityKind::tractor_beam:
     case AbilityKind::leech_shields:
     case AbilityKind::super_laser:
+    case AbilityKind::deploy_squad:
+    case AbilityKind::lucky_shot:
         return true;
     default:
         return false;
@@ -105,7 +107,7 @@ core::Result<void> TacticalSession::submit_object_turn(const ObjectTurnRecord& r
             context + ": submitted during an object-turn provider call"));
     }
     if (record.use.unit == invalid_entity_id || record.use.ability == AbilityKind::none
-        || static_cast<std::uint8_t>(record.use.ability) > static_cast<std::uint8_t>(AbilityKind::super_laser)
+        || static_cast<std::uint8_t>(record.use.ability) > static_cast<std::uint8_t>(AbilityKind::lucky_shot)
         || static_cast<std::uint8_t>(record.use.action) < static_cast<std::uint8_t>(AbilityAction::activate)
         || static_cast<std::uint8_t>(record.use.action) > static_cast<std::uint8_t>(AbilityAction::autofire_off)) {
         return core::Result<void>::failure(detail::diagnostic(diagnostic_codes::invalid_command,
@@ -205,7 +207,7 @@ core::Result<void> session_detail::Tick::object_turn_seam() {
                 const auto label = "object-turn use (tick " + std::to_string(tick) + ", unit " + std::to_string(use.unit)
                     + ", sequence " + std::to_string(use.sequence) + ")";
                 if (use.unit == invalid_entity_id || use.ability == AbilityKind::none
-                    || static_cast<std::uint8_t>(use.ability) > static_cast<std::uint8_t>(AbilityKind::super_laser)
+                    || static_cast<std::uint8_t>(use.ability) > static_cast<std::uint8_t>(AbilityKind::lucky_shot)
                     || static_cast<std::uint8_t>(use.action) < static_cast<std::uint8_t>(AbilityAction::activate)
                     || static_cast<std::uint8_t>(use.action) > static_cast<std::uint8_t>(AbilityAction::autofire_off)) {
                     return core::Result<void>::failure(detail::diagnostic(diagnostic_codes::invalid_command,
@@ -277,6 +279,7 @@ core::Result<RejectReason> session_detail::Tick::apply_object_turn_use(const Obj
     const auto group = std::find_if(impl_->squadrons.begin(), impl_->squadrons.end(),
         [&](const Squadron& value) { return value.container == use.unit; });
     if (group != impl_->squadrons.end() && !(group->members.size() == 1 && group->members.front() == use.unit)
+        && use.ability != AbilityKind::lucky_shot
         && use.ability != AbilityKind::buzz_droids && use.ability != AbilityKind::ion_cannon_shot
         && use.ability != AbilityKind::energy_weapon && use.ability != AbilityKind::tractor_beam
         && use.ability != AbilityKind::leech_shields && use.ability != AbilityKind::super_laser) {
@@ -325,6 +328,28 @@ core::Result<RejectReason> session_detail::Tick::apply_object_turn_use(const Obj
     if (!index || !object_turn_supports(use.ability)) return Result::success(RejectReason::ability_unavailable);
     const auto& ability = profile->abilities[*index];
     auto& slot = unit->abilities->slots[*index];
+    if (use.ability == AbilityKind::lucky_shot) {
+        if (use.action == AbilityAction::activate) {
+            const auto* target = live_unit(moving, use.target);
+            if (slot.active || !ability_ready(ability, slot, impl_->ability_gate(*unit, tick), tick)
+                || !target || !impl_->lucky_target_valid(*unit, *target)) return Result::success(RejectReason::ability_unavailable);
+            // Object-script uses carry a unit target; explicit hardpoints belong to player commands.
+            const auto hardpoint = no_hardpoint;
+            impl_->lock_lucky_shot(*unit, use.target, hardpoint, tick);
+            if (craft_prep_->minds->find(use.unit) != craft_prep_->minds->end()) {
+                apply_squadron_order(craft_prep_->minds->at(use.unit), AttackPayload{use.target, hardpoint}, unit->state.position, impl_->motion.squadrons);
+                for (const auto member : craft_prep_->minds->at(use.unit).roster) {
+                    if (auto* craft = live_unit(moving, member)) impl_->reset_lucky_weapon(*craft);
+                }
+            }
+        } else if (use.action == AbilityAction::deactivate) impl_->end_lucky_shot(*unit, tick);
+        else {
+            if (!ability.supports_autofire) return Result::success(RejectReason::ability_unavailable);
+            slot.autofire = use.action == AbilityAction::autofire_on;
+            slot.lucky_autofire_set = true;
+        }
+        return Result::success(RejectReason::none);
+    }
     const auto speed_changed = [&] {
         if (unit->motion && unit->motion->kind == MotionKind::path && !unit->formation) replans.push_back(unit->state.entity_id);
     };
@@ -419,6 +444,14 @@ core::Result<RejectReason> session_detail::Tick::apply_object_turn_use(const Obj
     }
     if (slot.active || !ability_ready(ability, slot, impl_->ability_gate(*unit, tick), tick))
         return Result::success(RejectReason::ability_unavailable);
+    if (use.ability == AbilityKind::sensor_jamming && !impl_->jammer_ready(*unit, ability, named_ability_locks_))
+        return Result::success(RejectReason::ability_unavailable);
+    if (use.ability == AbilityKind::deploy_squad) {
+        AbilityPayload payload;
+        payload.ability = use.ability;
+        payload.action = use.action;
+        return deploy_squad(*unit, payload, tick);
+    }
     if (use.ability == AbilityKind::replenish_wingmen) {
         if (!impl_->motion.squadrons.find_squadron(ability.replenish_team)) return Result::success(RejectReason::ability_unavailable);
         std::vector<LiveUnit> members{*unit};
@@ -462,7 +495,10 @@ core::Result<RejectReason> session_detail::Tick::apply_object_turn_use(const Obj
     }
     const auto switched = activate_ability(ability, slot, impl_->ability_gate(*unit, tick), tick);
     if (!switched.changed) return Result::success(RejectReason::ability_unavailable);
-    if (use.ability == AbilityKind::sensor_jamming) register_jammer(unit->state.entity_id, true);
+    if (use.ability == AbilityKind::sensor_jamming) {
+        impl_->jammer_reactivated(*unit, ability);
+        register_jammer(unit->state.entity_id, true);
+    }
     if (use.ability == AbilityKind::defend) impl_->defend_switched_on(*unit, tick);
     if (use.ability == AbilityKind::self_destruct) Impl::self_destruct_switched(*unit);
     if (use.ability == AbilityKind::stealth) {

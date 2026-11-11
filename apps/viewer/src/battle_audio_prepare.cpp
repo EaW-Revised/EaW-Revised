@@ -1,3 +1,4 @@
+#include "ability_loop_audio.hpp"
 #include "eawr/core/load_profile.hpp"
 #include "battle_audio.hpp"
 #include "eawr/presentation/ui/selection_config.hpp"
@@ -26,14 +27,17 @@
 #include <algorithm>
 #include <cctype>
 #include <chrono>
+#include <condition_variable>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <limits>
+#include <mutex>
 #include <span>
 #include <sstream>
 #include <string_view>
 #include <system_error>
+#include <thread>
 #include <utility>
 
 #include "battle_audio_internal.hpp"
@@ -378,6 +382,17 @@ void BattleAudio::prepare_speech_registry() {
 
 template <typename Event>
 void BattleAudio::prepare_unit_cues(const units::UnitTables& tables, const sim::tactical::CombatTable& combat, const std::set<sim::tactical::TypeId>& first_types, const std::map<sim::tactical::TypeId, const audio::SfxEvent*>& spotted, const audio::SfxEvent* generic_spotted, Event& event, bool& binding_unit, bool& first_type) {
+    std::map<std::string, std::map<tactical::TypeId, std::string>> lucky_projectiles;
+    for (const auto& holder : tables.units) {
+        const auto& abilities = holder.kind == units::UnitKind::squadron ? holder.team_abilities : holder.abilities;
+        for (const auto& ability : abilities) {
+            if (tactical::ability_kind(ability.type) != tactical::AbilityKind::lucky_shot || ability.projectile_override.empty()) continue;
+            if (holder.kind != units::UnitKind::squadron) lucky_projectiles[holder.id].insert_or_assign(battle::type_id(holder.id), ability.projectile_override);
+            else for (const auto& member : holder.members)
+                if (member.craft_index < tables.units.size())
+                    lucky_projectiles[tables.units[member.craft_index].id].insert_or_assign(battle::type_id(holder.id), ability.projectile_override);
+        }
+    }
     std::map<std::string, std::string> ability_projectiles;
     for (const units::UnitType& squadron : tables.units) {
         if (squadron.kind != units::UnitKind::squadron) continue;
@@ -526,8 +541,33 @@ void BattleAudio::prepare_unit_cues(const units::UnitTables& tables, const sim::
                                                event(child(ability, "SFXEvent_GUI_Unit_Ability_Deactivated"), where)};
                 // BA-53/54: targeting acknowledgement and successful spawn use the source object.
                 sounds.ability_targets[kind] = event(child(ability, "SFXEvent_Target_Ability"), where);
-                if (kind == tactical::AbilityKind::leech_shields)
-                    sounds.leech_loop = event(child(ability, "SFXEvent_Special_Ability_Loop"), where);
+                if (ability_loop_audio::supported(kind)) {
+                    for (const auto& field : ability.children)
+                        if (same(field.name, "SFXEvent_Special_Ability_Loop")) data::tag_trace::used(field);
+                    sounds.ability_loops[kind] = ability_loop_audio::bind(kind,
+                        [&] { return child(ability, "SFXEvent_Special_Ability_Loop"); },
+                        [&](const auto& name) { return event(name, where); });
+                    if (kind == tactical::AbilityKind::super_laser) {
+                        for (const auto& nested : type.special_abilities) {
+                            if (nested.kind == tactical::SpecialAbilityKind::super_laser
+                                && same(nested.name, child(ability, "GUI_Activated_Ability_Name"))) {
+                                sounds.super_laser_fire_delay = nested.fire_delay_frames;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // WLK-01/06: the runtime team's Lucky cue belongs to its authored container.
+        if (type.kind == units::UnitKind::squadron && !type.team_type.empty()) {
+            const auto team = catalog_->resolve(type.team_type, data::Category::game_object);
+            const auto* abilities = team ? team.value().value("Unit_Abilities_Data") : nullptr;
+            if (abilities) for (const auto& ability : abilities->value.children) {
+                if (!same(ability.name, "Unit_Ability")
+                    || tactical::ability_kind(child(ability, "Type")) != tactical::AbilityKind::lucky_shot) continue;
+                sounds.ability_targets[tactical::AbilityKind::lucky_shot] =
+                    event(child(ability, "SFXEvent_Target_Ability"), type.team_type);
             }
         }
         // WCB-02: the named handler's launch cue is distinct from the button voice.
@@ -554,16 +594,19 @@ void BattleAudio::prepare_unit_cues(const units::UnitTables& tables, const sim::
                 sounds.redirect_block = event(nested.redirect_activate_sfx, where);
         }
         const auto projectile_events = [&](const std::string& projectile, const std::uint32_t slot,
-                                            const tactical::ProjectileProfileKind kind = tactical::ProjectileProfileKind::ordinary) {
+                                            const tactical::ProjectileProfileKind kind = tactical::ProjectileProfileKind::ordinary,
+                                            const tactical::TypeId holder = 0) {
             auto shot = catalog_->resolve(projectile, data::Category::game_object);
             if (!shot) {
                 problems_.push_back("projectile " + projectile + ": " + core::format_diagnostic(shot.error()));
                 return;
             }
-            auto& plain = kind == tactical::ProjectileProfileKind::ability ? sounds.ability_detonate
+            auto& plain = kind == tactical::ProjectileProfileKind::lucky_shot ? sounds.lucky_detonate[holder]
+                : kind == tactical::ProjectileProfileKind::ability ? sounds.ability_detonate
                 : kind == tactical::ProjectileProfileKind::barrage ? sounds.barrage_detonate
                 : kind == tactical::ProjectileProfileKind::charged_blast ? sounds.charged_detonate : sounds.detonate;
-            auto& armor = kind == tactical::ProjectileProfileKind::ability ? sounds.ability_detonate_armor
+            auto& armor = kind == tactical::ProjectileProfileKind::lucky_shot ? sounds.lucky_detonate_armor[holder]
+                : kind == tactical::ProjectileProfileKind::ability ? sounds.ability_detonate_armor
                 : kind == tactical::ProjectileProfileKind::barrage ? sounds.barrage_detonate_armor
                 : kind == tactical::ProjectileProfileKind::charged_blast ? sounds.charged_detonate_armor : sounds.detonate_armor;
             plain[slot] = event(tag(shot.value(), "Projectile_SFXEvent_Detonate"), projectile);
@@ -608,6 +651,10 @@ void BattleAudio::prepare_unit_cues(const units::UnitTables& tables, const sim::
         sounds.hardpoint_points.assign(type.hardpoints.size(), sim::math::Vec3{});
         if (const tactical::CombatProfile* profile = combat.find(battle::type_id(type.id))) {
             for (const tactical::WeaponProfile& weapon : profile->weapons) {
+                if (const auto lucky = lucky_projectiles.find(type.id); lucky != lucky_projectiles.end())
+                    for (const auto& [holder, projectile] : lucky->second)
+                        if (tactical::lucky_shot(weapon, holder))
+                            projectile_events(projectile, weapon.hardpoint, tactical::ProjectileProfileKind::lucky_shot, holder);
                 if (weapon.ability_shot) {
                     if (const auto override = ability_projectiles.find(type.id); override != ability_projectiles.end())
                         projectile_events(override->second, weapon.hardpoint, tactical::ProjectileProfileKind::ability);
@@ -738,7 +785,9 @@ void BattleAudio::prepare(const units::UnitTables& tables, const tactical::Comba
             enqueue_audio_batches(scheduled, *queue);
             return;
         }
-        prepare_audio_batch(scheduled);
+        // The reads wait on the disk, not the CPU: they run beside the rest of the load and finish_loading() ends them.
+        start_audio_readers(scheduled);
+        return;
     } else {
         // Diagnostic control: legacy global/initial spatial warmup, no music
         // preload, then synchronous first-use reads. Never a settings option.
@@ -804,6 +853,7 @@ godot::Ref<godot::AudioStream> BattleAudio::open_stream(const std::string& path,
     auto& cache = load_kind == LoadKind::speech ? speech_streams_ : music_streams_;
     if (const auto found = cache.find(key); found != cache.end()) return found->second;
     const LoadKey request{load_kind, key};
+    if (async_prepare_) return {};
     if (samples_prepared_) {
         if (audio_ready(request)) return cache.at(key);
         return {};
@@ -861,6 +911,7 @@ const BattleAudio::Sample& BattleAudio::sample(const std::string& name) {
     const auto found = samples_.find(name);
     if (found != samples_.end()) return found->second;
     const LoadKey key{LoadKind::sfx, name};
+    if (async_prepare_) return pending_sample_;
     if (samples_prepared_) {
         if (audio_ready(key)) return samples_.at(name);
         return pending_sample_;
@@ -915,25 +966,150 @@ void BattleAudio::order_by_disk_position(const vfs::Vfs& filesystem, std::vector
     for (std::size_t index = 0; index < placed.size(); ++index) keys[index] = std::move(placed[index].key);
 }
 
-void BattleAudio::prepare_audio_batch(const std::set<LoadKey>& keys) {
-    using Clock = std::chrono::steady_clock;
-    const auto begin = Clock::now();
-    std::vector<LoadKey> ordered(keys.begin(), keys.end());
-    order_by_disk_position(*filesystem_, ordered);
-    const auto workers = std::min<std::size_t>(8, platform::ThreadWorkerAdapter::hardware_worker_count());
-    platform::ThreadWorkerAdapter pool(workers);
+// The preload without a load queue (skirmish and saved battles). The files, their disk order and their publication
+// order are the same as the stepped path's; only the reads' place in time changes: reader threads take the files in
+// that order while the main thread goes on with the rest of the load, and publish_audio() hands the finished buffers
+// to the owner thread in that same order. Buffers waiting to be published are bounded (a reader past the bound waits,
+// except for the file the publisher needs next, so the order cannot deadlock).
+struct BattleAudio::AsyncPrepare final {
+    static constexpr std::size_t max_waiting_bytes = 96U * 1024U * 1024U;
+    // What a waiting buffer holds: the file bytes and, for 8-bit and ADPCM files, the decoded copy.
+    [[nodiscard]] static std::size_t held_bytes(const PreparedAudio& prepared) {
+        return prepared.bytes.size() + (prepared.pcm ? prepared.pcm->converted.size() : 0U);
+    }
+    std::vector<LoadKey> ordered;
+    std::vector<std::optional<PreparedAudio>> slots;
+    std::mutex mutex;
+    std::condition_variable readers_wake, owner_wake;
+    std::size_t next{}, published{}, waiting_bytes{};
+    bool stop{};
+    std::chrono::steady_clock::time_point begin;
+    std::vector<std::thread> threads;
+
+    ~AsyncPrepare() {
+        {
+            const std::lock_guard lock(mutex);
+            stop = true;
+        }
+        readers_wake.notify_all();
+        for (auto& thread : threads) if (thread.joinable()) thread.join();
+    }
+
+    void read_loop(const std::shared_ptr<const vfs::Vfs>& filesystem) {
+        for (;;) {
+            std::size_t index = 0;
+            {
+                std::unique_lock lock(mutex);
+                readers_wake.wait(lock, [&] {
+                    return stop || next >= ordered.size() || waiting_bytes < max_waiting_bytes || next == published;
+                });
+                if (stop || next >= ordered.size()) return;
+                index = next++;
+            }
+            PreparedAudio prepared;
+            try { prepared = prepare_audio(filesystem, ordered[index]); }
+            catch (const std::exception& error) { prepared.cause = std::string("undecodable: audio reader ") + error.what(); }
+            {
+                const std::lock_guard lock(mutex);
+                waiting_bytes += held_bytes(prepared);
+                slots[index].emplace(std::move(prepared));
+            }
+            owner_wake.notify_all();
+        }
+    }
+};
+
+void BattleAudio::start_audio_readers(const std::set<LoadKey>& keys) {
+    auto state = std::make_shared<AsyncPrepare>();
+    state->begin = std::chrono::steady_clock::now();
+    state->ordered.assign(keys.begin(), keys.end());
+    order_by_disk_position(*filesystem_, state->ordered);
+    state->slots.resize(state->ordered.size());
+    const auto workers = std::min<std::size_t>({8, platform::ThreadWorkerAdapter::hardware_worker_count(),
+                                                std::max<std::size_t>(1, state->ordered.size())});
     audio_worker_count_ = workers;
-    // Bound temporary decoded/encoded payloads; each finished batch is published
-    // before the next batch starts, without sharing a resource between tasks.
-    const auto batch_size = std::max<std::size_t>(1, workers * 2);
-    for (std::size_t at = 0; at < ordered.size(); at += batch_size) prepare_audio_chunk(pool, ordered, at, batch_size);
+    try {
+        for (std::size_t index = 0; index < workers; ++index)
+            state->threads.emplace_back([raw = state.get(), filesystem = filesystem_] { raw->read_loop(filesystem); });
+    } catch (const std::system_error& error) {
+        // Fewer readers still read everything; with none the owner reads the files itself at finish_loading().
+        problems_.push_back("audio loading threads: " + std::string(error.what()));
+        audio_worker_count_ = state->threads.size();
+    }
+    async_prepare_ = std::move(state);
+}
+
+// Owner thread. Publishes the buffers the readers finished, in request order: until `budget` is spent, or (wait_for_all)
+// until every file is published, waiting for the readers where needed.
+void BattleAudio::publish_audio(const std::chrono::steady_clock::duration budget, const bool wait_for_all) {
+    AsyncPrepare& state = *async_prepare_;
+    const auto start = std::chrono::steady_clock::now();
+    for (;;) {
+        std::optional<PreparedAudio> ready;
+        std::size_t index = 0;
+        {
+            std::unique_lock lock(state.mutex, std::defer_lock);
+            if (wait_for_all) lock.lock(); else if (!lock.try_lock()) return;
+            if (state.published >= state.ordered.size()) return;
+            index = state.published;
+            if (!state.slots[index]) {
+                if (!wait_for_all) return;
+                if (state.threads.empty()) {
+                    // No reader could start: read this file here (the stepped path's own fallback).
+                    lock.unlock();
+                    commit_audio(state.ordered[index], prepare_audio(filesystem_, state.ordered[index]), false);
+                    lock.lock();
+                    ++state.published;
+                    continue;
+                }
+                const auto wait_begin = std::chrono::steady_clock::now();
+                state.owner_wake.wait(lock, [&] { return static_cast<bool>(state.slots[index]); });
+                audio_blocked_ms_ += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - wait_begin).count();
+            }
+            ready = std::move(state.slots[index]);
+            state.slots[index].reset();
+            state.waiting_bytes -= std::min(state.waiting_bytes, AsyncPrepare::held_bytes(*ready));
+        }
+        if (ready->cause.starts_with("undecodable: audio reader"))
+            problems_.push_back("audio loading thread: " + ready->cause);
+        commit_audio(state.ordered[index], std::move(*ready), false);
+        {
+            const std::lock_guard lock(state.mutex);
+            ++state.published;
+        }
+        state.readers_wake.notify_all();
+        if (!wait_for_all && std::chrono::steady_clock::now() - start >= budget) return;
+    }
+}
+
+void BattleAudio::pump_loading() {
+    if (!async_prepare_) return;
+    core::load_profile::Scope scope(core::load_profile::Phase::audio);
+    const auto begin = std::chrono::steady_clock::now();
+    publish_audio(std::chrono::milliseconds(2), false);
+    audio_publish_ms_ += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - begin).count();
+}
+
+void BattleAudio::cancel_loading() {
+    // The destructor sets `stop`, wakes the readers and joins them; the unpublished buffers go with the state.
+    async_prepare_.reset();
+}
+
+void BattleAudio::finish_loading() {
+    if (!async_prepare_) return;
+    core::load_profile::Scope scope(core::load_profile::Phase::audio);
+    const auto begin = std::chrono::steady_clock::now();
+    publish_audio({}, true);
+    audio_publish_ms_ += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - begin).count();
+    audio_prepare_wall_ms_ = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - async_prepare_->begin).count();
+    async_prepare_.reset(); // joins the readers (all have run out of files)
     // The report lists the loads in key order, as before the reads were put in disk order.
     std::stable_sort(audio_load_rows_.begin(), audio_load_rows_.end(),
                      [](const AudioLoadRow& a, const AudioLoadRow& b) { return a.key < b.key; });
-    audio_prepare_wall_ms_ = std::chrono::duration<double, std::milli>(Clock::now() - begin).count();
+    finish_prepare();
 }
 
-// The same batches as prepare_audio_batch, one load step each (same order, same sizes, same publication), then the
+// The same batches as the preload's reads, one load step each (same order, same sizes, same publication), then the
 // closing step. The wall figure is the sum of the steps' own times.
 void BattleAudio::enqueue_audio_batches(const std::set<LoadKey>& keys, const EnqueueLoadStep& queue) {
     struct Batches final {
@@ -1003,6 +1179,7 @@ bool BattleAudio::audio_ready(const LoadKey& key) {
     const bool cached = key.first == LoadKind::sfx ? samples_.contains(key.second)
         : key.first == LoadKind::speech ? speech_streams_.contains(key.second) : music_streams_.contains(key.second);
     if (cached) return true; // A cached failure takes the ordinary no-sample path.
+    if (async_prepare_) return false; // The preload is still being published: not loaded yet, not missing.
     if (!options_.preload) {
         // Deliberate diagnostic control only; production defaults to preload.
         commit_audio(key, prepare_audio(filesystem_, key), samples_prepared_);

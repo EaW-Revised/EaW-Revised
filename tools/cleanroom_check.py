@@ -42,6 +42,9 @@ ALLOWED_TOKENS = {
     "LuaWrapperMetaTable",
     # XML tag and value names of the FoC data (docs/tag-coverage/statuses.json).
     "MovementClass", "MovementClassType", "UnitCollisionClass",
+    # Public mod XML: remake5 Data/Overhead/DatabaseMapExport.xml:4 (opening tag).
+    # Retained exactly as an authored path segment in the coverage universe.
+    "KeyMapToClassDefinitions",
 }
 # Lua API names the game's scripts call (plan/inventories/lua-api.json, built from those scripts),
 # and asset file names the data refers to (an icon .tga, an effect .fx).

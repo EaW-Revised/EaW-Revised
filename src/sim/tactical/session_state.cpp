@@ -21,7 +21,6 @@
 
 #include <algorithm>
 #include <array>
-#include <chrono>
 #include <cstdlib>
 #include <cstddef>
 #include <cstdint>
@@ -40,7 +39,7 @@
 
 #include "session_encoding.hpp"
 #include "session_canonical.hpp"
-#include "checkpoint_fields_internal.hpp"
+#include "checkpoint_fields_internal.hpp" // include-guard: keep (archive template specializations)
 
 namespace eawr::sim::tactical {
 
@@ -54,8 +53,8 @@ core::Result<std::vector<std::uint8_t>> TacticalSession::save_checkpoint_state()
         out.script_invulnerable = std::any_of(live.begin(), live.end(), [](const auto& unit) {
             return unit.script_invulnerable;
         });
-        // Domain 9 base; +1 nonzero fire range (WFR-01); +2 any Lua Make_Invulnerable flag (TL-03).
-        out(std::uint32_t{9U + (out.fire_range_bonuses ? 1U : 0U) + (out.script_invulnerable ? 2U : 0U)});
+        // WJM-01: domain 25 base; +1 fire range; +2 script invulnerability.
+        out(std::uint32_t{25U + (out.fire_range_bonuses ? 1U : 0U) + (out.script_invulnerable ? 2U : 0U)});
         checkpoint_detail::Access::state(out, std::as_const(*impl_));
         out(live);
         out(checkpoint_detail::Access::visibility(*impl_));
@@ -103,9 +102,9 @@ core::Result<void> TacticalSession::load_checkpoint_state(const std::span<const 
         checkpoint_detail::Reader in(bytes);
         std::uint32_t version{};
         in(version);
-        if (version < 9U || version > 12U) throw checkpoint_detail::Invalid("unsupported child state domain");
-        in.fire_range_bonuses = (version - 9U) % 2U == 1U;
-        in.script_invulnerable = version >= 11U;
+        if (version < 25U || version > 28U) throw checkpoint_detail::Invalid("unsupported child state domain");
+        in.fire_range_bonuses = (version - 25U) % 2U == 1U;
+        in.script_invulnerable = version >= 27U;
         const auto cursors = impl_->last_submitted;
         checkpoint_detail::Access::state(in, *impl_);
         // SAE-10: a reinforcement whose search failed advanced its issuer's cursor but is never recorded, so the
@@ -152,9 +151,21 @@ core::Result<void> TacticalSession::load_checkpoint_state(const std::span<const 
                     })) throw checkpoint_detail::Invalid("invalid live unit identity or owner");
             previous = unit.state.entity_id;
             if (!math::to_matrix(unit.state.rotation, unit.state.position)) throw checkpoint_detail::Invalid("invalid live unit transform");
+            const auto* base = impl_->base_profile(unit.state.owner, unit.state.type_id);
+            if (unit.upgraded_durability) {
+                if (!base || !unit.durability || unit.upgraded_durability->hardpoints.size() != base->hardpoints.size())
+                    throw checkpoint_detail::Invalid("upgraded durability binding disagrees with content");
+                auto expected = *base;
+                expected.max_hull = unit.upgraded_durability->max_hull;
+                expected.max_shields = unit.upgraded_durability->max_shields;
+                expected.max_energy = unit.upgraded_durability->max_energy;
+                for (std::size_t i = 0; i < expected.hardpoints.size(); ++i)
+                    expected.hardpoints[i].max_health = unit.upgraded_durability->hardpoints[i].max_health;
+                if (expected != *unit.upgraded_durability)
+                    throw checkpoint_detail::Invalid("upgraded durability shape disagrees with content");
+            }
             if (unit.durability) {
-                const auto* profile = impl_->health_profile(unit);
-                if (!profile || unit.durability->hardpoints.size() != profile->hardpoints.size())
+                if (!base || unit.durability->hardpoints.size() != base->hardpoints.size())
                     throw checkpoint_detail::Invalid("durability binding disagrees with content");
             }
             if (unit.abilities) {
@@ -168,6 +179,17 @@ core::Result<void> TacticalSession::load_checkpoint_state(const std::span<const 
                 if (!profile || unit.combat->weapons.size() != profile->weapons.size())
                     throw checkpoint_detail::Invalid("combat binding disagrees with content");
             }
+        }
+        for (const auto& [id, spawner] : impl_->spawners) {
+            const auto found = std::lower_bound(live.begin(), live.end(), id,
+                [](const auto& unit, const EntityId value) { return unit.state.entity_id < value; });
+            if (found == live.end() || found->state.entity_id != id)
+                throw checkpoint_detail::Invalid("hangar binding has no live unit");
+            const auto* profile = spawner.selected_tech
+                ? impl_->motion.squadrons.find_spawner_at_tech(found->state.type_id, found->state.owner, *spawner.selected_tech)
+                : impl_->motion.squadrons.find_spawner(found->state.type_id, found->state.owner);
+            if (!profile || (spawner.ready && spawner.entries.size() != profile->entries.size()))
+                throw checkpoint_detail::Invalid("hangar binding disagrees with content");
         }
         if (impl_->setup.campaign) {
             auto derived = impl_->update_command_ledger(live, impl_->next_id, InlineExecutor{});
@@ -481,6 +503,12 @@ TacticalInstance TacticalSession::Impl::instance_for(const LiveUnit& unit, const
         instance.contained = unit.state.contained;
         instance.controller_seat = unit.state.controller_seat;
         instance.control = unit.state.control;
+        if (land) {
+            const auto found = std::lower_bound(sensors.begin(), sensors.end(), unit.state.type_id,
+                [](const SensorProfile& row, const TypeId type) { return row.type_id < type; });
+            instance.hide_when_fogged = found != sensors.end() && found->type_id == unit.state.type_id
+                && found->hide_when_fogged;
+        }
         if (unit.durability) {
             instance.durability = durability_status(*health_profile(unit), durability, *unit.durability);
         }
@@ -519,6 +547,7 @@ TacticalInstance TacticalSession::Impl::instance_for(const LiveUnit& unit, const
             }
         }
         instance.has_movement_path = unit.motion && unit.motion->kind == MotionKind::path;
+        if (unit.combat) instance.presentation_attack_target = unit.combat->attack_target;
         if (unit.motion && motion.find(unit.state.type_id)) instance.locomotor_speed_per_frame = unit.speed;
         instance.in_tractor_beam = unit.in_tractor_beam;
         if (unit.abilities) {
@@ -660,20 +689,15 @@ std::vector<std::uint8_t> TacticalSession::Impl::canonical_bytes(const Partition
             bytes.clear();
             bytes.reserve((range.end - range.begin) * (detail::unit_record_size + detail::order_record_size));
             for (auto index = range.begin; index < range.end; ++index) {
-                const auto profile_begin = core::tick_profile::active_jobs
-                    ? core::tick_profile::Clock::now() : core::tick_profile::Clock::time_point{};
+                // Includes component copying and encoding; never a simulation input.
+                core::tick_profile::JobScope canonical_job("job.canonical-unit", 0);
                 units[index] = live_at(order[index].first, order[index].second);
+                canonical_job.identify(units[index].state.entity_id, units[index].state.type_id);
                 append_canonical_unit(bytes, units[index]);
                 sparse_counts[partition].add(units[index]);
                 if (units[index].abilities) {
                     sim::detail::append_u64(ability_parts[partition], units[index].state.entity_id);
                     append_abilities(ability_parts[partition], *units[index].abilities);
-                }
-                if (core::tick_profile::active_jobs) {
-                    // Includes component copying and encoding; never a simulation input.
-                    const auto elapsed = std::chrono::duration<double, std::milli>(core::tick_profile::Clock::now() - profile_begin).count();
-                    core::tick_profile::active_jobs->costs.push_back({"job.canonical-unit", elapsed,
-                        units[index].state.entity_id, {}, units[index].state.type_id});
                 }
             }
             if (land) encode_land_partition(partition);

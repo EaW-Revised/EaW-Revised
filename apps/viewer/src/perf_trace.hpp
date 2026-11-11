@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <fstream>
@@ -31,6 +32,8 @@ public:
         double frame_ms{};
         double clock_newest{}, clock_before{}, clock_after{}, clock_advance{}, clock_delta{}, clock_rate{}, clock_target_rate{};
         bool clock_valid{}, clock_running{};
+        // steady_clock microseconds (since its epoch): the battle frame's start and the newest published tick's time.
+        double clock_frame_us{}, clock_newest_published_us{};
         std::vector<std::pair<std::string, double>> sim_profile;
         std::uint64_t presented_tick{};
         std::uint64_t units{};
@@ -71,6 +74,8 @@ public:
         std::size_t lane_main_help_tasks{};
         std::size_t slots_grown{}; // This frame, not the session cumulative count.
         double slot_growth_ms{};
+        std::size_t launch_preload_fallbacks{}; // Cumulative distinct fallback rosters.
+        std::uint64_t launch_read_bytes{};
         double hud_ms{};
         double audio_ms{};
         std::array<double, audio_trace::lap_count> audio_laps{};
@@ -123,6 +128,22 @@ public:
     // --eawr-sim-phase-profile adds typed jobs and callback timelines to the trace.
     [[nodiscard]] static bool detailed_sim_profile() noexcept { return detailed_sim_profile_; }
     [[nodiscard]] static bool sim_cadence_profile() noexcept { return sim_cadence_profile_; }
+    // --eawr-perf-movers N (report path only, N clamped to 64): a second file <trace>.movers.csv with, per battle frame on which
+    // the live step ran, one row per followed mover (drawn this frame and present in both snapshots): type id, owner, squadron-member
+    // flag (refreshed on refills only; use type_id for the unit class), the presented position, the previous/latest per-tick simulation position, arrival frames, the local player's
+    // visibility in both snapshots, the camera basis (camera_valid 0 = nan) and the frame's steady_clock time. Positions are
+    // SOURCE (sim) coordinates; the camera is RENDER space (source (x, y) is render (x, -y)).
+    [[nodiscard]] static std::size_t movers() noexcept { return movers_; }
+    [[nodiscard]] std::ofstream& movers_output() noexcept { return movers_output_; }
+    // --eawr-perf-screenshot-frames a,b,c (report path only, at most 16): the picture of the root viewport as drawn for each
+    // named `frame` of the trace is written to <trace>.frame-<N>.png. The frame is requested while frame N is recorded and
+    // read back at the start of frame N+1, when the viewport texture holds frame N. A bad list is refused whole with a message.
+    [[nodiscard]] bool screenshot_wanted(std::uint64_t frame) const noexcept {
+        return std::find(screenshot_frames_.begin(), screenshot_frames_.end(), frame) != screenshot_frames_.end();
+    }
+    [[nodiscard]] std::string screenshot_path(std::uint64_t frame) const { return path_ + ".frame-" + std::to_string(frame) + ".png"; }
+    // The root viewport's size in pixels (the picture the screenshots and the camera columns refer to); 0x0 without a tree.
+    [[nodiscard]] static std::pair<int, int> viewport_size();
     // False with --eawr-perf-no-render-timing: the render_cpu_ms and render_gpu_ms columns are left empty and the
     // root viewport's render-time measurement is never requested (its per-frame queries stall the Separate render thread).
     [[nodiscard]] static bool render_timing() noexcept { return render_timing_; }
@@ -141,7 +162,11 @@ private:
     static bool render_timing_;
     static bool detailed_sim_profile_;
     static bool sim_cadence_profile_;
+    static std::size_t movers_;
+    static std::vector<std::uint64_t> screenshot_frames_;
     std::ofstream output_;
+    std::ofstream movers_output_;
+    std::string path_;
     godot::RID viewport_;
     std::uint64_t frames_{};
     using Clock = std::chrono::steady_clock;

@@ -11,6 +11,7 @@
 #include <set>
 #include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace eawr::viewer::galactic {
@@ -28,6 +29,26 @@ struct AbilityPreviewPolicy {
     std::function<bool(ObjectId, ObjectId)> space_override;
     std::function<bool(ObjectId, sim::galactic::AbilityKind)> kind_restricted;
 };
+// #6120: the notice for a refused hero ability. Neutralize Hero says which test failed; every other refusal keeps the
+// general text.
+[[nodiscard]] inline std::string_view ability_refusal_text(sim::galactic::GalacticRejectReason reason) noexcept {
+    using sim::galactic::GalacticRejectReason;
+    switch (reason) {
+    case GalacticRejectReason::incompatible_location: return "This hero must be in orbit of that planet to use its ability.";
+    case GalacticRejectReason::neutralize_no_hero: return "There is no enemy hero on that planet to neutralize.";
+    case GalacticRejectReason::neutralize_allied_hero: return "The only heroes on that planet belong to an ally.";
+    case GalacticRejectReason::neutralize_not_targetable: return "The enemy heroes on that planet cannot be neutralized by this hero.";
+    case GalacticRejectReason::neutralize_unavailable: return "Neutralize Hero cannot be used on that planet right now.";
+    case GalacticRejectReason::insufficient_credits: return "You cannot afford that.";
+    // A drop on a distant planet is a move first; its refusals are the movement owner's, not the ability's.
+    case GalacticRejectReason::invalid_path: return "There is no route for the hero to that planet.";
+    case GalacticRejectReason::cannot_depart: return "The hero cannot leave its planet right now.";
+    case GalacticRejectReason::movement_blocked: return "The hero's path to that planet is blocked.";
+    case GalacticRejectReason::movement_ability_required: return "This fleet cannot travel there.";
+    case GalacticRejectReason::invalid_membership: return "That order is not available for this fleet.";
+    default: return "This ability cannot be used on that planet (allied or unavailable target, or nothing left to offer).";
+    }
+}
 namespace ability_preview {
 template<class Rows, class Id, class Key> const auto* find(const Rows& rows, Id id, Key key) {
     const auto at = std::lower_bound(rows.begin(), rows.end(), id,
@@ -48,6 +69,8 @@ inline bool enabled(const sim::galactic::GalacticAbilityProfile& p,
     case AbilityKind::technology_theft: return p.theft && s.theft_enabled && !s.theft_cancelled;
     case AbilityKind::system_spy: return p.spy && s.spy_enabled && !s.spy_cancelled
         && routed(host.activated_spy_abilities, p.spy->name);
+    case AbilityKind::remove_corruption: return p.removal && ground_ability_enabled(p, s, kind)
+        && routed(host.activated_removal_abilities, p.removal->name);
     case AbilityKind::black_market: return p.has_market && s.enabled && !s.cancelled;
     case AbilityKind::structure_sabotage: return p.sabotage && s.sabotage_enabled && !s.sabotage_cancelled
         && routed(host.activated_sabotage_abilities, p.sabotage->name);
@@ -97,6 +120,11 @@ inline bool target_admitted(const sim::galactic::GalacticSnapshot& snapshot,
     const auto* economy = snapshot.economy_corruption();
     const auto* economic = economy ? find(economy->planets, target, [](const auto& row) { return row.planet; }) : nullptr;
     if (!economic || economic->destroyed) return false;
+    if (kind == AbilityKind::remove_corruption) {
+        const auto* transition = find(snapshot.corruption_transitions(), target, [](const auto& row) { return row.planet; });
+        return actor.owner == allegiance.target_player && economic->corruption != corruption_fixture::Type::none
+            && (!transition || !transition->transition.active());
+    }
     if (kind == AbilityKind::corruption) {
         const auto* owner = find(control->players, planet->owner, [](const auto& row) { return row.player; });
         const auto* content = find(host.corruption_planets, target, [](const auto& row) { return row.planet; });
@@ -194,9 +222,10 @@ inline bool target_admitted(const sim::galactic::GalacticSnapshot& snapshot,
         if (!selected || rank < best) { selected = actor; best = rank; }
     }
     if (!selected || (policy.space_override && policy.space_override(selected->id, target))) return std::nullopt;
-    // Missing siphon/removal runtimes remain #1143/#1141; never disguise them as another kind.
+    // Siphon remains a separate unsupported route; removal keeps its own authored kind.
     constexpr std::array kinds{AbilityKind::planet_destruction, AbilityKind::technology_theft, AbilityKind::black_market,
-        AbilityKind::structure_sabotage, AbilityKind::system_spy, AbilityKind::hero_neutralization, AbilityKind::corruption, AbilityKind::superweapon_hack};
+        AbilityKind::structure_sabotage, AbilityKind::system_spy, AbilityKind::hero_neutralization, AbilityKind::corruption,
+        AbilityKind::remove_corruption, AbilityKind::superweapon_hack};
     for (const auto kind : kinds) {
         if (policy.kind_restricted && policy.kind_restricted(target, kind)) continue;
         std::vector<ObjectId> pending{selected->id};

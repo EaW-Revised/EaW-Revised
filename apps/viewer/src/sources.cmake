@@ -21,6 +21,7 @@ set(EAWR_VIEWER_SOURCES
     "${CMAKE_CURRENT_LIST_DIR}/viewer_host_report.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/viewer_host_report_scene.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/model_preview.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/shader_activation_owner.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/camera_binding_config.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/camera_binding_tokens.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/camera_binding_values.cpp"

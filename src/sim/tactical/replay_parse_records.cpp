@@ -60,7 +60,22 @@ core::Result<void> parse_commands(
                 logical_path);
         }
         std::size_t roster_bytes{};
-        if (opcode == detail::opcode_battle_control) {
+        if (opcode == detail::opcode_land_garrison) {
+            LandGarrisonPayload garrison;
+            std::uint32_t garrison_reserved{};
+            if (!reader.read_u64(garrison.host) || !reader.read_u32(garrison.bone)
+                || !reader.read_u32(garrison_reserved) || garrison_reserved != 0)
+                return fail<Parsed>(diagnostic_codes::invalid_command, "invalid land-garrison payload" + at, logical_path);
+            command.payload = garrison;
+        } else if (opcode == detail::opcode_land_unload) {
+            LandUnloadPayload unload;
+            std::uint32_t all{}, unload_reserved{};
+            if (!reader.read_u64(unload.occupant) || !reader.read_u32(all) || all > 1
+                || !reader.read_u32(unload_reserved) || unload_reserved != 0)
+                return fail<Parsed>(diagnostic_codes::invalid_command, "invalid land-unload payload" + at, logical_path);
+            unload.all = all != 0;
+            command.payload = unload;
+        } else if (opcode == detail::opcode_battle_control) {
             BattleControlPayload control;
             std::uint32_t version{}, count{};
             if (!reader.read_u32(control.departed.value) || !reader.read_u32(version)

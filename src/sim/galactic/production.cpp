@@ -1,6 +1,7 @@
 #include "eawr/sim/galactic/production.hpp"
 #include "eawr/sim/galactic/income.hpp"
 #include "session_impl.hpp"
+#include "eawr/core/gc_profile.hpp"
 #include "encoding.hpp"
 #include "native_population_projection.hpp"
 #include "native_production_admission.hpp"
@@ -10,6 +11,7 @@
 #include <cassert>
 #include <limits>
 #include <map>
+#include <optional>
 #include <set>
 #include <string>
 
@@ -170,6 +172,18 @@ core::Result<GalacticSession::ProductionLockReceipt> GalacticSession::apply_prod
     };
     if (!registered(write.unlock) || !registered(write.lock))
         return Result::failure(detail::diagnostic(diagnostic_codes::invalid_setup, "production lock names an unregistered type"));
+    // A technology notice can call back into the world before this write is published. Preserve the
+    // preceding publication for that callback even when earlier locks were grouped.
+    if (impl.production_lock_batch && impl.production_lock_publication_pending && write.slicer_check
+        && account->current_tech < account->maximum_tech) {
+        const bool remains_after_unlock = std::any_of(registry.begin(), registry.end(), [&](const auto& type) {
+            return type.initially_locked && type.slicer_unlockable && type.tech <= account->current_tech
+                && std::binary_search(type.affiliated_players.begin(), type.affiliated_players.end(), write.player)
+                && type.type != write.unlock
+                && !std::binary_search(player->unlocked.begin(), player->unlocked.end(), type.type);
+        });
+        if (!remains_after_unlock) { end_production_lock_batch(); begin_production_lock_batch(); }
+    }
     std::vector<std::uint8_t> bytes;
     detail::put_u32(bytes, write.player); detail::put_u64(bytes, write.unlock); detail::put_u64(bytes, write.lock);
     detail::put_u8(bytes, write.slicer_check ? 1 : 0); detail::put_i64(bytes, account->current_tech);
@@ -202,10 +216,24 @@ core::Result<GalacticSession::ProductionLockReceipt> GalacticSession::apply_prod
             receipt.tech_incremented = true;
         }
     }
-    const auto events = impl.snapshot->events();
-    impl.snapshot = impl.make_snapshot({events.begin(), events.end()});
+    if (impl.production_lock_batch) impl.production_lock_publication_pending = true;
+    else {
+        const auto events = impl.snapshot->events();
+        impl.snapshot = impl.make_snapshot({events.begin(), events.end()});
+    }
     return Result::success(receipt);
 }
+void GalacticSession::begin_production_lock_batch() { impl_->production_lock_batch = true; }
+void GalacticSession::end_production_lock_batch() {
+    auto& impl = *impl_;
+    if (impl.production_lock_publication_pending) {
+        const auto events = impl.snapshot->events();
+        impl.snapshot = impl.make_snapshot({events.begin(), events.end()});
+        impl.production_lock_publication_pending = false;
+    }
+    impl.production_lock_batch = false;
+}
+std::uint64_t GalacticSession::production_offer_rebuild_count() const noexcept { return impl_->production_offer_rebuilds; }
 core::Result<std::int64_t> GalacticSession::increment_technology(PlayerId id) {
     using Result = core::Result<std::int64_t>;
     if (impl_->failed || !impl_->economy)
@@ -1142,17 +1170,31 @@ GalacticSession::Impl::ProductionOfferInputs GalacticSession::Impl::production_o
         || account == economy->players.end() || account->player != local) return result;
     // WGUI-91: a raw production payload never supplies local-control knowledge.
     // Index once, then query only the local player's admitted producer rows.
+    std::optional<gc_profile::Scope> part(std::in_place, gc_profile::Phase::off_visible);
     for (const auto& row : observations)
         if (row.player == local && row.discovered && row.knowledge.ownership
             && row.known_allegiance == std::optional(local)) result.visible.push_back(row.planet);
     std::sort(result.visible.begin(), result.visible.end());
     result.visible.erase(std::unique(result.visible.begin(), result.visible.end()), result.visible.end());
+    part.emplace(gc_profile::Phase::off_fleets);
     for (const auto& fleet : fleet_inputs) {
         if (!std::binary_search(result.visible.begin(), result.visible.end(), fleet.orbit)) continue;
         result.fleets.insert(result.fleets.end(), {fleet.id, fleet.owner, fleet.orbit, fleet.motion.transit ? 1U : 0U, fleet.members.size()});
         for (const auto& member : fleet.members) result.fleets.push_back(member.type);
     }
-    if (income) result.reductions = production_reduction_sources(live_income_inputs(), owners);
+    part.emplace(gc_profile::Phase::off_reductions);
+    if (income) {
+        const auto& live = live_income_inputs();
+        const std::pair key{income_gather_generation, section_generation[static_cast<std::size_t>(StateSection::planets)]};
+        if (reduction_sources_key != key) {
+            reduction_sources_cache = production_reduction_sources(live, owners);
+            reduction_sources_key = key;
+        } else if (verify_cached_hash && reduction_sources_cache != production_reduction_sources(live, owners)) {
+            throw std::runtime_error("galactic cached production reduction sources differ from an independent recomputation");
+        }
+        result.reductions = reduction_sources_cache;
+    }
+    part.emplace(gc_profile::Phase::off_rest);
     auto& bytes = result.admission;
     detail::put_u32(bytes, local);
     detail::put_u64(bytes, next_id);
@@ -1162,7 +1204,9 @@ GalacticSession::Impl::ProductionOfferInputs GalacticSession::Impl::production_o
     if (!player->pay_as_you_go) detail::put_i64(bytes, account->credits.raw());
     detail::put_i64(bytes, account->current_tech);
     detail::put_i64(bytes, account->maximum_tech);
+    part.emplace(gc_profile::Phase::off_menu);
     detail::encode_production_menu_inputs(bytes, *production, local, result.visible);
+    part.emplace(gc_profile::Phase::off_rest);
     // Reservations include this player's queues on every producer, including hidden ones.
     const auto reservations = production_reservations(*production, local);
     detail::put_i64(bytes, reservations.population.raw());
@@ -1255,8 +1299,9 @@ std::vector<ObservedProductionOffer> GalacticSession::Impl::observed_production_
                 const ProductionAdmissionInputs admission_inputs{*production, planet, *player, *account, fleet_inputs,
                     owner->owner, setup.census ? &*total : nullptr, next_id, live_object_count, &reservations, unlocks};
                 row.admission = production_admission(admission_inputs, &adjusted.value(), original.domain);
-                row.current = queried_admission(admission_inputs, &adjusted.value(), original.domain,
-                    ProductionQuery::menu) == ProductionAdmission::allowed;
+                row.capability = queried_admission(admission_inputs, &adjusted.value(), original.domain,
+                    ProductionQuery::menu);
+                row.current = row.capability == ProductionAdmission::allowed;
                 row.population_fits = production_population_fits(admission_inputs, adjusted.value());
             }
             rows.push_back(std::move(row));

@@ -11,6 +11,8 @@
 #include "startup_trace.hpp"
 #include "galactic/gc_setup_memory.hpp"
 #include "eawr/presentation/render_categories.hpp"
+#include "eawr/presentation/hull_batching.hpp"
+#include "eawr/platform/saved_games.hpp"
 #include "ui/build_label.hpp"
 #include <chrono>
 #include <sstream>
@@ -127,6 +129,9 @@ void ViewerHost::_ready() try {
             return;
         }
     }
+    // Instanced submission of identical rest-pose hull pieces is on unless the launch asks for it off.
+    hull_batching::enabled = hull_batching::launch_state(arguments.has(hull_batching::off_argument));
+    UtilityFunctions::print(String("EAWR instanced hulls: ") + hull_batching::state_name(hull_batching::enabled));
     render_categories::enabled = arguments.has("--eawr-render-counters") || render_categories::ablation != "off";
     if (render_categories::enabled) RenderingServer::get_singleton()->connect("frame_post_draw",
         callable_mp(this, &ViewerHost::record_render_categories));
@@ -303,8 +308,11 @@ void ViewerHost::_ready() try {
 
     if (!options_->skirmish_setup && !options_->front_end && (!options_->report_path.empty() || options_->startup_metrics))
         startup_trace.begin(false, process_start);
+    // Resolve mounted mod identities once during viewer startup, before any screen opens.
+    prime_mounted_mods(options_->game_root);
     if (options_->skirmish_setup || options_->front_end) {
-        ready_battle_setup();
+        if (options_->front_end) begin_front_end_startup();
+        else ready_battle_setup();
         return;
     }
 
@@ -319,7 +327,7 @@ void ViewerHost::_ready() try {
     stop(2);
 }
 
-void ViewerHost::ready_battle_setup() {
+void ViewerHost::begin_front_end_startup() {
     // The front end draws the menus itself and takes captures of its own; the setup screen
     // behind it only captures in the stand-alone mode.
     const bool front_end_fixture = options_->front_end && (!options_->capture_path.empty()
@@ -331,6 +339,23 @@ void ViewerHost::ready_battle_setup() {
         options_->front_end ? std::filesystem::path{} : options_->capture_path,
         options_->profile, options_->cache_shaders, live_front_end, front_end_fixture});
     MenuTimeline::mark("setup_construct");
+    if (!skirmish_setup_->prepare_startup(*this)) {
+        status_message_ = skirmish_setup_->failure();
+        static_cast<void>(write_report("failed"));
+        stop(2);
+        return;
+    }
+    MenuTimeline::mark("startup_splash_prepared");
+    startup_splash_pending_ = true;
+}
+
+void ViewerHost::ready_battle_setup() {
+    if (!skirmish_setup_) {
+        skirmish_setup_ = std::make_unique<SkirmishSetupMode>(SkirmishSetupMode::Options{
+            options_->game_root, options_->mod_root, options_->report_path, options_->capture_path,
+            options_->profile, options_->cache_shaders, false, false});
+        MenuTimeline::mark("setup_construct");
+    }
     if (!skirmish_setup_->ready(*this)) {
         status_message_ = skirmish_setup_->failure();
         static_cast<void>(write_report("failed"));
@@ -345,12 +370,10 @@ void ViewerHost::ready_battle_setup() {
         auto front_options = FrontEndMode::from_command_line(
             options_->capture_path, options_->game_root, options_->mod_root, options_->profile);
         // The campaign hand-offs: a refused start owns only its own subtree and leaves the menu usable.
-        prime_mounted_mods(options_->game_root);
         const auto start_galactic = [this](GalacticMode::Options campaign_options) {
             register_gc_setup_memory(skirmish_setup_->content());
             campaign_options.game_root = options_->game_root;
             campaign_options.mod_root = options_->mod_root;
-            campaign_options.mounted_mods = mounted_mod_description();
             auto* campaign_host = memnew(Node3D);
             add_child(campaign_host);
             auto campaign = std::make_unique<GalacticMode>(std::move(campaign_options));
@@ -365,7 +388,13 @@ void ViewerHost::ready_battle_setup() {
             galactic_host_ = campaign_host;
             return std::string{};
         };
-        front_options.saved_game_launcher = [start_galactic](const presentation::ui::SavedGameRequest& request) {
+        front_options.saved_game_launcher = [this, start_galactic](const presentation::ui::SavedGameRequest& request) {
+            const auto listed = platform::list_saved_games(request.directory);
+            if (!listed) return listed.error().message;
+            const auto slot = std::find_if(listed.value().begin(), listed.value().end(),
+                [&](const auto& entry) { return entry.name == request.name; });
+            if (slot == listed.value().end()) return std::string("The selected save no longer exists.");
+            if (slot->skirmish) return queue_saved_battle(request);
             auto campaign_options = GalacticMode::from_command_line();
             campaign_options.restore_save = GalacticMode::Options::RestoreSave{request.directory, request.name};
             return start_galactic(std::move(campaign_options));
@@ -394,6 +423,7 @@ void ViewerHost::ready_battle_setup() {
         MenuTimeline::mark("front_end_ready");
         MenuTimeline::report("front_end_ready");
     }
+    skirmish_setup_->dismiss_startup();
     skirmish_setup_->start_button()->connect("pressed", callable_mp(this, &ViewerHost::on_skirmish_start));
     set_process_input(true);
     set_process_unhandled_input(true);
@@ -480,7 +510,8 @@ bool ViewerHost::ready_requested_mode() {
             .camera_zoom = options_->camera_zoom_requested
                 ? std::optional<float>(options_->camera_zoom) : std::nullopt,
             .setup = {}, .content = {}, .shaders = options_->cache_shaders ? std::make_shared<GodotShaderCache>() : nullptr,
-         .controller_names = {}, .observer_names = {}, .borrowed_battle = {}, .borrowed_feed = {}, .lan = {}, .replay_input = {}, .attract = {}});
+         .controller_names = {}, .observer_names = {}, .borrowed_battle = {}, .borrowed_feed = {}, .lan = {}, .replay_input = {},
+         .battle_save_input = {}, .battle_save_camera = {}, .battle_load = {}, .attract = {}});
         if (!map_mode_->ready(*this)) {
             stop(2);
             return true;

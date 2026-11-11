@@ -203,7 +203,7 @@ struct BuiltinText final {
     std::string_view key;
     std::u16string_view value;
 };
-constexpr std::array<BuiltinText, 20> builtin_texts{{
+constexpr std::array<BuiltinText, 21> builtin_texts{{
     // ADR-020 project caption; an authored language database overrides this default.
     {"TEXT_EAWR_GIFT_UNITS", u"Gift"},
     {"TEXT_EAWR_TWEAKS", u"Tweaks"},
@@ -215,6 +215,7 @@ constexpr std::array<BuiltinText, 20> builtin_texts{{
     {"TEXT_EAWR_AUTOMATIC", u"Automatic"},
     {"TEXT_EAWR_SEPARATE", u"Separate (default)"},
     {"TEXT_EAWR_SELECTION_HOTKEYS", u"Selection hotkeys"},
+    {"TEXT_EAWR_FIT_RADAR_TO_GALAXY", u"Fit radar to galaxy"},
     {"TEXT_EAWR_ANIMATED_LOADING_BACKGROUND", u"Animated loading screen background"},
     {"TEXT_EAWR_HOVER_OWNER_NAMES", u"Show player names when hovering units"},
     {"TEXT_EAWR_REINFORCEMENT_AREAS", u"Reinforcement areas only while placing"},

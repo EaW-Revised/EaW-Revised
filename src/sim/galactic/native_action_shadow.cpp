@@ -311,6 +311,7 @@ public:
     const GalacticClock& clock;
     const bool system_hold;
     EntityId& next_id;
+    const EntityId native_id_end; // exclusive end of a lane window's identity block; max for the live world
     std::size_t& live_object_count;
     std::shared_ptr<const MovementSetup> movement_inputs;
     bool population_stale{};
@@ -386,7 +387,7 @@ public:
     } detached_units;
     explicit FleetOwner(Data& data)
         : data_(data), setup{data.base->fleet_control(), data.base->movement()}, seats(data.base->seats()),
-          clock(data.base->clock()), system_hold(data.system_hold), next_id(data.next_id), live_object_count(data.live_objects),
+          clock(data.base->clock()), system_hold(data.system_hold), next_id(data.next_id), native_id_end(data.range_end ? data.range_end : std::numeric_limits<EntityId>::max()), live_object_count(data.live_objects),
           movement_inputs(data.movement),
           graph(data.graph.get()), native_movement_listener(data.movement_listener), registry{*this}, fleets{*this, {}}, planets{*data.base}, detached_units(data) {}
     bool raid_qualified(FleetId id, PlanetId destination) const {
@@ -414,7 +415,7 @@ public:
             if (row != *before) {
                 data_.actor_rows[id] = std::move(row); ++data_.observer_generation;
                 ++data_.work.copied_actor_rows;
-                data_.actor_changes.push_back({NativeActorChange::Kind::changed, id, 0, {}, {}, {}});
+                data_.actor_changes.push_back({NativeActorChange::Kind::changed, id, 0, {}, {}, {}, {}, {}});
             }
         }
         if (const auto* contents = data_.contents(id))
@@ -433,13 +434,13 @@ public:
             }
         }
         data_.actor_rows[id] = std::move(row); ++data_.observer_generation;
-        data_.actor_changes.push_back({NativeActorChange::Kind::created, id, 0, {}, {}, {}});
+        data_.actor_changes.push_back({NativeActorChange::Kind::created, id, 0, {}, {}, {}, {}, {}});
     }
     void lose_actor(EntityId id) {
         if (const auto* row = data_.contents(id)) for (const auto& child : row->children) lose_actor(child.id);
         if (!data_.actor(id)) return;
         data_.actor_rows[id] = std::nullopt;
-        data_.actor_changes.push_back({NativeActorChange::Kind::lost, id, 0, {}, {}, {}});
+        data_.actor_changes.push_back({NativeActorChange::Kind::lost, id, 0, {}, {}, {}, {}, {}});
     }
     void insert(const Fleet& row) {
         auto motion = row.motion;
@@ -532,7 +533,7 @@ public:
             ? std::optional<std::span<const CensusObject>>(records) : std::nullopt, *movement_inputs, &contents);
     }
     void finish() {
-        if (data_.independent_player && data_.next_id > data_.range_end)
+        if (data_.range_end && data_.next_id > data_.range_end)
             throw std::runtime_error("native player identity block exhausted");
         for (auto& [id, row] : loaded_) {
             const auto* previous = data_.fleet(id);
@@ -589,7 +590,7 @@ public:
     ControlOwner(Data& data, std::span<const PlanetId> selected)
         : FleetOwner(data), input_(data.view()), completed_tick(data.base->completed_tick()), actor_records(data), native_invasions_enabled(data.invasions_enabled),
           next_native_invasion(data.next_invasion),
-          native_invasion_range_end(data.independent_player ? data.invasion_range_end : std::numeric_limits<std::uint64_t>::max()),
+          native_invasion_range_end(data.invasion_range_end ? data.invasion_range_end : std::numeric_limits<std::uint64_t>::max()),
           native_invasion_transport_count(data.invasion_transports),
           native_invasion_queue(data.new_invasion_queue), native_invasions{data} {
         if (const auto& schema = input_->control()) {
@@ -836,8 +837,11 @@ core::Result<GalacticSession::NativeProductionReceipt> GalacticSession::NativeAc
         || request.mark_cost->raw() % math::Fixed::scale != 0)
         return invalid<NativeProductionReceipt>("native mark requires the resolved null-location integer type cost");
     const auto& offer = *prepared.offer; const auto id = data_->next_id;
-    if (data_->independent_player && id >= data_->range_end)
-        return invalid<NativeProductionReceipt>("native player identity block exhausted");
+    if (data_->range_end && id >= data_->range_end) {
+        const NativeProductionReceipt receipt{ProductionAdmission::resource_limit, 0, offer.price};
+        data_->record_request(Data::ProductionRequest{request, receipt});
+        return Result::success(receipt);
+    }
     if (auto marked = notify({NativeProductionNotice::Kind::marked, request.player, id, *request.mark_cost, offer.price, offer.seconds, prepared.owner}); !marked)
         return Result::failure(marked.error());
     auto row = current->production()->planets[prepared.planet_index];
@@ -869,7 +873,7 @@ std::span<const GalacticSession::NativeActionShadow::IntentRecord> GalacticSessi
 }
 core::Result<GalacticSession::NativeActionShadow> GalacticSession::NativeActionShadow::for_player(
     PlayerId player, std::size_t max_requests) const {
-    if (data_->independent_player || data_->tail || !data_->player || !player || player <= data_->player || !max_requests || max_requests > galactic_max_objects
+    if (data_->independent_player || data_->tail || !data_->player || !player || (!data_->free_players && player <= data_->player) || !max_requests || max_requests > galactic_max_objects
         || std::none_of(data_->base->players().begin(), data_->base->players().end(),
             [player](const auto& row) { return row.player_id == player; }))
         return invalid<NativeActionShadow>("native player layers require ascending known players and bounded requests");
@@ -878,6 +882,8 @@ core::Result<GalacticSession::NativeActionShadow> GalacticSession::NativeActionS
     state->system_hold = data_->system_hold;
     state->inherit_reads(data_);
     state->player = player; state->first_id = state->next_id = data_->next_id;
+    state->range_end = data_->range_end; state->invasion_range_end = data_->invasion_range_end;
+    state->intent_sink = data_->intent_sink; state->free_players = data_->free_players;
     state->live_objects = data_->live_objects; state->max_requests = max_requests;
     state->can_create = data_->can_create; state->victory = data_->victory;
     state->graph = data_->graph; state->movement = data_->movement; state->movement_listener = data_->movement_listener;
@@ -922,6 +928,15 @@ core::Result<GalacticSession::NativeActionShadow> GalacticSession::NativeActionS
 }
 const GalacticSession::NativeActionShadow::Work& GalacticSession::NativeActionShadow::work() const noexcept { return data_->work; }
 std::span<const GalacticSession::NativeActorChange> GalacticSession::NativeActionShadow::actor_changes() const noexcept { return data_->actor_changes; }
+core::Result<void> GalacticSession::NativeActionShadow::stage_actor_ai_usage(EntityId id, std::optional<bool> prevent,
+    std::optional<bool> prefer_ground) {
+    const auto* row = data_->actor(id);
+    if (!row) row = created_object(id);
+    if ((!prevent && !prefer_ground) || !row) return invalid<void>("an AI-usage write needs an actor of this batch's view");
+    detach();
+    data_->actor_changes.push_back({NativeActorChange::Kind::changed, id, 0, {}, {}, {}, prevent, prefer_ground});
+    return core::Result<void>::success();
+}
 const Planet* GalacticSession::NativeActionShadow::planet(PlanetId id) const {
     const auto rows = data_->base->planets();
     const auto at = std::lower_bound(rows.begin(), rows.end(), id, [](const auto& row, auto key) { return row.id < key; });
@@ -986,7 +1001,7 @@ core::Result<math::Fixed> GalacticSession::NativeActionShadow::add_credits(Playe
     data_->victory = std::move(staged_victory);
     if (victory_pending) data_->events.push_back({data_->base->completed_tick(), GalacticEventKind::victory_pending, {}, id, 0,
         static_cast<std::uint64_t>(VictoryKind::credits), GalacticRejectReason::none});
-    if (data_->player && (!data_->immediate_batch || data_->independent_player) && !data_->suppress_cash_request) data_->record_request(Data::CashRequest{id, delta, multiplier, actual.value()});
+    if (data_->player && (!data_->immediate_batch || data_->independent_player || data_->free_players) && !data_->suppress_cash_request) data_->record_request(Data::CashRequest{id, delta, multiplier, actual.value()});
     return actual;
 }
 core::Result<std::vector<EntityId>> GalacticSession::NativeActionShadow::create_force(const NativeProductionRequest& request,
@@ -1088,8 +1103,8 @@ core::Result<std::vector<EntityId>> GalacticSession::NativeActionShadow::create_
         base.control()->max_ground_forces, *location->orbit, *location->contents, skip_reader};
     auto made = builder(view, data_->next_id);
     if (!made) return Result::failure(made.error());
-    if (data_->independent_player && made.value().next_id > data_->range_end)
-        return invalid<std::vector<EntityId>>("native player identity block exhausted");
+    if (data_->range_end && made.value().next_id > data_->range_end)
+        return Result::success({});
     auto actors = validate_native_force(request, made.value(), data_->next_id, data_->live_objects,
         *base.production()->nested_creation, [&](EntityId id) {
             const auto* private_actor = created_object(id);
@@ -1188,7 +1203,9 @@ core::Result<std::vector<EntityId>> GalacticSession::NativeActionShadow::create_
     const auto births = ordered_births(placement.originals).value();
     data_->actor_changes.insert(data_->actor_changes.end(), births.begin(), births.end());
     data_->forces.push_back(std::make_shared<const Data::Force>(Data::Force{request, std::move(made).value()}));
-    if (data_->player && (!data_->immediate_batch || data_->independent_player)) data_->record_request(Data::ForceRequest{data_->forces.back(), actors.value()});
+    // An immediate batch inside the async lane (free_players) keeps its force and cash as intents too: the lane barrier is
+    // discarded and the world takes only intents, so an unrecorded force would leave the AI with an actor the world never got.
+    if (data_->player && (!data_->immediate_batch || data_->independent_player || data_->free_players)) data_->record_request(Data::ForceRequest{data_->forces.back(), actors.value()});
     data_->publication.reset();
     return actors;
 }

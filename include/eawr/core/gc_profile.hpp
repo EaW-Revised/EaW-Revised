@@ -37,6 +37,12 @@ enum class Phase : std::size_t {
     world_visibility, world_economy, world_observed, world_input, world_view, world_release,
     compare_production, view_moved, freestore_publish, selection, goal_record_maintenance, usability_record_maintenance,
     barrier_commit, layer_replay, shadow_view, policy_snapshot,
+    // prepare_connectivity attribution (serial, wall): the usability provider's publication, by step.
+    conn_stealth, conn_rebind, conn_check, conn_par_setup, conn_par_knowledge, conn_par_access, conn_par_refresh,
+    conn_par_sites, conn_par_players, conn_par_tail, conn_serial,
+    // tick_income / snap_offers attribution (serial, wall).
+    inc_gather, inc_phase, inc_commit,
+    off_visible, off_fleets, off_reductions, off_menu, off_rest, off_compare, off_rebuild,
     // Tick-cost attribution scopes (serial, wall): the galactic session step and the script host around it.
     tick_galaxy_step, tick_commands, tick_discovery, tick_gather, tick_movement, tick_control, tick_income,
     tick_production, tick_conflict_tail, tick_fiscal, tick_victory, tick_population, tick_state_hash,
@@ -53,6 +59,10 @@ inline constexpr std::array<std::string_view, static_cast<std::size_t>(Phase::co
     "world_visibility", "world_economy", "world_observed", "world_input", "world_view", "world_release",
     "compare_production", "view_moved", "freestore_publish", "selection", "goal_record_maintenance", "usability_record_maintenance",
     "barrier_commit", "layer_replay", "shadow_view", "policy_snapshot",
+    "conn_stealth", "conn_rebind", "conn_check", "conn_par_setup", "conn_par_knowledge", "conn_par_access", "conn_par_refresh",
+    "conn_par_sites", "conn_par_players", "conn_par_tail", "conn_serial",
+    "inc_gather", "inc_phase", "inc_commit",
+    "off_visible", "off_fleets", "off_reductions", "off_menu", "off_rest", "off_compare", "off_rebuild",
     "tick_galaxy_step", "tick_commands", "tick_discovery", "tick_gather", "tick_movement", "tick_control", "tick_income",
     "tick_production", "tick_conflict_tail", "tick_fiscal", "tick_victory", "tick_population", "tick_state_hash",
     "tick_actor_delivery", "tick_story_service", "tick_game_step",

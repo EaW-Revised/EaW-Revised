@@ -58,6 +58,10 @@ set_tests_properties(galactic_ai_hash_baseline_diagnostic PROPERTIES LABELS "gam
 set_tests_properties(galactic_ai_campaign_release_stock PROPERTIES LABELS "game-data;release-gate" ENVIRONMENT "EAWR_VERIFY_GALACTIC_HASH=1")
 set_tests_properties(galactic_ai_campaign_digest_mature_stock PROPERTIES LABELS "game-data;release-gate;benchmark" ENVIRONMENT "EAWR_VERIFY_GALACTIC_HASH=0")
 set_tests_properties(galactic_ai_campaign_release_stock galactic_ai_campaign_digest_mature_stock PROPERTIES TIMEOUT 7200 RUN_SERIAL TRUE)
+# The same digest on the synchronous reference schedule: the comparison arm for async AI outcome parity.
+eawr_add_game_data_test(NAME galactic_ai_campaign_digest_mature_reference COMMAND galactic_ai_campaign_tests --release-benchmark "${CMAKE_CURRENT_BINARY_DIR}/campaign-gate-benchmark-reference")
+set_tests_properties(galactic_ai_campaign_digest_mature_reference PROPERTIES LABELS "game-data;benchmark;batch-only" TIMEOUT 7200 RUN_SERIAL TRUE
+    ENVIRONMENT "EAWR_VERIFY_GALACTIC_HASH=0;EAWR_GCAI_TEST_SCHEDULE=reference")
 # The 27,000-frame correctness gate can take about 2.5 hours with full hash
 # verification; allow four hours without changing its assertions or frame limit.
 set_tests_properties(galactic_ai_campaign_release_stock PROPERTIES TIMEOUT 14400)
@@ -94,3 +98,7 @@ eawr_add_game_data_test(NAME galactic_ai_tick_profile_raw_steady COMMAND galacti
 set_tests_properties(galactic_ai_tick_profile_raw_steady PROPERTIES LABELS "game-data;benchmark;batch-only" TIMEOUT 14400
     RUN_SERIAL TRUE SKIP_RETURN_CODE 77
     ENVIRONMENT "EAWR_VERIFY_GALACTIC_HASH=0;EAWR_TICK_PROFILE_MOD_ID=1129810972;EAWR_TICK_PROFILE_CAMPAIGN=Sandbox_The_Clone_Wars_Rebel;EAWR_TICK_PROFILE_STATS_FROM=9000")
+
+# Remake co-op and solo checkpoint capacity.
+eawr_add_game_data_test(NAME galactic_remake_save_probe COMMAND galactic_ai_campaign_tests --remake-save-probe 3000)
+set_tests_properties(galactic_remake_save_probe PROPERTIES LABELS "game-data" TIMEOUT 14400 RUN_SERIAL TRUE SKIP_RETURN_CODE 77 ENVIRONMENT "EAWR_VERIFY_GALACTIC_HASH=0")

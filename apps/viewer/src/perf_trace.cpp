@@ -1,3 +1,5 @@
+#include <godot_cpp/variant/utility_functions.hpp>
+#include "perf_movers.hpp"
 #include "perf_trace.hpp"
 #include "particle_merge.hpp"
 #include "particle_workers.hpp"
@@ -26,12 +28,16 @@ bool PerfTrace::particle_batch_census_{};
 bool PerfTrace::render_timing_{true};
 bool PerfTrace::detailed_sim_profile_{};
 bool PerfTrace::sim_cadence_profile_{};
+std::size_t PerfTrace::movers_{};
+std::vector<std::uint64_t> PerfTrace::screenshot_frames_{};
 
 std::optional<std::string> PerfTrace::parse(const PackedStringArray& arguments, std::string& error) {
     fine_particle_timings_=false;
     particle_batch_census_=false;
     detailed_sim_profile_=false;
     sim_cadence_profile_=false;
+    movers_=0;
+    screenshot_frames_.clear();
     render_timing_=true;
     particles::EffectRegistry::set_stream_bucketing_default(true);
     particles::EffectRegistry::set_clean_present_default(true);
@@ -39,6 +45,29 @@ std::optional<std::string> PerfTrace::parse(const PackedStringArray& arguments, 
     for (int64_t index = 0; index < arguments.size(); ++index) {
         if (String(arguments[index]) == String("--eawr-sim-phase-profile")) detailed_sim_profile_=true;
         if (String(arguments[index]) == String("--eawr-sim-cadence-profile")) sim_cadence_profile_=true;
+        if (String(arguments[index]) == String("--eawr-perf-movers")) {
+            // Report path only: the count of followed movers, clamped to perf_movers::max_movers; a missing or non-numeric
+            // value leaves the movers trace off and says so.
+            if (index + 1 >= arguments.size() || !String(arguments[index + 1]).is_valid_int() || String(arguments[index + 1]).to_int() < 0) {
+                godot::UtilityFunctions::print("EAWR --eawr-perf-movers expects a count of 0 or more; the movers trace stays off");
+            } else {
+                const auto requested = String(arguments[index + 1]).to_int();
+                movers_ = perf_movers::clamp_count(requested);
+                if (requested > static_cast<int64_t>(perf_movers::max_movers))
+                    godot::UtilityFunctions::print("EAWR --eawr-perf-movers clamped to ", static_cast<int64_t>(perf_movers::max_movers));
+            }
+        }
+        if (String(arguments[index]) == String("--eawr-perf-screenshot-frames")) {
+            // Report path only: the trace frames whose picture is written beside the trace (a bad list leaves it off and says so).
+            std::string list_error;
+            const auto frames = index + 1 < arguments.size()
+                ? perf_movers::parse_screenshot_frames(String(arguments[index + 1]).utf8().get_data(), list_error)
+                : std::optional<std::vector<std::uint64_t>>{};
+            if (frames) screenshot_frames_ = *frames;
+            else godot::UtilityFunctions::print(list_error.empty()
+                ? String("EAWR --eawr-perf-screenshot-frames expects trace frame numbers a,b,c; no screenshots")
+                : String("EAWR ") + String::utf8(list_error.c_str()) + String("; no screenshots"));
+        }
         if (String(arguments[index]) == String("--eawr-particle-fine-timings")) fine_particle_timings_=true;
         if (String(arguments[index]) == String("--eawr-particle-batch-census")) particle_batch_census_=true;
         if (String(arguments[index]) == String("--eawr-particle-merge-additive")) {
@@ -60,15 +89,33 @@ std::optional<std::string> PerfTrace::parse(const PackedStringArray& arguments, 
         }
         return std::string(String(arguments[index + 1]).utf8().get_data());
     }
+    if (!screenshot_frames_.empty()) {
+        godot::UtilityFunctions::print("EAWR --eawr-perf-screenshot-frames needs --eawr-perf-trace; no screenshots");
+        screenshot_frames_.clear();
+    }
+    if (movers_ > 0) {
+        godot::UtilityFunctions::print("EAWR --eawr-perf-movers needs --eawr-perf-trace; no movers file");
+        movers_ = 0;
+    }
     return std::nullopt;
 }
 
 bool PerfTrace::open(const std::string& path, std::string& error) {
     startup_trace.trace_path(path);
+    path_ = path;
     output_.open(path, std::ios::binary | std::ios::trunc);
     if (!output_) {
         error = "--eawr-perf-trace: cannot write " + path;
         return false;
+    }
+    if (movers_ > 0) {
+        movers_output_.open(path + ".movers.csv", std::ios::binary | std::ios::trunc);
+        if (!movers_output_) {
+            error = "--eawr-perf-movers: cannot write " + path + ".movers.csv";
+            return false;
+        }
+        // The column list and its meaning live in perf_movers.hpp (base_columns, row_columns, frame_columns).
+        movers_output_ << perf_movers::base_columns << ',' << perf_movers::row_columns << ',' << perf_movers::frame_columns << '\n';
     }
     auto* tree = Object::cast_to<SceneTree>(Engine::get_singleton()->get_main_loop());
     if (tree != nullptr && tree->get_root() != nullptr) {
@@ -81,7 +128,7 @@ bool PerfTrace::open(const std::string& path, std::string& error) {
                ",emitter_owner_setup_ms,emitter_owner_fading_ms,emitter_owner_catchup_ms,emitter_owner_update_ms,emitter_owner_place_ms,emitter_owner_brightness_ms,emitter_owner_registry_ms,emitter_owner_finish_ms,clone_retire_ms"
                ",effects_owner_setup_ms,effects_owner_lookup_ms,effects_owner_abilities_ms,effects_owner_contacts_ms,effects_owner_events_ms,effects_owner_projectiles_ms,effects_owner_advance_ms,effects_owner_finish_ms,effects_shield_cast_ms"
                ",effects_combat_events,effects_hit_events,effects_lifecycle_events,particle_retirement_ms"
-               ",sim_completed_tick,presentation_lag_ticks,sim_pacing_lag_ms,sim_discarded_wall_ms,ui_accessor_lock_wait_ms,ui_accessor_lock_phases,clock_valid,clock_newest,clock_before,clock_after,clock_advance,clock_delta,clock_rate,clock_target_rate,clock_running"
+               ",sim_completed_tick,presentation_lag_ticks,sim_pacing_lag_ms,sim_discarded_wall_ms,ui_accessor_lock_wait_ms,ui_accessor_lock_phases,clock_valid,clock_newest,clock_before,clock_after,clock_advance,clock_delta,clock_rate,clock_target_rate,clock_running,clock_frame_us,clock_newest_published_us"
                ",render_counters_enabled,render_counter_frame,render_counter_ms,visible_draws,shadow_draws,canvas_draws";
     for (const auto name : std::span{render_categories::names}.first(static_cast<std::size_t>(render_categories::Role::debris)))
         for (const auto metric : {"submitted", "retained", "eligible_casters", "retained_surfaces"})
@@ -92,7 +139,7 @@ bool PerfTrace::open(const std::string& path, std::string& error) {
         for (const auto metric : {"submitted", "retained", "eligible_casters", "retained_surfaces"})
             output_ << ',' << name << '_' << metric;
     render_churn::write_csv_header(output_);
-    output_ << ",slots_grown,slot_growth_ms,report_query_ms,report_nonquery_ms,report_render_query_ms,report_performance_query_ms,report_setup_query_ms,report_display_query_ms,sim_profile,lane_wall_ms,lane_start_delay_ms,lane_join_wait_ms,lane_violations"
+    output_ << ",slots_grown,slot_growth_ms,launch_preload_fallbacks,launch_read_bytes,report_query_ms,report_nonquery_ms,report_render_query_ms,report_performance_query_ms,report_setup_query_ms,report_display_query_ms,sim_profile,lane_wall_ms,lane_start_delay_ms,lane_join_wait_ms,lane_violations"
                ",lane_main_help_ms,lane_main_help_tasks,lane_retirement_ms,retire_destroys,retire_destroys_reused"
                ",retire_suspends,retire_suspends_terminal";
     if (render_categories::fighter_experiment()) {
@@ -215,7 +262,8 @@ void PerfTrace::frame(const Frame& frame) {
     output_ << ',' << (frame.clock_valid ? 1 : 0) << std::setprecision(17)
             << ',' << frame.clock_newest << ',' << frame.clock_before << ',' << frame.clock_after
             << ',' << frame.clock_advance << ',' << frame.clock_delta << ',' << frame.clock_rate
-            << ',' << frame.clock_target_rate << ',' << (frame.clock_running ? 1 : 0) << std::setprecision(3);
+            << ',' << frame.clock_target_rate << ',' << (frame.clock_running ? 1 : 0)
+            << ',' << frame.clock_frame_us << ',' << frame.clock_newest_published_us << std::setprecision(3);
     const auto& categories = render_categories::latest;
     output_ << ',' << (render_categories::enabled ? 1 : 0) << ',' << categories.frame << ',' << categories.sample_ms;
     for (const auto count : categories.viewport_draws) output_ << ',' << count;
@@ -226,7 +274,8 @@ void PerfTrace::frame(const Frame& frame) {
     for (const auto& role : std::span{categories.roles}.subspan(static_cast<std::size_t>(render_categories::Role::debris)))
         output_ << ',' << role.submitted << ',' << role.retained << ',' << role.eligible_casters << ',' << role.retained_surfaces;
     render_churn::write_csv_row(output_, render_churn::frame);
-    output_ << ',' << frame.slots_grown << ',' << frame.slot_growth_ms;
+    output_ << ',' << frame.slots_grown << ',' << frame.slot_growth_ms
+            << ',' << frame.launch_preload_fallbacks << ',' << frame.launch_read_bytes;
     if (fine_particle_timings_) {
         const double query_ms = render_query_ms + performance_query_ms + setup_query_ms + display_query_ms;
         const double report_ms = std::chrono::duration<double, std::milli>(Clock::now() - report_began).count();
@@ -269,6 +318,13 @@ void PerfTrace::frame(const Frame& frame) {
     for (const std::uint64_t value : frame.audio_digests) output_ << ',' << value;
     output_ << '\n';
     previous_report_end_ = Clock::now();
+}
+
+std::pair<int, int> PerfTrace::viewport_size() {
+    auto* tree = Object::cast_to<SceneTree>(Engine::get_singleton()->get_main_loop());
+    if (tree == nullptr || tree->get_root() == nullptr) return {0, 0};
+    const auto size = tree->get_root()->get_visible_rect().size;
+    return {static_cast<int>(size.x), static_cast<int>(size.y)};
 }
 
 } // namespace eawr::presentation::godot_backend

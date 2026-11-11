@@ -364,6 +364,8 @@ reserved (zero) and unit_count uint64 entity IDs, nonzero and strictly increasin
 | 26 | Reinforce with explicit facing (WR-X01) | uint64 type ID, three int64 point raw values, uint64 pool token (zero for ordinary admission), int64 yaw raw in [0, 360) degrees; no unit | 80 |
 | 33 | Battle control transition (ADR-020; OrderKind 27) | uint32 departed seat, CTRL policy v4 for exactly one faction; no unit list entries; engine provenance only | 64 + 16s + 8f |
 | 34 | Script invulnerable (TL-03; OrderKind 28) | uint32 enabled (0 or 1), uint32 reserved (zero); one or more listed units, a squadron also covering its members; script host only | 40 + 8n |
+| 35 | Land garrison | uint64 host, uint32 bone index, uint32 reserved (zero); listed units are entrants | 48 + 8n |
+| 36 | Land unload | uint64 occupant, uint32 all flag (0 or 1), uint32 reserved (zero); one listed host; occupant is zero exactly when all is set | 48 + 8n |
 
 The explicit-facing reinforcement command is an EAWR extension. Its facing drives both the arrival-lane placement sweep and the spawned unit's rotation and flight direction. Each drop carries the local player's chosen value; absence of a wheel choice retains opcodes 11/19 and the player's authored FoC facing, including their existing bytes. A present zero yaw is an explicit choice. Negative yaw and yaw at or above 360 degrees are rejected during command validation.
 
@@ -1438,6 +1440,12 @@ campaign admission.
 
 ## Cooperative battle controllers
 
+Tag 19 (`replay_extension_market_purchases`) is optional and requires a campaign setup. Its body is
+version 1, a u32 item count, then each item's u32 identity, u32 ability-name count and each name
+as u32 byte length plus bytes, followed by a u32 owner count and each owner's u32 player, u32
+purchase count and u32 item identities. Item order selects the first matching authored ability;
+owners retain their independent acquired sets (WGEP-145). Absent, purchase checking is bypassed.
+
 Tag 18 (`replay_extension_controllers`) is the optional controller foundation of ADR-020.
 It uses the existing uint16 tag/length framing and a version-4 body: uint32 version,
 uint32 seat count, then `(uint32 seat, player, kind, active)` rows in ascending seat order;
@@ -1543,7 +1551,7 @@ extensions are rejected. Policy-disabled replay and encoding bytes are unchanged
 
 ## Galactic checkpoint agreement
 
-The GC setup domain is `galactic-campaign-v2` and its `GCSU` payload requires wire version 2.
+The GC setup domain is `galactic-campaign-v2` and its `GCSU` payload requires wire version 3.
 After the roster's tick-zero claim it appends a u8 start discriminator (0 new campaign,
 1 checkpoint), u64 initial completed tick, and four 32-byte SHA-256 values: checkpoint file,
 restored state, sealed frontier and accepted mapping/terms. New campaigns require zero for

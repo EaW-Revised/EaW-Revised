@@ -21,6 +21,7 @@ template <> struct Fields<PublishedVisibilityRow> {
 
 struct Access {
     using State = TacticalSession::Impl;
+    static State& state_for_testing(TacticalSession& session) { return *session.impl_; }
     using CommandSource = State::CommandSource;
     using ConcentrateEffect = State::ConcentrateEffect;
     using PendingBlastDamage = State::PendingBlastDamage;

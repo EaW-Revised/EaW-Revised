@@ -38,11 +38,20 @@ struct StoryPlotLink {
         std::function<core::Result<void>(const sim::galactic::story::PlotCommand&)> apply);
 };
 
+// A holder a non-AI host fills after its scheduler is built (the galactic story scheduler's link).
+struct StoryPlotLinkHolder { std::shared_ptr<StoryPlotLink> link; };
+
+// Where the bindings find the loaded plots when they run; null while no plot engine is hosted.
+using StoryPlotAccess = std::function<const StoryPlotLink*()>;
+
 namespace detail {
 struct Host;
 void register_story_plot_bindings(authoritative::ScriptScheduler&, const std::shared_ptr<Host>&, std::vector<core::Diagnostic>& errors);
+// The same bindings for a host that is not the AI host (the galactic story scheduler's sub-plot scripts).
+void register_story_plot_bindings(authoritative::ScriptScheduler&, StoryPlotAccess, std::vector<core::Diagnostic>& errors);
 // The AI engine's commit of one staged request. Returns an empty string, or why the request was not applied.
 [[nodiscard]] std::string commit_story_plot(const Host&, const authoritative::ScriptCommand&);
+[[nodiscard]] std::string commit_story_plot(const StoryPlotLink*, const authoritative::ScriptCommand&);
 } // namespace detail
 
 } // namespace eawr::script::foc

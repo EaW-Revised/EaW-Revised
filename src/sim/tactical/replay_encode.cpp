@@ -95,6 +95,7 @@ core::Result<std::vector<std::uint8_t>> write_replay(const TacticalReplay& repla
             return fail<Bytes>(diagnostic_codes::resource_limit, "controller extension exceeds header framing limit", {});
     }
     Bytes campaign;
+    Bytes market_purchases;
     Bytes carriers;
     const auto carrier_count = std::count_if(replay.setup.units.begin(), replay.setup.units.end(),
         [](const auto& unit) { return unit.purchase_type != 0 || !unit.contained.empty(); });
@@ -119,7 +120,7 @@ core::Result<std::vector<std::uint8_t>> write_replay(const TacticalReplay& repla
     }
     if (replay.setup.campaign) {
         const auto& binding = *replay.setup.campaign;
-        sim::detail::append_u32(campaign, binding.reserve_order.empty() ? 5U : 6U); // account build-time scale; optional source pool order
+        sim::detail::append_u32(campaign, binding.reserve_order.empty() ? 5U : 6U);
         sim::detail::append_i64(campaign, binding.corruption_price_multiplier.raw());
         sim::detail::append_u32(campaign, static_cast<std::uint32_t>(binding.players.size()));
         for (const auto& p : binding.players) {
@@ -160,6 +161,24 @@ core::Result<std::vector<std::uint8_t>> write_replay(const TacticalReplay& repla
             sim::detail::append_u32(campaign, static_cast<std::uint32_t>(binding.reserve_order.size()));
             for (const auto id : binding.reserve_order) sim::detail::append_u64(campaign, id);
         }
+        if (binding.market_abilities) {
+            sim::detail::append_u32(market_purchases, 1);
+            sim::detail::append_u32(market_purchases, static_cast<std::uint32_t>(binding.market_abilities->items.size()));
+            for (const auto& item : binding.market_abilities->items) {
+                sim::detail::append_u32(market_purchases, item.item);
+                sim::detail::append_u32(market_purchases, static_cast<std::uint32_t>(item.abilities.size()));
+                for (const auto& name : item.abilities) {
+                    sim::detail::append_u32(market_purchases, static_cast<std::uint32_t>(name.size()));
+                    market_purchases.insert(market_purchases.end(), name.begin(), name.end());
+                }
+            }
+            sim::detail::append_u32(market_purchases, static_cast<std::uint32_t>(binding.market_abilities->owners.size()));
+            for (const auto& owner : binding.market_abilities->owners) {
+                sim::detail::append_u32(market_purchases, owner.player);
+                sim::detail::append_u32(market_purchases, static_cast<std::uint32_t>(owner.purchased.size()));
+                for (const auto item : owner.purchased) sim::detail::append_u32(market_purchases, item);
+            }
+        }
     }
     auto identity = replay.setup.match_identity ? sim::canonical_match_identity(*replay.setup.match_identity)
         : std::vector<std::uint8_t>{};
@@ -182,6 +201,7 @@ core::Result<std::vector<std::uint8_t>> write_replay(const TacticalReplay& repla
             replay.setup.departure_policy ? 8U + 4U * replay.setup.departure_policy->humans.size() : std::size_t{}},
         std::pair{replay_extension_beacon_rules, 8U + 16U * replay.setup.beacon_rules.size()},
         std::pair{replay_extension_campaign, campaign.size()},
+        std::pair{replay_extension_market_purchases, market_purchases.size()},
         std::pair{replay_extension_carriers, carriers.size()},
         std::pair{replay_extension_cinematic_seats, 8U + 8U * replay.setup.cinematic_seats.size()},
         std::pair{replay_extension_attract_pool,
@@ -213,7 +233,8 @@ core::Result<std::vector<std::uint8_t>> write_replay(const TacticalReplay& repla
         + (native.empty() ? 0U : 6U + native.size())
         + (replay.object_turns.empty() ? 0U : 12U)
         + (replay.setup.domain == BattleDomain::space ? 0U : 12U)
-        + (controllers.empty() ? 0U : 4U + controllers.size());
+        + (controllers.empty() ? 0U : 4U + controllers.size())
+        + (market_purchases.empty() ? 0U : 4U + market_purchases.size());
     if (header_size > (wide_header ? replay_max_bytes : std::numeric_limits<std::uint16_t>::max())) {
         return fail<Bytes>(diagnostic_codes::resource_limit, "encoded replay header size " + std::to_string(header_size) + " exceeds the "
             + std::to_string(wide_header ? replay_max_bytes : std::numeric_limits<std::uint16_t>::max()) + "-byte limit", {});
@@ -272,7 +293,8 @@ core::Result<std::vector<std::uint8_t>> write_replay(const TacticalReplay& repla
             + (identity.empty() ? 0U : 1U) + (replay.setup.departure_policy ? 1U : 0U)
             + (replay.setup.beacon_rules.empty() ? 0U : 1U) + (replay.setup.attract_pool ? 1U : 0U) + (replay.setup.native_scene ? 1U : 0U)
             + (replay.object_turns.empty() ? 0U : 1U)
-            + (replay.setup.domain == BattleDomain::space ? 0U : 1U) + (controllers.empty() ? 0U : 1U));
+            + (replay.setup.domain == BattleDomain::space ? 0U : 1U) + (controllers.empty() ? 0U : 1U)
+            + (market_purchases.empty() ? 0U : 1U));
     }
     if (replay.setup.match_policy) {
         sim::detail::append_u16(bytes, replay_extension_match_policy);
@@ -384,6 +406,11 @@ core::Result<std::vector<std::uint8_t>> write_replay(const TacticalReplay& repla
         sim::detail::append_u16(bytes, replay_extension_controllers);
         sim::detail::append_u16(bytes, static_cast<std::uint16_t>(controllers.size()));
         bytes.insert(bytes.end(), controllers.begin(), controllers.end());
+    }
+    if (!market_purchases.empty()) {
+        sim::detail::append_u16(bytes, replay_extension_market_purchases);
+        sim::detail::append_u16(bytes, static_cast<std::uint16_t>(market_purchases.size()));
+        bytes.insert(bytes.end(), market_purchases.begin(), market_purchases.end());
     }
     for (const auto& player : replay.setup.players) {
         detail::append_player(bytes, player);

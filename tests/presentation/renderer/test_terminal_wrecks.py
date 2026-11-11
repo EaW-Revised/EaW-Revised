@@ -71,6 +71,7 @@ struct Player {
     mutable std::atomic<int> samples{};
     std::uint32_t playable_frames() const { return 3; }
     core::Result<int> sample_position(std::uint64_t position, std::uint32_t subdivisions, Pose& output) const;
+    core::Result<int> sample_blend(std::uint64_t, const Player&, std::uint64_t, std::uint32_t, float, Pose&) const { return {}; }
 };
 core::Result<Pose> sample_death_frame(const Player& player, const DeathFrame& frame) {
     ++player.samples;
@@ -138,7 +139,8 @@ struct GodotRenderer {
 };
 void prune_effect_clock_assets(std::vector<sim::AssetId>&, const std::vector<int>&) {}
 struct SpacePopulation {
-    struct LiveClipPose { std::size_t ship{}; animation::ClipPosition position{}; float blend_from{}; bool alternate{}; };
+    struct LiveClipPose { std::size_t ship{}; animation::ClipPosition position{}; float blend_from{}; bool alternate{};
+        std::optional<std::size_t> land_type{}, outgoing_land_type{}; animation::ClipPosition outgoing_position{}; float land_blend{}; };
     struct GatedInstance {
         sim::RenderInstance instance; std::optional<std::size_t> live;
         std::optional<std::array<std::uint8_t,3>> colour;
@@ -188,6 +190,7 @@ struct SpacePopulation {
     const animation::Player* live_clip(std::size_t ship, bool = false) const {
         return ship < live_clips_.size() && live_clips_[ship] ? clips_[*live_clips_[ship]].get() : nullptr;
     }
+    const animation::Player* land_clip(std::size_t, std::size_t) const { return nullptr; }
     void rebuild_piece_index() {
         piece_index_.pieces_.assign(live_clips_.size(), {}); piece_index_.clips_.assign(live_clips_.size(), {});
         for (std::size_t i = 0; i < pieces_.size(); ++i) piece_index_.pieces_[*pieces_[i].live].push_back(i);

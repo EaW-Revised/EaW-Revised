@@ -1,6 +1,7 @@
 #include "eawr/scene/scene.hpp"
 #include "eawr/vfs/vfs.hpp"
 #include "eawr/core/load_profile.hpp"
+#include "eawr/core/prepared_content.hpp"
 #include "eawr/diagnostics/owner_census.hpp"
 
 #include "scene_internal.hpp"
@@ -17,6 +18,7 @@
 #include <map>
 #include <optional>
 #include <span>
+#include <stdexcept>
 #include <mutex>
 #include <string>
 #include <tuple>
@@ -129,7 +131,9 @@ const LegacySelector* material_selector(const std::string_view program, const bo
             surface.mesh_name = mesh.name;
             surface.shader = submesh.shader;
             surface.effect_missing = missing_material_effect(access, submesh.shader);
-            if (const LegacySelector* selector = material_selector(submesh.shader, surface.effect_missing)) {
+            surface.translated = !material_selector(submesh.shader, surface.effect_missing)
+                && access.admitted_shader && access.admitted_shader(submesh);
+            if (const LegacySelector* selector = material_selector(submesh.shader, surface.effect_missing, surface.translated)) {
                 surface.supported = true;
                 surface.technique = std::string(selector->technique);
                 surface.pass = std::string(selector->pass);
@@ -234,30 +238,90 @@ struct VfsAssetCache::Loaded final {
     // SHA-256 of the file bytes the decode read, set only by loads outside gameplay (see the decode below).
     std::string file_sha256;
     bool has_file_sha256{};
+    // A verified preparation view refused or failed the read itself. The unrestricted presentation cache shares this
+    // store and key, so the refusal belongs to the view's request only and is never published to the store.
+    bool view_read_failure{};
 };
 struct VfsAssetCache::ModelStore final {
     std::atomic<bool> census_enabled{false};
     bool census_coverage_complete{true}; // Late opt-in cannot identify older raw wrappers.
     VfsAssetCache* census_wrappers{};
-    using Key = std::tuple<bool, std::string, std::string, std::string, vfs::AssetOrigin>;
+    using Key = ModelIdentity;
     using Recency = std::list<Key>;
     struct Entry final {
         std::weak_ptr<Loaded> weak;
         std::shared_ptr<Loaded> retained;
         Recency::iterator recent;
         bool in_lru{};
+        bool preparation_protected{};
     };
     std::mutex mutex;
     std::map<Key, Entry> models;
     Recency recency;
     std::uint64_t budget_bytes{std::numeric_limits<std::uint64_t>::max()};
     std::uint64_t retained_bytes{};
+    std::uint64_t preparation_protected_bytes{};
+    const ModelPreparationScope* preparation_owner{};
+    std::uint64_t preparation_entry_budget{};
     std::uint64_t evictions{};
     ModelStats stats;
     bool galactic_gameplay{};
     bool tactical_load_finished{}; // Set by end_model_load; decodes after it are gameplay work.
     unsigned load_depth{};
     std::uint64_t load_entry_budget{};
+
+    enum class Policy { budget, begin_load, end_load, gameplay, preparation };
+    struct PolicyChange final { Policy policy; std::uint64_t bytes; };
+    std::vector<PolicyChange> deferred_policy;
+
+    // Called under mutex. Keep viewer transitions in arrival order without disrupting the owning consumer.
+    void apply_policy(const PolicyChange change, std::vector<std::shared_ptr<Loaded>>& retired) {
+        switch (change.policy) {
+        case Policy::budget:
+        case Policy::begin_load:
+        case Policy::end_load:
+            if (load_depth != 0) return;
+            if (change.policy == Policy::begin_load) {
+                tactical_load_finished = false;
+                stats.gameplay_loads = 0;
+                stats.first_gameplay_model.clear();
+            } else if (change.policy == Policy::end_load) tactical_load_finished = true;
+            break;
+        case Policy::gameplay: galactic_gameplay = true; break;
+        case Policy::preparation:
+            galactic_gameplay = false;
+            tactical_load_finished = false;
+            budget_bytes = std::numeric_limits<std::uint64_t>::max();
+            stats.gameplay_loads = 0;
+            stats.first_gameplay_model.clear();
+            stats.battle_loads = 0;
+            stats.battle_load_boundaries = 0;
+            return;
+        }
+        budget_bytes = change.bytes;
+        trim(retired);
+    }
+
+    void change_policy(const Policy policy, const std::uint64_t bytes, std::vector<std::shared_ptr<Loaded>>& retired) {
+        // Preserve call-time no-ops: closing a battle before this window must not revive an ignored budget change.
+        if (load_depth != 0 && (policy == Policy::budget || policy == Policy::begin_load || policy == Policy::end_load)) return;
+        if (preparation_owner) deferred_policy.push_back({policy, bytes});
+        else apply_policy({policy, bytes}, retired);
+    }
+
+    // The caller holds mutex. A battle skips the window's final trim; queued finite policies still trim as on BASE.
+    void finish_preparation(std::vector<std::shared_ptr<Loaded>>& retired, const bool final_trim) {
+        for (auto& [key, entry] : models) {
+            static_cast<void>(key);
+            entry.preparation_protected = false;
+        }
+        preparation_protected_bytes = 0;
+        if (final_trim) trim(retired);
+        budget_bytes = preparation_entry_budget;
+        preparation_owner = nullptr;
+        for (const auto change : deferred_policy) apply_policy(change, retired);
+        deferred_policy.clear();
+    }
 
     // Diagnostic replay of the request sequence against LRUs of fixed budgets. Census-only.
     struct Replay final {
@@ -291,17 +355,25 @@ struct VfsAssetCache::ModelStore final {
         for (auto& replay : replays) replay.request(key, bytes);
     }
 
-    void evict_last(std::vector<std::shared_ptr<Loaded>>& retired) {
-        auto& entry = models.at(recency.back());
+    bool evict_last(std::vector<std::shared_ptr<Loaded>>& retired) {
+        auto victim = recency.end();
+        while (victim != recency.begin()) {
+            --victim;
+            if (!models.at(*victim).preparation_protected) break;
+        }
+        if (victim == recency.end() || models.at(*victim).preparation_protected) return false;
+        auto& entry = models.at(*victim);
         retained_bytes -= entry.retained->capacity.total_bytes();
         retired.push_back(std::move(entry.retained));
         entry.in_lru = false;
-        recency.pop_back();
+        recency.erase(victim);
         ++evictions;
+        return true;
     }
 
     void trim(std::vector<std::shared_ptr<Loaded>>& retired) {
-        while (!recency.empty() && (budget_bytes == 0 || retained_bytes > budget_bytes)) evict_last(retired);
+        while (!recency.empty() && (budget_bytes == 0 || retained_bytes - preparation_protected_bytes > budget_bytes))
+            if (!evict_last(retired)) break;
     }
 
     void admit(const Key& key, const std::shared_ptr<Loaded>& loaded,
@@ -311,7 +383,8 @@ struct VfsAssetCache::ModelStore final {
         if (!loaded->model) { entry.retained = loaded; return; }
         const auto bytes = loaded->capacity.total_bytes();
         if (budget_bytes == 0 || bytes > budget_bytes) return;
-        while (!recency.empty() && retained_bytes > budget_bytes - bytes) evict_last(retired);
+        while (!recency.empty() && retained_bytes - preparation_protected_bytes > budget_bytes - bytes)
+            if (!evict_last(retired)) break;
         recency.push_front(key);
         entry.recent = recency.begin();
         entry.in_lru = true;
@@ -352,6 +425,7 @@ AssetAccess VfsAssetCache::access() {
         [this](const std::string_view path) { return model(path); },
         [this](const std::string_view path) { return sha256(path); },
         [this](const std::string_view path) { return particle_system(path); },
+        admitted_shader_,
     };
 }
 
@@ -363,18 +437,30 @@ bool VfsAssetCache::exists(const std::string_view logical_path) {
     return present;
 }
 
-std::shared_ptr<const VfsAssetCache::Loaded> VfsAssetCache::loaded_model(const std::string_view logical_path, const bool ahead) {
+namespace {
+VfsAssetCache::ModelIdentity resolved_model_identity(const std::string_view logical_path,
+    const core::Result<vfs::AssetRecord>& record) {
+    const auto canonical = vfs::canonicalize(logical_path);
+    return record
+        ? VfsAssetCache::ModelIdentity{true, record.value().canonical_path, record.value().layer_id,
+                                      record.value().source_id, record.value().origin}
+        : VfsAssetCache::ModelIdentity{false, canonical ? canonical.value() : std::string(logical_path), {}, {}, {}};
+}
+} // namespace
+
+VfsAssetCache::ModelIdentity VfsAssetCache::model_identity(const std::string_view logical_path) const {
+    return resolved_model_identity(logical_path, filesystem_->stat(logical_path));
+}
+
+std::shared_ptr<const VfsAssetCache::Loaded> VfsAssetCache::loaded_model(const std::string_view logical_path, const bool ahead,
+    const ModelPreparationScope* preparation) {
     core::load_profile::Scope request_scope(core::load_profile::Phase::model_request);
     core::load_profile::model_cost(logical_path, [](core::load_profile::ModelCost& cost) { ++cost.requests; });
-    // Use the resolver's identity, including the supplying layer/archive. Missing
-    // paths use the same canonicalization, and invalid paths retain their bytes.
     const auto record = filesystem_->stat(logical_path);
-    const auto canonical = vfs::canonicalize(logical_path);
-    const ModelStore::Key key = record
-        ? ModelStore::Key{true, record.value().canonical_path, record.value().layer_id,
-                          record.value().source_id, record.value().origin}
-        : ModelStore::Key{false, canonical ? canonical.value() : std::string(logical_path), {}, {}, {}};
+    const auto key = resolved_model_identity(logical_path, record);
+    const bool verified = filesystem_->has_content_contract();
     std::shared_ptr<Loaded> loaded;
+    std::vector<std::shared_ptr<Loaded>> request_retired;
     {
         std::lock_guard lock(models_->mutex);
         auto& entry = models_->models.try_emplace(key).first->second;
@@ -382,9 +468,9 @@ std::shared_ptr<const VfsAssetCache::Loaded> VfsAssetCache::loaded_model(const s
         ++models_->stats.calls;
         if (!loaded) {
             loaded = std::make_shared<Loaded>();
-            if (models_->galactic_gameplay)
-                loaded->phase = models_->load_depth ? Loaded::Phase::battle_load : Loaded::Phase::gameplay;
-            else if (models_->tactical_load_finished) loaded->phase = Loaded::Phase::gameplay;
+            if (models_->load_depth) loaded->phase = Loaded::Phase::battle_load;
+            else if (!verified && models_->galactic_gameplay) loaded->phase = Loaded::Phase::gameplay;
+            else if (!verified && models_->tactical_load_finished) loaded->phase = Loaded::Phase::gameplay;
             entry.weak = loaded;
             ++models_->stats.misses;
         } else {
@@ -392,26 +478,34 @@ std::shared_ptr<const VfsAssetCache::Loaded> VfsAssetCache::loaded_model(const s
             if (!ahead) {
                 ++models_->stats.hits;
                 if (entry.in_lru) models_->recency.splice(models_->recency.begin(), models_->recency, entry.recent);
+                if (entry.preparation_protected && loaded->complete && preparation && models_->preparation_owner == preparation
+                    && preparation->models_ == models_) {
+                    entry.preparation_protected = false;
+                    models_->preparation_protected_bytes -= loaded->capacity.total_bytes();
+                    models_->trim(request_retired);
+                }
             }
         }
     }
     // Different files decode concurrently. The once flag publishes a fully
     // initialized immutable result (including failures) to same-file waiters.
-    std::call_once(loaded->once, [&] {
+    const auto decode = [&] {
         // The same stat/open/parse as assets::load_model(vfs, path), split so the read and the parse are timed apart
         // and the bytes already read can be hashed once (the hash used to re-read the file).
         std::optional<core::Result<std::vector<std::byte>>> bytes;
         auto decoded = [&]() -> core::Result<assets::Model> {
-            const core::load_profile::ModelScope decode_timer(logical_path, &core::load_profile::ModelCost::decode_ms);
+            const core::load_profile::ModelScope decode_timer(logical_path, core::load_profile::ModelField::decode);
             core::load_profile::Scope load_scope(core::load_profile::Phase::model);
             if (!record) return core::Result<assets::Model>::failure(record.error());
             {
                 core::load_profile::Scope read_scope(core::load_profile::Phase::model_read);
-                const core::load_profile::ModelScope read_timer(logical_path, &core::load_profile::ModelCost::read_ms);
+                const core::load_profile::ModelScope read_timer(logical_path, core::load_profile::ModelField::read);
                 std::uint64_t io_bytes = 0;
                 {
                     const core::load_profile::IoScope io_scope(core::load_profile::Phase::model_read, &io_bytes);
-                    bytes.emplace(filesystem_->open(logical_path));
+                    // Only an ordered consumer registers this decode's original-byte receipt below. An unused hint
+                    // must not make closure membership depend on scheduling; sealed views still verify/refuse here.
+                    bytes.emplace(verified ? filesystem_->open_for_prefetch(logical_path) : filesystem_->open(logical_path));
                 }
                 core::load_profile::model_cost(logical_path, [&](core::load_profile::ModelCost& cost) {
                     cost.io_read_bytes += io_bytes;
@@ -421,15 +515,16 @@ std::shared_ptr<const VfsAssetCache::Loaded> VfsAssetCache::loaded_model(const s
             }
             if (!*bytes) return core::Result<assets::Model>::failure(bytes->error());
             core::load_profile::Scope parse_scope(core::load_profile::Phase::model_parse);
-            const core::load_profile::ModelScope parse_timer(logical_path, &core::load_profile::ModelCost::parse_ms);
+            const core::load_profile::ModelScope parse_timer(logical_path, core::load_profile::ModelField::parse);
             return assets::load_model(bytes->value(), assets::source_from(record.value()));
         }();
         // The scene asks for this hash right after the model (model_facts). Hashing the bytes in hand saves the second
         // read of the file. A decode after the load phase (gameplay) hashes nothing, so it adds no work to a battle:
         // sha256() falls back to its own read there, as before.
-        if (bytes && *bytes && loaded->phase != Loaded::Phase::gameplay) {
+        loaded->view_read_failure = verified && bytes && !*bytes;
+        if (bytes && *bytes && (verified || loaded->phase != Loaded::Phase::gameplay)) {
             core::load_profile::Scope sha_scope(core::load_profile::Phase::model_sha256);
-            const core::load_profile::ModelScope sha_timer(logical_path, &core::load_profile::ModelCost::sha_ms);
+            const core::load_profile::ModelScope sha_timer(logical_path, core::load_profile::ModelField::sha);
             core::load_profile::count(core::load_profile::Counter::sha_bytes, bytes->value().size());
             core::load_profile::count(core::load_profile::Counter::sha_reused_bytes, bytes->value().size());
             loaded->file_sha256 = sim::sha256_hex(std::span<const std::uint8_t>(
@@ -463,13 +558,89 @@ std::shared_ptr<const VfsAssetCache::Loaded> VfsAssetCache::loaded_model(const s
                 ++models_->stats.gameplay_loads;
             }
             else if (loaded->phase == Loaded::Phase::battle_load) ++models_->stats.battle_loads;
-            // A decode-ahead leaves the entry unadmitted: the caller's shared_ptr is its only owner until a loader asks.
-            if (!ahead) {
-                models_->admit(key, loaded, retired);
+            // Successful ahead payloads stay unadmitted. Negative results have no payload/LRU charge: keep them for
+            // this mount too, so a failed prefetch cannot be retried by the ordered consumer or another hint.
+            if (loaded->view_read_failure) {
+                // Waiters of this once-flag still see it; the next request, from any cache, decodes afresh.
+                models_->models.at(key).weak.reset();
+                loaded->admitted.store(true, std::memory_order_release);
+            } else if (!ahead || !loaded->model) {
+                auto& entry = models_->models.at(key);
+                if (entry.preparation_protected && models_->preparation_owner && loaded->model) {
+                    // A non-owning MP consumer refreshed a protected incoming entry. Transfer its protection to the
+                    // replacement; only the owning ordered consumer (or the end of its scope) may release it.
+                    models_->recency.push_front(key);
+                    entry.recent = models_->recency.begin();
+                    entry.in_lru = true;
+                    entry.retained = loaded;
+                    models_->retained_bytes += loaded->capacity.total_bytes();
+                    models_->preparation_protected_bytes += loaded->capacity.total_bytes();
+                } else {
+                    entry.preparation_protected = false;
+                    models_->admit(key, loaded, retired);
+                }
                 loaded->admitted.store(true, std::memory_order_release);
             }
         }
-    });
+    };
+    std::optional<core::load_profile::Clock::time_point> refresh_started;
+    for (;;) {
+        std::call_once(loaded->once, decode);
+        if (refresh_started) {
+            filesystem_->record_model_refresh(static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                core::load_profile::Clock::now() - *refresh_started).count()));
+            refresh_started.reset();
+        }
+        // A gameplay decode has no original-byte SHA. Refresh only on ordered MP consumption, after the normal request
+        // has released its initial protection if it owns the preparation. Ahead requests retain their ownership policy and never publish
+        // unproven data to the simulation. Old raw/shared owners remain immutable and alive on their own references.
+        if (!verified || ahead || !record || loaded->has_file_sha256 || loaded->phase != Loaded::Phase::gameplay) break;
+        {
+            const std::lock_guard lock(models_->mutex);
+            auto& entry = models_->models.at(key);
+            if (auto current = entry.weak.lock(); current && current != loaded) {
+                loaded = std::move(current); // Another consumer already published the one refresh.
+                continue;
+            }
+            auto fresh = std::make_shared<Loaded>();
+            if (entry.in_lru) {
+                models_->retained_bytes -= entry.retained->capacity.total_bytes();
+                models_->recency.erase(entry.recent);
+                entry.in_lru = false;
+            }
+            if (entry.preparation_protected) {
+                models_->preparation_protected_bytes -= loaded->capacity.total_bytes();
+                // Leave the flag pending while the replacement decodes. It has no LRU charge until publication.
+            }
+            if (entry.retained) request_retired.push_back(std::move(entry.retained));
+            entry.weak = fresh;
+            loaded = std::move(fresh);
+            --models_->stats.hits;
+            ++models_->stats.misses;
+            refresh_started = core::load_profile::Clock::now();
+        }
+    }
+    if (verified && !ahead && preparation) {
+        const std::lock_guard lock(models_->mutex);
+        auto& entry = models_->models.at(key);
+        if (entry.weak.lock() == loaded && entry.preparation_protected && models_->preparation_owner == preparation
+            && preparation->models_ == models_) {
+            entry.preparation_protected = false;
+            models_->preparation_protected_bytes -= loaded->capacity.total_bytes();
+            models_->trim(request_retired);
+        }
+    }
+    if (verified && !ahead && record && loaded->has_file_sha256) {
+        const core::ContentInputReceipt receipt{record.value().canonical_path, record.value().layer_id, loaded->file_sha256};
+        const auto accepted = filesystem_->remember_content_inputs(std::span(&receipt, 1));
+        if (!accepted) {
+            // A per-request refusal must never poison the unrestricted presentation store's cached model/failure.
+            auto refused = std::make_shared<Loaded>();
+            refused->error = accepted.error();
+            return refused;
+        }
+        hashes_.insert_or_assign(std::string(logical_path), loaded->file_sha256);
+    }
     if (!ahead && !loaded->admitted.load(std::memory_order_acquire)) {
         // First ordinary request for an entry only a decode-ahead has touched: admit it now, in request order.
         std::vector<std::shared_ptr<Loaded>> retired;
@@ -489,8 +660,8 @@ std::shared_ptr<const VfsAssetCache::Loaded> VfsAssetCache::loaded_model(const s
     return loaded;
 }
 
-const assets::Model* VfsAssetCache::model(const std::string_view logical_path) {
-    const auto loaded = loaded_model(logical_path);
+const assets::Model* VfsAssetCache::model(const std::string_view logical_path, const ModelPreparationScope* preparation) {
+    const auto loaded = loaded_model(logical_path, false, preparation);
     // A load-phase decode already hashed the bytes it read: remember the hash for sha256() (this wrapper's memo).
     if (loaded->has_file_sha256) hashes_.try_emplace(std::string(logical_path), loaded->file_sha256);
     if (loaded->model) {
@@ -505,6 +676,16 @@ const assets::Model* VfsAssetCache::model(const std::string_view logical_path) {
 
 core::Result<std::shared_ptr<const assets::Model>> VfsAssetCache::shared_model(const std::string_view logical_path) {
     const auto loaded = loaded_model(logical_path);
+    using Result = core::Result<std::shared_ptr<const assets::Model>>;
+    return loaded->model
+        ? Result::success(std::shared_ptr<const assets::Model>(loaded, loaded->model.get()))
+        : Result::failure(*loaded->error);
+}
+
+core::Result<std::shared_ptr<const assets::Model>> VfsAssetCache::shared_model(const std::string_view logical_path, std::string& digest,
+    const ModelPreparationScope* preparation) {
+    const auto loaded = loaded_model(logical_path, false, preparation);
+    digest = loaded->has_file_sha256 ? loaded->file_sha256 : std::string{};
     using Result = core::Result<std::shared_ptr<const assets::Model>>;
     return loaded->model
         ? Result::success(std::shared_ptr<const assets::Model>(loaded, loaded->model.get()))
@@ -588,10 +769,7 @@ void VfsAssetCache::set_model_cache_budget(const std::uint64_t bytes) {
     std::vector<std::shared_ptr<Loaded>> retired;
     {
         std::lock_guard lock(models_->mutex);
-        // Battle preparation must stay unbounded until the outer load scope exits.
-        if (models_->load_depth != 0) return;
-        models_->budget_bytes = bytes;
-        models_->trim(retired);
+        models_->change_policy(ModelStore::Policy::budget, bytes, retired);
     }
 }
 
@@ -599,12 +777,7 @@ void VfsAssetCache::begin_model_load(const std::uint64_t bytes) {
     std::vector<std::shared_ptr<Loaded>> retired;
     {
         std::lock_guard lock(models_->mutex);
-        if (models_->load_depth != 0) return;
-        models_->tactical_load_finished = false;
-        models_->stats.gameplay_loads = 0;
-        models_->stats.first_gameplay_model.clear();
-        models_->budget_bytes = bytes;
-        models_->trim(retired);
+        models_->change_policy(ModelStore::Policy::begin_load, bytes, retired);
     }
 }
 
@@ -612,10 +785,7 @@ void VfsAssetCache::end_model_load(const std::uint64_t bytes) {
     std::vector<std::shared_ptr<Loaded>> retired;
     {
         std::lock_guard lock(models_->mutex);
-        if (models_->load_depth != 0) return;
-        models_->tactical_load_finished = true;
-        models_->budget_bytes = bytes;
-        models_->trim(retired);
+        models_->change_policy(ModelStore::Policy::end_load, bytes, retired);
     }
 }
 
@@ -623,27 +793,66 @@ void VfsAssetCache::begin_galactic_gameplay(const std::uint64_t bytes) {
     std::vector<std::shared_ptr<Loaded>> retired;
     {
         std::lock_guard lock(models_->mutex);
-        models_->galactic_gameplay = true;
-        models_->budget_bytes = bytes;
-        models_->trim(retired);
+        models_->change_policy(ModelStore::Policy::gameplay, bytes, retired);
     }
 }
 
 void VfsAssetCache::begin_galactic_preparation() {
+    std::vector<std::shared_ptr<Loaded>> retired;
     std::lock_guard lock(models_->mutex);
-    models_->galactic_gameplay = false;
-    models_->tactical_load_finished = false;
-    models_->budget_bytes = std::numeric_limits<std::uint64_t>::max();
-    models_->stats.gameplay_loads = 0;
-    models_->stats.first_gameplay_model.clear();
-    models_->stats.battle_loads = 0;
-    models_->stats.battle_load_boundaries = 0;
+    models_->change_policy(ModelStore::Policy::preparation, 0, retired);
+}
+
+VfsAssetCache::ModelPreparationScope::ModelPreparationScope(const vfs::Vfs& filesystem, const std::uint64_t bytes, const bool bounded) {
+    auto store = filesystem.attachment<ModelStore>();
+    std::lock_guard lock(store->mutex);
+    if (store->preparation_owner) throw std::logic_error("model preparation window already owned by another preparation");
+    if (!bounded) return;
+    if (store->galactic_gameplay || store->tactical_load_finished || store->load_depth)
+        fallback_reason_ = "a reused gameplay or tactical load phase requires legacy retention";
+    for (const auto& [key, entry] : store->models) {
+        static_cast<void>(key);
+        const auto loaded = entry.weak.lock();
+        if (!loaded) continue;
+        // A live external owner or an unfinished decode has no proven initial LRU lifetime.
+        if (!loaded->complete || (loaded->model && (!entry.retained || !entry.in_lru)))
+            fallback_reason_ = "an unfinished or externally held initial model requires legacy retention";
+    }
+    if (!fallback_reason_.empty()) return; // Legacy scopes neither own policy nor change it.
+    store->preparation_entry_budget = store->budget_bytes;
+    initial_bytes_ = store->retained_bytes;
+    for (auto& [key, entry] : store->models) {
+        static_cast<void>(key);
+        entry.preparation_protected = entry.in_lru;
+    }
+    store->preparation_owner = this;
+    store->preparation_protected_bytes = initial_bytes_;
+    store->budget_bytes = bytes;
+    models_ = std::move(store);
+}
+
+bool VfsAssetCache::ModelPreparationScope::active() const {
+    if (!models_) return false;
+    std::lock_guard lock(models_->mutex);
+    return models_->preparation_owner == this;
+}
+
+VfsAssetCache::ModelPreparationScope::~ModelPreparationScope() {
+    if (!models_) return;
+    std::vector<std::shared_ptr<Loaded>> retired;
+    {
+        std::lock_guard lock(models_->mutex);
+        if (models_->preparation_owner == this) models_->finish_preparation(retired, true);
+    }
 }
 
 VfsAssetCache::ModelLoadScope::ModelLoadScope(const vfs::Vfs& filesystem) {
+    std::vector<std::shared_ptr<Loaded>> retired;
     auto store = filesystem.attachment<ModelStore>();
     std::lock_guard lock(store->mutex);
-    if (!store->galactic_gameplay) return;
+    const bool interrupted_preparation = store->preparation_owner != nullptr;
+    if (interrupted_preparation) store->finish_preparation(retired, false);
+    if (!store->galactic_gameplay && !interrupted_preparation && store->load_depth == 0) return;
     models_ = std::move(store);
     if (models_->load_depth++ == 0) {
         ++models_->stats.battle_load_boundaries;
@@ -669,7 +878,7 @@ std::string VfsAssetCache::sha256(const std::string_view logical_path) {
     if (found != hashes_.end()) return found->second;
     std::string hash;
     core::load_profile::Scope sha_scope(core::load_profile::Phase::model_sha256);
-    const core::load_profile::ModelScope sha_timer(logical_path, &core::load_profile::ModelCost::sha_ms);
+    const core::load_profile::ModelScope sha_timer(logical_path, core::load_profile::ModelField::sha);
     if (auto bytes = filesystem_->open(logical_path)) {
         core::load_profile::count(core::load_profile::Counter::sha_bytes, bytes.value().size());
         hash = sim::sha256_hex(std::span<const std::uint8_t>(

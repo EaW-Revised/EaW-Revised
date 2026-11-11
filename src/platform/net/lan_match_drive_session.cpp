@@ -69,13 +69,21 @@ DriverResult TcpLanMatch::drive_session(const tactical::TacticalSetup& setup, pl
             view_.clock_paused = adapter_->clock.paused;
             view_.session_tick = adapter_->clock.completed; view_.world_tick = context.completed_tick();
             view_.pause_actor = adapter_->clock.actor; view_.pause_change_tick = adapter_->clock.changed_at;
-            if (view_.pause_actor) {
+            const auto seat_name = [&](sim::SeatId actor) {
                 const auto& seats = setup_result().offer().seats;
-                const auto at = std::find_if(seats.begin(), seats.end(), [&](const auto& seat) { return seat.seat == *view_.pause_actor; });
-                // The pauser's own peer decides the label; a lobby row below overrides it with the chosen name.
-                view_.pause_name = at == seats.end() ? "Player" : at->peer == view_.seat ? "You" : "Player " + std::to_string(at->peer + 1);
+                const auto at = std::find_if(seats.begin(), seats.end(), [&](const auto& seat) { return seat.seat == actor; });
+                // The actor's own peer decides the label; a lobby row below overrides it with the chosen name.
+                std::string name = at == seats.end() ? "Player" : at->peer == view_.seat ? "You" : "Player " + std::to_string(at->peer + 1);
                 if (lobby_ && at != seats.end()) for (const auto& row : lobby_->snapshot().seats)
-                    if (row.peer == at->peer) view_.pause_name = row.selection.name;
+                    if (row.peer == at->peer) name = row.selection.name;
+                return name;
+            };
+            if (view_.pause_actor) view_.pause_name = seat_name(*view_.pause_actor);
+            // #5355: the shared speed's last changer, for every peer's notice.
+            if (adapter_->options_actor && (view_.options_actor != adapter_->options_actor
+                    || view_.options_change_tick != adapter_->options_changed_at)) {
+                view_.options_actor = adapter_->options_actor; view_.options_change_tick = adapter_->options_changed_at;
+                view_.options_name = seat_name(*adapter_->options_actor);
             }
             if (pumped.value().completed) {
                 // Only the pause notice is owned here; other input feedback (a cancelled reservation) must survive.

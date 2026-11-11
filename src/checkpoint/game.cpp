@@ -1,10 +1,12 @@
 #include "eawr/checkpoint/game.hpp"
 
 #include "eawr/core/sha256.hpp"
+#include "eawr/sim/galactic/offer_pool.hpp"
 #include "eawr/sim/galactic/victory.hpp"
 #include "encoding_internal.hpp"
 #include "game_session_internal.hpp"
 #include "../campaign/checkpoint_owner_internal.hpp"
+#include "../sim/galactic/encoding.hpp"
 
 #include <algorithm>
 #include <bit>
@@ -381,8 +383,8 @@ core::Result<campaign::BattleResult> decode_result(std::span<const std::uint8_t>
     return core::Result<Result>::success(std::move(result));
 }
 // Reuse the state owner's bytes; never duplicate galaxy field encodings in this adapter.
-std::array<Bytes, gc::state_section_count> galaxy_sections(const campaign::GameSession& session) {
-    const auto bytes = session.galaxy().canonical_state_bytes(); detail::Reader in(bytes);
+std::array<Bytes, gc::state_section_count> galaxy_sections(const campaign::GameSession& session, gc::OfferPool& pool) {
+    const auto bytes = session.galaxy().canonical_state_bytes(pool); detail::Reader in(bytes);
     (void)in.take(12); const auto count = in.u32();
     std::array<Bytes, gc::state_section_count> sections;
     for (std::size_t index = 0; index < count; ++index) {
@@ -392,6 +394,16 @@ std::array<Bytes, gc::state_section_count> galaxy_sections(const campaign::GameS
         section.assign(value.begin(), value.end());
     }
     return sections;
+}
+// The checkpoint's offer pool: the one copy of the production offer tables that the session recording and the owner
+// barrier reference by index.
+core::Result<gc::OfferPool> read_offer_pool(const Checkpoint& saved, std::string_view path) {
+    const auto* section = saved.find(SectionId::offer_pool);
+    if (!section || !section->required || section->version != galaxy_section_version)
+        return fail<gc::OfferPool>("missing or unsupported offer-pool section", path);
+    auto pool = gc::OfferPool::decode(section->bytes);
+    if (!pool) return fail<gc::OfferPool>("section offer-pool: malformed", path);
+    return core::Result<gc::OfferPool>::success(std::move(*pool));
 }
 Digest capture_commitment(const Checkpoint& saved) {
     detail::Writer out;
@@ -449,15 +461,24 @@ core::Result<Checkpoint> capture(const campaign::GameSession& session, const Ide
     if (!mod_bytes) return fail<Checkpoint>("mod description is invalid or exceeds its limits", {}, diagnostic_codes::resource_limit);
     auto recorded = session.checkpoint_recording();
     if (!recorded) return core::Result<Checkpoint>::failure(recorded.error());
-    auto replay = gc::write_replay(recorded.value().commands);
+    // The session section stores the recording in its pooled form: the production offer tables go to `pool`, written as
+    // the offer-pool section once the production state and the owner barrier have added theirs.
+    gc::OfferPool pool;
+    auto replay = gc::write_replay(recorded.value().commands, &pool);
     if (!replay) return core::Result<Checkpoint>::failure(replay.error());
-    auto state = galaxy_sections(session);
+    auto state = galaxy_sections(session, pool);
     Checkpoint out; out.header.flags = flag_galaxy;
     out.header.identities = build; out.header.seed = session.galaxy().setup().seed;
     out.header.completed_tick = session.completed_tick(); out.header.galactic_frame = session.galaxy().clock().galactic_frame;
     // #4058: the digest chains the history base through this window; the key is the last sealed command, even when
     // the window holds none.
-    auto sealed = campaign::history_frontier_of(recorded.value(), replay.value(), session.completed_tick());
+    // The digest chains the standalone replay bytes (tables inline), exactly what GameSession::history_frontier()
+    // seals during play, so a peer or a later save derives the same boundary whatever form its save stores.
+    auto sealed = [&] {
+        auto standalone = gc::write_replay(recorded.value().commands);
+        if (!standalone) return core::Result<campaign::HistoryBoundary>::failure(standalone.error());
+        return campaign::history_frontier_of(recorded.value(), standalone.value(), session.completed_tick());
+    }();
     if (!sealed) return core::Result<Checkpoint>::failure(sealed.error());
     if (const auto& key = sealed.value().last_key) {
         out.header.flags |= flag_frontier;
@@ -585,15 +606,18 @@ core::Result<Checkpoint> capture(const campaign::GameSession& session, const Ide
     if (!ai_save) return core::Result<Checkpoint>::failure(ai_save.error());
     auto ai_bytes = campaign::encode_galactic_ai_save(ai_save.value());
     if (!ai_bytes) return core::Result<Checkpoint>::failure(ai_bytes.error());
-    out.sections.push_back({static_cast<std::uint16_t>(SectionId::galactic_ai), 1, true, std::move(ai_bytes).value()});
+    out.sections.push_back({static_cast<std::uint16_t>(SectionId::galactic_ai), 2, true, std::move(ai_bytes).value()});
     add(SectionId::galactic_abilities, std::move(state[20]));
     add(SectionId::campaign_scoring, std::move(state[21]));
-    auto owner = session.save_checkpoint_state();
+    auto owner = session.save_checkpoint_state(&pool);
     if (!owner) return core::Result<Checkpoint>::failure(owner.error());
     add(SectionId::galactic_owner, std::move(owner).value());
+    // The pool is complete now. It joins the capture commitment with every other section, so it is added before the
+    // resume section computes that commitment and the resume section is then placed ahead of it (IDs ascend).
+    add(SectionId::offer_pool, pool.encode());
     auto resume = resume_section(session, out, hash, sealed.value().digest);
     if (!resume) return core::Result<Checkpoint>::failure(resume.error());
-    out.sections.push_back(std::move(resume).value());
+    out.sections.insert(out.sections.end() - 1, std::move(resume).value());
     // Check total size before the final container allocation.
     std::size_t total = header_size;
     for (const auto& section : out.sections) {
@@ -612,7 +636,9 @@ core::Result<gc::GalacticSetup> inspect_game_setup(const Checkpoint& saved) {
     detail::Reader reader(section->bytes);
     const auto prefix = detail::read_session_prefix(reader);
     if (reader.failed()) return fail<gc::GalacticSetup>("truncated session setup");
-    auto replay = gc::parse_replay(prefix.replay);
+    auto pool = read_offer_pool(saved, {});
+    if (!pool) return core::Result<gc::GalacticSetup>::failure(pool.error());
+    auto replay = gc::parse_replay(prefix.replay, {}, &pool.value());
     if (!replay) return core::Result<gc::GalacticSetup>::failure(replay.error());
     return core::Result<gc::GalacticSetup>::success(std::move(replay).value().setup);
 }
@@ -652,7 +678,7 @@ core::Result<GameResumeMetadata> inspect_game_resume(const Checkpoint& saved) {
 }
 
 Identities game_identities(const gc::GalacticSetup& setup) {
-    Identities out; out.rules_version = gc::galactic_rules_version; out.state_encoding_version = 18;
+    Identities out; out.rules_version = gc::galactic_rules_version; out.state_encoding_version = gc::detail::state_encoding_version;
     out.content = setup.content_identity; out.campaign = setup.campaign_identity;
     return out;
 }
@@ -661,6 +687,8 @@ core::Result<mods::ModDescription> inspect_game_mods(const Checkpoint& saved) {
     if (!section || !section->required) return fail<mods::ModDescription>("missing required mod-list section");
     if (section->version != mod_list_section_version)
         return fail<mods::ModDescription>("unsupported mod-list section version", {}, diagnostic_codes::version);
+    if (!section->bytes.empty() && section->bytes.front() == 1)
+        return fail<mods::ModDescription>("mod list version 1, this build needs version 2", {}, diagnostic_codes::version);
     auto description = mods::decode_description(section->bytes);
     if (!description) return fail<mods::ModDescription>("malformed mod-list section");
     return core::Result<mods::ModDescription>::success(std::move(*description));
@@ -686,7 +714,7 @@ core::Result<void> validate_checkpoint_sections(const Checkpoint& saved, const I
         return fail<void>("restore tick budget exceeded", path, diagnostic_codes::resource_limit);
     for (const auto id : {SectionId::session, SectionId::seats, SectionId::players, SectionId::planets,
         SectionId::fleets, SectionId::production, SectionId::conflicts, SectionId::victory, SectionId::scripts,
-        SectionId::galactic_abilities, SectionId::campaign_scoring, SectionId::galactic_owner}) {
+        SectionId::galactic_abilities, SectionId::campaign_scoring, SectionId::galactic_owner, SectionId::offer_pool}) {
         const auto* section = saved.find(id);
         if (!section || !section->required) return fail<void>("missing required section " + std::string(section_name(static_cast<std::uint16_t>(id))), path);
         if (section->version != galaxy_section_version)
@@ -770,7 +798,7 @@ core::Result<void> decode_checkpoint_timelines(detail::Reader& context, campaign
 }
 
 core::Result<void> validate_checkpoint_recording(const Checkpoint& saved, campaign::GameRecording& recording, auto& active_conflict,
-    const auto& completed, auto& child_log, const auto& replay_bytes,
+    const auto& completed, auto& child_log, const auto& replay_bytes, gc::OfferPool& pool,
     const Identities& build, campaign::HistoryBoundary& boundary, std::string_view path) {
     if (recording.base.at.tick > completed)
         return fail<void>("section session: history base is after the saved tick", path, diagnostic_codes::inconsistent);
@@ -841,12 +869,16 @@ core::Result<void> validate_checkpoint_recording(const Checkpoint& saved, campai
         return elapsed >= save_barriers && elapsed - save_barriers == child_log->completed_tick;
     })) return fail<void>("active child disagrees with conflict history", path);
     // Validate canonical replay and header references before expensive reconstruction.
-    auto canonical = gc::write_replay(recording.commands);
+    // The saved recording must be the canonical pooled form: every table at the index the pool holds it.
+    auto canonical = gc::write_replay(recording.commands, &pool);
     if (!canonical || !std::equal(replay_bytes.begin(), replay_bytes.end(), canonical.value().begin(), canonical.value().end())
         || recording.commands.setup.seed != saved.header.seed || recording.commands.setup.content_identity != build.content
         || recording.commands.setup.campaign_identity != build.campaign)
         return fail<void>("section session: inconsistent replay identity", path, diagnostic_codes::inconsistent);
-    auto sealed = campaign::history_frontier_of(recording, replay_bytes, completed);
+    // The history digest chains the standalone recording bytes (see capture()).
+    auto standalone = gc::write_replay(recording.commands);
+    if (!standalone) return core::Result<void>::failure(standalone.error());
+    auto sealed = campaign::history_frontier_of(recording, standalone.value(), completed);
     if (!sealed) return core::Result<void>::failure(sealed.error());
     InputFrontier frontier{};
     if (const auto& key = sealed.value().last_key) frontier = {key->tick, key->seat.value, key->sequence, sealed.value().digest};
@@ -896,9 +928,9 @@ core::Result<void> bind_checkpoint_services(campaign::GameSession& session, cons
 core::Result<void> restore_checkpoint_frontier(campaign::GameSession& session, const Checkpoint& saved, const bool direct,
     const auto& completed, auto& active_conflict, auto& child_save, auto& child_log,
     const sim::PartitionExecutor& executor, std::uint64_t& resimulated,
-    bool& child_restored, std::string_view path) {
+    bool& child_restored, gc::OfferPool& pool, std::string_view path) {
     if (direct) {
-        auto restored = session.load_checkpoint_state(saved.find(SectionId::galactic_owner)->bytes);
+        auto restored = session.load_checkpoint_state(saved.find(SectionId::galactic_owner)->bytes, &pool);
         if (!restored) return fail<void>("direct owner restoration failed: " + restored.error().message, path, diagnostic_codes::restore_failed);
         if (session.completed_tick() != completed) return fail<void>("direct owner clock differs", path);
     } else {
@@ -1062,7 +1094,9 @@ core::Result<campaign::GameSession> import_oracle_base(std::span<const std::uint
     if ((saved.header.flags & flag_child) != 0) return fail<Session>("the replay oracle cannot start from a save with a battle in progress", path);
     detail::Reader context(saved.find(SectionId::session)->bytes);
     const auto prefix = detail::read_session_prefix(context);
-    auto replay = gc::parse_replay(prefix.replay, path);
+    auto pool = read_offer_pool(saved, path);
+    if (!pool) return core::Result<Session>::failure(pool.error());
+    auto replay = gc::parse_replay(prefix.replay, path, &pool.value());
     if (context.failed()) return fail<Session>("base save: invalid session prefix at offset " + std::to_string(context.offset()), path);
     if (!replay) return fail<Session>("base save: invalid recording: " + replay.error().message, path);
     campaign::GameRecording recording{std::move(replay).value(), {}, {}};
@@ -1071,7 +1105,7 @@ core::Result<campaign::GameSession> import_oracle_base(std::span<const std::uint
     std::optional<ChildLog> no_child;
     std::optional<campaign::ConflictRecord> no_conflict;
     campaign::HistoryBoundary boundary;
-    if (auto phase = validate_checkpoint_recording(saved, recording, no_conflict, prefix.completed, no_child, prefix.replay, build, boundary, path); !phase)
+    if (auto phase = validate_checkpoint_recording(saved, recording, no_conflict, prefix.completed, no_child, prefix.replay, pool.value(), build, boundary, path); !phase)
         return core::Result<Session>::failure(phase.error());
     if (boundary.tick != expected.tick || boundary.digest != expected.digest || boundary.last_key != expected.last_key)
         return fail<Session>("section session: history base differs from the earlier save it names", path, diagnostic_codes::inconsistent);
@@ -1079,7 +1113,7 @@ core::Result<campaign::GameSession> import_oracle_base(std::span<const std::uint
     if (!created) return created;
     auto session = std::move(created).value();
     if (auto phase = bind_checkpoint_services(session, options, prepared_runtime, true); !phase) return core::Result<Session>::failure(phase.error());
-    auto restored = session.load_checkpoint_state(saved.find(SectionId::galactic_owner)->bytes);
+    auto restored = session.load_checkpoint_state(saved.find(SectionId::galactic_owner)->bytes, &pool.value());
     if (!restored) return fail<Session>("base owner restoration failed: " + restored.error().message, path, diagnostic_codes::restore_failed);
     if (session.completed_tick() != prefix.completed) return fail<Session>("base owner clock differs", path);
     session.schedule_history_rebase(std::move(boundary));
@@ -1087,6 +1121,19 @@ core::Result<campaign::GameSession> import_oracle_base(std::span<const std::uint
 }
 
 } // namespace
+
+core::Result<std::optional<std::uint64_t>> inspect_game_vote_timeout(const Checkpoint& saved) {
+    using Result = core::Result<std::optional<std::uint64_t>>;
+    const auto* section = saved.find(SectionId::session);
+    if (!section || !section->required || section->version != galaxy_section_version)
+        return fail<std::optional<std::uint64_t>>("missing or unsupported session setup");
+    detail::Reader reader(section->bytes);
+    static_cast<void>(detail::read_session_prefix(reader));
+    if (reader.failed()) return fail<std::optional<std::uint64_t>>("truncated session setup");
+    campaign::GameRecording recording;
+    if (auto phase = decode_checkpoint_fixups(reader, recording, {}); !phase) return Result::failure(phase.error());
+    return Result::success(recording.multiplayer_vote_timeout);
+}
 
 static core::Result<GameRestore> load_game_checkpoint_impl(std::span<const std::uint8_t> bytes, const Identities& build,
     const GameLoadOptions& options, const sim::PartitionExecutor& executor, std::string_view path, bool direct,
@@ -1098,7 +1145,7 @@ static core::Result<GameRestore> load_game_checkpoint_impl(std::span<const std::
         return core::Result<GameRestore>::failure(phase.error());
     const auto& scripts_bytes = saved.find(SectionId::scripts)->bytes;
     const auto* ai_section = saved.find(SectionId::galactic_ai);
-    if (!ai_section || !ai_section->required || ai_section->version != 1)
+    if (!ai_section || !ai_section->required || ai_section->version != 2)
         return fail<GameRestore>("missing or unsupported native AI section", path);
     auto ai_save = campaign::decode_galactic_ai_save(ai_section->bytes);
     if (!ai_save) return core::Result<GameRestore>::failure(ai_save.error());
@@ -1138,7 +1185,9 @@ static core::Result<GameRestore> load_game_checkpoint_impl(std::span<const std::
     const auto completed = prefix.completed; const auto expected_hash = prefix.expected_hash;
     const auto strategic = prefix.strategic; const auto tactical = prefix.tactical;
     const auto replay_bytes = prefix.replay;
-    auto replay = gc::parse_replay(replay_bytes, path);
+    auto offer_pool = read_offer_pool(saved, path);
+    if (!offer_pool) return core::Result<GameRestore>::failure(offer_pool.error());
+    auto replay = gc::parse_replay(replay_bytes, path, &offer_pool.value());
     if (context.failed()) return fail<GameRestore>("section session: invalid prefix at offset " + std::to_string(context.offset()), path);
     if (!replay) return fail<GameRestore>("section session: invalid recording: " + replay.error().message, path);
     campaign::GameRecording recording{std::move(replay).value(), {}, {}};
@@ -1149,7 +1198,7 @@ static core::Result<GameRestore> load_game_checkpoint_impl(std::span<const std::
     if (auto phase = decode_checkpoint_timelines(context, timelines, completed, saved, recording, strategic, tactical, path); !phase)
         return core::Result<GameRestore>::failure(phase.error());
     campaign::HistoryBoundary boundary;
-    if (auto phase = validate_checkpoint_recording(saved, recording, active_conflict, completed, child_log, replay_bytes, build, boundary, path); !phase)
+    if (auto phase = validate_checkpoint_recording(saved, recording, active_conflict, completed, child_log, replay_bytes, offer_pool.value(), build, boundary, path); !phase)
         return core::Result<GameRestore>::failure(phase.error());
     const bool windowed_oracle = !direct && recording.base.at.tick != 0;
     if (windowed_oracle && (oracle_base.empty() || has_child))
@@ -1176,7 +1225,7 @@ static core::Result<GameRestore> load_game_checkpoint_impl(std::span<const std::
         return core::Result<GameRestore>::failure(phase.error());
     std::uint64_t resimulated{};
     bool child_restored{};
-    if (auto phase = restore_checkpoint_frontier(session, saved, direct, completed, active_conflict, child_save, child_log, executor, resimulated, child_restored, path); !phase)
+    if (auto phase = restore_checkpoint_frontier(session, saved, direct, completed, active_conflict, child_save, child_log, executor, resimulated, child_restored, offer_pool.value(), path); !phase)
         return core::Result<GameRestore>::failure(phase.error());
     // WGS-57/173: story rewards mutate the active monitor synchronously rather
     // than issuing ordinary replay commands. Restore its sealed owner before

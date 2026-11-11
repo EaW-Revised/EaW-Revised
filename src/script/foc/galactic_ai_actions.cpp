@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <limits>
+#include <optional>
 #include <stdexcept>
 
 namespace eawr::script::foc::galactic_ai {
@@ -185,24 +186,28 @@ NativeActions::~NativeActions() {
 void NativeActions::bind_handlers() {
     if (actor_changes_) world_.set_native_actor_changes_handler([lifetime = lifetime_](const auto& snapshot, auto changes) {
         if (changes.empty()) return core::Result<void>::success();
-        if (!*lifetime || !(*lifetime)->actor_changes_)
+        if (!*lifetime || !(*lifetime)->actor_changes_ || !(*lifetime)->actor_facts_)
             return invalid<void>("native actor lifecycle owner must be rebound before service");
-        return (*lifetime)->actor_changes_(**lifetime, snapshot, changes);
+        auto& owner = **lifetime;
+        // The facts come from this delivery's snapshot, so a later application sees what the world published now.
+        auto facts = owner.actor_facts_(snapshot, changes);
+        if (!facts) return core::Result<void>::failure(facts.error());
+        Delivery delivery{ActorChangesDelivery{{changes.begin(), changes.end()}, std::move(facts).value()}};
+        if (owner.delivery_sink_ && owner.delivery_sink_(delivery)) return core::Result<void>::success();
+        return owner.apply_delivery(delivery);
     });
     world_.set_native_production_outcome_handler([lifetime = lifetime_](const auto& input) {
         if (!*lifetime) return;
-        const auto found = (*lifetime)->bound().purchases_.find(input.build);
-        if (found == (*lifetime)->bound().purchases_.end() || found->second.player != input.player) return;
-        RecordWrite record_write{**lifetime, 1, input.build};
-        (*lifetime)->mark_build_state_changed();
-        found->second.completed = input.completed;
-        found->second.failed = !input.completed;
-        found->second.object = input.object;
+        auto& owner = **lifetime;
+        Delivery delivery{input};
+        if (owner.delivery_sink_ && owner.delivery_sink_(delivery)) return;
+        owner.apply_production_outcome(input);
     });
     world_.set_native_production_handler([lifetime = lifetime_](const auto& input) {
         return *lifetime ? (*lifetime)->notice(input) : invalid<gc::GalacticSession::NativeProductionPayment>("native producer owner must be rebound before service");
     });
     world_.set_credit_notification_handler([lifetime = lifetime_](const auto& input) {
+        if (*lifetime && (*lifetime)->credit_sink_) if (auto taken = (*lifetime)->credit_sink_(input)) return std::move(*taken);
         return *lifetime && (*lifetime)->funding_ ? (*lifetime)->funding_->notify(input) : invalid<void>("native cash requires the rebound funding owner");
     });
 }
@@ -216,8 +221,80 @@ const gc::GalacticSession::NativeInvasion* NativeActions::invasion_status(std::u
     return world_.native_invasion(request);
 }
 core::Result<void> NativeActions::retire_invasion(std::uint64_t request) { return world_.retire_native_invasion(request); }
+core::Result<BillDecision> decide_bill(const BillRow& row, const gc::GalacticSession::NativeProductionNotice& input,
+    const BillLedgers& ledgers, std::span<const gc::ProductionPlayer> players) {
+    using Result = core::Result<BillDecision>;
+    if (input.amount.raw() < 0) return invalid<BillDecision>("native bill has no reconstructed build/goal mapping");
+    const auto* ledger = ledgers ? ledgers(row.player) : nullptr;
+    if (!ledger) return invalid<BillDecision>("native bill requires its ledger");
+    BillDecision out;
+    auto charge = input.amount; auto payer = row.player;
+    if (!row.orphan) {
+        const auto goal = ledger->goals.find(row.goal);
+        if (goal == ledger->goals.end()) { out.payment = {false, payer, {}}; return Result::success(out); }
+        const auto held = sim::math::add(goal->second.capital, goal->second.accumulated);
+        if (!held) return Result::failure(held.error());
+        const auto spendable = std::min(held.value(), goal->second.cost);
+        const auto difference = sim::math::subtract(spendable, charge);
+        if (!difference) return Result::failure(difference.error());
+        if (difference.value().trunc_to_integer() < 0) {
+            // WGA-157: a live plan quotes completion cost, independently of its
+            // spendable capital/income. Only that quote's shortage adds a mark.
+            if (goal->second.cost < charge) {
+                const auto shortage = sim::math::subtract(charge, goal->second.cost);
+                if (!shortage) return Result::failure(shortage.error());
+                if (const auto marked = sim::math::add(row.marked, shortage.value()); !marked) return Result::failure(marked.error());
+                out.effect = {BillEffect::Kind::mark, row.player, row.goal, shortage.value(), {}};
+            }
+            out.payment = {false, payer, {}};
+            return Result::success(out);
+        }
+        charge = std::min(charge, spendable);
+    } else {
+        const auto owner = std::find_if(players.begin(), players.end(), [&](const auto& p) { return p.player == input.planet_owner && !p.human; });
+        if (owner == players.end() || !ledgers(input.planet_owner)) { out.payment = {false, input.planet_owner, {}}; return Result::success(out); }
+        payer = input.planet_owner;
+    }
+    const auto total = sim::math::add(row.billed, charge);
+    if (!total || total.value() > row.price) return invalid<BillDecision>("native bill exceeds accepted price");
+    out.payment = {true, payer, charge};
+    out.effect = {BillEffect::Kind::spend, payer, row.orphan ? 0 : row.goal, charge, input.remaining};
+    return Result::success(out);
+}
+bool bill_mark_applies(const gc::funding::Ledger& ledger, const BillEffect& effect) {
+    return effect.kind == BillEffect::Kind::mark && ledger.goals.contains(effect.goal);
+}
+std::uint64_t bill_spend_goal(const gc::funding::Ledger& ledger, const BillEffect& effect) {
+    if (!effect.goal || ledger.goals.contains(effect.goal)) return effect.goal;
+    const auto dead = ledger.dead_goals.find(effect.goal);
+    return dead != ledger.dead_goals.end() && !(dead->second.marked < effect.amount) ? effect.goal : 0;
+}
+core::Result<gc::funding::Ledger> apply_bill_ledger(gc::funding::Ledger ledger, const BillEffect& effect) {
+    if (effect.kind == BillEffect::Kind::mark)
+        return bill_mark_applies(ledger, effect) ? gc::funding::mark_spending(std::move(ledger), effect.goal, effect.amount)
+                                                 : core::Result<gc::funding::Ledger>::success(std::move(ledger));
+    if (effect.kind == BillEffect::Kind::spend) {
+        const auto goal = bill_spend_goal(ledger, effect);
+        return gc::funding::spend(std::move(ledger), goal, effect.amount);
+    }
+    return core::Result<gc::funding::Ledger>::success(std::move(ledger));
+}
+void apply_bill_row(BillRow& row, const BillEffect& effect) {
+    if (effect.kind == BillEffect::Kind::mark) {
+        if (const auto marked = sim::math::add(row.marked, effect.amount)) row.marked = marked.value();
+    }
+    if (effect.kind == BillEffect::Kind::spend) {
+        if (const auto billed = sim::math::add(row.billed, effect.amount)) row.billed = billed.value();
+        row.remaining = effect.remaining;
+    }
+}
+core::Result<void> NativeActions::apply_credit(const gc::GalacticSession::CreditNotification& input) {
+    return funding_ ? funding_->notify(input) : invalid<void>("native cash requires the rebound funding owner");
+}
 core::Result<gc::GalacticSession::NativeProductionPayment> NativeActions::notice(const gc::GalacticSession::NativeProductionNotice& input) {
-    auto result = notice_unrecorded(input);
+    std::optional<core::Result<gc::GalacticSession::NativeProductionPayment>> taken;
+    if (billing_sink_) taken = billing_sink_(input);
+    auto result = taken ? std::move(*taken) : notice_unrecorded(input);
     if (result && input.kind == gc::GalacticSession::NativeProductionNotice::Kind::billed) {
         const auto recorded = world_.append_native_effect(gc::NativeEffectKind::production_payment,
             economic_replay::payment(input, result.value()), gc::NativeEffectPhase::world_service);
@@ -252,49 +329,51 @@ core::Result<gc::GalacticSession::NativeProductionPayment> NativeActions::notice
             false, false, 0, pending_->target, pending_->type, offer->domain});
         return Result::success({true, input.player, {}});
     }
-    auto at = bound().purchases_.find(input.build);
+    auto decided = decide_live_bill(input);
+    if (!decided) return Result::failure(decided.error());
+    if (auto applied = apply_bill_effect(input.build, decided.value().effect); !applied) return Result::failure(applied.error());
+    return Result::success(decided.value().payment);
+}
+core::Result<BillDecision> NativeActions::decide_live_bill(const gc::GalacticSession::NativeProductionNotice& input) const {
+    if (!funding_) return invalid<BillDecision>("native billing requires the funding owner");
+    const auto at = bound().purchases_.find(input.build);
     if (at == bound().purchases_.end() || at->second.player != input.player || input.amount.raw() < 0)
-        return invalid<Payment>("native bill has no reconstructed build/goal mapping");
-    auto& row = at->second;
-    const auto ledger = funding_->ledger(row.player);
-    if (!ledger) return invalid<Payment>("native bill requires its ledger");
-    auto charge = input.amount; auto payer = row.player;
-    if (!row.orphan) {
-        const auto goal = ledger->goals.find(row.goal);
-        if (goal == ledger->goals.end()) return Result::success({false, payer, {}});
-        const auto held = sim::math::add(goal->second.capital, goal->second.accumulated);
-        if (!held) return Result::failure(held.error());
-        const auto spendable = std::min(held.value(), goal->second.cost);
-        const auto difference = sim::math::subtract(spendable, charge);
-        if (!difference) return Result::failure(difference.error());
-        if (difference.value().trunc_to_integer() < 0) {
-            // WGA-157: a live plan quotes completion cost, independently of its
-            // spendable capital/income. Only that quote's shortage adds a mark.
-            if (goal->second.cost < charge) {
-                const auto shortage = sim::math::subtract(charge, goal->second.cost);
-                if (!shortage) return Result::failure(shortage.error());
-                const auto marked = sim::math::add(row.marked, shortage.value());
-                if (!marked) return Result::failure(marked.error());
-                auto result = funding_->mark_spending(row.player, row.goal, shortage.value());
-                if (!result) return Result::failure(result.error());
-                mark_build_state_changed();
-                row.marked = marked.value();
-            }
-            return Result::success({false, payer, {}});
-        }
-        charge = std::min(charge, spendable);
-    } else {
-        const auto players = world_.snapshot()->production()->players;
-        const auto owner = std::find_if(players.begin(), players.end(), [&](const auto& p) { return p.player == input.planet_owner && !p.human; });
-        if (owner == players.end() || !funding_->ledger(input.planet_owner)) return Result::success({false, input.planet_owner, {}});
-        payer = input.planet_owner;
-    }
-    auto total = sim::math::add(row.billed, charge);
-    if (!total || total.value() > row.price) return invalid<Payment>("native bill exceeds accepted price");
-    if (auto spent = funding_->spend(payer, row.orphan ? 0 : row.goal, charge); !spent) return Result::failure(spent.error());
+        return invalid<BillDecision>("native bill has no reconstructed build/goal mapping");
+    const auto snapshot = world_.snapshot();
+    if (!snapshot->production()) return invalid<BillDecision>("native bill requires its actual production owner");
+    std::map<gc::PlayerId, std::shared_ptr<const gc::funding::Ledger>> held;
+    const BillLedgers ledgers = [&](gc::PlayerId player) -> const gc::funding::Ledger* {
+        auto& ledger = held[player];
+        if (!ledger) ledger = funding_->ledger(player);
+        return ledger.get();
+    };
+    return decide_bill(bill_row(at->second), input, ledgers, snapshot->production()->players);
+}
+BillRow NativeActions::bill_row(const Purchase& row) {
+    return {row.player, row.goal, row.price, row.billed, row.marked, row.remaining, row.orphan};
+}
+std::map<sim::EntityId, BillRow> NativeActions::bill_rows() const {
+    std::map<sim::EntityId, BillRow> rows;
+    for (const auto& [build, row] : bound().purchases_) rows.emplace_hint(rows.end(), build, bill_row(row));
+    return rows;
+}
+core::Result<void> NativeActions::apply_bill_effect(sim::EntityId build, const BillEffect& effect) {
+    if (effect.kind == BillEffect::Kind::none) return core::Result<void>::success();
+    RecordWrite record_write{*this, 1, build};
+    const auto at = bound().purchases_.find(build);
+    if (at == bound().purchases_.end()) return invalid<void>("recorded bill requires its accepted build mapping");
+    if (!funding_) return invalid<void>("native billing requires the funding owner");
+    const auto owner = effect.kind == BillEffect::Kind::mark ? at->second.player : effect.payer;
+    const auto ledger = funding_->ledger(owner);
+    if (!ledger) return invalid<void>("native bill requires its ledger");
+    if (effect.kind == BillEffect::Kind::mark) {
+        if (!bill_mark_applies(*ledger, effect)) return core::Result<void>::success();
+        if (auto marked = funding_->mark_spending(owner, effect.goal, effect.amount); !marked) return marked;
+    } else if (auto spent = funding_->spend(owner, bill_spend_goal(*ledger, effect), effect.amount); !spent) return spent;
     mark_build_state_changed();
-    row.billed = total.value(); row.remaining = input.remaining;
-    return Result::success({true, payer, charge});
+    auto row = bill_row(at->second); apply_bill_row(row, effect);
+    at->second.marked = row.marked; at->second.billed = row.billed; at->second.remaining = row.remaining;
+    return core::Result<void>::success();
 }
 core::Result<void> NativeActions::finish_task(sim::EntityId build, bool salvage) {
     RecordWrite record_write{*this, 1, build};
@@ -594,20 +673,46 @@ void NativeActions::bind_freestore_path(FreestorePathProvider provider, Conflict
 void NativeActions::bind_movement_listener() {
     world_.set_native_movement_listener([token = lifetime_](const gc::GalacticEvent& event) {
         if (!*token) return;
-        // Sparse listener records, at the ordered movement commit; no per-frame
-        // scene walk or allocation, and no dependency on the poll's cadence.
-        for (auto& [id, movement] : (*token)->bound().movements_) {
-            (void)id;
-            if (!movement.registered || movement.actor != event.subject) continue;
-            (*token)->retain_record(2, id);
-            const auto previous = movement;
-            if (event.kind == gc::GalacticEventKind::movement_finished && (movement.freestore_actor || !movement.finished)) movement.advance_requested = true;
-            if (event.kind == gc::GalacticEventKind::movement_canceled) {
-                movement.finished = true; if (!movement.freestore_actor) movement.advance_requested = false;
-            }
-            if (movement != previous) { (*token)->mark_state_changed(); (*token)->update_record(2, id); }
-        }
+        (*token)->on_movement_event(event);
     });
+}
+void NativeActions::on_movement_event(const gc::GalacticEvent& event) {
+    Delivery delivery{event};
+    if (delivery_sink_ && delivery_sink_(delivery)) return;
+    apply_movement_event(event);
+}
+void NativeActions::apply_production_outcome(const gc::GalacticSession::NativeProductionOutcome& input) {
+    const auto found = bound().purchases_.find(input.build);
+    if (found == bound().purchases_.end() || found->second.player != input.player) return;
+    RecordWrite record_write{*this, 1, input.build};
+    mark_build_state_changed();
+    found->second.completed = input.completed;
+    found->second.failed = !input.completed;
+    found->second.object = input.object;
+}
+core::Result<void> NativeActions::apply_delivery(const Delivery& delivery) {
+    if (const auto* outcome = std::get_if<gc::GalacticSession::NativeProductionOutcome>(&delivery)) {
+        apply_production_outcome(*outcome); return core::Result<void>::success();
+    }
+    if (const auto* event = std::get_if<gc::GalacticEvent>(&delivery)) { apply_movement_event(*event); return core::Result<void>::success(); }
+    const auto& changes = std::get<ActorChangesDelivery>(delivery);
+    if (!actor_changes_) return invalid<void>("native actor lifecycle owner must be rebound before service");
+    return actor_changes_(*this, changes.changes, changes.facts);
+}
+void NativeActions::apply_movement_event(const gc::GalacticEvent& event) {
+    // Sparse listener records, at the ordered movement commit; no per-frame
+    // scene walk or allocation, and no dependency on the poll's cadence.
+    for (auto& [id, movement] : bound().movements_) {
+        (void)id;
+        if (!movement.registered || movement.actor != event.subject) continue;
+        retain_record(2, id);
+        const auto previous = movement;
+        if (event.kind == gc::GalacticEventKind::movement_finished && (movement.freestore_actor || !movement.finished)) movement.advance_requested = true;
+        if (event.kind == gc::GalacticEventKind::movement_canceled) {
+            movement.finished = true; if (!movement.freestore_actor) movement.advance_requested = false;
+        }
+        if (movement != previous) { mark_state_changed(); update_record(2, id); }
+    }
 }
 core::Result<void> NativeActions::advance_movement(Movement& movement, bool taskforce_has_members) {
     if (movement.freestore_actor) return advance_freestore_movement(movement);
@@ -755,7 +860,24 @@ core::Result<NativeActions::Movement> NativeActions::poll_movement(std::uint64_t
         [&](const auto& fleet) { return fleet.id == movement.actor; })) { movement.actor = 0; movement.finished = true; }
     return core::Result<Movement>::success(movement);
 }
+core::Result<void> NativeActions::settle_movement_cursors() {
+    const auto snapshot = world_.snapshot();
+    const auto events = snapshot->events().size();
+    for (auto& [id, movement] : bound().movements_) {
+        if (movement.observed_tick != snapshot->completed_tick() || movement.event_cursor <= events) continue;
+        RecordWrite record_write{*this, 2, id};
+        movement.event_cursor = events; mark_state_changed();
+    }
+    return core::Result<void>::success();
+}
 core::Result<void> NativeActions::movement_conflict(std::uint64_t request, gc::PlanetId location, bool begin) {
+    std::vector<sim::EntityId> orbiting;
+    for (const auto& fleet : world_.snapshot()->fleets()) if (fleet.orbit && fleet.orbit == location) orbiting.push_back(fleet.id);
+    std::sort(orbiting.begin(), orbiting.end());
+    return movement_conflict(request, location, begin, orbiting);
+}
+core::Result<void> NativeActions::movement_conflict(std::uint64_t request, gc::PlanetId location, bool begin,
+    std::span<const sim::EntityId> orbiting) {
     RecordWrite record_write{*this, 2, request};
     const auto found = bound().movements_.find(request);
     if (found == bound().movements_.end() || !found->second.registered)
@@ -776,8 +898,7 @@ core::Result<void> NativeActions::movement_conflict(std::uint64_t request, gc::P
     } else {
         if (movement.conflict_location != location) return invalid<void>("movement conflict end does not match its listener location");
         movement.conflict_location = 0;
-        for (const auto& fleet : world_.snapshot()->fleets())
-            if (fleet.id == movement.actor && fleet.orbit == location) movement.advance_requested = true;
+        if (std::binary_search(orbiting.begin(), orbiting.end(), movement.actor)) movement.advance_requested = true;
         // WGA-231: a retreat/delete return no longer owns a resumable actor at
         // the conflict location. Do not let its travel finish restart this block.
         if (!movement.advance_requested) { movement.finished = true; movement.actor = 0; }
@@ -816,6 +937,27 @@ core::Result<void> NativeActions::retire_movement(std::uint64_t request) {
         }
     }
     return core::Result<void>::success();
+}
+core::Result<bool> NativeActions::refuse_movement(gc::PlayerId player, gc::FleetId actor) {
+    bool changed{};
+    for (auto& [id, movement] : bound().movements_) {
+        if (!movement.registered || movement.finished || movement.player != player || movement.actor != actor) continue;
+        RecordWrite record_write{*this, 2, id};
+        movement.finished = true; changed = true;
+    }
+    if (changed) mark_state_changed();
+    return core::Result<bool>::success(changed);
+}
+core::Result<bool> NativeActions::refuse_purchase(gc::PlayerId player, sim::EntityId build) {
+    const auto found = bound().purchases_.find(build);
+    // A completed purchase stays completed: its object exists in the world, and a refusal that arrives afterwards (a late
+    // production or finish intent) must not turn the row into "failed" with an object, which no restore accepts (#6388).
+    if (found == bound().purchases_.end() || found->second.player != player || found->second.failed || found->second.completed)
+        return core::Result<bool>::success(false);
+    RecordWrite record_write{*this, 1, build};
+    mark_build_state_changed();
+    found->second.completed = false; found->second.failed = true;
+    return core::Result<bool>::success(true);
 }
 core::Result<void> NativeActions::retire_freestore_movement(sim::EntityId actor, bool actor_lost) {
     const auto found = bound().freestore_requests_.find(actor);
@@ -1046,7 +1188,7 @@ core::Result<NativeState> NativeActions::capture() const {
 }
 core::Result<void> NativeActions::restore(const NativeState& state) {
     if (phase_ || phase_abandoned_) return invalid<void>("cannot restore an active or unsettled native action phase");
-    if (pending_admission() || state.version != 1 || !funding_) return invalid<void>("production restore requires its completed native/funding boundary");
+    if (pending_admission() || state.version != native_state_version || !funding_) return invalid<void>("production restore requires its completed native/funding boundary");
     const auto found = state.components.find(component);
     if (found == state.components.end()) return invalid<void>("production component is missing");
     const auto& bytes = found->second; std::size_t at{}; bool valid = true;
@@ -1069,10 +1211,14 @@ core::Result<void> NativeActions::restore(const NativeState& state) {
         const auto producer = read(), requested_type = read(), channel = read(), task_finished = read(), salvage = read();
         if (!producer || !world_.graph() || !world_.graph()->node(producer) || !requested_type
             || channel > 1 || task_finished > 1 || salvage > 1) return invalid<void>("production task association is invalid");
-        if (completed > 1 || failed > 1 || (completed && failed) || (object && (!completed || object >= world_.next_entity_id())))
-            return invalid<void>("production completion reference is invalid");
-        if (!valid || !id || id <= last || id >= world_.next_entity_id() || !player || player > std::numeric_limits<gc::PlayerId>::max()
-            || !goal || price > (std::uint64_t{1} << 48) || billed > price || marked > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()) || remaining > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()) || orphan > 1) return invalid<void>("production identities or amounts are invalid");
+        if (completed > 1 || failed > 1 || (completed && failed) || (object && (!completed || object >= identity_ceiling())))
+            return invalid<void>("production completion reference is invalid: purchase " + std::to_string(id) + " completed " + std::to_string(completed)
+                + " failed " + std::to_string(failed) + " object " + std::to_string(object) + " identity ceiling " + std::to_string(identity_ceiling())
+                + " (world next id " + std::to_string(world_.next_entity_id()) + ")");
+        if (!valid || !id || id <= last || id >= identity_ceiling() || !player || player > std::numeric_limits<gc::PlayerId>::max()
+            || !goal || price > (std::uint64_t{1} << 48) || billed > price || marked > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()) || remaining > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()) || orphan > 1) return invalid<void>("production identities or amounts are invalid: purchase " + std::to_string(id) + " after " + std::to_string(last) + " player "
+                + std::to_string(player) + " goal " + std::to_string(goal) + " price " + std::to_string(price) + " billed " + std::to_string(billed)
+                + " identity ceiling " + std::to_string(identity_ceiling()));
         const auto ledger = funding_->ledger(static_cast<gc::PlayerId>(player));
         // Completed and cancelled mappings remain visible; pending obligations
         // can outlive an active goal; orphan billing uses the aggregate dead budget.
@@ -1093,7 +1239,7 @@ core::Result<void> NativeActions::restore(const NativeState& state) {
         const auto plan_id = read(), taskforce_id = read(), block_id = read(), registered = read();
         const auto freestore_actor = read();
         if (!valid || !id || id <= last || id >= next_movement || !player || player > std::numeric_limits<gc::PlayerId>::max()
-            || actor >= world_.next_entity_id() || freestore_actor >= world_.next_entity_id()
+            || actor >= identity_ceiling() || freestore_actor >= identity_ceiling()
             || (freestore_actor && (plan_id || taskforce_id || block_id || taskforce || reach || location)) || !world_.graph() || !world_.graph()->node(destination)
             || (location && !world_.graph()->node(location)) || reach > static_cast<std::uint64_t>(MovementReach::any)
             || registered > 1 || taskforce > 1 || (taskforce != (taskforce_id != 0)) || finished > 1 || advance > 1 || (!actor && !finished) || tick > world_.snapshot()->completed_tick()
@@ -1107,10 +1253,17 @@ core::Result<void> NativeActions::restore(const NativeState& state) {
     if (!valid || freestore_size != bytes.size() - at) return invalid<void>("production freestore tail framing is invalid");
     const auto freestore_bytes = std::span(bytes).subspan(at, static_cast<std::size_t>(freestore_size));
     QualifiedFreestore staged_freestore;
-    if (auto decoded = staged_freestore.restore(freestore_bytes, world_.next_entity_id(), world_.setup().players); !decoded) return decoded;
+    if (auto decoded = staged_freestore.restore(freestore_bytes, identity_ceiling(), world_.setup().players); !decoded) return decoded;
     if (!staged_freestore.inventory().empty()) {
         if (!freestore_validation_) return invalid<void>("freestore restore requires reconstructed content/lifecycle/reservation validation");
-        if (auto checked = freestore_validation_(staged_freestore); !checked) return checked;
+        // The world already shows the actor changes still waiting in the async inbox (a merged-away fleet, a type change):
+        // compare it with the freestore as it will be once they apply. The retained owner stays the saved one.
+        std::optional<QualifiedFreestore> replayed;
+        if (pending_freestore_replay_) {
+            replayed.emplace(staged_freestore.clone());
+            if (auto pending = pending_freestore_replay_(*replayed); !pending) return pending;
+        }
+        if (auto checked = freestore_validation_(replayed ? *replayed : staged_freestore); !checked) return checked;
     }
     std::map<sim::EntityId, std::uint64_t> tracked_actors;
     for (const auto& [id, movement] : moves) {
@@ -1148,17 +1301,31 @@ core::Result<void> NativeActions::restore(const NativeState& state) {
                 [&](const auto& p) { return p.player == entry.builder; });
             if (player == world_.snapshot()->production()->players.end()) return invalid<void>("production queue has an unknown player");
             if (player->human) continue;
+            // The first difference is named with both values: this one check used to say only "disagrees".
             const auto purchase = staged.find(entry.build_id);
-            if (purchase == staged.end() || purchase->second.completed || purchase->second.failed
-                || purchase->second.player != entry.builder || purchase->second.price != entry.price
-                || purchase->second.producer != planet.planet || purchase->second.requested_type != entry.type
-                || static_cast<std::size_t>(purchase->second.channel) != static_cast<std::size_t>(&queue - planet.queues.data())
-                || purchase->second.remaining != entry.last_remaining)
-                return invalid<void>("production mapping disagrees with the reconstructed paid queue");
+            const auto channel = static_cast<std::size_t>(&queue - planet.queues.data());
+            const auto pair = [](auto saved, auto queued) { return " (purchase " + std::to_string(saved) + ", queue " + std::to_string(queued) + ")"; };
+            std::string difference;
+            if (purchase == staged.end()) difference = "no reconstructed purchase for this queue entry";
+            else if (purchase->second.completed) difference = "its purchase is already completed";
+            else if (purchase->second.failed) difference = "its purchase already failed";
+            else if (purchase->second.player != entry.builder) difference = "builder differs" + pair(purchase->second.player, entry.builder);
+            else if (purchase->second.price != entry.price) difference = "price differs" + pair(purchase->second.price.raw(), entry.price.raw());
+            else if (purchase->second.producer != planet.planet) difference = "producer differs" + pair(purchase->second.producer, planet.planet);
+            else if (purchase->second.requested_type != entry.type) difference = "type differs" + pair(purchase->second.requested_type, entry.type);
+            else if (static_cast<std::size_t>(purchase->second.channel) != channel) difference = "channel differs" + pair(static_cast<std::size_t>(purchase->second.channel), channel);
+            else if (const auto pending = pending_bill_remaining_ ? pending_bill_remaining_(entry.build_id) : std::nullopt;
+                     pending.value_or(purchase->second.remaining) != entry.last_remaining)
+                difference = "remaining time differs" + pair(pending.value_or(purchase->second.remaining).raw(), entry.last_remaining.raw())
+                    + " (raw fixed-point)";
+            if (!difference.empty())
+                return invalid<void>("production mapping disagrees with the reconstructed paid queue: build " + std::to_string(entry.build_id)
+                    + " (builder " + std::to_string(entry.builder) + ", planet " + std::to_string(planet.planet) + ", type "
+                    + std::to_string(entry.type) + "): " + difference);
         }
     mark_build_state_changed();
     // Validation above finishes before any retained owner is replaced.
-    if (auto decoded = bound().freestore_->restore(freestore_bytes, world_.next_entity_id(), world_.setup().players); !decoded) return decoded;
+    if (auto decoded = bound().freestore_->restore(freestore_bytes, identity_ceiling(), world_.setup().players); !decoded) return decoded;
     bound().purchases_ = std::move(staged);
     bound().movements_ = std::move(moves); bound().next_movement_ = next_movement;
     bound().freestore_requests_ = std::move(tracked_actors);
@@ -1257,43 +1424,8 @@ struct NativeActions::ImmediateState final : authoritative::ImmediateEffectState
             effects.emplace_back(gc::NativeEffectKind::cash, economic_replay::cash(player, amount.value(), multiplier->second, actual.value()));
             return Result::success({});
         }
-        if (action == "galactic.story_prevent_ai_usage") {
-            // RGC-178 / L-57: the story script's Prevent_AI_Usage works only for an actor whose owner has an
-            // initialized AI pool. Any other owner (a human seat) is a warning without effect, never a script error.
-            const auto actor = args.size() == 2 ? id(args[0], handle_game_object) : std::nullopt;
-            const auto* prevent = args.size() == 2 ? std::get_if<bool>(&args[1].data) : nullptr;
-            if (!actor || !prevent) return invalid<authoritative::ValueList>("Prevent_AI_Usage requires an actor and Boolean");
-            // Read the refusals from the shared store: a call that publishes nothing never clones it.
-            const auto& view = freestore ? static_cast<const QualifiedFreestore&>(*freestore) : *owner->bound().freestore_;
-            const auto* facts = view.facts(*actor);
-            // Second element names the refusal: "actor" (the object is not a free-store actor) or "pool" (its owner has no AI pool).
-            if (!facts) return Result::success({authoritative::Value{false}, authoritative::Value{std::string("actor")}});
-            if (!view.initialized(facts->object.owner)) return Result::success({authoritative::Value{false}, authoritative::Value{std::string("pool")}});
-            if (!freestore) { freestore = owner->bound().freestore_->clone(); original_freestore = owner->bound().freestore_->encode(); }
-            facts = freestore->facts(*actor);
-            if (!facts) return Result::success({authoritative::Value{false}, authoritative::Value{std::string("actor")}});
-            const auto before = freestore->operation_cursor();
-            const auto result = freestore->prevent_ai_usage(facts->object.owner, *actor, *prevent);
-            if (!result) return Result::failure(result.error());
-            if (auto retained = retain_store_step(before); !retained) return Result::failure(retained.error());
-            return Result::success({authoritative::Value{true}});
-        }
-        if (action == "galactic.spawn_unit") {
-            // RGC-176..178: Spawn_Unit(type, planet, player) creates through the same journaled native creation as
-            // the AI's forced production and the story reward (one deterministic identity block, one replayable
-            // effect, the AI free-store hand-off of an AI owner). The script receives the new object of the
-            // requested type (a fleet creation yields its first ship); an empty list is a null creation.
-            const auto player = args.size() == 3 ? id(args[0], handle_player) : std::nullopt;
-            const auto planet = args.size() == 3 ? id(args[1], handle_game_object) : std::nullopt;
-            const auto type = args.size() == 3 ? id(args[2], handle_type) : std::nullopt;
-            if (!player || !planet || !type) return invalid<authoritative::ValueList>("Spawn_Unit requires a player, planet and type");
-            auto made = apply("galactic.magic_force", {args[0], args[1], authoritative::Value{std::vector<authoritative::Value>{args[2]}}});
-            if (!made) return made;
-            const auto* actors = made.value().size() == 1 ? std::get_if<std::vector<authoritative::Value>>(&made.value()[0].data) : nullptr;
-            if (!actors) return invalid<authoritative::ValueList>("native creation returned no actor list");
-            if (actors->empty()) return Result::success({});
-            return Result::success({authoritative::Value{std::vector<authoritative::Value>{actors->front()}}});
-        }
+        // #6378: the world scripts' Spawn_Unit and Prevent_AI_Usage use the world-side host (galactic_world_immediate_host.hpp);
+        // this host serves the AI's own scripts.
         if (action != "galactic.magic_force" || (args.size() != 3 && args.size() != 4)
             || !id(args[0], handle_player) || !id(args[1], handle_game_object))
             return invalid<authoritative::ValueList>("magic requires its player, staging planet and requested original types");
@@ -1442,7 +1574,7 @@ struct NativeActions::ImmediateHost final : authoritative::ImmediateEffectHost {
                 return invalid<void>("immediate freestore step has an invalid native intent prefix");
             previous_count = step.native_count;
         }
-        const auto publish_world = [&] { return owner->world_.commit_native_actions(native->world, prepared, !native_sink); };
+        const auto publish_world = [&] { return owner->world_.commit_native_actions(native->world, prepared, !(native_sink && store_sink)); };
         auto committed = [&]() -> core::Result<void> {
             if (!owner->funding_) return publish_world();
             if (!owner->funding_->has_player_frontier())

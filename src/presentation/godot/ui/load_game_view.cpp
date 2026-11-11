@@ -13,6 +13,7 @@
 
 #include <utility>
 #include <algorithm>
+#include <chrono>
 
 using namespace godot;
 
@@ -209,12 +210,51 @@ void EawrLoadGameScreen::place_dates() {
 void EawrLoadGameScreen::_process(const double delta) {
     if (finished_) return;
     place_dates();
+    if (!review_request_ && review_result_.valid()
+        && review_result_.wait_for(std::chrono::seconds(0)) == std::future_status::ready)
+        static_cast<void>(review_result_.get()); // discarded after Cancel; never restart the load
     if (details_ && (details_elapsed_ += delta) >= 1.0) {
         details_elapsed_ = 0.0;
         const auto* selected = model_.selected_entry();
         const auto value = godot_text(selected && selected->kind == model::EntryKind::saved_game
             ? context_.save_details(selected->file_name) : std::string{});
         if (details_->get_text() != value) details_->set_text(value);
+    }
+    if (review_request_) {
+        if (!review_result_.valid()) {
+            if (context_.review_ready && !context_.review_ready()) {
+                if (!review_wait_lease_ && context_.review_wait_lease) review_wait_lease_ = context_.review_wait_lease();
+                log_review_wait();
+                return;
+            }
+            review_wait_lease_.reset();
+            if (review_wait_logged_) log_review_end("mod digests ready");
+            review_result_ = context_.review_save(*review_request_);
+        }
+        if (review_result_.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return;
+        auto result = review_result_.get();
+        log_review_end("mod check finished");
+        review_request_.reset();
+        if (box_open()) box_->queue_free();
+        box_ = nullptr; box_id_ = 0;
+        if (!result) { static_cast<void>(mod_review_.answer(false)); static_cast<void>(show_notice(result.error().message)); return; }
+        if (!mod_review_.complete(std::move(result).value())) return;
+        if (auto admitted = mod_review_.proceed()) begin_launch(std::move(*admitted));
+        else {
+            model::MessageBoxRequest prompt;
+            prompt.caption = "TEXT_BUTTON_LOAD_GAME";
+            prompt.lines[0] = mod_review_.prompt(); prompt.literal_lines[0] = true;
+            prompt.buttons = {{"TEXT_BUTTON_YES", 1, false}, {"TEXT_BUTTON_NO", 0, true}};
+            box_ = memnew(EawrMessageBox);
+            if (!box_->open(*this, context_.boxes, prompt)) {
+                failure_ = box_->failure(); memdelete(box_); box_ = nullptr;
+                static_cast<void>(mod_review_.answer(false)); return;
+            }
+            box_id_ = static_cast<int64_t>(box_->get_instance_id());
+            box_->set_scrollable_text(mod_review_.prompt());
+            box_->connect("result_chosen", callable_mp(this, &EawrLoadGameScreen::on_mod_answer));
+        }
+        return;
     }
     if (!pending_load_) return;
     if (launch_frames_ > 0) {
@@ -233,6 +273,7 @@ void EawrLoadGameScreen::finish_launch() {
     box_ = nullptr;
     box_id_ = 0;
     if (!refusal.empty()) {
+        UtilityFunctions::print("EAWR saved game load refused: ", godot_text(refusal));
         static_cast<void>(show_notice(refusal));
         return;
     }
@@ -259,22 +300,25 @@ void EawrLoadGameScreen::on_item_activated(const int64_t index) {
 }
 
 void EawrLoadGameScreen::on_load() {
-    if (finished_ || box_open() || pending_load_) return;
+    if (finished_ || box_open() || pending_load_ || review_result_.valid()) return;
     if (const auto saved = model_.saved_request()) {
-        model::MessageBoxRequest loading;
-        loading.kind = model::BoxKind::small_message;
-        loading.caption = "TEXT_SAVELOAD_LOADING_MSG";
-        box_ = memnew(EawrMessageBox);
-        if (!box_->open(*this, context_.boxes, loading)) {
-            failure_ = box_->failure();
-            memdelete(box_);
-            box_ = nullptr;
-            return;
-        }
-        box_id_ = static_cast<int64_t>(box_->get_instance_id());
-        pending_load_ = *saved;
-        launch_frames_ = loading_box_frames;
-        ++loads_started_;
+        if (context_.review_save) {
+            review_request_ = *saved;
+            review_started_ = std::chrono::steady_clock::now();
+            review_wait_logged_ = false;
+            mod_review_.wait(*saved);
+            model::MessageBoxRequest waiting;
+            waiting.caption = "TEXT_BUTTON_LOAD_GAME";
+            waiting.lines[0] = "Checking saved mods. A large mod can take a while the first time.";
+            waiting.literal_lines[0] = true;
+            waiting.buttons = {{"TEXT_BUTTON_CANCEL", 0, true}};
+            box_ = memnew(EawrMessageBox);
+            if (!box_->open(*this, context_.boxes, waiting)) {
+                failure_ = box_->failure(); memdelete(box_); box_ = nullptr; review_request_.reset(); return;
+            }
+            box_id_ = static_cast<int64_t>(box_->get_instance_id());
+            box_->connect("result_chosen", callable_mp(this, &EawrLoadGameScreen::on_review_cancelled));
+        } else begin_launch(*saved);
         return;
     }
     const auto request = model_.play_request();
@@ -282,6 +326,47 @@ void EawrLoadGameScreen::on_load() {
     finished_ = true;
     emit_signal("replay_chosen", godot_text(model::utf8_from_path(request->path)), godot_text(request->map));
     queue_free();
+}
+
+void EawrLoadGameScreen::begin_launch(model::SavedGameRequest request) {
+    model::MessageBoxRequest loading;
+    loading.kind = model::BoxKind::small_message;
+    loading.caption = "TEXT_SAVELOAD_LOADING_MSG";
+    box_ = memnew(EawrMessageBox);
+    if (!box_->open(*this, context_.boxes, loading)) {
+        failure_ = box_->failure(); memdelete(box_); box_ = nullptr; return;
+    }
+    box_id_ = static_cast<int64_t>(box_->get_instance_id());
+    pending_load_ = std::move(request); launch_frames_ = loading_box_frames; ++loads_started_;
+}
+void EawrLoadGameScreen::on_mod_answer(const int64_t result) {
+    box_ = nullptr; box_id_ = 0;
+    if (auto request = mod_review_.answer(result == 1)) begin_launch(std::move(*request));
+}
+void EawrLoadGameScreen::log_review_wait() {
+    const auto now = std::chrono::steady_clock::now();
+    constexpr auto interval = std::chrono::seconds(30);
+    if (review_wait_logged_ && now - review_logged_ < interval) return;
+    const auto seconds = std::chrono::duration_cast<std::chrono::seconds>(now - review_started_).count();
+    const std::string progress = context_.review_progress ? context_.review_progress() : std::string();
+    UtilityFunctions::print("EAWR saved game load waiting for the mounted mods' content digests: ", static_cast<int64_t>(seconds),
+                            " s", progress.empty() ? "" : "; ", godot_text(progress));
+    review_wait_logged_ = true;
+    review_logged_ = now;
+}
+
+void EawrLoadGameScreen::log_review_end(const char* what) {
+    const auto seconds = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - review_started_).count();
+    UtilityFunctions::print("EAWR saved game load ", what, " after ", static_cast<int64_t>(seconds), " s");
+}
+
+void EawrLoadGameScreen::on_review_cancelled(const int64_t) {
+    log_review_end("mod check cancelled");
+    review_wait_lease_.reset();
+    review_request_.reset();
+    static_cast<void>(mod_review_.answer(false));
+    box_ = nullptr; box_id_ = 0;
+    sync();
 }
 
 void EawrLoadGameScreen::on_delete() {
@@ -304,6 +389,7 @@ bool EawrLoadGameScreen::show_notice(const std::string& reason) {
     model::MessageBoxRequest request;
     request.caption = "TEXT_BUTTON_LOAD_GAME";
     request.lines[0] = reason;
+    request.literal_lines[0] = true;
     request.buttons = {model::BoxButton{"TEXT_BUTTON_OK", 0, true}};
     box_ = memnew(EawrMessageBox);
     if (!box_->open(*this, context_.boxes, request)) {
@@ -313,6 +399,7 @@ bool EawrLoadGameScreen::show_notice(const std::string& reason) {
         return false;
     }
     box_id_ = static_cast<int64_t>(box_->get_instance_id());
+    box_->set_scrollable_text(reason);
     pending_delete_.reset();
     return true;
 }

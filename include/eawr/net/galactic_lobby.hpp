@@ -24,10 +24,19 @@
 namespace eawr::net {
 
 inline constexpr std::string_view galactic_lobby_options_tag = "gc";
-inline constexpr unsigned galactic_lobby_options_version = 1;
+inline constexpr unsigned galactic_lobby_options_version = 2;
 // Stock MP_Default_Allow_Auto_Resolve (WAR-01): 0 always, 1 never, 2 ask, 3 overwhelming odds.
 inline constexpr std::uint32_t galactic_lobby_default_auto_resolve = 2;
 inline constexpr std::uint32_t galactic_lobby_max_auto_resolve = 3;
+// Battle-vote timeout, a host setting (#6156, owner D9): seconds a battle vote waits between different human sides. The retail
+// default is 15; the host may choose 5 to 120. Players on one side never vote against a clock (GameSession::untimed_votes).
+inline constexpr std::uint32_t galactic_lobby_min_vote_timeout = 5;
+inline constexpr std::uint32_t galactic_lobby_max_vote_timeout = 120;
+inline constexpr std::uint32_t galactic_lobby_default_vote_timeout = 15;
+[[nodiscard]] constexpr std::uint32_t galactic_lobby_clamp_vote_timeout(const std::int64_t seconds) noexcept {
+    return seconds < galactic_lobby_min_vote_timeout ? galactic_lobby_min_vote_timeout
+        : seconds > galactic_lobby_max_vote_timeout ? galactic_lobby_max_vote_timeout : static_cast<std::uint32_t>(seconds);
+}
 // Owner decision D5 (#4358) is open: what a human faction becomes when its side empties. Plan recommendation: AI.
 inline constexpr sim::galactic::FactionControl galactic_lobby_default_dropout = sim::galactic::FactionControl::ai;
 // Lobby rule: at most two human sides (WGS), at most eight humans in total (galactic_max_human_seats).
@@ -61,11 +70,15 @@ struct GalacticLobbyOptions {
     // MP_Default_Allow_Auto_Resolve seed (WAR-01). The setup offer does not carry it yet: it is agreed here and
     // applied by the arbitration slice (GCMP-06).
     std::uint32_t auto_resolve{galactic_lobby_default_auto_resolve};
+    // Seconds a battle vote waits between different human sides (#6156). The host sets it, every peer arms the same tick
+    // count from it. A new room starts at the campaign's own constant when it states one (clamped to the host range), else
+    // the retail 15. A resumed save shows the value it recorded, which can lie outside the host range.
+    std::uint32_t vote_timeout{galactic_lobby_default_vote_timeout};
     std::vector<GalacticLobbyRow> rows;
     friend bool operator==(const GalacticLobbyOptions&, const GalacticLobbyOptions&) = default;
 };
 
-// Canonical text, same style as the skirmish v1 codec: `gc1 <delay> <seed> <auto resolve> <custom> <credits>
+// Canonical text, same style as the skirmish v1 codec: `gc2 <delay> <seed> <auto resolve> <vote timeout> <custom> <credits>
 // <start tech> <max tech> <heroes> "<difficulty>" <row count>` then per row `<player> <faction id> <flags>
 // "<faction>" <human> <dropout>`. Decode accepts only bytes that re-encode to themselves; an unknown version is
 // refused by name.
@@ -99,6 +112,21 @@ enum class GalacticAiCaption : std::uint8_t { easy, normal, hard };
 // the setup offer would refuse (galactic_roster_draft + validate_mp_roster: at least two humans, at most eight,
 // a lead per side). Editable staging may be incomplete.
 [[nodiscard]] core::Result<void> validate_galactic_lobby(const LobbySnapshot& snapshot, bool starting,
+    std::span<const sim::galactic::MpLobbyCampaign> catalog);
+
+// #6134: the options after the seat of `peer` sits on faction row `slot`, for a row that is not planned for a player yet.
+// The row becomes a planned (human) row; the row the seat leaves is closed when no other seat holds it, so the number of
+// human sides does not grow when a guest moves to a free faction. Nothing when the row cannot be held (unplayable, neutral,
+// unknown) or the move would plan more human sides than a campaign game has. A row that is already planned is unchanged.
+// `before` is the room as it was, so the seat's old row and the other holders are known.
+[[nodiscard]] std::optional<GalacticLobbyOptions> galactic_lobby_options_with_seat_on(const GalacticLobbyOptions& options,
+    const sim::galactic::MpLobbyCampaign& campaign, const LobbySnapshot& before, PeerIndex peer, sim::galactic::PlayerId slot);
+
+// The lobby's choice hook for a Galactic Conquest room (host side, while a seat edits its own choice): when the choice
+// names a faction row that is not planned for a player yet, the room's rows are reshaped with galactic_lobby_options_with_seat_on
+// and every seat's side and faction follow its row again, so a guest can pick any free playable faction without the host
+// closing another row first. A choice that cannot be reshaped is refused with the reason (two human sides at most).
+[[nodiscard]] core::Result<void> follow_galactic_choice(const LobbySnapshot& before, LobbySnapshot& candidate, PeerIndex peer,
     std::span<const sim::galactic::MpLobbyCampaign> catalog);
 
 // The roster the agreed choices describe: every campaign faction as a player, a human seat per lobby seat on its

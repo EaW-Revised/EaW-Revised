@@ -132,6 +132,25 @@ struct SavedGameRequest final {
     std::string name;
 };
 
+// One reviewed request, retained across a yes/no dialog. A response consumes it once;
+// declining leaves the caller's running game and list untouched.
+class SavedLoadReview final {
+public:
+    void begin(SavedGameRequest request, std::string prompt);
+    void wait(SavedGameRequest request);
+    [[nodiscard]] bool waiting() const noexcept { return request_.has_value() && waiting_; }
+    // A cancelled check cannot revive its request when the worker eventually answers.
+    [[nodiscard]] bool complete(std::string prompt);
+    [[nodiscard]] bool needs_confirmation() const noexcept { return request_.has_value() && !prompt_.empty(); }
+    [[nodiscard]] const std::string& prompt() const noexcept { return prompt_; }
+    [[nodiscard]] std::optional<SavedGameRequest> proceed();
+    [[nodiscard]] std::optional<SavedGameRequest> answer(bool yes);
+private:
+    std::optional<SavedGameRequest> request_;
+    std::string prompt_;
+    bool waiting_{};
+};
+
 // What Play hands to the replay mode.
 struct PlayRequest final {
     platform::Path path;

@@ -85,7 +85,8 @@ Result run(std::uint64_t ticks, std::size_t workers, std::string_view campaign_n
     galactic_campaign_gate::check(fog, "stock AI fog policy exists");
     const auto setup = must(cp::prepare_stock_galactic_ai_runtime(files, loaded.catalog, data, types, plan, {},
         std::make_shared<eawr::platform::ThreadWorkerAdapter>(workers),
-        eawr::data::retail::boolean(fog->text).value(), gc::galactic_max_objects, gc::galactic_max_objects, "Normal_Default"));
+        eawr::data::retail::boolean(fog->text).value(), gc::galactic_max_objects, gc::galactic_max_objects, "Normal_Default",
+        eawr::script::foc::galactic_ai::retail_service_periods, galactic_campaign_gate::test_schedule()));
     auto observed = std::make_shared<galactic_campaign_gate::Observations>();
     for (const auto& player : setup->lifecycle.players) observed->players.emplace(player.player, galactic_campaign_gate::PlayerProgress{});
     const auto services = must(cp::prepare_live_campaign_services(files, loaded.catalog, data, types, plan, "Normal_Default"));

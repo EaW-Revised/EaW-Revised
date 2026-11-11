@@ -656,6 +656,46 @@ void test_sample_position() {
     const auto bind_only = playback::Player::create(model);
     expect(bind_only && bind_only.value().sample_position(0U, 30U), "a clipless player samples its bind pose");
 }
+void test_clip_blend() {
+    assets::Model model; model.bones = {bone("root", -1), bone("hand", 0, 2.0F)};
+    const auto clip = animation_data();
+    const auto first = playback::Player::create(model, &clip);
+    const auto second = playback::Player::create(model, &clip);
+    expect(first && second, "blend players create");
+    if (!first || !second) return;
+    const auto mixed = first.value().sample_blend(0, second.value(), 1, 1, 0.5F);
+    expect(static_cast<bool>(mixed), "two clip positions blend");
+    if (mixed) {
+        expect(close(mixed.value().bones[0].local_asset[12], 5.0F), "blend interpolates local translation");
+        expect(close(mixed.value().bones[0].local_asset[0], 0.0F), "blend normalizes interpolated rotation");
+        expect(mixed.value().bones[0].visible, "blend keeps a bone visible if either clip shows it");
+        expect(close(mixed.value().bones[1].model_asset[13], 2.0F), "blend rebuilds child hierarchy");
+        expect(first.value().sampled(mixed.value()), "blend retains the first player's pose origin");
+    }
+    expect(first.value().blend_compatible(second.value()), "matching skeletons bind for blending");
+    playback::Pose reused;
+    const auto initial = first.value().sample_blend(0, second.value(), 1, 1, 0.5F, reused);
+    const auto* storage = reused.bones.data();
+    const auto again = first.value().sample_blend(0, second.value(), 1, 1, 0.5F, reused);
+    expect(initial && again && storage == reused.bones.data() && mixed
+        && close(reused.bones[0].local_asset[12], mixed.value().bones[0].local_asset[12]),
+        "reusable blend preserves its storage and matches the value overload");
+    expect(!first.value().sample_blend(0, second.value(), 1, 1, -0.1F), "blend rejects invalid weight");
+    auto reflected = clip;
+    reflected.tracks[0].samples[0].scale.x = -1.0F;
+    const auto reflected_player = playback::Player::create(model, &reflected);
+    expect(static_cast<bool>(reflected_player), "reflected animation player creates");
+    if (reflected_player) {
+        const auto reflected_blend = reflected_player.value().sample_blend(0, second.value(), 0, 1, 0.5F);
+        expect(reflected_blend && close(reflected_blend.value().bones[0].local_asset[0], 0.0F),
+            "clip blend interpolates signed animated scale without decomposing its matrix");
+    }
+    model.bones[0].name = "other";
+    const auto incompatible = playback::Player::create(model);
+    expect(incompatible && !first.value().blend_compatible(incompatible.value())
+        && !first.value().sample_blend(0, incompatible.value(), 0, 1, 0.5F),
+        "blend rejects a different skeleton");
+}
 } // namespace
 
 // pf-mem-9: one shared bind Player per model key; poses stay byte-identical to an independent Player's.
@@ -753,6 +793,7 @@ int main() {
         return 1;
     }
     test_sample_position();
+    test_clip_blend();
     test_channel_elision();
     test_rigid_vertex_to_bind();
     test_rigid_instance_routes();

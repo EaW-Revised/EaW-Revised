@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <limits>
 #include <exception>
+#include <optional>
 
 namespace eawr::script::foc::galactic_ai {
 
@@ -17,7 +18,9 @@ struct Manager::PhaseSavepoint::Saved {
     Clocks clocks;
     Admission admission;
     ServicePeriods periods;
-    std::map<gc::PlayerId, PlayerLifecycle> players;
+    // One slot per player, created when the phase begins: a chain engages only its own slot, so no map
+    // insertion happens while players are serviced (S9b).
+    std::map<gc::PlayerId, std::optional<PlayerLifecycle>> players;
     std::vector<ServiceTrace> traces;
     bool settled{};
 };
@@ -28,7 +31,10 @@ Manager::PhaseSavepoint::~PhaseSavepoint() {
     saved_->owner->mark_state_changed();
 }
 Manager::PhaseSavepoint::Work Manager::PhaseSavepoint::work() const noexcept {
-    return saved_ ? Work{saved_->players.size(), saved_->traces.size()} : Work{};
+    if (!saved_) return Work{};
+    const auto copies = static_cast<std::size_t>(std::count_if(saved_->players.begin(), saved_->players.end(),
+        [](const auto& slot) { return slot.second.has_value(); }));
+    return Work{copies, saved_->traces.size()};
 }
 core::Result<void> Manager::PhaseSavepoint::commit() {
     if (!saved_ || saved_->settled || saved_->owner->impl_->servicing)
@@ -45,8 +51,8 @@ core::Result<void> Manager::PhaseSavepoint::rollback() {
     if (!saved_ || saved_->settled || saved_->owner->impl_->servicing)
         return core::Result<void>::failure(lifecycle_error("lifecycle rollback requires its unsettled idle owner"));
     auto& impl = *saved_->owner->impl_;
-    for (auto& player : impl.state.players) if (auto old = saved_->players.find(player.selected.player); old != saved_->players.end())
-        player = std::move(old->second);
+    for (auto& player : impl.state.players) if (auto old = saved_->players.find(player.selected.player);
+        old != saved_->players.end() && old->second) player = std::move(*old->second);
     impl.state.clocks = saved_->clocks; impl.state.admission = saved_->admission; impl.state.service_periods = saved_->periods;
     impl.policy_restored(); impl.reset_records(); impl.failure.reset(); impl.service_threw = false; impl.faulted_provider.reset();
     impl.phase = nullptr; saved_->settled = true; saved_->owner->mark_state_changed();
@@ -64,11 +70,16 @@ core::Result<std::unique_ptr<Manager::PhaseSavepoint>> Manager::begin_phase() {
     impl_->faulted_provider.reset();
     auto saved = std::make_unique<PhaseSavepoint::Saved>(); saved->owner = this;
     saved->clocks = impl_->state.clocks; saved->admission = impl_->state.admission; saved->periods = impl_->state.service_periods;
+    for (const auto& player : impl_->state.players) saved->players.emplace(player.selected.player, std::nullopt);
     auto phase = std::unique_ptr<PhaseSavepoint>(new PhaseSavepoint(std::move(saved)));
     impl_->phase = phase->saved_.get(); return Return::success(std::move(phase));
 }
+// Engages the player's own slot, created by begin_phase; the first retained copy wins. Never inserts, so chains
+// of different players can retain concurrently.
 void Manager::Impl::retain_player(const PlayerLifecycle& player) {
-    if (phase) phase->players.try_emplace(player.selected.player, player);
+    if (!phase) return;
+    const auto slot = phase->players.find(player.selected.player);
+    if (slot != phase->players.end() && !slot->second) slot->second = player;
 }
 
 void Manager::Impl::policy_changed(gc::PlayerId player) {
@@ -107,6 +118,8 @@ core::Result<std::shared_ptr<Manager>> Manager::create(LifecycleSetup setup, Cap
     if (std::any_of(setup.service_periods.begin(), setup.service_periods.end(), [](auto frames) { return frames == 0; }))
         return Result::failure(lifecycle_error("galactic AI service periods must be positive synchronization frames"));
     impl->state.service_periods = setup.service_periods;
+    if (setup.schedule.batch_ticks == 0) return Result::failure(lifecycle_error("galactic AI batches need at least one virtual tick"));
+    impl->schedule = setup.schedule;
     impl->data = std::move(data).value();
     impl->capabilities = std::move(capabilities);
     impl->plans = std::move(setup.plans);
@@ -136,9 +149,22 @@ core::Result<std::shared_ptr<Manager>> Manager::create(LifecycleSetup setup, Cap
 }
 
 core::Result<void> Manager::service(Clocks clocks, Admission admission, authoritative::ScriptScheduler& scripts) {
+    return service_window(clocks, std::span<const Admission>(&admission, 1), scripts);
+}
+
+void Manager::set_virtual_tick(std::uint32_t virtual_tick) noexcept { impl_->virtual_tick = virtual_tick; }
+
+std::uint64_t Manager::virtual_mode(std::uint64_t real_mode) const noexcept {
+    if (impl_->schedule.batch_ticks <= 1) return real_mode;
+    return std::max(real_mode + (impl_->virtual_tick - 1U), impl_->state.clocks.mode);
+}
+
+core::Result<void> Manager::service_window(Clocks snapshot, std::span<const Admission> admissions, authoritative::ScriptScheduler& scripts,
+    std::uint32_t first_virtual_tick) {
     auto& impl = *impl_;
     if (impl.phase_abandoned || impl.servicing || impl.service_threw) return core::Result<void>::failure(lifecycle_error("lifecycle service requires its live nonreentrant owner"));
     if (impl.failure) return core::Result<void>::failure(*impl.failure);
+    if (admissions.empty()) return core::Result<void>::failure(lifecycle_error("a lifecycle service window needs at least one virtual tick"));
     struct ServiceScope {
         Impl& impl; int exceptions{std::uncaught_exceptions()};
         ~ServiceScope() { if (std::uncaught_exceptions() > exceptions) impl.service_threw = true; impl.servicing = false; }
@@ -149,44 +175,91 @@ core::Result<void> Manager::service(Clocks clocks, Admission admission, authorit
         return core::Result<void>::failure(*impl.failure);
     };
     mark_state_changed();
-    impl.state.admission = admission; impl.update_record();
-    if (admission.active_mode != Mode::galactic) return core::Result<void>::success();
-    if (impl.capabilities.immediate_effects) {
-        if (auto bound = scripts.set_immediate_effect_host(impl.capabilities.immediate_effects,
-            impl.capabilities.immediate_instance_limit); !bound) return abort(bound.error());
+    // The world copy is taken once, at the snapshot: every virtual tick of the window reads that frozen input.
+    std::shared_ptr<const WorldInput> world;
+    for (std::size_t offset = 0; offset < admissions.size(); ++offset) {
+        const auto& admission = admissions[offset];
+        auto clocks = virtual_clocks(snapshot, static_cast<std::uint32_t>(first_virtual_tick + offset));
+        if (impl.schedule.batch_ticks > 1) clocks.mode = std::max(clocks.mode, impl.state.clocks.mode);
+        impl.state.admission = admission; impl.update_record();
+        if (admission.active_mode != Mode::galactic) continue;
+        if (impl.capabilities.immediate_effects) {
+            if (auto bound = scripts.set_immediate_effect_host(impl.capabilities.immediate_effects,
+                impl.capabilities.immediate_instance_limit); !bound) return abort(bound.error());
+        }
+        if (clocks.synchronization < impl.state.clocks.synchronization || clocks.mode < impl.state.clocks.mode) return abort(lifecycle_error("galactic manager clocks went backwards"));
+        if (!world) {
+            world = impl.capabilities.queries->copy_world();
+            if (!world || world->clocks != snapshot) return abort(lifecycle_error("galactic manager requires a copied view at its two clocks"));
+        }
+        impl.state.clocks = clocks; impl.update_record();
+        if (auto served = impl.serve_tick(clocks, admission, world, scripts); !served) return abort(served.error());
     }
-    if (clocks.synchronization < impl.state.clocks.synchronization || clocks.mode < impl.state.clocks.mode) return abort(lifecycle_error("galactic manager clocks went backwards"));
-    const auto world = impl.capabilities.queries->copy_world();
-    if (!world || world->clocks != clocks) return abort(lifecycle_error("galactic manager requires a copied view at its two clocks"));
-    impl.state.clocks = clocks; impl.update_record();
-    for (auto& player : impl.state.players) {
-        if (provider_retired(player.selected.player)) continue;
-        struct RecordWrite {
-            Impl& owner; gc::PlayerId player{}; int exceptions{std::uncaught_exceptions()};
-            ~RecordWrite() {
-                if (owner.failure || std::uncaught_exceptions() > exceptions) owner.faulted_provider = player;
-                owner.publish_traces(player); owner.update_record(player);
+    return core::Result<void>::success();
+}
+
+core::Result<void> Manager::Impl::serve_tick(const Clocks& clocks, const Admission& admission,
+    const std::shared_ptr<const WorldInput>& world, authoritative::ScriptScheduler& scripts) {
+    // S9b: a player's chain touches only that player's slice (lifecycle row, player_state, retained slot) and
+    // reports its outcome through its own slot. Everything the players share is settled here, after the chains
+    // and in ascending player order, so the order the chains run in cannot change the result: trace publication
+    // and the faulted provider (the lowest faulting player).
+    std::vector<gc::PlayerId> visited;
+    visited.reserve(state.players.size());
+    struct Settle {
+        Impl& owner; std::vector<gc::PlayerId>& players;
+        ~Settle() {
+            std::optional<gc::PlayerId> faulted;
+            for (const auto player : players) {
+                auto& slice = owner.player_state.at(player);
+                if (slice.faulted && !faulted) faulted = player;
+                slice.faulted = false;
+                owner.publish_traces(player);
             }
-        } record_write{impl, player.selected.player};
-        if (!player.initialized) {
-            impl.retain_player(player);
-            if (auto initialized = impl.initialize(player); !initialized) return abort(initialized.error());
+            if (faulted) owner.faulted_provider = faulted;
         }
-        for (std::size_t index = 0; index < service_count; ++index) {
-            const auto service_kind = static_cast<Service>(index);
-            if (!admission.processing && !(admission.auto_resolve && service_kind == Service::planning)) continue;
-            if (player.deadlines[index] > clocks.synchronization) continue;
-            const auto delay = impl.state.service_periods[index];
-            if (clocks.synchronization > std::numeric_limits<std::uint64_t>::max() - delay) return abort(lifecycle_error("galactic service deadline overflow"));
-            impl.retain_player(player);
-            player.deadlines[index] = clocks.synchronization + delay;
-            impl.player_state.at(player.selected.player).traces.push_back(ServiceTrace{player.selected.player, service_kind, clocks});
-            if (service_kind == Service::templates) {
-                if (auto changed = impl.templates(player); !changed) return abort(changed.error());
-            }
-            const ServiceInput input{player.selected.player, service_kind, clocks, world, impl.policy_snapshot(player)};
-            if (auto served = impl.capabilities.services->run(input, scripts); !served) return abort(served.error());
+    } settle{*this, visited};
+    for (auto& player : state.players) {
+        if (state.retired_providers.contains(player.selected.player)) continue;
+        visited.push_back(player.selected.player);
+        if (auto served = serve_player(player, clocks, admission, world, scripts); !served) return served;
+    }
+    return core::Result<void>::success();
+}
+
+// One player's due services, in GFS-A02 order. Writes only this player's slice; a failure is returned, never
+// recorded in shared state (the caller picks the lowest faulting player).
+core::Result<void> Manager::Impl::serve_player(PlayerLifecycle& player, const Clocks& clocks, const Admission& admission,
+    const std::shared_ptr<const WorldInput>& world, authoritative::ScriptScheduler& scripts) {
+    struct RecordWrite {
+        Impl& owner; gc::PlayerId player{}; bool failed{}; int exceptions{std::uncaught_exceptions()};
+        ~RecordWrite() {
+            if (failed || std::uncaught_exceptions() > exceptions) owner.player_state.at(player).faulted = true;
+            owner.update_record(player);
         }
+    } record_write{*this, player.selected.player};
+    const auto fail = [&](core::Diagnostic error) {
+        record_write.failed = true;
+        return core::Result<void>::failure(std::move(error));
+    };
+    if (!player.initialized) {
+        retain_player(player);
+        if (auto initialized = initialize(player); !initialized) return fail(initialized.error());
+    }
+    for (std::size_t index = 0; index < service_count; ++index) {
+        const auto service_kind = static_cast<Service>(index);
+        if (!admission.processing && !(admission.auto_resolve && service_kind == Service::planning)) continue;
+        if (player.deadlines[index] > clocks.synchronization) continue;
+        const auto delay = state.service_periods[index];
+        if (clocks.synchronization > std::numeric_limits<std::uint64_t>::max() - delay) return fail(lifecycle_error("galactic service deadline overflow"));
+        retain_player(player);
+        player.deadlines[index] = clocks.synchronization + delay;
+        player_state.at(player.selected.player).traces.push_back(ServiceTrace{player.selected.player, service_kind, clocks});
+        if (service_kind == Service::templates) {
+            if (auto changed = templates(player); !changed) return fail(changed.error());
+        }
+        const ServiceInput input{player.selected.player, service_kind, clocks, world, policy_snapshot(player)};
+        if (auto served = capabilities.services->run(input, scripts); !served) return fail(served.error());
     }
     return core::Result<void>::success();
 }
@@ -196,7 +269,10 @@ core::Result<authoritative::ServiceOptions> Manager::before_service(const sim::P
     using Result = core::Result<authoritative::ServiceOptions>;
     if (impl_->phase_abandoned || impl_->service_threw) return Result::failure(lifecycle_error("unsettled lifecycle phase"));
     if (impl_->capabilities.prepare) if (auto prepared = impl_->capabilities.prepare(executor, world, tick); !prepared) return Result::failure(prepared.error());
-    if (auto serviced = service({tick.completed_tick, world.clock().galactic_frame}, impl_->state.admission, scripts); !serviced) return Result::failure(serviced.error());
+    // The world is the snapshot's (real clocks); the lifecycle runs on the clocks of the batch's current virtual tick.
+    const Admission admission = impl_->state.admission;
+    if (auto serviced = service_window({tick.completed_tick, world.clock().galactic_frame}, std::span<const Admission>(&admission, 1), scripts,
+        impl_->virtual_tick); !serviced) return Result::failure(serviced.error());
     if (auto finished = impl_->capabilities.services->finish_barrier(scripts); !finished) return Result::failure(finished.error());
     authoritative::ServiceOptions options;
     options.host_paced = [](std::uint64_t) { return true; }; // plan/freestore pumps belong to their admitted services.
@@ -224,6 +300,7 @@ bool Manager::service_due(gc::PlayerId player, Service service, std::uint64_t sy
         && found->deadlines[static_cast<std::size_t>(service)] <= synchronization;
 }
 ServicePeriods Manager::service_periods() const noexcept { return impl_->state.service_periods; }
+AsyncSchedule Manager::schedule() const noexcept { return impl_->schedule; }
 core::Result<void> Manager::after_service(authoritative::ServiceReport& report) {
     if (impl_->phase_abandoned || impl_->service_threw || impl_->failure)
         return core::Result<void>::failure(lifecycle_error("lifecycle tail requires its healthy owner"));
@@ -281,7 +358,7 @@ void Manager::Impl::publish_traces(gc::PlayerId player) {
 core::Result<void> Manager::restore_lifecycle(const LifecycleState& saved) {
     if (impl_->phase || impl_->phase_abandoned || impl_->servicing)
         return core::Result<void>::failure(lifecycle_error("cannot restore an active or unsettled lifecycle phase"));
-    if (saved.version != 2 || std::any_of(saved.service_periods.begin(), saved.service_periods.end(), [](auto frames) { return frames == 0; })
+    if (saved.version != 3 || std::any_of(saved.service_periods.begin(), saved.service_periods.end(), [](auto frames) { return frames == 0; })
         || saved.players.size() != impl_->state.players.size() ||
         static_cast<unsigned>(saved.admission.active_mode) > static_cast<unsigned>(Mode::land)) return core::Result<void>::failure(lifecycle_error("galactic lifecycle schema/player count/mode differs"));
     if (saved.retired_providers.size() > saved.players.size()) return core::Result<void>::failure(lifecycle_error("too many retired native providers"));

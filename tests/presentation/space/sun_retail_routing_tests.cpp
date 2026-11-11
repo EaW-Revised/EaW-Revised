@@ -1,3 +1,4 @@
+#include "../../support/runtime_path.hpp"
 #include "sun_retail_test_support.hpp"
 #include <system_error>
 
@@ -347,7 +348,7 @@ void test_admission_closed() {
     // Structural: nothing outside the owned pair, the build lists and the P1
     // environment view's approximate sun (environment_scene, rescope
     // 2026-09-24) references the retail policy.
-    const auto root = std::filesystem::path{EAWR_SUN_RETAIL_SOURCE_ROOT}.lexically_normal();
+    const auto root = eawr::testing::runtime_path("EAWR_TEST_SOURCE_ROOT", "", EAWR_SUN_RETAIL_SOURCE_ROOT).lexically_normal();
     const std::set<std::filesystem::path> owned{
         (root / "include/eawr/presentation/space/sun_retail.hpp").lexically_normal(),
         (root / "src/presentation/space/sun_retail.cpp").lexically_normal(),

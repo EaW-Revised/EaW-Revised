@@ -19,6 +19,7 @@ struct CampaignWarmType final {
     sim::tactical::PlayerId owner{};
     std::string type;
     std::vector<std::pair<std::string, std::size_t>> hangar;
+    bool complete{true};
 };
 struct CampaignWarmSeed final {
     sim::tactical::PlayerId owner{};
@@ -29,6 +30,7 @@ struct CampaignWarmSeed final {
 struct CampaignWarmArrivals final {
     battle::ArrivalPlan plan;
     bool complete{true};
+    bool cyclic{}, overflow{}, unknown{};
 };
 
 // Each carrier's live complement is starting, not starting+reserve: reserves
@@ -41,7 +43,10 @@ struct CampaignWarmArrivals final {
     std::map<Key, const CampaignWarmType*> indexed;
     CampaignWarmArrivals result;
     for (const auto& type : types) {
-        if (!indexed.emplace(Key{type.owner, type.type}, &type).second) result.complete = false;
+        if (!indexed.emplace(Key{type.owner, type.type}, &type).second) {
+            result.complete = false;
+            result.unknown = true;
+        }
     }
     std::set<Key> visiting;
     const auto visit = [&](auto&& self, const CampaignWarmSeed& seed) -> void {
@@ -49,11 +54,13 @@ struct CampaignWarmArrivals final {
         const Key key{seed.owner, seed.type};
         const auto found = indexed.find(key);
         if (found == indexed.end()) return;
-        if (!visiting.insert(key).second) { result.complete = false; return; }
+        if (!found->second->complete) { result.complete = false; result.unknown = true; }
+        if (!visiting.insert(key).second) { result.complete = false; result.cyclic = true; return; }
         for (const auto& [craft, count] : found->second->hangar) {
             if (count == 0) continue;
             if (seed.count > std::numeric_limits<std::size_t>::max() / count) {
                 result.complete = false;
+                result.overflow = true;
                 continue;
             }
             const auto maximum = seed.count * count;

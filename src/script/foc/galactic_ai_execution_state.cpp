@@ -108,7 +108,7 @@ core::Result<void> ExecutionStateContributor::restore(const NativeState& input) 
         return core::Result<void>::failure(std::move(error));
     }
     const auto found = input.components.find(component);
-    if (input.version != 1 || found == input.components.end())
+    if (input.version != native_state_version || found == input.components.end())
         return core::Result<void>::failure(invalid("missing component or unsupported envelope version"));
     Reader reader{found->second};
     const auto length = reader.word(4);

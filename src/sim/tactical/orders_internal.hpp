@@ -6,6 +6,12 @@
 #include <cstdint>
 #include <optional>
 
+namespace eawr::sim::tactical {
+struct AvoidanceRules;
+struct CollisionWorld;
+struct Footprint;
+}
+
 // Orders that send a unit towards another unit (#452, docs/behaviour/space-orders.md): the
 // approach distance, the in-range tests, the intercept prediction and the approach slot. Pure
 // Q24 functions of their arguments: the session gathers the inputs and plans the moves.
@@ -28,5 +34,13 @@ namespace eawr::sim::tactical::detail {
 // at the predicted position's height; `predicted` itself when the unit stands on its XY.
 [[nodiscard]] core::Result<math::Vec3> approach_slot(
     const math::Vec3& unit, const math::Vec3& predicted, math::Fixed approach);
+
+// OR-28: try the nominal slot, then alternate five-degree offsets about the target.
+// The per-unit coordinator uses a quarter turn on either side; group layout remains OR-U1 (#6278).
+// No open point leaves slot placement to the existing planner's fallback.
+[[nodiscard]] core::Result<std::optional<math::Vec3>> open_approach_slot(const math::Vec3& slot,
+    const math::Vec3& centre, const math::Vec3& position, const AvoidanceRules& rules,
+    const Footprint& footprint, const CollisionWorld& world, EntityId entity, std::uint64_t frame,
+    bool through_hazards, std::uint32_t* candidates = nullptr);
 
 } // namespace eawr::sim::tactical::detail

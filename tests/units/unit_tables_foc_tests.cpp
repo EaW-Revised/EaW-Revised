@@ -1,4 +1,5 @@
 #include "../support/env.hpp"
+#include "../support/runtime_path.hpp"
 #include "unit_tables_foc_fixtures.hpp"
 
 #include <algorithm>
@@ -85,6 +86,7 @@ void foc_fleet(const bool formation_only, const bool fire_bones_only) {
     foc_lure(input);
     foc_hardpoint_ranks(input);
     foc_land_companies(input);
+    foc_priority_sets(input);
     auto loaded = eawr::units::load_unit_tables(input);
     expect(static_cast<bool>(loaded), "FoC unit tables load");
     if (!loaded) return;
@@ -999,7 +1001,9 @@ void foc_fleet(const bool formation_only, const bool fire_bones_only) {
     expect(std::none_of(tables.unresolved.begin(), tables.unresolved.end(), [](const auto& row) {
         return row.owner == "UL_Extort_Cash_L1_Upgrade" || row.owner == "UL_Extort_Cash_L2_Upgrade";
     }), "upgrade objects never pass through the required ship-body fields");
-    const auto pin_path = eawr::testing::environment("EAWR_UNIT_PINNED_REPLAY").value_or(EAWR_UNIT_PINNED_REPLAY);
+    const auto pin_path = eawr::testing::environment("EAWR_UNIT_PINNED_REPLAY").value_or(
+        eawr::testing::runtime_path("EAWR_TEST_SOURCE_ROOT", "tests/skirmish/fixtures/m2-start.eawr-replay",
+                                    EAWR_UNIT_PINNED_REPLAY).string());
     std::ifstream pinned(pin_path, std::ios::binary);
     const std::vector<std::uint8_t> pinned_bytes((std::istreambuf_iterator<char>(pinned)), std::istreambuf_iterator<char>());
     const auto replay_pin = eawr::sim::tactical::parse_replay(pinned_bytes);

@@ -135,6 +135,10 @@ void GalacticSession::Impl::execute_destruction(const GameCommand& command, cons
     auto cleaned = execute_planet_ruins(*ruins);
     if (!cleaned) { failed = true; return; }
     // WGCH-115: no debit, actor consumption, weapon lock, orbit destruction, starbase clear or ownership change.
+    // WGP-193: transient presentation after committed ruins; no saved or hashed state.
+    if (feedback_notice_handler && observer) for (const auto local : observer->human_observers)
+        feedback_notice_handler({GalacticFeedbackNotice::Kind::planet_destroyed, local, prepared.planet,
+            events.size(), bearer->current_type, clock.galactic_frame});
     settle(AbilityOutcome::purchased);
 }
 

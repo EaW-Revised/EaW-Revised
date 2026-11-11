@@ -99,7 +99,7 @@ def main() -> int:
             return 1
         write_target(root, "beta", hashes)
         fixtures = pathlib.Path(__file__).parent / "fixtures"
-        state = "0b96c50559c347dfe1f8b46b39a59f440242f1435b0f27b7310849010f8b9ffe"
+        state = "7e5af6b16a7ccfbf8758f4ea5a574febfeb05d78778f9ce252accaf49e540cff"
         snapshot = "d" * 64
         census = json.dumps({"tick_zero": {"state_sha256": state, "snapshot_sha256": snapshot}}) + "\n"
         for target in targets:

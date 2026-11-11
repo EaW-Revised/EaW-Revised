@@ -1,6 +1,7 @@
 #include "unit_tables_decode.hpp"
 #include "eawr/core/load_profile.hpp"
 #include "eawr/data/retail_values.hpp"
+#include "eawr/data/tag_trace.hpp"
 #include "eawr/sim/math/geometry.hpp"
 
 #include <algorithm>
@@ -42,6 +43,8 @@ void Loader::enqueue(const std::string& id, const UnitKind kind) {
         // Tell the decode-ahead which model this type will ask for, by the same tag as planned_model_paths. The report is
         // thrown away: the loader reports what is wrong when it loads the unit itself.
         Report discard;
+        // The hint is not the loader's own read: keep it out of the tag-use trace, so only kinds that load a model mark it used.
+        const data::tag_trace::Unrecorded quiet;
         auto object = resolve(*input_.catalog, id, data::Category::game_object, id, "model", discard);
         if (!object) return;
         const auto path = model_path(object->text(domain_tag(input_.domain, DomainTag::model_name)));
@@ -130,6 +133,7 @@ BonePoint Loader::point(const std::string& bone, const Frames* owner, const std:
         if (const auto index = attached_only ? std::nullopt : bone_index(*owner->model, bone)) {
             result.position = translation(owner->frames[*index]);
             result.axes = axes(owner->frames[*index]);
+            result.owner_bone_index = static_cast<std::uint32_t>(*index);
             note_frame();
             return result;
         }
@@ -221,6 +225,8 @@ void Loader::load_unit(const std::string& id, const UnitKind hint) {
         if (!object->effective.class_origin.empty())
             report_.note(unit.id, "class", object->effective.type_name, object->effective.class_origin);
         unit.variant_chain = object->effective.chain;
+        unit.movie_object = flag(*object, "Movie_Object", false).value_or(true);
+        unit.glory_cinematics = tokens(object->text("Glory_Cinematics"));
         if (input_.domain == sim::tactical::BattleDomain::land && lower(unit.xml_type).ends_with("company")) {
             load_land_company(*object);
             object->note_duplicates(report_);
@@ -229,6 +235,9 @@ void Loader::load_unit(const std::string& id, const UnitKind hint) {
         // LS shoot PR 1: a ground object of a land table loads its land body (Land_Model_Name, combat and durability rows).
         if (input_.domain == sim::tactical::BattleDomain::land && land_ground_object(*object)) {
             load_land_body(*object, unit);
+            load_land_income_abilities(*object, unit); // LR4-15: authored land income streams.
+            // LE-LOADER: a build pad or a construction child also decodes its pad and menu rows.
+            if (land_pad_object(*object)) load_land_pad(*object, unit);
             object->note_duplicates(report_);
             tables_.units.push_back(std::move(unit));
             return;

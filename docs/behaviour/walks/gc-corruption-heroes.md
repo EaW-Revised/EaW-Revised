@@ -1094,7 +1094,7 @@ The focused debug-build read GAH-C01 compares the authored curve tag kinds and t
 | --- | --- | --- |
 | WGCH-169 | Theft's planet-availability, base-level and planet-difficulty curves use the same piecewise-linear evaluator as WGEP-63's political-income curve. Authored pairs replace the previous curve occurrence; distinct points sort by x and interpolate linearly over the bracketing interval. Fractional planet ratings remain fractional inputs. Fewer than two points and values outside the authored domain return zero without extrapolation. Duplicate-x behavior remains WGEP-63/U-03; the theft provider still refuses those inputs. Neutralization instead accepts duplicate points with a load note; differing y values use stable authored-order ties as a project fallback pending capture. | debug build GAH-C01; WGEP-63; WGCH-33; project fallback |
 | WGCH-170 | The common ability constructor initializes `Initially_Enabled` to true; an explicit authored false remains false. The theft service inherits that constructor and initializes both cost and chance affinity adjustments to zero. An omitted affinity modifier therefore contributes zero; authored values replace the corresponding adjustment. Curve interpolation and numeric representation retain WGCH-169 and the project's fixed-point arithmetic boundary. | debug build GAH-C02; GAH-C01; WGS-88 |
-| WGCH-187 | Each galactic action ability type sets its own activation style to ground-activated in its constructor, over the common constructor's zero: theft, black market, neutralization, destruction, sabotage, hacking and corruption alike. An authored `Activation_Style` replaces that value, so an omitted tag stays ground-activated and reaches the ground-activated group of WGCH-155..157. Validation then limits it: theft, black market, sabotage, hacking and credit siphon show an error for any other style and force ground-activated; neutralization and corruption removal have no such check. Ground-activated is a galaxy-map value: the mode check allows it only there, and the land-battle value is ground-automatic. Stock authors no style on its slicer, its neutralization abilities or its black-market abilities, and does on the other four. The live setup always lists theft. Black market and neutralization keep an empty list for now, an open gap (legacy EAWR-5507): their stock planet slots are therefore refused for a human, and listing them would also make AI hostile landings prepare those kinds, which have no AI chooser yet. | debug build GAH-C03: the seven ability constructors, the type validators, the mode check and the ground-activated count reader; XML data |
+| WGCH-187 | Each galactic action ability type sets its own activation style to ground-activated in its constructor, over the common constructor's zero: theft, black market, neutralization, destruction, sabotage, hacking and corruption alike. An authored `Activation_Style` replaces that value, so an omitted tag stays ground-activated and reaches the ground-activated group of WGCH-155..157. Validation then limits it: theft, black market, sabotage, hacking and credit siphon show an error for any other style and force ground-activated; neutralization and corruption removal have no such check. Ground-activated is a galaxy-map value: the mode check allows it only there, and the land-battle value is ground-automatic. Stock authors no style on its slicer, its neutralization abilities or its black-market abilities, and does on the other four. The live setup always lists theft. Neutralization is listed too (an authored style other than ground-activated stands): a human's drop on a planet slot, or landing, prepares its menu, and the host skips it for an AI seat, which has no chooser for that menu yet. Black market keeps an empty list for now, an open gap (legacy EAWR-5507): its stock planet slot is therefore refused for a human, and listing it would also make AI hostile landings prepare that kind. | debug build GAH-C03: the seven ability constructors, the type validators, the mode check and the ground-activated count reader; XML data |
 | WGCH-188 | Technology theft and neutralization share one dialog: shell `target_type_back`, title `h_title`, description `text_hero`, cancel `h_close`, twelve buttons `h_0000`..`h_0501` in rows of two, and `h_name_00`..`h_name_11` with `h_price_00`..`h_price_11` beside them. There is no scrolling. A row the player cannot afford is disabled, and its button, name and price are grey. The original's fill loop has no bound at twelve, so a longer list is undefined there; ours opens and shows the first twelve. `bm_frame` belongs to the sabotage dialog, with ten slots; ours still shows sabotage on the twelve-button dialog. `h_title`, `h_name_*` and `h_price_*` are bones of the shell with no mesh, so the text is placed by the bone: centred on its height, and on its x unless left-justified. The shell's six `frame_ALT<n>` meshes are the dialog's heights by row count, not faction variants. The original fits the frame and moves the text to the row count; ours draws the tallest frame and keeps the description and cancel where they are authored. Both are open gaps (legacy EAWR-5507). | debug build GAH-C03: the theft and neutralization menu builders and the component order; XML data |
 
 
@@ -1170,6 +1170,70 @@ and checkpoint work is admitted. No retail image or fixture is committed.
 
 ## Live ground deployment and probe invocation
 
+### Authored hero corruption removal
+
+The focused static reread **RCM-E01** covers removal construction, target
+admission, price, application and validation; **RCM-E02** covers the common
+constructor, target-allegiance predicate, audio dispatch and success-only
+consumption. Raw reads stay in ignored research storage. These are debug-build
+readings, not a new frame-order trace or an owner capture.
+
+| ID | Rule and conditions | Source |
+|---|---|---|
+| WGCH-189 | Removal inherits initial enablement **true**, despawn **false**, an unspecified/invalid activation style and zero respawn-time endpoints. Its own constructor supplies cost multiplier **1** and duration **10 s**. Validation replaces a negative multiplier with **1** and a nonpositive duration with **10 s**; zero cost multiplier remains valid. It does not force this ability to ground activation. The planet-type constructor supplies removal base cost **2000 credits**; an authored or inherited value replaces it, while omission retains it. Common validation clears despawn on automatic styles. Ground deployment therefore requires explicitly authored **Ground_Activated** membership, independently of the activated-name list that admits the preview. | debug build RCM-E01/02/03; WGCH-19/70; WHE-10 |
+| WGCH-190 | The target predicate compares actor ownership with **target allegiance**, not current planet ownership or alliance. It then requires corruption and no active transition. Application uses WGCH-18's nonnegative base-cost product and begins WGCH-19's timed removal before debiting a positive price. On success it sends the hero-land story notice; only the actor's local player receives the authored audiovisual effect and removal-begun text. Failed affordability or transition start requests local negative feedback and does not authorize success-only consumption. The shared manager applies WGCH-70's consumption afterward; duration is not hero absence time. | debug build RCM-E01/02; WGCH-18/19/70 |
+| WGCH-191 | The activation event is `SFXEvent_Activate` on the owner; a 2D sound has no positional attachment, while a 3D sound uses the owner. The target effect is separate. The live removal path publishes the source's current type with the target planet, so presentation can still resolve the authored cue after actor consumption; the local-player gate is retained. | debug build RCM-E01/02; shared effect dispatch; project event boundary |
+
+
+The host now binds the authored removal name, initial enablement, ground
+membership, cost multiplier, duration and consumption flag. The planet's
+`Planet_Corruption_Removal_Base_Cost` reaches the price product. Its omitted
+constructor default is **2000 credits** (WGCH-189); authored fractional and zero
+values remain intact. Negative products become zero
+under WGCH-18. A successful invocation uses the existing corruption transition,
+payment-notification, story and hero-return owners. Profiles and routing names,
+planet cost, service enable/cancel state and active transitions survive a fresh
+checkpoint; no recurring actor scan is added.
+
+Coverage remains explicit: non-ground activation producers and the existing
+militia revolt/retreat integration are not supplied here. The common transition
+owner refuses militia removal before payment. The authored local activation
+cue uses the existing audio queue; the removal-begun text feed remains a
+presentation seam under the owner-capture work. These boundaries are not
+replaced by guessed faction rules or an instant clear.
+
+### Removal activation and record-count coverage
+
+| ID | Rule and conditions | Source |
+|---|---|---|
+| WGCH-192 | The stock and eight target-profile authoring survey finds only explicitly authored `Ground_Activated` removal records, with at most one removal record per resolved type. Non-ground triggers and multiple removal records therefore have no authored effect to supply in these snapshots. This is a corpus coverage finding: WGCH-189 allows other styles, and WHE-10 selects matching styles in declared order. Neither rule makes unauthored styles ignored or establishes support for future multi-record content. | XML authoring survey, 2026-11-08; debug-build rules WGCH-189 and WHE-10 |
+
+The survey reads loose XML over active archives, then leaf-first mod layers in
+`coverage-profiles.json` order. It includes unregistered files and resolves
+`Variant_Of_Existing_Type` for inherited records. Mod counts cover mod-owned
+definitions; stock fallback supplies parent context only. All **103** direct
+removal declarations parse strictly. Repeated identical style leaves within a
+record count as one style, not multiple removal records. These are authored
+candidates, not a claim that every file is loaded by a campaign.
+
+| Profile | XML files | Direct removal records | Resolved removal types | Other or omitted styles | Types with multiple removal records |
+|---|---:|---:|---:|---:|---:|
+| Stock FoC | 639 | 14 | 20 | 0 | 0 |
+| BFC GCW 1.1 | 349 | 26 | 33 | 0 | 0 |
+| Remake 4.0 + Clone Wars Holdouts + FFT | 1703 | 12 | 21 | 0 | 0 |
+| Republic at War | 494 | 3 | 3 | 0 | 0 |
+| Fall of the Republic | 624 | 0 | 0 | 0 | 0 |
+| Alliance at War | 227 | 23 | 27 | 0 | 0 |
+| Stargate | 717 | 0 | 0 | 0 | 0 |
+| Awakening of the Rebellion | 980 | 13 | 14 | 0 | 0 |
+| Remake 5.0 public test | 1935 | 12 | 18 | 0 | 0 |
+
+The file/object/style tally stays in ignored research storage; no mod XML is
+copied into the repository. Recheck this finding when target profile data changes.
+The registry retains its partial status for the independent militia integration
+gap; the absent non-ground and multi-record cases are closed for this survey
+(legacy EAWR-6258).
+
 Live AI corruption preparation applies WGCH-03/49/50 to the existing typed
 corruption command. It filters authored slots by current credits, pooled unit
 alternatives, previous mission usage and any owned required planet; required
@@ -1205,7 +1269,16 @@ All work is bounded by explicit commands/arrivals; idle ticks add no ability sca
 The direct ground producer is galaxy-only (GFS-01/GFD-03); child-mode actions remain
 in the campaign's galactic command queue. It reads the active galaxy frame and the
 validated logical rate for WGUI-102 expiry. Automatic unit/structure spy influence
-callbacks, source-owner-transfer callbacks, siphon invocation and corruption
-removal remain their owning interfaces. Raw tutorial/special-map providers remain
+callbacks, source-owner-transfer callbacks, siphon invocation and non-ground
+corruption removal remain their owning interfaces. Raw tutorial/special-map providers remain
 the existing named seam (legacy EAWR-2042). Land-mission entry remains the ground-combat
 owner's hook; this change adds no land battle or Defiler mission producer.
+
+
+The ground removal binding is partial: militia cleanup/revolt/retreat effects
+remain the WGCH-17 provider (legacy EAWR-6257), and non-ground activation producers
+and multiple named removal records per type remain separate interfaces (legacy EAWR-6258). The current constructor retains one removal record, preferring an
+activated-list match and otherwise the first authored record; the list gates
+preview rather than generic ground deployment. The removal-begun text feed
+remains with the advisor presentation owner (legacy EAWR-4973). These boundaries do
+not authorize charging a refused militia transition.

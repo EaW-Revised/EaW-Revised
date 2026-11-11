@@ -35,6 +35,9 @@ The following choices remain unqualified retail questions. Their named constants
 - Q6: terrain/water queries retain the explicit unqualified boundary policies in L1.
 - Q7: no cover/surface/high-ground combat modifiers, fog, LOS, crush, garrison, abilities,
   reinforcement, victory/retreat, AI or hardpoint-vehicle combat are added here.
+  Fog came later (walk rows LC-85 to LC-91): a land content that binds a fog grid
+  makes targeting and the shared weapon gates read the published mask; one without keeps every
+  object visible, as this slice does (legacy EAWR-5898).
 
 Land checkpoint section 18 is version 7. It retains each living squad's shared target
 and scan deadline. Existing child-state records already retain member health/weapons,

@@ -4,6 +4,7 @@
 #include "land_test_support.hpp"
 #include "../support/reverse_partition_executor.hpp"
 
+#include <cstdio>
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -271,6 +272,8 @@ void terrain_and_dynamic_inputs() {
     auto away_state = movement.checkpoint();
     away_state.squads[0].path = {LandPathStatus::found, {away_state.squads[0].position, centre(2, 3)}, whole(80)};
     away_state.squads[0].next_node = 1;
+    away_state.squads[0].facing = Fixed::from_ratio(1, 2).value(); // facing west, as the path leads: no turn to wait for
+    away_state.members[0].facing = away_state.squads[0].facing;
     auto away = LandMovement::from_checkpoint(away_state).value();
     const auto before_away = away.squads()[0].position;
     expect(static_cast<bool>(away.step(field.occupancy, serial, dt)) && away.squads()[0].position != before_away,
@@ -820,6 +823,36 @@ void member_terrain_detours() {
     expect(open.crossed && open.reached && !open.clipped && open.route_untouched && !open.contact_seen,
         "open ground has nothing to clip");
 }
+}
+
+// LR3-11 with the corner cosine cap: two bodies that must turn through more than a quarter turn rotate at zero speed. That
+// is progress, so the contact layer neither counts a deadlock nor sends one of them on a spurious escape.
+void rotating_pair_is_not_deadlocked() {
+    sim::InlineExecutor serial;
+    auto field = make_field(std::vector<std::string>(9, std::string(15, '.')));
+    auto saved = seed(field, false, 2);
+    for (std::size_t i = 0; i < 2; ++i) {
+        auto& s = saved.squads[i];
+        s.position = centre(8 + static_cast<std::int64_t>(i), 3); s.facing = Fixed{}; // both face east; the path leads west
+        s.path = LandPath{LandPathStatus::found, {s.position, centre(2, 3)}, whole(120)};
+        s.next_node = 1; s.order = LandMoveOrder::following;
+        saved.members[i].position = s.position; saved.members[i].facing = Fixed{};
+        saved.members[i].profile.turn_rate = Fixed::from_ratio(1, 20).value(); // 90 degrees takes 5 s, well past 30 visits
+    }
+    auto movement = LandMovement::from_checkpoint(saved).value(); publish(field, movement);
+    bool escaped = false, progressed_in_place = false;
+    for (std::uint64_t tick = 0; tick < 200; ++tick) {
+        expect(static_cast<bool>(movement.step(field.occupancy, serial, dt)), "rotating pair ordinary motion");
+        expect(static_cast<bool>(movement.service_contacts(field.occupancy, serial, tick)), "rotating pair late contacts");
+        for (const auto& c : movement.contacts())
+            escaped = escaped || c.state == LandContactState::deadlocked || c.state == LandContactState::recovery || c.installed;
+        if (tick == 20)
+            progressed_in_place = movement.squads()[0].position == saved.squads[0].position
+                && movement.squads()[1].position == saved.squads[1].position
+                && movement.squads()[0].facing != Fixed{} && movement.squads()[0].progress > 0 && movement.squads()[1].progress > 0;
+    }
+    expect(progressed_in_place, "a body rotating at zero speed stays in place and counts as making progress");
+    expect(!escaped, "two bodies rotating at zero speed are not deadlocked and take no escape route");
 }
 
 // WLPA-68/79: a started path turns the squad in place at the rate clamp before it translates.
@@ -1682,6 +1715,83 @@ void body_selection_contract() {
     expect(!LandMovement::from_checkpoint(refused), "a retained contact naming a squad without a body is refused");
 }
 
+// #6115: the stock Naboo trace. Two Stormtrooper squads stand 26 units apart (their boxes overlap); the one ordered to move
+// has its path search pending ("dropped"), so the idle push (WLPA-57) chooses it. The squad box comes from the members' slots
+// and hard extents (WLPA-95), set here by hand to the stock squad's 3 x 3 rows (slots 12 apart).
+struct StockPush { bool separated{}; double shortest_route{1e9}; std::uint64_t installs{}; double moved{}; Fixed gap; LandMovement::Checkpoint end; };
+StockPush stock_stormtrooper_push(const sim::PartitionExecutor& executor, bool log = false) {
+    // Walls east of the pushed squad (the stock squad stands at the edge of closed ground): the point the push desires is closed.
+    std::vector<std::string> rows_text(15, std::string(30, '.'));
+    for (std::size_t y = 3; y < 9; ++y) rows_text[y][6] = rows_text[y][7] = rows_text[y][8] = '#';
+    auto field = make_field(rows_text);
+    LandMovement::Checkpoint saved;
+    saved.contact_settings = {100000, 5, whole(2), whole(120)};
+    const auto facing = Fixed::from_ratio(-372222, 1000000).value();
+    const auto axis = sim::math::sin_cos_turn(facing);
+    const auto add = [&](sim::EntityId object, sim::math::Vec2 position, std::vector<sim::math::Vec2> slots, Fixed rear, LandMoveOrder order) {
+        const auto index = saved.squads.size();
+        LandMovingSquad squad;
+        squad.object = object; squad.maximum_speed = Fixed::from_ratio(3744, 100).value(); squad.formation_length = whole(24);
+        squad.rear_extent = rear; squad.collision_class = units::LandCollisionGroup::infantry;
+        squad.position = position; squad.facing = facing; squad.order = order;
+        saved.squads.push_back(std::move(squad));
+        for (const auto& slot : slots) {
+            LandMovingMember m;
+            m.object = static_cast<sim::EntityId>(saved.members.size() + 1); m.squad = index;
+            m.source.kind = units::LandObjectKind::infantry;
+            m.slot = slot; m.facing = facing;
+            m.position = {Fixed::from_raw(position.x.raw() + axis.cosine.raw() * slot.x.raw() / Fixed::scale - axis.sine.raw() * slot.y.raw() / Fixed::scale),
+                          Fixed::from_raw(position.y.raw() + axis.sine.raw() * slot.x.raw() / Fixed::scale + axis.cosine.raw() * slot.y.raw() / Fixed::scale)};
+            m.profile = {Fixed::from_ratio(3744, 100).value(), whole(90), whole(90), Fixed::from_ratio(1, 4).value(), whole(6), false, units::LandCollisionGroup::infantry};
+            m.mask = walker; m.hard_x = whole(6); m.hard_y = whole(6); m.gap = whole(12);
+            saved.members.push_back(std::move(m));
+        }
+    };
+    std::vector<sim::math::Vec2> rows;
+    for (const std::int64_t x : {0, -12, -24}) for (const std::int64_t y : {-12, 0, 12}) rows.push_back({whole(x), whole(y)});
+    const sim::math::Vec2 pushed_at{Fixed::from_ratio(9857, 100).value(), Fixed::from_ratio(11137, 100).value()};
+    const sim::math::Vec2 other_at{Fixed::from_ratio(7410, 100).value(), Fixed::from_ratio(12005, 100).value()};
+    add(1689, pushed_at, rows, whole(24), LandMoveOrder::dropped);
+    add(1718, other_at, {{whole(0), whole(-6)}, {whole(0), whole(6)}, {whole(-12), whole(-6)}, {whole(-12), whole(6)}}, Fixed::from_ratio(1570, 100).value(),
+        LandMoveOrder::idle);
+    auto movement = LandMovement::from_checkpoint(saved).value(); publish(field, movement);
+    StockPush out;
+    bool had_route = false;
+    for (std::uint64_t tick = 0; tick < 600; ++tick) {
+        expect(static_cast<bool>(movement.step(field.occupancy, executor, dt)), "stock push ordinary motion");
+        expect(static_cast<bool>(movement.service_contacts(field.occupancy, executor, tick)), "stock push late contacts");
+        const auto& squad = movement.squads()[0];
+        if (!squad.temporary_path.nodes.empty()) {
+            const auto& nodes = squad.temporary_path.nodes;
+            if (squad.temporary_next == 1 && nodes.size() >= 2) {
+                ++out.installs;
+                out.shortest_route = std::min(out.shortest_route, static_cast<double>(distance(nodes.front(), nodes.back()).raw()) / Fixed::scale);
+            }
+            had_route = true;
+        }
+        if (log && (tick < 10 || tick % 60 == 0))
+            std::printf("stock push tick=%llu pos=(%.3f,%.3f) order=%d tmp=%zu/%zu contacts=%zu\n", static_cast<unsigned long long>(tick),
+                static_cast<double>(squad.position.x.raw()) / Fixed::scale, static_cast<double>(squad.position.y.raw()) / Fixed::scale,
+                static_cast<int>(squad.order), squad.temporary_next, squad.temporary_path.nodes.size(), movement.contacts().size());
+    }
+    static_cast<void>(had_route);
+    const auto& squad = movement.squads()[0];
+    out.moved = static_cast<double>(distance(squad.position, pushed_at).raw()) / Fixed::scale;
+    out.gap = distance(squad.position, movement.squads()[1].position);
+    out.separated = movement.contacts().empty() && out.gap > whole(40);
+    out.end = movement.checkpoint();
+    return out;
+}
+
+void stock_stormtrooper_push_contracts() {
+    sim::InlineExecutor serial;
+    const auto run = stock_stormtrooper_push(serial, true);
+    std::printf("stock push result installs=%llu shortest_route=%.6f moved=%.3f gap=%.3f\n", static_cast<unsigned long long>(run.installs),
+        run.shortest_route, run.moved, static_cast<double>(run.gap.raw()) / Fixed::scale);
+    expect(run.shortest_route >= 1.0, "a push never installs an escape route shorter than a unit (the open-position search can return the mover's own spot)");
+    expect(run.installs <= 20, "a pushed stock squad against closed ground is not pushed again and again (the retry release is not fed by rounding steps)");
+}
+
 // WLPA-57: two idle overlapping containers separate as whole containers.
 LandMovement::Checkpoint idle_overlap(const sim::PartitionExecutor& executor, bool restore, bool& separated, bool& restored_equal) {
     auto field = make_field(std::vector<std::string>(9, std::string(15, '.')));
@@ -1802,9 +1912,9 @@ void squad_body_contracts() {
 
 int main() {
     quota_and_states(); roles_and_prediction(); terrain_and_dynamic_inputs(); live_subtype_and_bounded_escape_retries();
-    deadlock(); head_on(); pushed_squad_pusher_dies(); stopped_path_around(); squad_turning_state(); member_terrain_detours();
+    deadlock(); head_on(); pushed_squad_pusher_dies(); stopped_path_around(); squad_turning_state(); rotating_pair_is_not_deadlocked(); member_terrain_detours();
     authored_class_eligibility(); peer_guard_reads_both_classes(); idle_peer_passes_without_a_row(); moving_pair_peer_classes(); same_direction_threshold_and_stalled(); soft_crossing_contracts(); soft_crowd_contracts();
-    rows_layout_contract(); rows_remap_contracts(); reached_on_parent_arrival(); squad_body_contracts();
+    rows_layout_contract(); rows_remap_contracts(); reached_on_parent_arrival(); squad_body_contracts(); stock_stormtrooper_push_contracts();
     sim::InlineExecutor serial;
     const auto stragglers = straggler_contact(serial, false, true);
     const auto wedge = straggler_contact(serial, false, true, true);

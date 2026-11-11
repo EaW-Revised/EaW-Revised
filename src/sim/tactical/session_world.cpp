@@ -98,8 +98,9 @@ core::Result<void> detail::prepare_projectile_defences(CombatWorld& world,
                 }
             }
             const auto passive = unit.profile->passive_missile_shield_radius;
-            static_sources[slot] = passive.raw() > 0 || ability.shield_radius ? 1U : 0U;
-            if (!ability.active_shield && passive.raw() <= 0 && !ability.active_jamming
+            static_sources[slot] = (passive.raw() > 0 || ability.shield_radius) ? 1U : 0U;
+            if (!ability.active_shield && passive.raw() <= 0 && !ability.jammer_registered
+                && !(ability.active_jamming && !ability.jammer_registration_explicit)
                 && !(ability.shield_radius && unit.sensor_jammed)) continue;
             auto height = math::add(unit.position.z, unit.profile->ranged_target_z_adjust);
             if (!height) { errors[slot] = height.error(); continue; }
@@ -197,8 +198,10 @@ core::Result<detail::CombatWorld> TacticalSession::Impl::combat_world(std::vecto
                 if (published != instances.end() && published->entity_id == state.entity_id) {
                     entry.visible_to = published->visible_to;
                 }
-                // Land combat slice: fog has no land provider yet. Only the copied phase input is unmasked.
-                if (land) entry.visible_to = ~std::uint64_t{0};
+                // LC-90: a land session with a fog grid reads the same published mask as space (the land fog service runs
+                // each tick), so the shared weapon, aim and target gates see a fogged enemy as not visible. Content
+                // that binds no fog grid (a land start always binds one) has no fog to read: everything is visible.
+                if (land && !fog) entry.visible_to = ~std::uint64_t{0};
                 const bool land_wrapper = land && land->requests.contains(state.entity_id);
                 entry.profile = land_wrapper ? nullptr : combat.find_target_type(state.type_id);
                 entry.footprint = land_wrapper ? nullptr : combat.footprint(state.type_id);
@@ -239,7 +242,16 @@ core::Result<detail::CombatWorld> TacticalSession::Impl::combat_world(std::vecto
                     }
                     if (const auto jammer = ability_slot(profile, AbilityKind::sensor_jamming)) {
                         defence.jamming_radius = profile.abilities[*jammer].effective_radius;
-                        defence.active_jamming = unit.abilities->slots[*jammer].active;
+                        if (profile.abilities[*jammer].gui_activated_ability_name.empty()) {
+                            defence.active_jamming = unit.abilities->slots[*jammer].active;
+                        }
+                    }
+                    for (std::size_t special = 0; special < profile.special.size(); ++special) {
+                        if (profile.special[special].kind != SpecialAbilityKind::sensor_jamming) continue;
+                        const auto& jammer = unit.abilities->special.slots[special];
+                        defence.jammer_registration_explicit = true;
+                        defence.active_jamming = defence.active_jamming || jammer.jammer_active;
+                        defence.jammer_registered = defence.jammer_registered || jammer.jammer_registered;
                     }
                     if (const auto salvo = ability_slot(profile, AbilityKind::full_salvo)) {
                         entry.full_salvo = unit.abilities->slots[*salvo].active;
@@ -333,6 +345,26 @@ core::Result<detail::CombatWorld> TacticalSession::Impl::combat_world(std::vecto
                 entry->ion_target_hardpoint = slot->target_hardpoint;
             }
         }
+        const auto lucky = std::none_of(abilities.profiles.begin(), abilities.profiles.end(), [](const auto& profile) {
+            return ability_slot(profile, AbilityKind::lucky_shot).has_value();
+        }) ? core::Result<void>::success() : executor.execute_phase("combat-lucky-overrides", tick_partition_count, [&](const std::size_t partition) {
+            const auto range = partition_range(partition, world.units.size());
+            for (auto index = range.begin; index < range.end; ++index) {
+                auto& entry = world.units[index];
+                const auto* holder = live(world.container_of(entry.id));
+                if (!holder || !lucky_slot(*holder)) holder = live(entry.id);
+                const auto* lock = holder ? lucky_slot(*holder) : nullptr;
+                if (!lock || !lock->active) continue;
+                entry.lucky_holder_type = holder->state.type_id;
+                entry.lucky_held = entry.ion_held = true;
+                const auto* target = live(lock->target);
+                const auto* member = live(entry.id);
+                entry.ion_armed = member && lucky_slot(*member) && target && lucky_target_valid(*holder, *target);
+                entry.ion_target = lock->target;
+                entry.ion_target_hardpoint = lock->target_hardpoint;
+            }
+        });
+        if (!lucky) return core::Result<detail::CombatWorld>::failure(lucky.error());
         return core::Result<detail::CombatWorld>::success(std::move(world));
     }
 

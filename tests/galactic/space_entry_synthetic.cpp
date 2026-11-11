@@ -1185,6 +1185,43 @@ void scene_contracts() {
         expect(stowed.notes.empty(), "an entry whose flagship sources all have profiles raises no note");
     }
     {
+        // #6076: a type with the Tactical_Health tag absent rates by the retail default hull (100, scaled like any hull),
+        // not zero. An authored non-positive hull adds nothing; its shields alone rate.
+        units::UnitType bare; bare.id = "Bare_Hull"; bare.kind = units::UnitKind::ship;
+        const auto defaulted = campaign::flagship_rating_source(bare);
+        expect(defaulted.hull && *defaulted.hull == whole(100), "an absent Tactical_Health rates by the default hull of 100");
+        expect(!bare.hull, "the default is applied to the rating copy, never to the loaded type");
+        units::UnitType authored = bare; authored.hull = whole(40);
+        expect(*campaign::flagship_rating_source(authored).hull == whole(40), "an authored hull is kept");
+        units::UnitType squadron = bare; squadron.kind = units::UnitKind::squadron; squadron.team_hull = whole(100);
+        squadron.team_shield_points = whole(30); squadron.hull = whole(7);
+        const auto container = campaign::flagship_rating_source(squadron);
+        expect(*container.hull == whole(100) && container.shielded && *container.shield_points == whole(30),
+            "a squadron still rates by its container (WSQ-60)");
+        units::UnitType hollow = bare; hollow.hull = Fixed{}; hollow.shielded = true; hollow.shield_points = whole(25);
+        expect(campaign::flagship_shield_rating(hollow) == whole(25), "a non-positive hull rates by its shields alone");
+        hollow.shielded = false;
+        expect(campaign::flagship_shield_rating(hollow) == Fixed{}, "a non-positive hull without shields rates zero");
+    }
+    {
+        // #6076 through the entry: a type with no Tactical_Health rates by the default hull and so wins the combat
+        // flagship over a type with a lower rating. The rating comes from the helper and the durability table, as the
+        // stock entry computes it (the synthetic tables author a health multiplier of 1).
+        auto bare = *tables.find("Ship"); bare.hull.reset(); bare.shielded = false; bare.shield_points.reset();
+        units::UnitTables rated_tables; rated_tables.constants = tables.constants;
+        rated_tables.units.push_back(campaign::flagship_rating_source(bare));
+        const auto durability = take(units::durability_table(rated_tables));
+        const auto* profile = durability.find(skirmish::type_id("Ship"));
+        expect(profile && profile->max_hull == whole(100), "the defaulted hull enters the durability table as a hull of 100");
+        auto defaulted = transport_input; defaulted.types[0].source_flagship_rating = profile->max_hull;
+        campaign::SpaceEntryType weak = defaulted.types[0]; weak.galactic = 11; weak.source_flagship_rating = whole(10);
+        defaulted.types.push_back(weak);
+        auto roster = record; roster.forces.insert(roster.forces.begin() + 3, {23, 11, 1, 10}); // ids stay ascending
+        const auto won = take(campaign::prepare_space_entry(roster, defaulted, 100, 17));
+        expect(!won.riders.empty() && won.riders.front().force.carrier == 20,
+            "a defaulted-hull type is the combat flagship over a lower-rated type");
+    }
+    {
         // A negative authored population reads as zero with a note; it does not refuse the entry.
         auto negative = transport_input; negative.types[0].population = Fixed::from_raw(-Fixed::scale);
         auto admitted = campaign::prepare_space_entry(record, negative, 100, 17);
@@ -1421,6 +1458,23 @@ void formation_stage_contracts() {
         expect(position(unclassed,22)!=position(corvette,22), "an unknown Ship_Class does not form up as a corvette");
         expect(std::any_of(unclassed.start.units.begin(),unclassed.start.units.end(),[](const auto& u){return u.state.entity_id==20;}),
             "the unclassed ship is still in the battle at its creation pose");
+        {
+            // #6075: an invader fleet whose every object is unclassed still plays the prebattle cinematic (the debug
+            // build's formation pass runs it over all registered members, WGT-23); target presence still decides.
+            const_cast<units::UnitType*>(tables.find("Ship"))->campaign_ship_class="Gunship";
+            auto input=entry_inputs(tables); input.structures.clear(); input.station_type.clear(); input.riders.clear(); input.types[0].escorts.clear(); input.sides[0].cap=whole(30);
+            std::erase_if(input.map.placements,[](const auto& marker){return marker.record==4;});
+            campaign::ConflictRecord record; record.id=90; record.invader=1; record.defender=2; record.map_identity=input.map.map;
+            record.forces={{20,1,1,10},{21,1,1,10},{70,1,2,12}};
+            const auto plan=take(campaign::prepare_space_entry(record,input,100,17));
+            auto scene=take(campaign::build_space_entry(record,input,100,17)).start;
+            auto other=scene;
+            const auto target=take(campaign::form_space_entry(scene,input,plan,sim::math::Vec3{whole(9999),whole(-8888),{}}));
+            const auto absent=take(campaign::form_space_entry(other,input,plan,std::nullopt));
+            expect(target.attacker_cinematic_admitted && !absent.attacker_cinematic_admitted,
+                "an all-unclassed invader fleet admits the prebattle intro on target presence alone");
+            const_cast<units::UnitType*>(tables.find("Ship"))->campaign_ship_class="corvette";
+        }
         // The land words share the space values: infantry forms up as a fighter, tank as a frigate, walker as a capital.
         for(const auto& [word,expected] : {std::pair{"infantry","fighter"},{"tank","frigate"},{"walker","capital"},{"artillery","transport"}}) {
             const_cast<units::UnitType*>(tables.find("Ship"))->campaign_ship_class=word;
@@ -1546,7 +1600,7 @@ void craft_without_profile_stays_skipped() {
 
 // #3956 / WSL-16, WSL-16a, WGT-10: a campaign station also launches a ship type (no squadron members) as one
 // single ship: starting count 1, a lost ship is replaced from the unlimited reserve. Skirmish tables retain the
-// entry with no reserves. The ship's own Hyperspace tag decides how it enters: with it down the reinforcement arrival lane, without
+// entry and its authored reserves (#6206). The ship's own Hyperspace tag decides how it enters: with it down the reinforcement arrival lane, without
 // it straight from the bay; the squadron entry always leaves the hangar. Level 2 places the "Station" row with a Tartan-like ship;
 // level 4 places its own "Station4" row (a different authored station type, as in the retail level-4 station)
 // with an Acclamator-like ship; the rule is the same.
@@ -1590,9 +1644,10 @@ void station_ship_spawn_scenario(const std::string& ship_name, const bool hypers
     };
     const auto skirmish_like = build(false);
     const auto* skirmish_station = skirmish_like.content.motion.squadrons.find_spawner(skirmish::type_id(station_name), 2);
-    expect(skirmish_station && skirmish_station->entries.size() == 2 && skirmish_station->entries[1].ship
-        && skirmish_station->entries[1].arrival == hyperspace && skirmish_station->entries[1].reserve == 0,
-        "WSL-16a: skirmish profiles retain ordinary ship entries without campaign reserves");
+    expect(skirmish_station && skirmish_station->entries.size() == 2 && !skirmish_station->entries[0].ship
+        && skirmish_station->entries[0].reserve == -1 && skirmish_station->entries[1].ship
+        && skirmish_station->entries[1].arrival == hyperspace && skirmish_station->entries[1].reserve == -1,
+        "WSL-16a: skirmish profiles retain ordinary ship entries and authored unlimited reserves (#6206)");
     const auto entry = build(true);
     const auto* profile = entry.content.motion.squadrons.find_spawner(skirmish::type_id(station_name), 2);
     expect(entry.conflict.station_level == level && profile != nullptr && profile->entries.size() == 2 && !profile->entries[0].ship && !profile->entries[0].arrival
@@ -1784,6 +1839,30 @@ void commander_contracts() {
             "removing one same-category source preserves the surviving commander's defence and allied reveal");
         if(workers==1) reference.insert(reference.end(),hashes.begin(),hashes.end());
         else expect(std::equal(hashes.begin(),hashes.end(),reference.begin()+static_cast<std::ptrdiff_t>(scenario*hashes.size())),"commander continuation is identical on 1/2/4/8 workers");
+    }
+    for (const auto enabled : {false, true}) {
+        auto tables = tables_for_entry(); tables.campaign_scene = true;
+        units::NamedConstant cap; cap.tag = "Credit_Cap_Per_Planet"; cap.value = whole(10000); tables.constants.scalars.push_back(cap);
+        auto* commander = const_cast<units::UnitType*>(tables.find("Commander"));
+        commander->production.retreat_prevention = {{"Custom_Retreat", enabled}};
+        auto input = entry_inputs(tables); input.structures.clear(); input.station_type.clear(); input.types[0].escorts.clear();
+        for (auto& faction : input.map.factions) faction.space_unit_cap = 30;
+        campaign::ConflictRecord record; record.id = 90; record.invader = 1; record.defender = 2; record.map_identity = input.map.map;
+        record.forces = {{20, 1, 1, 10}, {22, 1, 1, 10}, {23, 3, 1, 10}, {30, 2, 2, 12}};
+        auto entry = take(campaign::build_space_entry(record, input, 100, 17));
+        campaign::SpaceRuleInputs rules; rules.players = {{1, whole(100), 0, 5, 1, {}, false, {}}, {2, whole(100), 0, 5, 1, {}, true, {}}};
+        check(campaign::apply_space_rules(entry, input.map, rules));
+        entry.content.victory = {};
+        entry.content.retreat.emplace(); entry.content.retreat->rules.campaign = true;
+        entry.content.retreat->rules.players = {{1, 1, true}, {2, 1, true}};
+        auto session = take(tt::TacticalSession::create(entry.conflict.tactical, entry.content));
+        const auto views = session.retreat_views();
+        const auto refusal = [&](tt::PlayerId player) {
+            return std::find_if(views.begin(), views.end(), [&](const auto& row) { return row.player == player; })->refusal;
+        };
+        expect(refusal(1) == (enabled ? tt::RetreatRefusal::prevention : tt::RetreatRefusal::none)
+            && refusal(2) == tt::RetreatRefusal::none,
+            "WRP-02: authored rider enabled state controls its own player's retreat gate");
     }
 }
 

@@ -125,6 +125,23 @@ void fiscal_inputs() {
         && bound.value().fiscal()->contributions->factions[0].alignment == gc::IncomeAlignment::light
         && bound.value().fiscal()->contributions->planets[0].alignment == gc::IncomeAlignment::dark,
         "alignment constants and profiles bind authored values without stock literals");
+    // CGS-16: a planet type with no The_Force / Force_Strength keeps the type default instead of refusing the campaign.
+    auto unauthored = enhanced;
+    unauthored.planets[0].force_alignment.clear(); unauthored.planets[0].force_strength.reset();
+    const auto defaulted = cp::plan_campaign_setup(unauthored, types(), "Ordinary", opts);
+    expect(defaulted && defaulted.value().fiscal()->contributions
+        && defaulted.value().fiscal()->contributions->planets[0].alignment == gc::IncomeAlignment::invalid
+        && defaulted.value().fiscal()->contributions->planets[0].strength == Fixed{},
+        "planet without alignment or strength binds the invalid alignment and zero strength");
+    auto strength_only = enhanced;
+    strength_only.planets[0].force_strength.reset();
+    const auto zero_strength = cp::plan_campaign_setup(strength_only, types(), "Ordinary", opts);
+    expect(zero_strength && zero_strength.value().fiscal()->contributions->planets[0].alignment == gc::IncomeAlignment::dark
+        && zero_strength.value().fiscal()->contributions->planets[0].strength == Fixed{},
+        "authored alignment without strength keeps zero strength");
+    auto misspelled = enhanced;
+    misspelled.planets[0].force_alignment = "Grey";
+    expect(!cp::plan_campaign_setup(misspelled, types(), "Ordinary", opts), "an authored alignment name outside Light/Neutral/Dark still refuses");
     eawr::sim::InlineExecutor serial;
     for (int i = 0; i < 1350; ++i) expect(bool(campaign.game()->step(serial)), "campaign pre-boundary service");
     expect(campaign.game()->galaxy().snapshot()->player_economy()->players[0].credits == f(12000), "startup balance unchanged until boundary");

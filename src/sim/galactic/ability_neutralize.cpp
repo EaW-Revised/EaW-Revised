@@ -45,18 +45,22 @@ void GalacticSession::Impl::prepare_neutralization(const GameCommand& command, c
     const std::uint64_t tick, std::vector<GalacticEvent>& events) {
     const auto planet = std::get<PrepareGalacticAbility>(command.payload).planet;
     GalacticEvent event{tick, GalacticEventKind::command_rejected, command.key.seat, actor.id, command.key.sequence};
-    const auto reject = [&] { event.reason = GalacticRejectReason::unknown_value; events.push_back(event); };
+    const auto refuse = [&](GalacticRejectReason why) { event.reason = why; events.push_back(event); };
+    const auto reject = [&] { refuse(GalacticRejectReason::unknown_value); };
     const auto* profile = find(setup.ability_host->profiles, actor.current_type, [](const auto& r) { return r.type; });
     const auto* service = find(ability_host->actors, actor.id, [](const auto& r) { return r.actor; });
-    if (!profile || !profile->neutralize || !service || !service->neutralize_enabled || service->neutralize_cancelled
+    if (!profile || !profile->neutralize || !service
         || !control || !economy_corruption || !economy || !production || !planets.contains(planet)) return reject();
+    // #6120: an ability that is off for this hero, or not activated for the faction, is told apart from an empty planet.
+    if (!service->neutralize_enabled || service->neutralize_cancelled) return refuse(GalacticRejectReason::neutralize_unavailable);
     const auto& names = setup.ability_host->activated_neutralize_abilities;
-    if (std::find(names.begin(), names.end(), profile->neutralize->name) == names.end()) return reject();
+    if (std::find(names.begin(), names.end(), profile->neutralize->name) == names.end())
+        return refuse(GalacticRejectReason::neutralize_unavailable);
     const auto* surface = find(control->planets, planet, [](const auto& r) { return r.planet; });
     const auto* economic = find(economy_corruption->planets, planet, [](const auto& r) { return r.planet; });
     if (!surface || !economic || !find(economy->players, actor.owner, [](const auto& p) { return p.player; })) return reject();
     // WGCH-20: a planet with a hackable superweapon is not a neutralization target.
-    if (find_hack_weapon(planet)) return reject();
+    if (find_hack_weapon(planet)) return refuse(GalacticRejectReason::neutralize_unavailable);
     const auto index = static_cast<std::size_t>(surface - control->planets.data());
     const auto& ability = *profile->neutralize;
     const auto controller = control->state[index].current_player;
@@ -114,9 +118,13 @@ void GalacticSession::Impl::prepare_neutralization(const GameCommand& command, c
     const auto corrupted = economic->corruption != corruption_fixture::Type::none ? 1 : 0;
     const auto actor_original = find(setup.ability_host->profiles, actor.original_type, [](const auto& r) { return r.type; });
     const bool actor_named = actor_original && actor_original->named;
+    // #6120: what stood there, so a refusal can say whether the planet held no hero, only an ally's, or none to buy.
+    std::size_t foreign_heroes = 0, allied_heroes = 0;
     for (const auto& candidate : candidates) {
         const auto* hero = live(candidate.id);
-        if (!hero || allied(actor.owner, hero->owner)) continue;
+        if (!hero || hero->owner == actor.owner) continue;
+        ++foreign_heroes;
+        if (allied(actor.owner, hero->owner)) { ++allied_heroes; continue; }
         const auto* target = find(setup.ability_host->neutralization_targets, hero->current_type, [](const auto& r) { return r.type; });
         if (!target || target->cost.raw() <= 0 || !hero->current_type) continue;
         const auto* container = hero->container ? live(hero->container) : nullptr;
@@ -164,7 +172,10 @@ void GalacticSession::Impl::prepare_neutralization(const GameCommand& command, c
         prepared.target_choices.push_back({hero->id, company, std::max(corruption_fixture::one, reduced.value()),
             mine.value(), theirs.value(), valid});
     }
-    if (prepared.target_choices.empty()) return reject();
+    if (prepared.target_choices.empty())
+        return refuse(!foreign_heroes ? GalacticRejectReason::neutralize_no_hero
+            : allied_heroes == foreign_heroes ? GalacticRejectReason::neutralize_allied_hero
+            : GalacticRejectReason::neutralize_not_targetable);
     prepared.id = ability_host->next_request++;
     if (auto* menu = find(economy_corruption->menus, actor.id, [](const auto& m) { return m.buyer; }); menu && menu->active) {
         menu->active = false; dirty[static_cast<std::size_t>(StateSection::economy_corruption)] = true;
@@ -177,7 +188,8 @@ void GalacticSession::Impl::prepare_neutralization(const GameCommand& command, c
 void GalacticSession::Impl::execute_neutralization(const GameCommand& command, const CensusObject& actor,
     const PreparedAbility& prepared, const std::uint64_t tick, std::vector<GalacticEvent>& events) {
     GalacticEvent event{tick, GalacticEventKind::command_rejected, command.key.seat, actor.id, command.key.sequence};
-    const auto reject = [&] { event.reason = GalacticRejectReason::unknown_value; events.push_back(event); };
+    const auto refuse = [&](GalacticRejectReason why) { event.reason = why; events.push_back(event); };
+    const auto reject = [&] { refuse(GalacticRejectReason::unknown_value); };
     if (!economy || !ability_consumption_handler || !planets.contains(prepared.planet)) return reject();
     auto* account = find(economy->players, actor.owner, [](const auto& p) { return p.player; });
     const auto* original = find(setup.ability_host->profiles, actor.original_type, [](const auto& r) { return r.type; });
@@ -185,10 +197,10 @@ void GalacticSession::Impl::execute_neutralization(const GameCommand& command, c
     if (!account || !original) return reject();
     // WGCH-91/92: the stored planet resolves; the actor is the current owner's; the victim is resolved again by id.
     const auto victim_at = actor_records.find(prepared.target);
-    if (victim_at == actor_records.end() || victim_at->second.dead || victim_at->second.delete_pending) return reject();
+    if (victim_at == actor_records.end() || victim_at->second.dead || victim_at->second.delete_pending) return refuse(GalacticRejectReason::neutralize_no_hero);
     const auto victim = victim_at->second;
-    if (!prepared.valid) return reject();
-    if (account->credits < prepared.price) return reject();
+    if (!prepared.valid) return refuse(GalacticRejectReason::neutralize_not_targetable);
+    if (account->credits < prepared.price) return refuse(GalacticRejectReason::insufficient_credits);
     bool captured = false;
     if (!original->named) {
         // WGCH-25: the planet flag intercepts a generic actor; an absent flag stays a named provider seam.

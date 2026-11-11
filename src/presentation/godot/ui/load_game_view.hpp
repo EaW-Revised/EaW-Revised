@@ -18,13 +18,16 @@
 #include "ui/message_box_view.hpp"
 
 #include "eawr/presentation/ui/load_game.hpp"
+#include "eawr/core/result.hpp"
 
 #include <godot_cpp/classes/base_button.hpp>
 #include <godot_cpp/classes/canvas_layer.hpp>
 #include <godot_cpp/classes/input_event.hpp>
 #include <godot_cpp/classes/rich_text_label.hpp>
 
+#include <chrono>
 #include <functional>
+#include <future>
 #include <memory>
 #include <optional>
 #include <string>
@@ -46,6 +49,11 @@ struct LoadGameContext final {
     SavedGameLauncher launcher;
     // Optional co-op save details, shown for the selected row.
     std::function<std::string(std::string_view)> save_details;
+    std::function<bool()> review_ready;
+    std::function<std::shared_ptr<void>()> review_wait_lease;
+    // Optional: how far the mounted mods' content digests are, for the log line a long wait prints.
+    std::function<std::string()> review_progress;
+    std::function<std::future<core::Result<std::string>>(const presentation::ui::SavedGameRequest&)> review_save;
 };
 
 class EawrLoadGameScreen final : public godot::CanvasLayer {
@@ -96,6 +104,13 @@ private:
     void on_cancel();
     void on_delete_answer(int64_t result);
     void finish_launch();
+    void begin_launch(presentation::ui::SavedGameRequest);
+    void on_mod_answer(int64_t result);
+    void on_review_cancelled(int64_t result);
+    // The saved-mod check can wait minutes on a cold digest cache behind the "Checking saved mods" box;
+    // these print one line when it starts, a progress line every half minute, and one when it ends.
+    void log_review_wait();
+    void log_review_end(const char* what);
 
     presentation::ui::LoadGameModel model_;
     LoadGameContext context_;
@@ -110,6 +125,13 @@ private:
     // The request the Loading box waits on, and the frames left before the launcher runs, so the box
     // is on screen first.
     std::optional<presentation::ui::SavedGameRequest> pending_load_;
+    std::optional<presentation::ui::SavedGameRequest> review_request_;
+    std::shared_ptr<void> review_wait_lease_;
+    std::future<core::Result<std::string>> review_result_;
+    std::chrono::steady_clock::time_point review_started_{};
+    std::chrono::steady_clock::time_point review_logged_{};
+    bool review_wait_logged_{};
+    presentation::ui::SavedLoadReview mod_review_;
     int launch_frames_{};
     int loads_started_{};
     // The date column: one label per saved-game row, laid over the list at 68% of its width.

@@ -21,6 +21,9 @@ struct CaptureProfile {
     math::Vec3 attachment{}; // scaled bind position, or zero for pad-transform fallback
     bool destroy_when_child_dies{};
     std::uint32_t rebuild_frames{};
+    // False: a build pad that is not a capture point (land: stock faction and structure pads). It is a pad for the build
+    // menu and the proximity test (`radius`), and never changes owner by capture.
+    bool captures{true};
     friend bool operator==(const CaptureProfile&, const CaptureProfile&) = default;
 };
 

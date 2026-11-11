@@ -1,5 +1,6 @@
 #pragma once
 
+#include "eawr/core/checkpoint_limits.hpp"
 #include "eawr/core/result.hpp"
 
 #include <array>
@@ -20,9 +21,8 @@ inline constexpr std::array<std::uint8_t, 8> magic{'E', 'A', 'W', 'R', 'C', 'K',
 inline constexpr std::uint16_t format_version = 1;
 inline constexpr std::size_t header_size = 304;
 inline constexpr std::size_t section_header_size = 16;
-// The multiplayer-readiness budget for one uncompressed checkpoint. A save over it fails; nothing
-// is ever truncated.
-inline constexpr std::size_t max_bytes = 64U * 1024U * 1024U;
+// The shared budget for one uncompressed checkpoint. A save over it fails; nothing is truncated.
+inline constexpr std::size_t max_bytes = core::checkpoint_byte_limit;
 inline constexpr std::size_t max_sections = 64;
 
 inline constexpr std::uint16_t flag_child = 1U << 0U;    // a tactical battle is in progress
@@ -54,6 +54,7 @@ enum class SectionId : std::uint16_t {
     land_state = 18, // coordinator-reserved, optional tactical land services
     multiplayer_resume = 19, // canonical roster, capture commitment and continuation
     tactical_host = 20, // coordinator-reserved: a standalone battle's script host (skirmish saves)
+    offer_pool = 21, // coordinator-reserved (galaxy save 56): the one copy of every production offer table
     presentation_hints = 0x8000,
     // 0x8001: the live transport's queued input (platform-owned).
     campaign_identity = 0x8002, // #3035: authored campaign/faction a player save belongs to

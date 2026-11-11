@@ -279,6 +279,9 @@ public:
     // The drop-down list as the retail rig capture shows it (rim, translucent backing, list font, no radio
     // mark). Off by default (#3167).
     void set_retail_list(bool retail);
+    // UI-COMBO-01: resource height after subtracting the closed text box.
+    void set_list_height(float height);
+    [[nodiscard]] float get_list_height() const { return list_height_; }
     void _draw() override;
     void _notification(int what);
 
@@ -289,6 +292,7 @@ private:
     void apply_skin();
     void apply_retail_list(godot::PopupMenu& popup);
     void scale_retail_list();
+    float list_height_{};
     KitState forced_{KitState::automatic};
     bool applying_{};
     bool retail_list_{};

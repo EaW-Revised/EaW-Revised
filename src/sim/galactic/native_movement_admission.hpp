@@ -143,6 +143,7 @@ void execute_native_movement(Owner& owner, const GameCommand& command, std::uint
     }
     // WGM-84: the first corruption-benefiting mover pays the intermediate planets before anything moves. Retreat
     // endpoints are supplied directly and are not an ordinary path (WGM-198).
+    if (!prepared.departure.left_behind.empty() && native_id_block_exhausted(owner)) return reject(GalacticRejectReason::resource_limit);
     if (!returning_player) {
         std::vector<FleetMember> departing;
         const auto& left = prepared.departure.left_behind;

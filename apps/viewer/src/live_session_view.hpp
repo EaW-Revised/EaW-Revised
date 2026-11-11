@@ -16,6 +16,7 @@
 #include "debris_props.hpp"
 #include "space_environment.hpp"
 #include "battle_scene.hpp"
+#include "../../../src/presentation/animation/land_locomotion_clips.hpp"
 
 #include "eawr/core/result.hpp"
 #include "eawr/data/xml_fwd.hpp"
@@ -349,8 +350,12 @@ public:
     struct ClockTrace final {
         double newest{}, before{}, after{}, advance{}, delta{}, rate{}, target_rate{};
         bool valid{}, running{};
+        // steady_clock microseconds: this frame's start and the newest published tick's time (report path only).
+        double frame_us{}, newest_published_us{};
     };
     [[nodiscard]] const ClockTrace& clock_trace() const noexcept { return clock_trace_; }
+    // Every live frame so far, warm-up included (the movers trace gates on this counter, not on shown_frames()).
+    [[nodiscard]] std::uint64_t live_frames() const noexcept { return frames_; }
     // The frames shown after the warm-up (scripted f<frame> gestures count these).
     [[nodiscard]] std::uint64_t shown_frames() const noexcept {
         return frames_ > options_.warmup_frames ? frames_ - options_.warmup_frames : 0U;
@@ -358,6 +363,11 @@ public:
     // #459: the time panel (docs/behaviour/tactical-time-controls.md). The buttons change only
     // when ticks run (TP-01, TP-02); each change enters the time track (TP-04). Main thread.
     [[nodiscard]] const ui::TimeControls& time() const noexcept { return time_; }
+    // #5355: a LAN GC battle child's agreed clock (absent in solo and skirmish) as frame synchronization last read it,
+    // and the fast-forward button state derived there: pressed while the agreed tactical rate, or the request still in
+    // flight, is the shared 2x. The HUD reads these cached values and never queries the feed (no owner lock per refresh).
+    [[nodiscard]] const std::optional<platform::TacticalFeed::AgreedPacing>& agreed_pacing() const noexcept { return agreed_pace_; }
+    [[nodiscard]] bool shared_fast_forward_pressed() const noexcept { return shared_fast_forward_pressed_; }
     void press_pause();
     bool request_speed(std::uint32_t step);
     void press_fast_forward();
@@ -390,6 +400,7 @@ public:
                                  std::vector<std::uint8_t> hints);
     // Frame thread, every frame: moves a running save on. True on the frame a save ended.
     bool service_save();
+    [[nodiscard]] core::Result<std::string> save_scoring();
     struct SaveStatus final {
         bool running{};
         std::uint64_t written{}, failed{};
@@ -436,6 +447,8 @@ public:
     }
     // Whether every entity the session holds is still standing (destroyed units leave it).
     [[nodiscard]] const std::vector<sim::EntityId>& alive_units() const noexcept { return snapshot_index_.alive(); }
+    [[nodiscard]] const std::vector<sim::EntityId>& sensor_visible_units() const noexcept { return snapshot_index_.visible(); }
+    [[nodiscard]] bool reveal_all() const noexcept { return options_.reveal; }
     [[nodiscard]] std::span<const sim::EntityId> unfogged_map_props() const noexcept { return unfogged_map_props_; }
     // One presentation frame: poses the population's live ships and says whether to capture.
     // After a simulation failure it keeps the last poses and carries the error instead. A unit
@@ -487,12 +500,21 @@ public:
     [[nodiscard]] double bookkeeping_ms() const noexcept { return bookkeeping_ms_; }
     [[nodiscard]] std::size_t frame_slots_grown() const noexcept { return arrival_slots_.frame_grown; }
     [[nodiscard]] double slot_growth_ms() const noexcept { return arrival_slots_.growth_ms; }
+    [[nodiscard]] std::size_t preload_fallbacks() const noexcept {
+        return arrival_slots_.warm_fallbacks.size() + static_cast<std::size_t>(arrival_slots_.warm_out_of_memory);
+    }
+    [[nodiscard]] std::uint64_t frame_launch_read_bytes() const noexcept { return arrival_slots_.frame_launch_read_bytes; }
     [[nodiscard]] bool warm_campaign_slots(BattleScene&, GodotRenderer&);
     [[nodiscard]] double pose_ms() const noexcept { return pose_ms_; }
     [[nodiscard]] double opacity_ms() const noexcept { return opacity_ms_; }
     [[nodiscard]] double tick_wait_ms() const noexcept { return tick_wait_ms_; }
     [[nodiscard]] double live_frame_ms() const noexcept { return live_frame_ms_; }
     [[nodiscard]] double session_tail_ms() const noexcept { return session_tail_ms_; }
+    [[nodiscard]] std::optional<std::size_t> land_animation_type(sim::EntityId entity) const noexcept {
+        const auto found = land_playback_.find(entity);
+        return found != land_playback_.end() && found->second.initialized
+            ? std::optional(found->second.type) : std::nullopt;
+    }
     [[nodiscard]] double clip_pose_ms() const noexcept { return clip_pose_ms_; }
     [[nodiscard]] const space::SnapshotIndex& snapshot_index() const noexcept { return snapshot_index_; }
     void set_pose_workers(const particles::StepExecutor* workers) noexcept { pose_workers_ = workers; }
@@ -504,6 +526,12 @@ public:
     }
     [[nodiscard]] const RenderClock& render_clock() const noexcept { return render_clock_; }
     [[nodiscard]] std::optional<BattleEffects::UnitFrame> unit_frame(sim::EntityId entity) const;
+    // Report path only (--eawr-perf-movers): the content name of a unit type, empty while the type table is not indexed yet
+    // or for a type that is not a unit. Not hashed, saved or replayed.
+    [[nodiscard]] std::string unit_type_name(sim::tactical::TypeId type) const {
+        const auto found = presentation_types_.find(type);
+        return found == presentation_types_.end() ? std::string{} : found->second->id;
+    }
     // This frame's unit poses, ascending by entity, for a caller that walks them in step with the ascending instances.
     [[nodiscard]] const std::map<sim::EntityId, BattleEffects::UnitFrame>& unit_frames() const noexcept { return unit_frames_; }
     [[nodiscard]] std::optional<std::size_t> composed_ship(sim::EntityId entity) const noexcept {
@@ -732,6 +760,7 @@ private:
 
     [[nodiscard]] bool prepare_land(const vfs::Vfs&, const data::Catalog&, std::string_view, std::string&);
     void bind_land_roster(const platform::LiveSession&);
+    void advance_land_playback(BattleScene&, const platform::LiveLandMotion&);
     std::optional<sim::tactical::TacticalContent> land_content_;
     Options options_;
     std::optional<battle::BattleStart> start_;
@@ -762,6 +791,20 @@ private:
     std::string recovery_input_feedback_;
     std::shared_ptr<platform::TacticalFeed> session_;
     std::vector<BattleScene::PlacedUnit> placed_ships_;
+    struct LandPlayback {
+        animation::LandClip active{animation::LandClip::idle};
+        animation::LandTurnPhase phase{animation::LandTurnPhase::main};
+        std::size_t type{}, outgoing_type{};
+        std::uint64_t position{}, outgoing_position{}, blend_ticks{}, blend_start{}, tick{};
+        float facing{}, roll{}, rate{1}, outgoing_rate{1};
+        bool initialized{}, blending{}, turning{}, loop{true}, outgoing_loop{true};
+        units::LandLocomotionData data;
+        bool team{}, bike{};
+    };
+    std::map<sim::EntityId, LandPlayback> land_playback_;
+    std::uint64_t land_playback_tick_{};
+    std::vector<platform::LiveLandMotion> land_motion_buffer_;
+    bool land_playback_started_{};
     std::vector<std::uint32_t> session_records_;
     std::vector<sim::EntityId> unfogged_map_props_;
     std::vector<sim::EntityId> draw_visibility_;
@@ -923,6 +966,9 @@ private:
     // #459: the time panel, and the driven presentation clock's current segment (TP-06): from
     // the frame `driven_origin_frame_` on, the tick advances step x factor per frame.
     ui::TimeControls time_;
+    ui::SharedSpeedRequest shared_speed_; // #5355: one agreed speed request in flight
+    std::optional<platform::TacticalFeed::AgreedPacing> agreed_pace_; // read once per frame in synchronize_frame_lan
+    bool shared_fast_forward_pressed_{};
     double driven_factor_{1.0};
     double driven_origin_tick_{};
     std::uint64_t driven_origin_frame_{};
@@ -959,6 +1005,11 @@ private:
     // Nullopt when the type has no Death_Clone, or the clone is not drawn.
     [[nodiscard]] std::optional<DeathClone> prepare_death_clone(const vfs::Vfs& filesystem, const data::Catalog& catalog,
                                                                 std::size_t source, std::uint64_t variant_key);
+    // A battle restored from a save re-simulates to its saved tick, so the rosters its carriers hold are only known from
+    // the first snapshot. Before the loading screen's Begin, extend the launch plan with every authored tier up to each
+    // owner's current tech for the carriers present, then add the missing recipes and warm copies through the same path.
+    void warm_live_rosters(BattleScene& population, GodotRenderer& renderer, const sim::tactical::TacticalSnapshot& snapshot);
+    bool warm_recipe_read_{}; // set while warm_live_rosters reads a missing recipe: planned work, not a fallback
     // `selected` is the arrival plan the source chose; the slots below only add to it.
     void prepare_launch_slots(const vfs::Vfs& filesystem, const data::Catalog& catalog,
                               std::optional<battle::ArrivalPlan> selected);
@@ -967,6 +1018,7 @@ private:
                          sim::tactical::TypeId required_station = 0, bool ability_proxy_owner = false,
                          std::string_view source = "launch");
     void note_spawned(sim::tactical::TypeId type) const;
+    void note_preload_fallback(sim::tactical::PlayerId owner, const std::string& type, std::string_view reason);
     [[nodiscard]] std::optional<std::size_t> grow_launch_slot(sim::EntityId, sim::tactical::TypeId,
                                                            sim::tactical::PlayerId);
     // A slot whose unit is no longer in the tactical snapshot, and whose death clone (if any) has

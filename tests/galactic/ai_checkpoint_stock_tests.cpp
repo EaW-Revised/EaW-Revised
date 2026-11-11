@@ -64,7 +64,7 @@ public:
         return eawr::core::Result<ai::NativeState>::success(std::move(value));
     }
     eawr::core::Result<void> restore(const ai::NativeState& value) override {
-        if (value.version != 1 || value.components.size() != 1 || !value.components.contains("funding"))
+        if (value.version != ai::native_state_version || value.components.size() != 1 || !value.components.contains("funding"))
             return refusal("unsupported fixture state");
         auto decoded = ai::decode_funding_state(value.components.at("funding"));
         if (!decoded) return eawr::core::Result<void>::failure(decoded.error());
@@ -112,7 +112,7 @@ void codecs() {
     ai::NativeState state; state.components["funding"] = bytes; state.components["GALACTIC_PERCEPTION"] = {1, 0, 0, 0};
     const auto encoded = take(ai::encode_native_state(state));
     auto decoded = take(ai::decode_native_state(encoded));
-    expect(decoded.version == 1 && decoded.components == state.components, "canonical component envelope preserves bytes and ASCII keys");
+    expect(decoded.version == ai::native_state_version && decoded.components == state.components, "canonical component envelope preserves bytes and ASCII keys");
     expect(take(ai::encode_native_state(decoded)) == encoded, "native round-trip byte identity");
     const auto hash = take(ai::native_state_hash(state));
     expect(hash.size() == 64 && hash.find_first_not_of("0123456789abcdef") == std::string::npos, "native digest lowercase SHA256");
@@ -125,7 +125,7 @@ void codecs() {
     damaged = encoded; damaged[4] ^= 1; expect(!ai::decode_native_state(damaged), "native domain mismatch refused");
     for (std::size_t size = 0; size < encoded.size(); ++size)
         expect(!ai::decode_native_state(std::span(encoded).first(size)), "native truncation refused");
-    auto invalid = state; invalid.version = 2; expect(!ai::encode_native_state(invalid), "unknown version refused");
+    auto invalid = state; invalid.version = ai::native_state_version + 1; expect(!ai::encode_native_state(invalid), "unknown version refused");
     invalid = state; invalid.components["bad key"] = {1}; expect(!ai::encode_native_state(invalid), "invalid component key refused");
     damaged = bytes; damaged.push_back(0); expect(!ai::decode_funding_state(damaged), "funding trailing bytes refused");
     damaged = bytes; damaged.back() = 255; // Raw Fixed words are preserved; all bit patterns are valid.
@@ -135,6 +135,19 @@ void codecs() {
     expect(saved.completed_tick == 11 && saved.galactic_frame == 7 && saved.state->components == state.components,
         "distinct synchronization and mode clocks persisted");
     boundary[16] = 2; expect(!campaign::decode_galactic_ai_save(boundary), "nonboolean native presence refused");
+}
+void large_native_ai_save_round_trip() {
+    ai::NativeState state;
+    auto& payload = state.components["large"];
+    payload.assign(32U * 1024U * 1024U + 1U, 0x5a);
+    payload.front() = 0x12;
+    payload.back() = 0x34;
+    const auto bytes = take(campaign::encode_galactic_ai_save({11, 7, state}));
+    expect(bytes.size() > 32U * 1024U * 1024U, "native AI save exceeds the former 32 MiB limit");
+    const auto restored = take(campaign::decode_galactic_ai_save(bytes));
+    expect(restored.completed_tick == 11 && restored.galactic_frame == 7 && restored.state
+            && restored.state->components == state.components,
+        "large native AI save restores its complete component bytes");
 }
 galactic::GalacticSetup setup() {
     return galactic::synthetic_galaxy({.seed = 71, .planets = 8, .players = 2,
@@ -328,7 +341,7 @@ void live_save(std::size_t workers, const std::filesystem::path& directory) {
 int case_galactic_ai_checkpoint_tests(int argc, char** argv) {
     try {
         if (argc != 2) throw std::runtime_error("expected an output directory");
-        codecs(); std::vector<std::string> reference;
+        codecs(); large_native_ai_save_round_trip(); std::vector<std::string> reference;
         for (auto workers : platform::determinism_worker_counts()) {
             checkpoint_boundaries(workers, reference);
             transit_boundary(workers);

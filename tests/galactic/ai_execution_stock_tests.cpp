@@ -696,7 +696,7 @@ void native_execution_state() {
     expect(!restored.restore(invalid), "execution component rejects trailing bytes");
     invalid = saved; invalid.components["galactic-execution"][4 + ga::ExecutionStateContributor::component.size()] = 2;
     expect(!restored.restore(invalid), "execution component refuses an unsupported version");
-    invalid = saved; invalid.version = 2;
+    invalid = saved; invalid.version = ga::native_state_version + 1;
     expect(!restored.restore(invalid), "execution component refuses an unsupported native envelope");
     invalid = saved; invalid.components.erase("galactic-execution");
     expect(!restored.restore(invalid), "execution component must be present");

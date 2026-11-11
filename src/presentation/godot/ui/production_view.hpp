@@ -123,6 +123,9 @@ public:
     }
     [[nodiscard]] bool pane_open() const noexcept { return pane_open_; }
     void set_pane_open(bool open);
+    using Hover = presentation::ui::ProductionHover;
+    // PU-73: input admission stays here, beside the pool drag's capture.
+    [[nodiscard]] const Hover* hovered_entry() const;
 
     // Where scripted hud=<name> gestures point: tqueueNN, b_reinforcement, r_close, r_RRCC.
     [[nodiscard]] std::optional<godot::Rect2> control_rect(const std::string& name) const;
@@ -154,6 +157,7 @@ private:
     [[nodiscard]] presentation::ui::ShellPlacement pane_placement() const;
     [[nodiscard]] data::ui::ReferenceRect close_rect() const;
     [[nodiscard]] std::optional<Target> target_at(const godot::Vector2& point) const;
+    void refresh_hover();
     [[nodiscard]] godot::Ref<godot::Texture2D> icon_texture(const std::string& type, std::string* name = nullptr) const;
     void draw_text(KitText& text, const godot::String& value, const godot::Rect2& box, godot::HorizontalAlignment align,
                    const data::ui::Rgba8& colour, std::int32_t points, bool outline, bool emboss = false,
@@ -173,6 +177,8 @@ private:
     std::function<void(std::size_t)> pick_;
     std::function<void()> open_;
     std::optional<Target> pressed_;
+    std::optional<Target> hover_target_;
+    presentation::ui::ProductionHoverCache hover_;
     bool pressed_right_{};
     bool hovered_reinforce_{};
     bool hovered_close_{};

@@ -5,6 +5,7 @@
 #include "eawr/net/tcp_transport.hpp"
 #include "eawr/net/lan_credentials.hpp"
 #include "eawr/presentation/ui/command_sink.hpp"
+#include "eawr/presentation/ui/time_controls.hpp"
 #include "eawr/platform/sim_workers.hpp"
 #include "eawr/net/desync_monitor.hpp"
 #include "eawr/sim/tactical/session.hpp"
@@ -87,6 +88,14 @@ void loopback(bool abrupt, bool departed_ahead, bool closed_before_launch, int f
         bool accept_forwarded{};
         unsigned catchup_batches{}, suppressed_repeats{};
         std::array<std::optional<std::uint64_t>, 2> early_seal_tick;
+        // #5355 (d), held-seat rejoin (6, 7): the survivor alone changes the shared speed and the relay withholds its
+        // seals from the returning peer until the drop, so the returning peer never executes that change before it is
+        // restored. It can then only show and run the speed through the staged replay of the recovery.
+        const bool missed_speed = (final_window == 6 || final_window == 7) && policy_disagreement == 0;
+        const unsigned speed_survivor = final_window == 7 ? 1U : 0U;
+        std::optional<unsigned> withheld_from;
+        std::optional<net::MatchOptions> returning_options_at_drop;
+        std::array<std::optional<std::uint32_t>, 2> activated_rate;
         std::array<bool, 2> failed{};
         std::array<bool, 2> observed_hold{};
         struct PortHold {
@@ -118,8 +127,11 @@ void loopback(bool abrupt, bool departed_ahead, bool closed_before_launch, int f
                 };
                 const bool hold_delivery = a && !a->frame.empty() && a->frame[0] == net::lan_credentials_kind && policy_disagreement == 3;
                 const bool hold_ack = b && !b->frame.empty() && b->frame[0] == net::lan_credentials_ack_kind && policy_disagreement == 5;
-                if (a && !hold_delivery && !repeated_early_seal(0, a) && relay_host->link(1) == net::LinkState::open) require(relay_host->send(1, a->frame));
-                if (b && !hold_ack && !repeated_early_seal(1, b) && relay_join->link(0) == net::LinkState::open) {
+                const auto withheld = [&](unsigned peer, const auto& received) {
+                    return withheld_from == peer && received && !received->frame.empty() && received->frame.front() == net::sealed_batch_kind;
+                };
+                if (a && !hold_delivery && !repeated_early_seal(0, a) && !withheld(0, a) && relay_host->link(1) == net::LinkState::open) require(relay_host->send(1, a->frame));
+                if (b && !hold_ack && !repeated_early_seal(1, b) && !withheld(1, b) && relay_join->link(0) == net::LinkState::open) {
                     require(relay_join->send(0, b->frame));
                     if (!b->frame.empty() && b->frame[0] == net::setup_accept_kind) accept_forwarded = true;
                 }
@@ -155,6 +167,8 @@ void loopback(bool abrupt, bool departed_ahead, bool closed_before_launch, int f
                                 require(tactical::TacticalSession::create(initial, content()))};
         std::array<std::vector<std::string>, 2> hashes;
         std::array<std::vector<std::pair<std::uint64_t, std::uint32_t>>, 2> rates;
+        // #5355 (d): target rates a rebuilt (restored) peer's staging context receives while it catches up.
+        std::array<std::vector<std::pair<std::uint64_t, std::uint32_t>>, 2> staged_rates;
         std::array<eawr::platform::LiveStepContext, 2> contexts;
         std::array<unsigned, 2> activations{};
         for (std::size_t peer = 0; peer < 2; ++peer) {
@@ -205,6 +219,7 @@ void loopback(bool abrupt, bool departed_ahead, bool closed_before_launch, int f
             next->completed_tick = [staged] { return staged->completed_tick(); };
             next->state_hash = [staged] { return staged->state_sha256(); };
             next->canonical_state = [staged] { return staged->canonical_state_bytes(); };
+            next->set_target_rate = [&, peer, staged](std::uint32_t rate) { staged_rates[peer].emplace_back(staged->completed_tick(), rate); };
             next->snapshot = [staged] { return staged->snapshot(); };
             next->departures = [staged] { const auto controls = staged->departure_controls();
                 return std::vector<tactical::DepartureControl>{controls.begin(), controls.end()}; };
@@ -237,7 +252,12 @@ void loopback(bool abrupt, bool departed_ahead, bool closed_before_launch, int f
                 auto stepped = staged->step(executor);
                 return stepped ? eawr::core::Result<void>::success() : eawr::core::Result<void>::failure(stepped.error());
             };
-            next->activate = [&, peer, staged] { ++activations[peer]; worlds[peer] = std::move(*staged); return eawr::core::Result<void>::success(); };
+            next->activate = [&, peer, staged] {
+                ++activations[peer]; worlds[peer] = std::move(*staged);
+                // #5355 (d): the rate this staging context holds when it goes live, from its own staged deliveries only.
+                if (!staged_rates[peer].empty()) activated_rate[peer] = staged_rates[peer].back().second;
+                return eawr::core::Result<void>::success();
+            };
             return eawr::core::Result<std::shared_ptr<Context>>::success(std::move(next));
         };
         std::array<eawr::platform::LiveStepDriver, 2> drivers;
@@ -350,8 +370,11 @@ void loopback(bool abrupt, bool departed_ahead, bool closed_before_launch, int f
         const auto goal = final_window >= 5 ? 180U : 120U;
         while (worlds[0].completed_tick() < goal || worlds[1].completed_tick() < goal
             || (final_window >= 5 && !recovery_seen)) {
-            if (final_window >= 6 && !dropped && worlds[0].completed_tick() >= 60 && worlds[1].completed_tick() >= 60) {
-                relay_host->cancel(); relay_join->cancel(); dropped = true;
+            const auto survivor_applied = [&] { return (speed_survivor == 0 ? host : join)->view().options.tactical_speed == 4; };
+            if (final_window >= 6 && !dropped && (missed_speed ? speed_sent && survivor_applied()
+                    : worlds[0].completed_tick() >= 60 && worlds[1].completed_tick() >= 60)) {
+                if (missed_speed) returning_options_at_drop = (speed_survivor == 0 ? join : host)->view().options;
+                relay_host->cancel(); relay_join->cancel(); dropped = true; withheld_from.reset();
                 // Let the two real streams observe EOF before rebuilding the relays.
                 require(drivers[0](contexts[0], {}, clock++)); require(drivers[1](contexts[1], {}, clock++));
                 if (final_window == 8) {
@@ -393,11 +416,16 @@ void loopback(bool abrupt, bool departed_ahead, bool closed_before_launch, int f
             }
             recovery_seen = recovery_seen || host->view().phase == viewer::LanPhase::resyncing
                 || join->view().phase == viewer::LanPhase::resyncing || rejoined;
+            if (!speed_sent && missed_speed && worlds[0].completed_tick() >= 45 && worlds[1].completed_tick() >= 45) {
+                withheld_from = speed_survivor; // from this request on, the returning peer gets none of the survivor's seals
+                expect((speed_survivor == 0 ? host : join)->request_speed(4), "the survivor requests the shared 2x");
+                speed_sent = true;
+            }
             if (!speed_sent && worlds[0].completed_tick() >= 45 && worlds[1].completed_tick() >= 45) {
                 expect(host->request_speed(0) && join->request_speed(4), "both humans request shared speed");
                 if (!speed_during_departure)
-                    expect(host->request_speed(1) && host->request_speed(2) && host->request_speed(3) && host->request_speed(4) && host->request_speed(1)
-                        && !host->request_speed(2), "seventh local change in window is refused");
+                    // #5355 owner decision: 2 local changes per 10 session seconds.
+                    expect(host->request_speed(1) && !host->request_speed(2), "a local change past the window budget is refused");
                 expect(!host->request_speed(5), "invalid speed refused locally");
                 expect(host->view().options.tactical_speed == 2 && join->view().options.tactical_speed == 2,
                     "request cannot mutate local pacing before future admission");
@@ -484,6 +512,23 @@ void loopback(bool abrupt, bool departed_ahead, bool closed_before_launch, int f
                 "repaired viewer worlds retain equal final hashes and replay commands");
             expect(host->view().phase == viewer::LanPhase::running && join->view().phase == viewer::LanPhase::running,
                 "recovery returns both battle HUDs to play");
+            // #5355 (d): the restored peer replays the options inputs while staging: its staging context is given the agreed
+            // rate (and goes live with it), and its view ends on the agreed speed.
+            expect(speed_sent, "the recovery cases change the shared speed before the recovery");
+            const auto agreed = eawr::presentation::ui::speed_step_rates[host->view().options.tactical_speed];
+            expect(host->view().options == join->view().options, "a restored peer's view shows the same agreed speed as the survivor");
+            expect(!staged_rates[returning].empty() && staged_rates[returning].back().second == agreed,
+                "the staged replay gives the restored peer the agreed rate");
+            expect(activated_rate[returning] == agreed, "the restored peer goes live at the agreed rate its staging context holds");
+            if (missed_speed) {
+                // The returning peer never executed the change before the drop; only the staged replay can supply it.
+                expect(returning_options_at_drop && returning_options_at_drop->tactical_speed == eawr::presentation::ui::default_speed_step,
+                    "the returning peer had not executed the survivor's speed change when the link dropped");
+                expect(std::none_of(rates[returning].begin(), rates[returning].end(), [](const auto& row) { return row.second == 60; }),
+                    "the returning peer's live context never ran 2x before its recovery");
+                expect(host->view().options.tactical_speed == 4 && agreed == 60,
+                    "after the rejoin both peers show the 2x the returning peer missed");
+            }
             for (const auto& match : {host, join}) {
                 const auto view = match->view();
                 const bool survivor_saw_hold = observed_hold[match == host ? 0U : 1U];
@@ -538,6 +583,11 @@ void loopback(bool abrupt, bool departed_ahead, bool closed_before_launch, int f
         expect(rates[0].front().first > 45, "speed event executes at a future tick");
         expect(host->view().options == join->view().options && host->view().options.tactical_speed == 4,
             "later canonical join seat wins the speed choices");
+        // #5355: every peer names the same seat as the last speed changer, for its notice; presentation only.
+        expect(host->view().options_actor && host->view().options_actor == join->view().options_actor
+            && host->view().options_change_tick == join->view().options_change_tick && host->view().options_change_tick > 45
+            && !host->view().options_name.empty() && !join->view().options_name.empty(),
+            "both peers name the same speed changer at the same session tick");
         expect(host->local_player() == 1 && join->local_player() == 2, "each facade binds its own human faction");
         expect(host->view().input_delay == 5 && join->view().input_delay == 5, "monitor and core use the non-default agreed delay");
         expect(sent[0] && sent[1], "both local seat inputs exercised");

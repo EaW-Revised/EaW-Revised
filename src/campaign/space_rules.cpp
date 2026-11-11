@@ -90,6 +90,20 @@ core::Result<void> bind_space_rules(const tactical::TacticalSetup& setup,
             profile.bonus.applicable.push_back(profile.type);
             economy.value().command_bonuses.push_back(std::move(profile));
         }
+        for (const auto& ability : type.production.retreat_prevention) {
+            tactical::CommandBonusProfile profile;
+            profile.type = battle::type_id(type.id); profile.slot = slot++;
+            profile.battlefield = true; profile.apply_to_self = true; profile.retreat_prevention = true;
+            for (const auto& player : setup.players) {
+                bool enabled = ability.enabled;
+                for (const auto& lock : inputs.tables->campaign_ability_locks)
+                    if (lock.player == player.player_id && battle::type_id(lock.type) == profile.type && lock.name == ability.name) enabled = lock.enabled;
+                if (enabled) profile.enabled_players.push_back(player.player_id);
+            }
+            if (profile.enabled_players.empty()) continue;
+            profile.bonus.applicable.push_back(profile.type);
+            economy.value().command_bonuses.push_back(std::move(profile));
+        }
     }
     std::sort(economy.value().command_bonuses.begin(), economy.value().command_bonuses.end(), [](const auto& a, const auto& b) { return std::pair{a.type, a.slot} < std::pair{b.type, b.slot}; });
     if (auto valid = tactical::validate_economy(economy.value(), setup.players); !valid) return valid;

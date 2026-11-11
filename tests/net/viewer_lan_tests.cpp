@@ -1091,10 +1091,14 @@ int main(int argc, char** argv) {
         viewer::apply_lan_lobby_ping(games, measured);
         expect(games[0].ping_ms == 0, "disconnected snapshot does not apply stale ping");
         eawr::net::MatchSpeedWindow window;
-        for (std::uint64_t request = 0; request < 6; ++request) expect(window.accept(3 + request * 3), "MP-U1 six requests per session window");
-        expect(!window.accept(21), "the seventh request is refused");
-        expect(!window.accept(1'353) && window.accept(1'354), "oldest expires strictly after 45 session seconds");
-        expect(!window.accept(1'354) && window.accept(1'357), "expiry retains the younger accepted requests");
+        // #5355 owner decision: 2 requests per 10 session seconds (window_ticks 300).
+        constexpr auto requests = eawr::net::ClockThrottle::speed_changes_per_window;
+        constexpr auto window_ticks = eawr::net::ClockThrottle::window_ticks;
+        static_assert(requests == 2 && window_ticks == 300);
+        for (std::uint64_t request = 0; request < requests; ++request) expect(window.accept(3 + request * 3), "MP-U1 requests per session window");
+        expect(!window.accept(3 + requests * 3 + 3), "the request past the budget is refused");
+        expect(!window.accept(3 + window_ticks) && window.accept(4 + window_ticks), "oldest expires strictly after the window");
+        expect(!window.accept(4 + window_ticks) && window.accept(7 + window_ticks), "expiry retains the younger accepted requests");
         for (std::uint32_t tactical_speed = 0; tactical_speed < 5; ++tactical_speed)
             for (std::uint32_t strategic_speed = 0; strategic_speed < 5; ++strategic_speed) {
                 const eawr::net::MatchOptions options{tactical_speed, strategic_speed};

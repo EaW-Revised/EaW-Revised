@@ -85,6 +85,14 @@ elseif(EAWR_GNS_PROVIDER STREQUAL "FETCH")
     if(CMAKE_TOOLCHAIN_FILE)
         list(APPEND _eawr_gns_common_args "-DCMAKE_TOOLCHAIN_FILE:FILEPATH=${CMAKE_TOOLCHAIN_FILE}")
     endif()
+    if(WIN32 AND EAWR_ENABLE_RELAY AND CMAKE_CXX_COMPILER_ID STREQUAL "Clang" AND CMAKE_LINKER)
+        list(APPEND _eawr_gns_common_args "-DCMAKE_LINKER:FILEPATH=${CMAKE_LINKER}")
+    endif()
+    set(_eawr_protobuf_rc_args)
+    if(WIN32 AND CMAKE_CXX_COMPILER_ID STREQUAL "Clang" AND NOT CMAKE_CROSSCOMPILING)
+        list(APPEND _eawr_protobuf_rc_args
+            "-DCMAKE_USER_MAKE_RULES_OVERRIDE:FILEPATH=${CMAKE_CURRENT_LIST_DIR}/EawrProtobufRcRules.cmake")
+    endif()
     set(_eawr_gns_static_crt OFF)
     if(CMAKE_MSVC_RUNTIME_LIBRARY MATCHES "^MultiThreaded" AND NOT CMAKE_MSVC_RUNTIME_LIBRARY MATCHES "DLL")
         set(_eawr_gns_static_crt ON)
@@ -116,7 +124,7 @@ elseif(EAWR_GNS_PROVIDER STREQUAL "FETCH")
         SOURCE_DIR "${eawr_protobuf_source_SOURCE_DIR}/cmake"
         BINARY_DIR "${_eawr_gns_prefix}/protobuf-build"
         DOWNLOAD_COMMAND "" UPDATE_COMMAND ""
-        CMAKE_ARGS ${_eawr_gns_common_args}
+        CMAKE_ARGS ${_eawr_gns_common_args} ${_eawr_protobuf_rc_args}
             -Dprotobuf_BUILD_TESTS:BOOL=OFF
             -Dprotobuf_BUILD_SHARED_LIBS:BOOL=OFF
             -Dprotobuf_WITH_ZLIB:BOOL=OFF

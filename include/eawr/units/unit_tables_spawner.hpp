@@ -17,9 +17,8 @@ struct SpawnEntry final {
     bool operator==(const SpawnEntry&) const = default;
 };
 
-// SPAWN_SQUADRON lists. SK-23 launches `starting` once after
-// `delay_seconds`; SK-36 keeps `reserves` read but unused (reserves_used is
-// always false in M2).
+// SPAWN_SQUADRON lists. The six authored tiers are selected at hangar setup;
+// the Tech_0 aliases remain available to existing content consumers.
 struct Spawner final {
     std::vector<SpawnEntry> starting;
     std::optional<Fixed> delay_seconds;

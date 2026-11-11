@@ -1236,19 +1236,148 @@ void planet_flights_follow_wall_time_and_stock_transforms() {
     assert(same(missing.pose().distance, 0.0F)); // No model/renderable -> radius zero (WGUI-60).
 }
 
+void radar_camera_rectangle_follows_zoom_and_pan() {
+    // Analytic top-down camera: at height 100 and full FOV 90, source footprint
+    // is 400 by 200 for a 2:1 viewport, independently of the radar dimensions.
+    eawr::presentation::FixedCamera camera{
+        .width = 200, .height = 100, .vertical_fov_degrees = 90,
+        .near_plane = 1, .far_plane = 1000,
+        .eye = {0,100,0}, .target = {0,0,0}, .up = {0,0,-1}};
+    const auto bounds = radar_camera_bounds(camera);
+    assert(bounds);
+    const auto close = [](float a, float b) { return std::abs(a-b) < 0.0001F; };
+    assert(close(bounds->min.x, -200.0F/380) && close(bounds->max.x, 200.0F/380));
+    assert(close(bounds->min.y, -100.0F/460) && close(bounds->max.y, 100.0F/460));
+    camera.eye[1] = 200;
+    const auto zoomed = radar_camera_bounds(camera);
+    assert(zoomed && close(zoomed->max.x-zoomed->min.x, 2*(bounds->max.x-bounds->min.x)));
+    assert(close(zoomed->max.y-zoomed->min.y, 2*(bounds->max.y-bounds->min.y)));
+    camera.eye[0] = camera.target[0] = 76;
+    camera.eye[2] = camera.target[2] = -92;
+    const auto panned = radar_camera_bounds(camera);
+    assert(panned && close(panned->min.x-zoomed->min.x, 0.2F));
+    assert(close(panned->max.y-zoomed->max.y, 0.2F));
+    assert(close(panned->max.x-panned->min.x, zoomed->max.x-zoomed->min.x));
+    const auto fitted = radar_camera_bounds(camera, {760,920});
+    assert(fitted && close(fitted->min.x, panned->min.x/2) && close(fitted->max.y, panned->max.y/2));
+    camera.width = 100;
+    const auto square = radar_camera_bounds(camera);
+    assert(square && close(square->max.x-square->min.x, (panned->max.x-panned->min.x)/2));
+    assert(close(square->max.y-square->min.y, panned->max.y-panned->min.y));
+    camera.width = 0;
+    assert(!radar_camera_bounds(camera));
+    camera.width = 200; camera.vertical_fov_degrees = 0;
+    assert(!radar_camera_bounds(camera));
+    camera.vertical_fov_degrees = 90; camera.target = camera.eye;
+    assert(!radar_camera_bounds(camera));
+
+    // Exercise the live galactic pose conversion, including a tilted, yawed view.
+    OrbitCamera orbit; orbit.distance = 300; orbit.pitch_degrees = 60; orbit.yaw_degrees = 25;
+    const auto first = radar_camera_bounds(fixed_camera(orbit, 1280, 720, galactic_vertical_fov(1280,720)));
+    orbit.distance *= 2;
+    const auto second = radar_camera_bounds(fixed_camera(orbit, 1280, 720, galactic_vertical_fov(1280,720)));
+    assert(first && second && second->max.x-second->min.x > first->max.x-first->min.x);
+    orbit.target.x += 38;
+    const auto third = radar_camera_bounds(fixed_camera(orbit, 1280, 720, galactic_vertical_fov(1280,720)));
+    assert(third && close(third->min.x-second->min.x, 0.1F));
+    // Upper rays beyond the horizon use the skirmish far-face cut, staying finite.
+    orbit.pitch_degrees = 5;
+    const auto horizon = radar_camera_bounds(fixed_camera(orbit, 1280, 720, galactic_vertical_fov(1280,720)));
+    assert(horizon && std::isfinite(horizon->min.x) && std::isfinite(horizon->max.y));
+}
+
+void radar_fit_keeps_the_default_and_expands_only_when_requested() {
+    const std::array<Vec3, 6> positions{{
+        {0,0,10}, {-379,459,10}, {380,-460,10},
+        {850,0,10}, {0,-920,10}, {-760,1380,10}}};
+    GalaxyView galaxy;
+    for (const auto& position : positions) {
+        PlanetView planet;
+        planet.position = position;
+        galaxy.planets.push_back(planet);
+    }
+    const RadarExtents retail;
+    const auto off = radar_extents(galaxy, false);
+    const auto fitted = radar_extents(galaxy, true);
+    assert(off == retail);
+    assert(same(fitted.x, 850.0F/0.95F) && same(fitted.y, 1380.0F/0.95F));
+    unsigned outside{};
+    for (const auto& planet : galaxy.planets) {
+        const auto position = planet.position;
+        if (std::abs(position.x) > 380 || std::abs(position.y) > 460) ++outside;
+        for (const auto size : {std::array<float, 2>{175,175}, {320,120}}) {
+            const auto default_point = world_to_radar(position, size[0], size[1]);
+            const auto off_point = world_to_radar(position, size[0], size[1], off);
+            const Vec3 expected{position.x/380.0F*size[0]*0.5F, position.y/460.0F*size[1]*0.5F, 0};
+            assert(default_point && off_point && *default_point == expected && *off_point == expected);
+            const auto on_point = world_to_radar(position, size[0], size[1], fitted);
+            assert(on_point && std::abs(on_point->x) <= size[0]*0.475F+0.001F);
+            assert(std::abs(on_point->y) <= size[1]*0.475F+0.001F);
+        }
+    }
+    // Synthetic positions cover inside, exact-edge, one-axis and two-axis overflow.
+    assert(outside == 3);
+}
+
+void fitted_radar_uses_loaded_galaxy_positions() {
+    auto galaxy = *build_view(synthetic_galaxy(), 1).view;
+    const RadarExtents retail;
+    assert(radar_extents(galaxy, false) == retail);
+    assert(radar_extents(galaxy, true) == retail);
+    galaxy.planets[0].position = {-380.0F, 460.0F, 10.0F};
+    assert(radar_extents(galaxy, true) == retail);
+    galaxy.planets[0].position.x = -760.0F;
+    const auto one_axis = radar_extents(galaxy, true);
+    assert(one_axis.x > 760.0F && one_axis.y == retail.y);
+    // Synthetic authored positions extend both axes, including an offset galaxy.
+    galaxy.planets[0].position = {-900.0F, -700.0F, 10.0F};
+    galaxy.planets[1].position = {1200.0F, 1500.0F, 10.0F};
+    assert(radar_extents(galaxy, false) == retail);
+    const auto fitted = radar_extents(galaxy, true);
+    assert(fitted.x > 1200.0F && fitted.y > 1500.0F);
+    for (const auto size : {std::array<float, 2>{175,175}, {320,120}}) {
+        for (const auto& planet : galaxy.planets) {
+            const auto point = world_to_radar(planet.position, size[0], size[1], fitted);
+            assert(point && std::abs(point->x) <= size[0] * 0.475F + 0.001F);
+            assert(std::abs(point->y) <= size[1] * 0.475F + 0.001F);
+            const auto world = radar_to_world(*point, size[0], size[1], fitted);
+            assert(world && std::abs(world->x - planet.position.x) < 0.001F);
+            assert(std::abs(world->y - planet.position.y) < 0.001F);
+            MapInput input;
+            const auto clicked = input.radar({point->x, point->y}, size[0], size[1], fitted);
+            assert(clicked && std::abs(clicked->x - planet.position.x) < 0.001F);
+            input.gates.tutorial_scroll = false;
+            assert(!input.radar({point->x, point->y}, size[0], size[1], fitted));
+        }
+        const auto outside = world_to_radar(galaxy.planets[1].position, size[0], size[1]);
+        assert(outside && outside->x > size[0] * 0.5F && outside->y > size[1] * 0.5F);
+    }
+    assert((radar_extents(GalaxyView{}, true) == retail));
+    galaxy.planets.resize(1);
+    galaxy.planets[0].position = {0,0,0};
+    assert(radar_extents(galaxy, true) == retail);
+    galaxy.planets[0].position.x = std::numeric_limits<float>::quiet_NaN();
+    assert(radar_extents(galaxy, true) == retail);
+    assert(!world_to_radar({}, 175, 175, {0,460}));
+    assert(!radar_to_world({}, 175, 175, {380,std::numeric_limits<float>::infinity()}));
+}
+
 void pan_drag_and_radar_are_separate_transforms() {
     const auto light = source_light_direction({99.0F, 90.0F, 0.0F});
     assert(same(light.x, 1.0F) && same(light.y, 0.0F) && same(light.z, 0.0F));
     const auto focused_light = source_light_direction(CameraConstants{}.in_angles);
     assert(focused_light.x < -0.77F && focused_light.y > 0.54F && focused_light.z > 0.30F);
     const auto view = *build_view(synthetic_galaxy(), 1).view;
+    PlanetCamera mouse_up;
+    assert(mouse_up.right_drag(view, 0.0F, -0.02F, true, false));
+    assert(mouse_up.pose().target.y > 0.0F); // Screen-up moves forward, as in tactical space.
     PlanetCamera regular;
     assert(!regular.right_drag(view, 0.01F, 0.02F, false, false));
     assert(regular.right_drag(view, 0.01F, 0.02F, true, false));
-    assert(same(regular.pose().target.x, 10.0F) && same(regular.pose().target.y, 20.0F));
+    assert(same(regular.pose().target.x, 10.0F) && same(regular.pose().target.y, -20.0F));
     PlanetCamera slow;
     assert(slow.right_drag(view, 0.01F, 0.02F, true, true));
-    assert(same(slow.pose().target.x, 2.5F) && same(slow.pose().target.y, 5.0F));
+    assert(same(slow.pose().target.x, 2.5F) && same(slow.pose().target.y, -5.0F));
     slow.pan(view, 100.0F, 100.0F, true);
     assert(same(slow.pose().target.x, 2.5F));
     slow.pan(view, 1.0e6F, 1.0e6F);
@@ -1422,6 +1551,9 @@ int main() {
     overview_wheel_zoom_out_extends_the_pullback_and_keeps_the_zoom_in_limit();
     overview_pan_follows_the_yaw();
     planet_flights_follow_wall_time_and_stock_transforms();
+    radar_camera_rectangle_follows_zoom_and_pan();
+    radar_fit_keeps_the_default_and_expands_only_when_requested();
+    fitted_radar_uses_loaded_galaxy_positions();
     pan_drag_and_radar_are_separate_transforms();
     campaign_start_uses_authored_home_transform();
     wide_windows_keep_the_16_9_vertical_extent();

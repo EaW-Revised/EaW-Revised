@@ -1124,8 +1124,21 @@ void surface_world_orbit_targets() {
     assert(!surface_orbit_target(snapshot, 1, 1, 1, 1, 0, std::nullopt));
     assert(!surface_orbit_target(snapshot, 1, 1, 1, 1, 0, std::uint8_t{3}));
 }
+// #6120: each refusal of Neutralize Hero gets its own plain notice; the old catch-all stays for other abilities only.
+void neutralize_refusals_have_their_own_text() {
+    using R = eawr::sim::galactic::GalacticRejectReason;
+    const std::array reasons{R::neutralize_no_hero, R::neutralize_allied_hero, R::neutralize_not_targetable,
+        R::neutralize_unavailable, R::insufficient_credits, R::incompatible_location, R::invalid_path, R::cannot_depart,
+        R::movement_blocked, R::movement_ability_required, R::invalid_membership};
+    std::set<std::string_view> texts;
+    for (const auto reason : reasons) texts.insert(ability_refusal_text(reason));
+    assert(texts.size() == reasons.size());
+    assert(!texts.contains(ability_refusal_text(R::unknown_value)));
+    assert(ability_refusal_text(R::unknown_value).find("allied or unavailable target") != std::string_view::npos);
+}
 int main() {
     wheel_stays_blocked_until_widget_gestures_end();
+    neutralize_refusals_have_their_own_text();
     unused_wheel_follows_focus_and_advanced_states();
     surface_world_orbit_targets();
     space_proof_selects_reachable_authored_defenders();

@@ -19,6 +19,33 @@
 
 namespace eawr::viewer::galactic {
 
+enum class CommandMenuAction { none, story_summary, options, cinematic_camera };
+
+[[nodiscard]] inline CommandMenuAction command_menu_action(const std::string_view name) {
+    const auto matches = [name](const std::string_view expected) {
+        return name.size() == expected.size() && std::equal(name.begin(), name.end(), expected.begin(),
+            [](const char a, const char b) { return std::tolower(static_cast<unsigned char>(a)) == b; });
+    };
+    if (matches("b_story_arc_g")) return CommandMenuAction::story_summary;
+    if (matches("b_option_g")) return CommandMenuAction::options;
+    if (matches("b_camera_g")) return CommandMenuAction::cinematic_camera;
+    return CommandMenuAction::none;
+}
+
+// WGUI-36: the goal feed controls story admission. The unpublished HUD-movie gate stays with GHUD-S34.
+[[nodiscard]] inline bool command_menu_disabled(CommandMenuAction action, bool authored_disabled, bool has_goals) noexcept {
+    return authored_disabled || action == CommandMenuAction::cinematic_camera
+        || (action == CommandMenuAction::story_summary && !has_goals);
+}
+
+[[nodiscard]] inline std::vector<std::string> command_menu_names(const data::ui::CommandBarCatalog& catalog) {
+    std::vector<std::string> names;
+    for (const auto& component : catalog.components())
+        if ((component.type == data::ui::ComponentType::button || component.type == data::ui::ComponentType::text_button)
+            && command_menu_action(component.name) != CommandMenuAction::none) names.push_back(component.name);
+    return names;
+}
+
 [[nodiscard]] inline bool is_command_filter(const data::ui::CommandBarComponent& component) {
     if (component.type != data::ui::ComponentType::button) return false;
     for (const auto& group : component.groups) {
@@ -78,6 +105,13 @@ struct CommandButtonGeometry final {
         composite_tab ? anchor.rect : hit};
 }
 
+// Each retained layer uses its own texture dimensions, centred on the button artwork.
+[[nodiscard]] inline data::ui::ReferenceRect command_layer_rect(float width, float height,
+    float texture_width, float texture_height, float scale) noexcept {
+    const float layer_width = texture_width * scale, layer_height = texture_height * scale;
+    return {(width - layer_width) * 0.5F, (height - layer_height) * 0.5F, layer_width, layer_height};
+}
+
 // GHUD-R01..R03: nonnegative balances truncate; income previews still round.
 // Negative truncation is current EAWR policy pending the inventory's
 // "Negative credit balance display seam" retail captures.
@@ -103,10 +137,10 @@ struct ClockGates final {
 // Whether a pause/resume press is admitted: the bar's own flag when a bar exists; a bar-less view keeps the plain key
 // outside a LAN match, and a LAN match keeps every gate above.
 [[nodiscard]] bool pause_press_admitted(bool has_command_bar, bool bar_clock_enabled, const ClockGates& gates) noexcept;
-// The fast-forward button needs the clock controls open and, as in retail network play (TM-04), at most one human.
-// A LAN match shares the pause button through the agreed command; its fast forward stays off with several humans.
-[[nodiscard]] bool fast_forward_controls_admitted(bool clock_enabled, std::size_t active_humans, bool fixture) noexcept;
-[[nodiscard]] std::optional<sim::math::Fixed> live_fast_forward_factor(bool fixture, bool live_game) noexcept;
+// The fast-forward button is admitted exactly when the clock controls are open (#5355). Its factor: a solo campaign
+// fast-forwards at 4x (TM-03); a multiplayer campaign (a LAN match or several humans) shares 2x through the agreed
+// speed command, the debug build's network maximum (MP-06), since the 4x button is refused there (TM-04).
+[[nodiscard]] std::optional<sim::math::Fixed> live_fast_forward_factor(bool fixture, bool live_game, bool multiplayer) noexcept;
 // TM-06: the button is disabled, and its press does nothing, while paused or without a factor.
 [[nodiscard]] bool fast_forward_available(bool controls_enabled, bool paused, bool has_factor) noexcept;
 // TM-06: a press turns fast forward on, and off again to the normal speed (1x).
@@ -124,6 +158,7 @@ struct ProductionItem final {
     int progress_percent{};
     sim::galactic::TypeId type_id{};
     sim::EntityId build_id{};
+    std::optional<std::int64_t> price{}; // Admitted queue cost, independent of current offers.
     friend bool operator==(const ProductionItem&, const ProductionItem&) = default;
 };
 
@@ -239,6 +274,7 @@ struct QueueComponent final {
     sim::galactic::TypeId type_id{};
     sim::EntityId build_id{};
     std::uint32_t index{};
+    std::optional<std::int64_t> price{};
     friend bool operator==(const QueueComponent&, const QueueComponent&) = default;
 };
 
@@ -394,6 +430,7 @@ struct PlayerHudView final {
 
 // WGUI-35: previews are already computed immutable inputs, never ledger reads
 // or collection calls. Unknown values clear rather than retaining stale text.
-[[nodiscard]] PlayerHudView player_hud_view(const PlayerHudFacts& facts, std::string_view cycle_label);
+[[nodiscard]] PlayerHudView player_hud_view(const PlayerHudFacts& facts, std::string_view cycle_label,
+    std::string_view technology_label = {});
 
 } // namespace eawr::viewer::galactic

@@ -57,6 +57,13 @@ public:
         runs_.back().recording.detailed = detail;
         core::load_profile::census = detail ? &runs_.back().census : nullptr;
     }
+    // Drops the run begin() just opened when its attempt was refused before any battle work could draw.
+    void cancel() {
+        if (!pending()) return;
+        runs_.pop_back();
+        core::load_profile::active = nullptr;
+        core::load_profile::census = nullptr;
+    }
     void drawn() {
         if (runs_.empty() || runs_.back().drawn) return;
         runs_.back().total_ms = milliseconds(runs_.back().start);

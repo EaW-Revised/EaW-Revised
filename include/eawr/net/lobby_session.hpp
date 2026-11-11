@@ -1,8 +1,10 @@
 #pragma once
 
 #include "eawr/net/setup.hpp"
+#include "eawr/core/prepared_content.hpp"
 
 #include <deque>
+#include <array>
 #include <variant>
 
 namespace eawr::net {
@@ -20,6 +22,8 @@ inline constexpr std::uint8_t lobby_chat_request_kind = 74, lobby_chat_kind = 75
 inline constexpr std::uint8_t lobby_setup_kind = 76, lobby_cancel_kind = 77;
 inline constexpr std::uint8_t lobby_closed_kind = 78, lobby_rejected_kind = 79;
 inline constexpr std::uint8_t lobby_mod_review_ack_kind = 99;
+inline constexpr std::uint8_t lobby_prepare_kind = 100, lobby_prepared_kind = 101;
+using LobbyDigest = std::array<std::uint8_t, 32>;
 
 enum class LobbyPhase : std::uint8_t { staging, starting, committed, closed };
 enum class LobbyReason : std::uint8_t {
@@ -57,6 +61,7 @@ struct LobbySnapshot {
     LobbyGame game;
     std::vector<LobbySeat> seats; // Host first, then ascending stable seat IDs.
     std::vector<std::uint8_t> mounted_mods; // Host description for display, not simulation.
+    LobbyDigest start_attempt{}; // Fresh host nonce for concurrent new-campaign preparation; zero on legacy/checkpoint paths.
     friend bool operator==(const LobbySnapshot&, const LobbySnapshot&) = default;
 };
 enum class LobbyAction : std::uint8_t { select, ready, unready, leave, snapshot };
@@ -74,7 +79,31 @@ struct LobbyChat {
     std::string name, text; // Host captures the sender label when posting to the chat log.
     friend bool operator==(const LobbyChat&, const LobbyChat&) = default;
 };
-struct LobbySetupFrame { std::string room; std::uint64_t revision{}; std::vector<std::uint8_t> frame; };
+struct LobbySetupFrame { std::string room; std::uint64_t revision{}; std::vector<std::uint8_t> frame; LobbyDigest attempt{}; };
+struct LobbyPrepare {
+    // Wire 3, kind 100: room:text, revision:u64, snapshot:blob, input domains, layers. Text/blob/count lengths are LE u32;
+    // a domain is name:text, version:u32, SHA-256:32, strictly ascending by ASCII name, at most 32 domains.
+    // Manifest identity is SHA-256(text("eawr-gc-prepare-manifest-v1") || complete canonical frame).
+    std::string room;
+    std::uint64_t revision{};
+    std::vector<std::uint8_t> snapshot;
+    std::vector<sim::IdentityDomain> inputs; // Named locally verified initialization inputs.
+    std::vector<core::ContentLayerIdentity> layers{}; // Ordered consumed-content checksums; names are diagnostic only.
+};
+struct LobbyPrepared {
+    // Wire 3, kind 101: room:text, revision:u64, attempt:32, manifest:32, sealed offer SHA-256:32, domains,
+    // refusal:text, layers, prepared SHA-256:32. A layer is label:text (256 bytes), digest:32; at most 256 layers.
+    // The claim checksum hashes text("eawr-gc-prepared-v1") then these fields, excluding layer labels.
+    // Nonempty refusal carries zero offer, no domains/layers. Setup envelopes also carry attempt:32.
+    // Guests send a claim; the host repeats its matching claim only after unanimity, releasing ordinary setup.
+    std::string room;
+    std::uint64_t revision{};
+    LobbyDigest attempt{}, manifest{}, offer{};
+    std::vector<sim::IdentityDomain> domains; // Strictly ordered names, independently derived state/content claims.
+    std::string refusal; // Nonempty refuses the entire attempt, including failures detected before preparation.
+    std::vector<core::ContentLayerIdentity> layers{};
+    friend bool operator==(const LobbyPrepared&, const LobbyPrepared&) = default;
+};
 struct LobbyNotice {
     std::string room;
     std::uint64_t revision{};
@@ -85,7 +114,7 @@ struct LobbyCancel : LobbyNotice {};
 struct LobbyClosed : LobbyNotice {};
 struct LobbyRejected : LobbyNotice {};
 using LobbyFrame = std::variant<LobbySnapshot, LobbyRequest, LobbyChatRequest, LobbyChat,
-    LobbySetupFrame, LobbyCancel, LobbyClosed, LobbyRejected>;
+    LobbySetupFrame, LobbyCancel, LobbyClosed, LobbyRejected, LobbyPrepare, LobbyPrepared>;
 
 [[nodiscard]] std::string sanitize_lobby_text(std::string_view value, std::size_t limit);
 // True when the room frame codec accepts these mounted-mod bytes (empty means "not known"). The host checks before it opens a room.
@@ -94,11 +123,20 @@ using LobbyFrame = std::variant<LobbySnapshot, LobbyRequest, LobbyChatRequest, L
 [[nodiscard]] core::Result<LobbyFrame> decode_lobby_frame(std::span<const std::uint8_t> frame);
 [[nodiscard]] core::Diagnostic lobby_diagnostic(LobbyReason reason, std::string message);
 
+// #6045: a hook that needs minutes of local work (a Galactic Conquest campaign derivation) runs it on a worker thread and
+// answers this diagnostic until the work has finished. The room stays serviced meanwhile: the host's `start` records a
+// pending Start and every `pump` asks the hook again; a joiner's frozen-setup creation waits the same way. Never sent on the
+// wire. Hooks that always answer at once never return it.
+inline constexpr std::string_view start_pending_code = "EAWR-NET-1618";
+[[nodiscard]] core::Diagnostic start_pending_diagnostic(std::string message);
+[[nodiscard]] bool is_start_pending(const core::Diagnostic& diagnostic) noexcept;
+
 struct LobbyLimits {
     std::size_t frames_per_pump{256}, queued_setup_bytes{8U * 1024U * 1024U};
     std::size_t chat_history{128}, chat_messages_per_window{4};
     std::uint64_t chat_window_ms{2'000};
     std::size_t denied_identities{128};
+    std::uint64_t preparation_timeout_ms{1'800'000}; // A large authored campaign may take minutes; links remain serviced.
 };
 struct LobbySetupContext {
     SetupProviders providers;
@@ -107,6 +145,14 @@ struct LobbySetupContext {
 };
 struct LobbyHooks {
     std::vector<std::uint8_t> mounted_mods;
+    // Empty disables concurrent preparation (checkpoint/skirmish). Called before expensive work on every peer;
+    // equal canonical bytes prove the local interpretation of the frozen initialization inputs.
+    std::function<core::Result<std::vector<sim::IdentityDomain>>(const LobbySnapshot&, const std::vector<SetupSeat>&)> preparation_inputs;
+    // Completes the claim for the retained local offer; must include every initialized simulation state/service input.
+    std::function<core::Result<std::vector<sim::IdentityDomain>>(const SetupOffer&)> preparation_domains;
+    // Null offer: verified simulation closure. Non-null: that closure plus the actual prepared tactical inputs.
+    std::function<core::Result<std::vector<core::ContentLayerIdentity>>(const LobbySnapshot&, const SetupOffer*)> preparation_mounts;
+    std::function<void()> discard_preparation;
     // Optional mode-specific staging traffic, consumed before ordinary lobby decoding.
     std::function<bool(MessageTransport&, const LobbySnapshot&, const Received&, std::uint64_t)> application_frame;
     // Returns true only for a changed host selection; the room clears all readiness.
@@ -118,8 +164,15 @@ struct LobbyHooks {
     // capacity and canonical options; starting=true checks complete teams at
     // Ready, Start and frozen snapshots. Editable staging may be incomplete.
     std::function<core::Result<void>(const LobbySnapshot&, bool starting)> validate;
+    // Optional, host side: a seat's own choice may carry the room with it (a Galactic Conquest guest picking a faction that
+    // was not planned for a player: the rows and every seat's side follow). Called with the room as it is, the candidate
+    // room that holds the seat's new choice (which it may edit, game bytes and seats), and the peer. A failure refuses the
+    // choice with its message. Runs before `validate`, which still checks the final candidate.
+    std::function<core::Result<void>(const LobbySnapshot& before, LobbySnapshot& candidate, PeerIndex peer)> follow_choice;
     // Build the EXACT frozen revision; returned seats must match the supplied
     // dense setup roster. Never reuse a previously built offer after an edit.
+    // May answer start_pending_diagnostic while a worker builds it: Start stays pending and locked until all required
+    // preparation claims agree. A mode with preparation_inputs publishes its frozen manifest before this hook runs.
     std::function<core::Result<SetupOffer>(const LobbySnapshot&, const std::vector<SetupSeat>&)> offer;
     // Called once per attempt on every peer. Create fresh monitors here using
     // this transport (dense setup peers, host zero); they must outlive the result.
@@ -187,7 +240,15 @@ public:
     // players; the host's notice() carries the diagnostic EAWR-NET-1762. No ban: the slot is free for another player.
     [[nodiscard]] core::Result<void> refuse_unreachable(PeerIndex newcomer, PeerIndex unreachable, bool relay_configured);
     [[nodiscard]] core::Result<void> close();
+    // Host. Returns ok both when Start was published and when it is pending on an asynchronous offer hook (#6045): then
+    // `start_pending()` is true, the room is locked against edits (a guest's select/ready is refused with the reason),
+    // and `pump` publishes Start when the hook answers. Anything that changes the room meanwhile (a player leaves or
+    // withdraws readiness, a link closes) cancels the pending Start with a notice; `cancel_start` does it on request.
     [[nodiscard]] core::Result<void> start(std::uint64_t revision);
+    [[nodiscard]] bool start_pending() const;
+    core::Result<void> cancel_start();
+    // Joiner: the room is frozen for Start but the local setup waits for the asynchronous offer hook.
+    [[nodiscard]] bool setup_pending() const;
     [[nodiscard]] core::Result<void> accept_setup(); // Separate explicit SetupSession::accept.
     [[nodiscard]] core::Result<void> pump(std::uint64_t now_ms);
     // True once the host's commitment is accepted AND this peer's own setup barrier (tick-zero agreement with every

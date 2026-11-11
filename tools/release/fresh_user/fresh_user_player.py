@@ -13,6 +13,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -29,6 +30,22 @@ GODOT_NAME = 'Godot_v4.7.2-stable_win64.exe'
 EXTENSION = 'libeawr_viewer.windows.template_release.x86_64.dll'
 
 
+def extract_package(archive_path, extracted):
+    if extracted.exists():
+        shutil.rmtree(extracted)
+    extracted.mkdir(parents=True)
+    with zipfile.ZipFile(archive_path) as archive:
+        for name in archive.namelist():
+            if not (extracted / name).resolve().is_relative_to(extracted.resolve()):
+                raise ValueError('unsafe archive member: ' + name)
+        archive.extractall(extracted)
+    unpacked = next(extracted.glob('*/EAWR.exe')).parent
+    package = extracted / 'current'
+    if unpacked != package:
+        unpacked.rename(package)
+    return package
+
+
 class PlayerFreshUser(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -39,13 +56,9 @@ class PlayerFreshUser(unittest.TestCase):
         cls.output.mkdir(parents=True, exist_ok=True)
         cls.archive = Path(os.environ['EAWR_JOB_RELEASE_PACKAGE'])
         cls.kind = os.environ.get('EAWR_JOB_RELEASE_KIND', 'player')
-        cls.extracted = cls.output / 'EAWR Tést dir'
-        with zipfile.ZipFile(cls.archive) as archive:
-            for name in archive.namelist():
-                if not (cls.extracted / name).resolve().is_relative_to(cls.extracted.resolve()):
-                    raise ValueError('unsafe archive member: ' + name)
-            archive.extractall(cls.extracted)
-        cls.package = next(cls.extracted.glob('*/EAWR.exe')).parent
+        lane_root = os.environ.get('EAWR_FIXED_LANE_ROOT')
+        cls.extracted = (Path(lane_root) / 'fresh' / 'EAWR Tést dir') if lane_root else cls.output / 'EAWR Tést dir'
+        cls.package = extract_package(cls.archive, cls.extracted)
         cls.godot = cls.package / 'godot' / GODOT_NAME
         cls.rig_godot = Path(os.environ['EAWR_GODOT_EXECUTABLE']).resolve()
         cls.game = os.environ['EAWR_EAW_GAME_ROOT']

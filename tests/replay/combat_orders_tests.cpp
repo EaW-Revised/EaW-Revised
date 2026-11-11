@@ -1,4 +1,6 @@
 #include "combat_support.hpp"
+#include "eawr/sim/tactical/pathfind.hpp"
+#include "../../src/sim/tactical/orders_internal.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -76,6 +78,102 @@ std::vector<tactical::Event> run_events(tactical::TacticalSession& value, const 
 }
 
 void test_orders_approach() {
+    // OR-28: occupation moves around the target, retaining reach. Other dynamic
+    // layers do not block a slot; a completely occupied arc has bounded work.
+    {
+        tactical::Footprint footprint;
+        footprint.type_id = shooter_type;
+        footprint.layer = tactical::SpaceLayer::capital;
+        footprint.radius = footprint.x_extent = footprint.y_extent = units(100);
+        tactical::AvoidanceRules avoidance;
+        avoidance.occupation_radius = Fixed::from_decimal("1.2").value();
+        tactical::TrackingLayerView layer;
+        layer.start_frame = 1;
+        layer.windows = {{{2, {units(-900), {}}, {units(-900), {}}, {units(1), {}},
+            units(200), units(200), units(200), tactical::collision_static}}};
+        tactical::CollisionWorld world{90, {&layer, nullptr, nullptr, nullptr}, nullptr};
+        const auto slot = at(-900, 0, -290);
+        const auto centre = at(0, 0, -290);
+        const auto position = at(-2000, 0, -290);
+        std::uint32_t candidates{};
+        const auto search = [&] {
+            return tactical::detail::open_approach_slot(slot, centre, position, avoidance,
+                footprint, world, 1, 1, false, &candidates);
+        };
+        const auto displaced = search();
+        expect(displaced && displaced.value() && *displaced.value() != slot,
+            "blocked approach chooses another point around the target");
+        if (displaced && displaced.value()) {
+            expect(std::abs(planar(*displaced.value(), centre) - 900.0) < 1e-3
+                    && displaced.value()->z == slot.z,
+                "blocked approach preserves the target ring and height");
+        }
+        expect(candidates <= 37, "blocked approach candidate work stays within its fixed budget");
+        world.layers = {nullptr, &layer, nullptr, nullptr};
+        const auto other_layer = search();
+        expect(other_layer && other_layer.value() && *other_layer.value() == slot,
+            "a different dynamic layer leaves the nominal approach slot unchanged");
+        world.layers = {};
+        world.statics = &layer.windows.front();
+        const auto static_block = search();
+        expect(static_block && static_block.value() && *static_block.value() != slot,
+            "static occupation also moves a slot around the target");
+        layer.windows.front().front() = {2, {}, {}, {units(1), {}}, units(5000), units(5000),
+            units(5000), tactical::collision_static};
+        const auto closed = search();
+        expect(closed && !closed.value() && candidates <= 37,
+            "a fully occupied arc returns no slot within bounded work");
+
+        // An open angular point beyond the motion domain must not become a path
+        // destination. Equal obstacle extents give a constant reach (AV-04), so
+        // the legal arc is blocked while AV-19 can leave the obstacle upwards.
+        const auto edge = tactical::max_motion_coordinate;
+        layer.windows.front().front() = {2, {units(edge - 2500), units(-2100)},
+            {units(edge - 2500), units(-2100)}, {units(1), {}}, units(3800), units(3800),
+            units(3800), tactical::collision_static};
+        const auto edge_slot = at(edge - 5, 900);
+        const auto edge_centre = at(edge - 10, 0);
+        const auto edge_position = at(edge - 5, 2000);
+        const auto edge_result = tactical::detail::open_approach_slot(edge_slot, edge_centre, edge_position,
+            avoidance, footprint, world, 1, 1, false, &candidates);
+        expect(edge_result && !edge_result.value() && candidates <= 37,
+            edge_result ? "an open point outside the motion domain is rejected by slot placement"
+                        : edge_result.error().message);
+        avoidance.destination_search_increment = units(50);
+        const auto fallback = tactical::nearest_open_position(avoidance, footprint, world, 1, 1,
+            {edge_position.x, edge_position.y}, {edge_slot.x, edge_slot.y});
+        expect(fallback && fallback.value().x <= units(edge) && fallback.value().y > units(920),
+            fallback ? "the original fallback still finds a representable destination beyond the obstacle"
+                     : fallback.error().message);
+    }
+
+    // OR-28: no point on a short guard ring can clear these large hulls. Preserve
+    // the existing destination fallback instead of leaving the far guard idle.
+    for (const std::uint64_t budget : {1000U, 1U}) {
+        const auto decimal = [](const char* text) { return Fixed::from_decimal(text).value(); };
+        auto motion = turning_motion_all();
+        motion.avoidance = tactical::AvoidanceRules{units(24), decimal("0.2"), units(100), decimal("0.8"),
+            units(15), decimal("0.66"), decimal("1.2"), decimal("0.25"), decimal("1.7"), decimal("0.5"),
+            decimal("0.5"), 3500, 6, 90, 45, units(50), budget, 4, 1500};
+        motion.footprints = {
+            {shooter_type, tactical::SpaceLayer::capital, units(600), units(600), units(600), false},
+            {bomber_type, tactical::SpaceLayer::capital, units(600), units(600), units(600), false},
+        };
+        auto combat = table();
+        combat.profiles.front().max_attack_distance = units(2000);
+        auto made = tactical::TacticalSession::create(
+            setup({unit(1, shooter_type, 1, at(0, 0)), unit(2, bomber_type, 1, at(3000, 0))}),
+            sensors(5000), {}, motion, std::nullopt, combat);
+        expect(static_cast<bool>(made), "large-hull guard fixture creates");
+        if (!made) continue;
+        auto value = std::move(made).value();
+        expect(static_cast<bool>(value.submit({{0, 1, 0}, {1}, tactical::GuardPayload{{}, 2}})),
+            "large-hull guard order queues");
+        static_cast<void>(run(value, 60));
+        expect(state_of(value, 1).position.x > units(0),
+            "a fully occupied guard ring retains immediate and sliced approach movement");
+    }
+
     // OR-07 / OR-25: a static station's last attachment lies beyond its centre.
     // Admission, mapping and the path-end check must agree on that destination.
     for (const bool explicit_hardpoint : {false, true}) {
@@ -751,6 +849,17 @@ void test_hardpoint_orders_replay() {
     tactical::TacticalReplay replay;
     replay.setup = setup({unit(1, shooter_type, 1, at(0, 0)), unit(2, capital_type, 2, at(300, 0))});
     replay.final_tick_count = 10;
+    for (const tactical::PlayerCommand& land_command : {
+            tactical::PlayerCommand{{0, 1, 0}, {1}, tactical::LandGarrisonPayload{2, 3}},
+            tactical::PlayerCommand{{0, 1, 0}, {1}, tactical::LandUnloadPayload{2, false}},
+            tactical::PlayerCommand{{0, 1, 0}, {1}, tactical::LandUnloadPayload{0, true}}}) {
+        replay.commands = {land_command};
+        const auto encoded = tactical::write_replay(replay);
+        const auto parsed = encoded ? tactical::parse_replay(encoded.value())
+            : eawr::core::Result<tactical::TacticalReplay>::failure({});
+        expect(parsed && parsed.value().commands == std::vector<tactical::PlayerCommand>{land_command},
+            "land garrison command round-trips");
+    }
     replay.commands = {hull_command};
     const auto hull_bytes = tactical::write_replay(replay);
     replay.commands = {hardpoint_command};

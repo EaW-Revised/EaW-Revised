@@ -136,6 +136,8 @@ void BattleEffects::plan_projectile_models(std::vector<SpacePopulation::Options:
         std::vector<const ProjectileLook*> all;
         for (const auto& [slot, look] : looks.weapons) all.push_back(&look);
         for (const auto& [slot, look] : looks.ability_weapons) all.push_back(&look);
+        for (const auto& [holder, weapons] : looks.lucky_weapons)
+            for (const auto& [slot, look] : weapons) all.push_back(&look);
         for (const auto& [slot, look] : looks.barrage_weapons) all.push_back(&look);
         for (const auto& [slot, look] : looks.charged_weapons) all.push_back(&look);
         for (const ProjectileLook* entry : all) {
@@ -169,6 +171,12 @@ const BattleEffects::ProjectileLook* BattleEffects::look_of(const tactical::Proj
         const auto& key = *projectile.profile_key;
         const auto type = types_.find(key.type);
         if (type == types_.end()) return nullptr;
+        if (key.kind == tactical::ProjectileProfileKind::lucky_shot) {
+            const auto holder = type->second.lucky_weapons.find(key.holder);
+            if (holder == type->second.lucky_weapons.end()) return nullptr;
+            const auto look = holder->second.find(key.weapon);
+            return look == holder->second.end() ? nullptr : &look->second;
+        }
         const auto& looks = key.kind == tactical::ProjectileProfileKind::ability ? type->second.ability_weapons
             : key.kind == tactical::ProjectileProfileKind::barrage ? type->second.barrage_weapons
             : key.kind == tactical::ProjectileProfileKind::charged_blast && type->second.charged_weapons.contains(key.weapon)
@@ -1118,7 +1126,7 @@ void BattleEffects::note_ability_shots(const std::span<const platform::LiveTickE
         const auto launched = snapshot_at ? snapshot_at(record.tick) : nullptr;
         for (const tactical::CombatEvent& event : record.combat_events) {
             if (event.kind != tactical::CombatEventKind::weapon_fired
-                || (event.outcome & (tactical::fired_ability_shot | tactical::fired_barrage_shot)) == 0U) {
+                || (event.outcome & (tactical::fired_ability_shot | tactical::fired_barrage_shot | tactical::fired_lucky_shot)) == 0U) {
                 continue;
             }
             const auto list = launched ? launched->projectiles() : latest.projectiles();
@@ -1131,7 +1139,7 @@ void BattleEffects::note_ability_shots(const std::span<const platform::LiveTickE
                 if (shot == nullptr || projectile.id > shot->id) shot = &projectile;
             }
             if (shot == nullptr) continue;
-            auto& selected = (event.outcome & tactical::fired_ability_shot) != 0U
+            auto& selected = (event.outcome & (tactical::fired_ability_shot | tactical::fired_lucky_shot)) != 0U
                 ? ability_projectiles_ : barrage_projectiles_;
             selected.emplace(shot->id, record.tick);
             const ProjectileLook* look = look_of(*shot);

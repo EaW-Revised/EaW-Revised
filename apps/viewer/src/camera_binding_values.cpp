@@ -28,7 +28,7 @@ struct Named final {
     std::uint32_t value;
 };
 
-constexpr std::array<Named, 24> action_names{{
+constexpr std::array<Named, 26> action_names{{
     {"pan_left", static_cast<std::uint32_t>(Action::pan_left)},
     {"pan_right", static_cast<std::uint32_t>(Action::pan_right)},
     {"pan_forward", static_cast<std::uint32_t>(Action::pan_forward)},
@@ -53,6 +53,8 @@ constexpr std::array<Named, 24> action_names{{
     {"orbit_pitch", static_cast<std::uint32_t>(Action::orbit_pitch)},
     {"translate_x", static_cast<std::uint32_t>(Action::translate_x)},
     {"translate_y", static_cast<std::uint32_t>(Action::translate_y)},
+    {"battlecam", static_cast<std::uint32_t>(Action::battlecam)},
+    {"unit_preview", static_cast<std::uint32_t>(Action::unit_preview)},
 }};
 // Existing v1 IDs stay stable; the tactical pointer IDs above the v2 range
 // (Alt pan, orbit pitch and the grab translate) are also accepted by v1.
@@ -60,7 +62,7 @@ constexpr std::uint32_t first_v2_action = static_cast<std::uint32_t>(Action::fre
 
 [[nodiscard]] bool tactical_pointer_action(const Action action) noexcept {
     return action == Action::pan_motion_x || action == Action::pan_motion_y
-        || action == Action::orbit_pitch || action == Action::translate_x
+        || action == Action::orbit_pitch || action == Action::battlecam || action == Action::unit_preview || action == Action::translate_x
         || action == Action::translate_y;
 }
 
@@ -82,7 +84,9 @@ struct Compatibility final {
 // The complete action/trigger/device matrix. Anything absent is rejected. The
 // Existing v1 rows stay compatible; the pointer-pan and orbit rows are
 // tactical in either version, and the remaining rows describe v2 free actions.
-constexpr std::array<Compatibility, 41> compatibility{{
+constexpr std::array<Compatibility, 43> compatibility{{
+    {Action::battlecam, Trigger::held, Device::keyboard},
+    {Action::unit_preview, Trigger::held, Device::keyboard},
     {Action::pan_left, Trigger::held, Device::keyboard},
     {Action::pan_left, Trigger::held, Device::mouse_button},
     {Action::pan_right, Trigger::held, Device::keyboard},

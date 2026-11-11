@@ -9,6 +9,13 @@
 #include "ui/input_routing.hpp"
 #include "polled_pointer.hpp"
 #include "galactic/galactic_launch_options.hpp"
+#include "skirmish_save_hints.hpp"
+#include "battle_content.hpp" // include-guard: keep -- preflight accesses the mounted filesystem and catalog
+#include "skirmish_prepare.hpp"
+#include "eawr/checkpoint/checkpoint.hpp"
+#include "eawr/platform/saved_games.hpp"
+#include "eawr/platform/live_ai.hpp"
+#include "eawr/units/simulation_model.hpp"
 #include <godot_cpp/classes/rendering_server.hpp>
 #include <godot_cpp/classes/viewport.hpp>
 #include <godot_cpp/classes/viewport_texture.hpp>
@@ -110,7 +117,10 @@ void ViewerHost::start_skirmish_battle() {
         .controller_names = {}, .observer_names = skirmish_setup_->lan_match()
             ? std::vector<std::pair<sim::tactical::PlayerId, std::string>>{}
             : std::vector<std::pair<sim::tactical::PlayerId, std::string>>{{1, skirmish_setup_->local_player_name()}},
-        .borrowed_battle = {}, .borrowed_feed = {}, .lan = skirmish_setup_->lan_match(), .replay_input = {}, .attract = {}});
+        .borrowed_battle = {}, .borrowed_feed = {}, .lan = skirmish_setup_->lan_match(), .replay_input = {},
+        .battle_save_input = {}, .battle_save_camera = {},
+        .battle_load = [this](const presentation::ui::SavedGameRequest& request) { return queue_saved_battle(request); },
+        .attract = {}});
     if (!map_mode_->ready(*skirmish_battle_host_)) {
         // A land battle names why it refused (for example a company or locomotion the authored tables lack).
         const std::string reason = land ? std::string(map_mode_->failure()) : std::string{};
@@ -123,6 +133,125 @@ void ViewerHost::start_skirmish_battle() {
         skirmish_setup_->show(reason.empty() ? "This battle could not start. Check the map and factions or the run report."
                                              : "The land battle could not start: " + reason);
         if (options_->skirmish_setup_test) stop(2);
+    }
+}
+
+std::string ViewerHost::queue_saved_battle(const presentation::ui::SavedGameRequest& request) {
+    // A save load is a battle load: its phases are reported like a Start press (origin start_pressed), from the
+    // activation of the save to the first drawn frame after the first battle step.
+    const bool measured = !startup_trace.pending() && (!options_->report_path.empty() || options_->startup_metrics);
+    if (measured) startup_trace.begin(true);
+    auto refused = queue_saved_battle_checked(request);
+    if (measured && !refused.empty()) startup_trace.cancel();
+    return refused;
+}
+
+std::string ViewerHost::queue_saved_battle_checked(const presentation::ui::SavedGameRequest& request) {
+    if (!platform::valid_saved_game_name(request.name)) return "The save name is invalid.";
+    auto bytes = platform::read_saved_game_bytes(ViewerPath::utf8(request.directory), request.name);
+    if (!bytes) return core::format_diagnostic(bytes.error());
+    auto parsed = checkpoint::parse_checkpoint(bytes.value());
+    if (!parsed) return core::format_diagnostic(parsed.error());
+    auto setup = platform::skirmish_save_setup(bytes.value());
+    if (!setup) return core::format_diagnostic(setup.error());
+    const auto content = skirmish_setup_->content();
+    if (!content || !content->filesystem || !content->catalog) return "The mounted game data is unavailable.";
+    const auto& filesystem = *content->filesystem;
+    const auto& catalog = *content->catalog;
+    // The unit tables and the data identity are built once here; the battle's first load stage takes the result below.
+    auto built = prepare_saved_battle(filesystem, catalog, setup.value());
+    if (!built) return core::format_diagnostic(built.error());
+    auto prepared_battle = std::make_shared<SavedBattlePreparation>(std::move(built).value());
+    const auto& prepared = prepared_battle->prepared;
+    if (units::content_identity(prepared.tables) != setup.value().content_identity)
+        return "This save was made with different game data or mods.";
+    if (auto valid = skirmish::validate_replay_identity(setup.value(), prepared.inputs); !valid)
+        return core::format_diagnostic(valid.error());
+    if (parsed.value().header.identities.content != setup.value().content_identity)
+        return "The save contains inconsistent game data identities.";
+    {
+        core::load_profile::Scope live_ai_scope(core::load_profile::Phase::live_ai_validate);
+        if (auto valid = platform::validate_live_ai_save(prepared.start, prepared.inputs,
+                prepared.tables, filesystem, bytes.value()); !valid)
+            return core::format_diagnostic(valid.error());
+    }
+    PendingBattleSave pending;
+    pending.path = request.directory / (request.name + ".eawrsave");
+    if (options_->cache_content) { // the battle reuses this mounted content only then (see start_saved_battle)
+        prepared_battle->save_path = ViewerPath::utf8(pending.path);
+        pending.prepared = std::move(prepared_battle);
+    }
+    pending.map = setup.value().skirmish->map;
+    pending.from_front_end = front_end_ && (!map_mode_ || saved_battle_from_front_end_);
+    pending.fresh_front_end = front_end_ && !map_mode_;
+    if (const auto* hints = parsed.value().find(checkpoint::SectionId::presentation_hints)) {
+        if (const auto decoded = viewer::decode_skirmish_save_hints(hints->bytes); decoded && decoded->camera) {
+            const auto& c = *decoded->camera;
+            pending.camera = std::array<float, 5>{c.target[0], c.target[1], c.target[2], c.zoom, c.yaw_degrees};
+        }
+    }
+    pending_battle_save_ = std::move(pending);
+    return {};
+}
+
+void ViewerHost::open_saved_battle_loading() {
+    if (map_mode_) {
+        world_capture_.clear();
+        map_mode_.reset();
+        gpu_memory_trace.battle_released();
+        if (skirmish_battle_host_) {
+            remove_child(skirmish_battle_host_);
+            memdelete(skirmish_battle_host_);
+        }
+        skirmish_battle_host_ = nullptr;
+        skirmish_loading_ = nullptr;
+    }
+    skirmish_battle_host_ = memnew(Node3D);
+    add_child(skirmish_battle_host_);
+    auto* screen = memnew(EawrLoadingScreen);
+    EawrLoadingScreen::Options screen_options;
+    screen_options.content = skirmish_setup_->content();
+    screen_options.map_path = pending_battle_save_->map;
+    if (screen->build(*skirmish_battle_host_, std::move(screen_options))) skirmish_loading_ = screen;
+    else { UtilityFunctions::printerr("EAWR loading screen: ", String::utf8(screen->failure().c_str())); memdelete(screen); }
+    saved_loading_prepared_ = true;
+}
+
+void ViewerHost::start_saved_battle() {
+    auto saved = std::move(*pending_battle_save_);
+    pending_battle_save_.reset();
+    saved_loading_prepared_ = false;
+    saved_battle_from_front_end_ = saved.from_front_end;
+    gpu_memory_trace.battle_started();
+    map_mode_ = std::make_unique<MapMode>(MapMode::Options{
+        .game_root = options_->game_root, .mod_root = options_->mod_root,
+        .profile = options_->profile, .map_path = saved.map, .campaign_briefing_movie = {},
+        .report_path = options_->report_path, .capture_path = {}, .populate = true,
+        .effect_alt = {}, .effect_lod = {}, .lighting = "sh", .shadows = "on", .environment = "map", .interactive = true,
+        .camera_zoom = {}, .setup = {},
+        .content = options_->cache_content ? skirmish_setup_->content() : nullptr,
+        .shaders = skirmish_setup_->shaders(), .loading = skirmish_loading_, .controller_names = {},
+        .observer_names = {{1, skirmish_setup_->local_player_name()}},
+        .borrowed_battle = {}, .borrowed_feed = {}, .lan = {}, .replay_input = {},
+        .battle_save_input = saved.path, .battle_save_camera = saved.camera,
+        .battle_load = [this](const presentation::ui::SavedGameRequest& request) { return queue_saved_battle(request); },
+        .battle_save_keep_inputs = saved.fresh_front_end,
+        .saved_preparation = std::move(saved.prepared),
+        .attract = {}});
+    if (!map_mode_->ready(*skirmish_battle_host_)) {
+        const std::string reason(map_mode_->failure());
+        saved_battle_from_front_end_ = false;
+        map_mode_.reset();
+        remove_child(skirmish_battle_host_);
+        memdelete(skirmish_battle_host_);
+        skirmish_battle_host_ = nullptr;
+        skirmish_loading_ = nullptr;
+        gpu_memory_trace.battle_released();
+        const auto message = reason.empty() ? std::string("The saved battle could not be loaded.") : reason;
+        if (front_end_) { front_end_->return_to_main_menu(); front_end_->show_load_failure(message); }
+        else skirmish_setup_->show(message);
+    } else {
+        UtilityFunctions::print("EAWR skirmish battle restored from ", String::utf8(ViewerPath::utf8(saved.path).c_str()));
     }
 }
 
@@ -147,7 +276,8 @@ void ViewerHost::start_replay_battle(const UiGalleryMode::ReplayRequest& request
         .effect_alt = {}, .effect_lod = {}, .lighting = "sh", .shadows = "on", .environment = "map",
         .interactive = interactive,
         .camera_zoom = {}, .setup = {}, .content = {}, .shaders = options_->cache_shaders ? std::make_shared<GodotShaderCache>() : nullptr,
-        .controller_names = {}, .observer_names = {}, .borrowed_battle = {}, .borrowed_feed = {}, .lan = {}, .replay_input = request.path, .attract = {}});
+        .controller_names = {}, .observer_names = {}, .borrowed_battle = {}, .borrowed_feed = {}, .lan = {}, .replay_input = request.path,
+        .battle_save_input = {}, .battle_save_camera = {}, .battle_load = {}, .attract = {}});
     if (!map_mode_->ready(*battle_host)) {
         const std::string reason(map_mode_->failure());
         map_mode_.reset();
@@ -169,6 +299,25 @@ void ViewerHost::start_replay_battle(const UiGalleryMode::ReplayRequest& request
 
 void ViewerHost::_process(const double delta) {
     if (completed_) return;
+    if (startup_splash_pending_) {
+        if (startup_splash_frames_++ == 0) return;
+        startup_splash_pending_ = false;
+        try {
+            ready_battle_setup();
+        } catch (const std::exception& error) {
+            status_message_ = std::string("Viewer startup failed: ") + error.what() +
+                ". Check read permissions for this account and verify or repair the FoC installation.";
+            UtilityFunctions::printerr(String::utf8(status_message_.c_str()));
+            static_cast<void>(write_report("failed"));
+            stop(2);
+        }
+        return;
+    }
+    if (pending_battle_save_) {
+        if (!saved_loading_prepared_) open_saved_battle_loading();
+        else if (!skirmish_loading_ || skirmish_loading_->frames() >= 2) start_saved_battle();
+        return;
+    }
     auto* display = DisplayServer::get_singleton();
     auto* input = Input::get_singleton();
     const bool active_map = map_mode_ && map_mode_->pointer_confine_allowed();
@@ -176,7 +325,13 @@ void ViewerHost::_process(const double delta) {
     const bool confine = pointer_confined(pointer_window_mode(mode), display && display->window_is_focused(),
         mode == DisplayServer::WINDOW_MODE_MINIMIZED,
         !active_map || options_mode_ || input_focus(*get_viewport()).modal_open);
-    const auto desired_mouse_mode = confine ? Input::MOUSE_MODE_CONFINED : Input::MOUSE_MODE_VISIBLE;
+    const bool capture_preview = preview_pointer_captured(map_mode_ && map_mode_->battlecam_preview(),
+        display && display->window_is_focused(), mode == DisplayServer::WINDOW_MODE_MINIMIZED,
+        !map_mode_ || !map_mode_->pointer_confine_allowed(true) || options_mode_ || input_focus(*get_viewport()).modal_open);
+    const auto desired_mouse_mode = capture_preview ? Input::MOUSE_MODE_CAPTURED
+        : map_mode_ && map_mode_->battlecam_active() && !options_mode_
+        && !input_focus(*get_viewport()).modal_open ? Input::MOUSE_MODE_HIDDEN
+        : confine ? Input::MOUSE_MODE_CONFINED : Input::MOUSE_MODE_VISIBLE;
     if ((!galactic_mode_ || options_mode_) && input && input->get_mouse_mode() != desired_mouse_mode)
         input->set_mouse_mode(desired_mouse_mode);
     if (!options_mode_ && !map_mode_) {
@@ -321,7 +476,8 @@ void ViewerHost::process_battle_frame(const double delta) {
             const auto return_start = StartupTrace::Clock::now();
             world_capture_.clear();
             // Quit Game in the battle's menu goes to the main menu, not back to the setup screen.
-            const bool to_menu = front_end_ && map_mode_->leave_to_menu();
+            const bool to_menu = front_end_ && (saved_battle_from_front_end_ || map_mode_->leave_to_menu());
+            saved_battle_from_front_end_ = false;
             map_mode_.reset();
             remove_child(skirmish_battle_host_);
             memdelete(skirmish_battle_host_);
@@ -369,8 +525,6 @@ void ViewerHost::process_battle_setup_frame() {
             campaign_options.game_root = options_->game_root;
             campaign_options.mod_root = options_->mod_root;
             campaign_options.save_directory = GalacticMode::from_command_line().save_directory;
-            prime_mounted_mods(options_->game_root);
-            campaign_options.mounted_mods = mounted_mod_description();
             if (!skirmish_setup_->gc_acceptance_directory().empty()) {
                 campaign_options.lan_acceptance_directory = skirmish_setup_->gc_acceptance_directory();
                 campaign_options.report_path = campaign_options.lan_acceptance_directory / "report.json";

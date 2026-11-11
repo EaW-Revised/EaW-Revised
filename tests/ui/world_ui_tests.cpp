@@ -691,6 +691,12 @@ void reticle_xml() {
 } // namespace
 
 int main() {
+    const auto small_area = ui::area_preview_side(120.0F, 1.2F);
+    const auto large_area = ui::area_preview_side(345.0F, 1.2F);
+    expect(small_area && close_to(*small_area, 288.0F) && large_area && close_to(*large_area, 828.0F),
+        "target preview follows the authored radius and faction scale");
+    expect(!ui::area_preview_side(0.0F, 1.2F) && !ui::area_preview_side(120.0F, 0.0F),
+        "nonpositive target preview inputs do not draw");
     ui::SquadronIconAnchor arrival_anchor{{-3300.0F, 20.0F, -90.0F}, 12.0F, false};
     const std::array<float, 3> landing{300.0F, 20.0F, -90.0F};
     for (const float flight_x : {-3300.0F, -2000.5F, -100.25F, 300.0F}) {

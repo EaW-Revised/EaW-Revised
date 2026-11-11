@@ -264,15 +264,20 @@ std::optional<std::size_t> EawrUnitCards::slot_at(const Vector2& point) const {
 
 bool EawrUnitCards::_has_point(const Vector2& point) const { return slot_at(point).has_value(); }
 
-void EawrUnitCards::set_external_hover(const std::uint64_t identity, std::optional<model::UnitCardLooks> content) {
+void EawrUnitCards::set_external_hover(const std::uint64_t identity, std::optional<model::UnitCardLooks> content,
+                                     EncyclopediaPopupStatus status) {
     if (content && shown_external_ && external_identity_ == identity) {
         shown_external_content_ = content;
+        shown_external_status_ = status;
         update_text();
         redraw();
     }
-    if (!content && shown_external_) {
+    if (!content && external_identity_) {
+        timing_.candidate = 0;
+        timing_.hovered_seconds = 0;
         timing_.shown = 0;
         timing_.alpha = 0;
+        timing_.remaining = 0;
         tooltip_shown_ = false;
         shown_card_.reset();
         shown_external_ = false;
@@ -281,6 +286,7 @@ void EawrUnitCards::set_external_hover(const std::uint64_t identity, std::option
     }
     external_identity_ = content ? identity : 0;
     external_content_ = std::move(content);
+    external_status_ = std::move(status);
 }
 
 double EawrUnitCards::now() const {
@@ -365,6 +371,7 @@ void EawrUnitCards::_notification(const int what) {
                 shown_card_ = Card{};
                 shown_card_->type = external_content_->name;
                 shown_external_content_ = external_content_;
+                shown_external_status_ = external_status_;
             } else shown_card_ = *card;
         }
         tooltip_shown_ = timing_.shown != 0;
@@ -470,8 +477,11 @@ void EawrUnitCards::update_popup(const Card& card) {
     // CARD-19: preserve the tactical anchor and its upward growth.
     constexpr float anchor_y = static_cast<float>((720.0 - 430.0) * model::reference_height / 720.0);
     const auto anchor = screen({64.0F, anchor_y, setup_.tooltip_size.x, 0.0F});
-    popup_.update(setup_, content, {card.price, card.disabled_reason, card.price.has_value()},
-        anchor.position, setup_.space(), static_cast<float>(setup_.placement().scale));
+    const auto status = shown_external_ ? shown_external_status_
+        : EncyclopediaPopupStatus{card.price, card.disabled_reason, card.price.has_value()};
+    popup_.update(setup_, content, status,
+        shown_external_ && setup_.external_popup_anchor ? setup_.external_popup_anchor() : anchor.position,
+        setup_.space(), static_cast<float>(setup_.placement().scale));
     tooltip_rect_ = popup_.popup_rect_;
 }
 
@@ -862,6 +872,7 @@ std::string EawrUnitCards::report_json() const {
         if (!card->disabled_reason.empty()) name += "\n" + String(card->disabled_reason.c_str());
         const CharString utf8 = name.utf8();
         output << "{\"slot\": " << card->slot << ", \"external\": " << (shown_external_ ? "true" : "false")
+               << ", \"price\": " << (shown_external_ ? shown_external_status_.price : card->price).value_or(0)
                << ", \"alpha\": " << timing_.alpha << ", \"text\": " << json_space_controls_with_newline(std::string(utf8.get_data(), utf8.length()))
                << ", \"rect\": " << rect_json(tooltip_rect_);
         if (popup_.popup_rect_.has_area()) {

@@ -3,6 +3,7 @@
 #include "eawr/skirmish/setup.hpp"
 #include "eawr/skirmish/land_terrain.hpp"
 #include "eawr/sim/galactic/income.hpp"
+#include "eawr/sim/tactical/economy.hpp"
 
 namespace eawr::skirmish {
 
@@ -21,7 +22,21 @@ struct LandStartInputs {
     std::vector<LandFactionStart> factions;
     bool human_vehicles_only{}; // one-switch vehicles-only land start for human slots; land only, no rules change
     units::UnitTables static_tables; // scene types and every authored pre-built marker candidate
+    // LE-LOADER: the build pads of static_tables (a type with TACTICAL_BUILD_OBJECTS) decoded as land types with their
+    // menus, prices, construction children and constructed types; empty when the map and its marker candidates have no pad.
+    // A caller that builds the physical bindings from its own tables adds these rows to them (see merge_land_pad_types).
+    units::UnitTables pad_tables;
+    // LC-44..52 (#5894): the GameConstants rows the land reinforcement reads, filled by read_land_start_inputs. The
+    // per-type rows are built from the loaded tables when the start is built.
+    sim::tactical::LandReinforcementRules reinforcement_constants;
 };
+// The pad types of `pads` that `tables` does not already hold, appended in `pads` order. Needed so the durability, combat and
+// sensor rows of pads, construction children and constructed structures reach the physical bindings.
+void merge_land_pad_types(units::UnitTables& tables, const units::UnitTables& pads);
+// LC-46: the land start's economy keeps its own EconomyPlayer rows (cap, start tech, credits, difficulty multipliers) and takes only
+// the pad rules, the build menus and the pad sales from the shared economy builder run over the pad types. Everything else the
+// builder derived (its player rows with the space unit cap, income, upgrades, prevention, footprints, disabled types) is dropped.
+void merge_land_pad_rules(sim::tactical::EconomyRules& land, sim::tactical::EconomyRules&& builder);
 
 struct LandStaticBinding {
     sim::tactical::TypeId type{};
@@ -67,6 +82,11 @@ struct LandStart {
 [[nodiscard]] bool is_land_vehicle_company(const units::LandCompany& company) noexcept;
 // Turns the switch on: sets human_vehicles_only and fills every faction's vehicle_forces.
 void set_land_vehicles_only(LandStartInputs& inputs, bool enabled);
+// LC-86 (#6183): the sensor rows of the placed static types that are in the session (`session_types`, any order). A row exists
+// for a type that reveals (REVEAL with its authored range, 0 when absent) or samples the fog (Multisample_FOW_Check); a type
+// outside `session_types` (census-only: never a session object) gets none. Sorted strictly ascending by type id.
+[[nodiscard]] std::vector<sim::tactical::SensorProfile> land_static_sensor_table(
+    const std::vector<units::LandStaticObject>& rows, std::span<const sim::tactical::TypeId> session_types);
 // WLEN-53..56, LC-46: pure start construction. L5 validates/places company members
 // through L2 plans and L4. Unbound scene objects remain census-only, with named notes.
 [[nodiscard]] core::Result<LandStart> build_land_start(

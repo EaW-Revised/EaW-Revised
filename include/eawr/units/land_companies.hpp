@@ -1,6 +1,7 @@
 #pragma once
 
 #include "eawr/units/unit_tables_common.hpp"
+#include "eawr/core/text.hpp"
 
 #include <cstdint>
 #include <optional>
@@ -14,9 +15,51 @@
 // the object-kind routes below are pure functions of that data. No tactical creation happens here.
 namespace eawr::units {
 
+// G-01: authored containment inputs, shared by mobile objects, teams and static hosts.
+struct LandGarrisonData final {
+    bool entrant{}, host{}, hovering{};
+    std::vector<std::string> categories;
+    std::uint32_t value{1}, slots{}, guns{};
+    Fixed radius{}, enter_distance{}, exit_distance{};
+    Fixed scale{Fixed::from_raw(Fixed::scale)}; // Scale_Factor: bone points are model-space
+    std::vector<BonePoint> bones;
+    bool operator==(const LandGarrisonData&) const = default;
+};
+
+// G-02: an empty category mask admits any category; otherwise at least one must match.
+[[nodiscard]] inline bool land_garrison_compatible(const LandGarrisonData& host, const LandGarrisonData& entrant) {
+    if (host.categories.empty() || entrant.categories.empty()) return true;
+    for (const auto& accepted : host.categories)
+        for (const auto& offered : entrant.categories)
+            if (core::iequals(accepted, offered)) return true;
+    return false;
+}
+
+// G-03: pending entrants do not reserve capacity; pass only committed occupant costs.
+[[nodiscard]] inline bool land_garrison_has_capacity(const std::uint32_t slots,
+    const std::span<const std::uint32_t> occupied, const std::uint32_t cost) noexcept {
+    std::uint64_t used{};
+    for (const auto value : occupied) used += value;
+    return used <= slots && cost <= slots - used;
+}
+
+// LC-86 (#6183): the fog inputs of an object that may reveal ground: the REVEAL behaviour (land or shared list), its authored
+// range (absent on a REVEAL object reads as 0, which the sensor floors), the dense-fog multiplier, the multisample flag and
+// the authored hard extents and offsets of the fog box. One reader fills this for a land body and for a placed static row.
+struct LandRevealInputs final {
+    bool reveal{};
+    std::optional<Fixed> range;
+    Fixed dense_multiplier{Fixed::from_raw(Fixed::scale / 2)};
+    bool multisample{};
+    Fixed box_x_offset{}, box_y_offset{};
+    std::optional<Fixed> custom_hard_x, custom_hard_y;
+    bool operator==(const LandRevealInputs&) const = default;
+};
+
 // WLPA-61..66: authored geometry and selected model collision data.
 struct LandStaticObject final {
     std::string id, xml_type, proxy_type;
+    LandRevealInputs fog; // LC-86: read for every placed static candidate, obstacle or not
     bool land_obstacle{};
     bool hq_victory_relevant{};
     bool victory_relevant{}, land_victory_relevant{};
@@ -27,8 +70,26 @@ struct LandStaticObject final {
     std::string model_path;
     std::optional<Fixed> scale_factor;
     std::optional<CollisionBounds> collision_bounds;
+    // LC-89 (#6183): the X and Y half extents of the model's collision box (the unit reader's), the fallback of the fog box
+    // when no hard extents are authored. Read with the model, so only an obstacle with a model has them.
+    std::optional<Fixed> collision_half_x, collision_half_y;
     std::vector<CollisionMesh> collision_meshes;
     bool model_present{};
+    // LC-44..49/52: the reinforcement and capture rows of a map object, read for any placed type (a marker such as a
+    // reinforcement point has no LAND_OBSTACLE geometry). Absent tags stay absent; nothing here names a stock type.
+    bool reinforcement_point{};                       // effective REINFORCEMENT_POINT behaviour
+    bool capture_point{};                             // effective CAPTURE_POINT behaviour
+    bool energy_pool{};                               // effective ENERGY_POOL behaviour: prevention needs a powered base (LC-45)
+    bool hide_when_fogged{}, dummy_tooltip{};
+    bool immune_to_damage{}, valid_target{true};
+    bool influences_capture{true};                    // Influences_Capture_Point, default true
+    bool ownership_sticks{};                          // Ownership_Sticks (capture points)
+    std::string affiliation;                          // Affiliation as authored (capture eligibility)
+    std::optional<Fixed> reinforcement_enabling_radius;   // Reinforcement_Enabling_Radius
+    std::optional<Fixed> reinforcement_prevention_radius; // Reinforcement_Prevention_Radius
+    std::optional<Fixed> capture_radius, capture_seconds; // Capture_Point_Radius, Capture_Point_Transition_Time_Seconds
+    std::int64_t additional_population_capacity{};    // Additional_Population_Capacity
+    LandGarrisonData garrison;
     bool operator==(const LandStaticObject&) const = default;
 };
 
@@ -66,13 +127,30 @@ inline constexpr std::size_t land_collision_class_count = 11;
 // Case-insensitive; nullopt for a name outside the fixed set.
 [[nodiscard]] std::optional<LandCollisionGroup> parse_land_collision_class(std::string_view name) noexcept;
 
+// LMF-02: `FormationGrouping`. Solo objects always stand alone in a group move. An unauthored tag is Standard. A name
+// outside the two the stock data uses keeps Standard and leaves a note (the engine has a further value that is unread).
+enum class LandFormationGrouping : std::uint8_t { standard, solo };
+
 struct LandLocomotionData final {
     // L2b: raw authored values; the skirmish adapter converts frame units to seconds.
     std::optional<Fixed> acceleration, deceleration, rate_of_turn, stopped_rate_of_turn;
     std::optional<Fixed> scale_factor, soft_radius, hard_x, hard_y, collision_x, collision_y;
     std::optional<Fixed> formation_spacing;
+    // WLPA-90/91: Min_Speed_Fraction_For_Turn and Close_Enough_Angle_For_Move_Start (degrees), as authored.
+    std::optional<Fixed> min_speed_fraction_for_turn, close_enough_angle;
     LandCollisionGroup collision_class{LandCollisionGroup::none}; // absent tag = None
+    LandFormationGrouping formation_grouping{LandFormationGrouping::standard}; // LMF-02
     bool walk_transition{}, has_pre_turn_animation{};
+    // LR13-17 (#6115): `Movement_Animation_Speed` as authored, and the MOVESTART clip (`<model>_movestart_00.ala`, the
+    // first variant) of a Walk_Transition type: the loader looked (`start_clip_read`); `start_clip_frames` is zero when the
+    // model has no such clip, else its stored frame count and playback frames per second.
+    std::optional<Fixed> movement_animation_speed;
+    // WLAN-01/03/05/12: authored presentation inputs, excluded from simulation identity.
+    std::optional<Fixed> walk_animation_speed, crouch_animation_speed, rotation_animation_speed;
+    std::optional<Fixed> max_rate_of_roll, bank_turn_angle;
+    bool start_clip_read{};
+    std::uint32_t start_clip_frames{};
+    Fixed start_clip_fps{};
     bool operator==(const LandLocomotionData&) const = default;
 };
 
@@ -94,6 +172,10 @@ struct LandCompany final {
     std::optional<Fixed> team_max_jiggle;
     std::optional<Fixed> formation_spacing; // first member spacing for landing; team spacing stays separate
     std::vector<LandLocomotionData> locomotion; // member order; separate from live member identity
+    // LC-48/50: Population_Value of the company object (the tactical population its reinforcement charges); absent = 0.
+    std::optional<std::uint32_t> population_value;
+    LandGarrisonData team_garrison;
+    std::vector<LandGarrisonData> member_garrisons; // same order as members
     bool operator==(const LandCompany&) const = default;
 };
 

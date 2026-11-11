@@ -10,6 +10,7 @@
 #include <godot_cpp/classes/v_box_container.hpp>
 #include "galactic_mode_internal.hpp"
 #include "ground_stack.hpp"
+#include "command_bar_scale.hpp"
 #include "eawr/sim/galactic/ground_intelligence.hpp"
 #include "ui/tactical_hud_internal.hpp"
 #include "ui/input_routing.hpp"
@@ -88,7 +89,7 @@ void GalacticMode::State::build_planet_info() {
         auto* button = memnew(EawrHudButton);
         button->set_name(name);
         button->set_sounds(*component, [this](const std::string& cue) { if (audio) audio->ui_sound(cue); });
-        button->set_texture_normal(command_texture(first(*component, data::ui::Field::icon_texture_name)));
+        button->set_texture_normal(command_texture(galactic_view::command_bar_text_button_face(*component)));
         button->set_texture_hover(command_texture(first(*component, data::ui::Field::mouse_over_texture_name)));
         button->set_order_icon({}, false);
         parent->add_child(button);
@@ -223,7 +224,11 @@ void GalacticMode::State::update_planet_info(const presentation::ui::ShellPlacem
     const auto* anchor = fleet_anchors.find("planet_info");
     const auto* component = command_catalog.find("planet_info");
     if (!anchor || !component) { planet_info_button->hide(); return; }
-    const auto pixels = presentation::ui::shell_to_screen(anchor->rect, placement);
+    const auto art = planet_info_button->get_texture_normal();
+    if (art.is_null()) { planet_info_button->hide(); return; }
+    const auto face = galactic_view::button_face_rect(*anchor, static_cast<float>(art->get_width()),
+        static_cast<float>(art->get_height()), galactic_view::command_bar_component_scale(*component, 1.0F));
+    const auto pixels = presentation::ui::shell_to_screen(face, placement);
     planet_info_button->set_position({static_cast<float>(pixels.x), static_cast<float>(pixels.y)});
     planet_info_button->set_size({static_cast<float>(pixels.width), static_cast<float>(pixels.height)});
     planet_info_button->set_hit_rect({{}, planet_info_button->get_size()});
@@ -248,6 +253,18 @@ bool GalacticMode::State::build_fleet_hud() {
     auto loaded = data::ui::load_shell_anchors(*filesystem, shell->text(data::ui::Field::model_name));
     if (!loaded) { failure = core::format_diagnostic(loaded.error()); return false; }
     fleet_anchors = std::move(loaded).value().shell;
+    // GHUD-S98: focused text buttons can be attached to bones without meshes.
+    // Their face supplies their size, while the model supplies their centre.
+    for (const auto* name : {"advanced_planetary", "planet_info"}) {
+        if (fleet_anchors.find(name)) continue;
+        const auto* bone = fleet_anchors.find_bone(name);
+        const auto* component = command_catalog.find(name);
+        if (!bone || !component) continue;
+        const auto art = command_texture(galactic_view::command_bar_text_button_face(*component));
+        if (art.is_null()) continue;
+        fleet_anchors.add(galactic_view::bone_button_anchor(*bone, static_cast<float>(art->get_width()),
+            static_cast<float>(art->get_height()), galactic_view::command_bar_component_scale(*component, 1.0F)));
+    }
     auto* mask = memnew(EawrUiHitMask);
     mask->set_force_pass_scroll_events(true); // #5085: the organize shell has no wheel action.
     hud->add_child(mask); mask->set_anchors_and_offsets_preset(Control::PRESET_FULL_RECT);
@@ -406,7 +423,9 @@ bool GalacticMode::State::build_fleet_hud() {
         auto* button = memnew(EawrHudButton);
         button->set_name("advanced_planetary");
         button->set_sounds(*component, [this](const std::string& cue) { if (audio) audio->ui_sound(cue); });
-        button->set_texture_normal(command_texture(first(*component, data::ui::Field::blank_texture_name)));
+        // A text button's face is its Blank texture, or its Icon texture when the data authors only that one (the
+        // planet_info button here does the same): the data decides, no name is special.
+        button->set_texture_normal(command_texture(galactic_view::command_bar_text_button_face(*component)));
         button->set_texture_hover(command_texture(first(*component, data::ui::Field::mouse_over_texture_name)));
         button->set_order_icon({}, false);
         button->set_action([this] {
@@ -691,6 +710,18 @@ void GalacticMode::State::rebuild_fleet_projection(const bool publication_change
         fleet_health_cache.emplace(type, value);
         return value;
     };
+    // #6122: the same hero bit that steers the ground badge steers the space fleet image (GHUDL-16, the debug
+    // build's best-ship helper): named heroes, and generic heroes with an icon, rank by Ranking_In_Category.
+    const viewer::galactic::StackHeroPreference hero_preference{ground_hero_preference,
+        [this](const sim::galactic::TypeId type) -> std::optional<std::int64_t> {
+            const auto name = production_names.find(type);
+            if (name == production_names.end()) return std::nullopt;
+            const auto art = production_art.find(name->second);
+            if (art == production_art.end()) return std::nullopt;
+            const auto& look = art->second;
+            if (look.named_hero || (look.generic_hero && !look.icon.empty())) return look.hero_rank;
+            return std::nullopt;
+        }};
     const auto capacity = fleet_group_buttons[0].size();
     const auto image_rank = [&health](const sim::galactic::TypeId type) -> std::optional<std::uint32_t> {
         return galactic_view::stack_health_rank(health(type));
@@ -731,7 +762,7 @@ void GalacticMode::State::rebuild_fleet_projection(const bool publication_change
     for (const auto& [planet, cards] : by_planet) {
         const auto other = aware_other.find(planet);
         const auto aware = other == aware_other.end() ? std::nullopt : std::optional{other->second};
-        for (const auto& icon : viewer::galactic::fleet_stack_icons(cards, health, stacks.size(), aware))
+        for (const auto& icon : viewer::galactic::fleet_stack_icons(cards, health, stacks.size(), aware, hero_preference))
             placed.emplace_back(planet, icon);
     }
     for (auto& [key, badge] : fleet_badges) badge.shown = false;
@@ -1151,7 +1182,7 @@ void GalacticMode::State::update_fleet_badges(const galactic_view::ObjectId plan
     const float icon_scale = icon_size.x > 0 ? icon_size.x : 1.0F;
     const auto place = [&](TextureButton* button, const std::uint8_t icon) {
         const auto texture = button->get_texture_normal();
-        const auto size = texture.is_valid() ? texture->get_size() * scale : Vector2{};
+        const auto size = texture.is_valid() ? texture->get_size() * galactic_view::command_bar_component_scale(*style, scale) : Vector2{};
         const float x = icon == 0 ? -side.x : icon == 2 ? side.x : 0.0F;
         const float y = icon == 1 ? middle.y : side.y;
         button->set_position(anchor + Vector2(x, -y) * scale - size * 0.5F);
@@ -1197,12 +1228,13 @@ void GalacticMode::State::update_fleet_badges(const galactic_view::ObjectId plan
             if (!ground_style) { button->hide(); continue; }
             const auto offset = ground_style->vec2(data::ui::Field::offset).value_or(data::ui::Vec2{});
             const auto texture = button->get_texture_normal();
-            const auto size = texture.is_valid() ? texture->get_size() * scale : Vector2{};
+            const auto size = texture.is_valid() ? texture->get_size() * galactic_view::command_bar_component_scale(*ground_style, scale) : Vector2{};
             button->set_position(anchor - Vector2(0, offset.y) * scale - size * 0.5F);
             button->set_size(size); static_cast<EawrHudButton*>(button)->set_hit_rect({{}, size});
             if (badge.ship->get_texture().is_valid()) {
                 const auto image = badge.ship->get_texture()->get_size()
-                    * ground_style->vec2(data::ui::Field::size).value_or(data::ui::Vec2{1, 0}).x * scale;
+                    * ground_style->vec2(data::ui::Field::size).value_or(data::ui::Vec2{1, 0}).x
+                    * galactic_view::command_bar_component_scale(*ground_style, scale);
                 badge.ship->set_position((size - image) * 0.5F - Vector2(0, offset.x * static_cast<float>(badge.texture) * scale));
                 badge.ship->set_size(image);
             }
@@ -1213,14 +1245,14 @@ void GalacticMode::State::update_fleet_badges(const galactic_view::ObjectId plan
         }
         const auto size = place(button, found->first.second);
         if (badge.ship->get_texture().is_valid()) {
-            const auto image = badge.ship->get_texture()->get_size() * icon_scale * scale;
+            const auto image = badge.ship->get_texture()->get_size() * icon_scale * galactic_view::command_bar_component_scale(*style, scale);
             // GHUDL-16: each stack layer lifts the ship by Offset X (sign partial).
             badge.ship->set_position((size - image) * 0.5F - Vector2(0, layer * static_cast<float>(badge.texture) * scale));
             badge.ship->set_size(image);
         }
         if (badge.stealth_overlay->get_texture().is_valid()) {
             // The overlay sits over the ship image on the stack, at the same scale and lift.
-            const auto image = badge.stealth_overlay->get_texture()->get_size() * icon_scale * scale;
+            const auto image = badge.stealth_overlay->get_texture()->get_size() * icon_scale * galactic_view::command_bar_component_scale(*style, scale);
             badge.stealth_overlay->set_position((size - image) * 0.5F - Vector2(0, layer * static_cast<float>(badge.texture) * scale));
             badge.stealth_overlay->set_size(image);
             badge.stealth_overlay->show();

@@ -57,6 +57,7 @@ inline constexpr std::uint64_t synthesised_command_bit = std::uint64_t{1} << 63;
     case SpecialAbilityKind::leech_shields: return AbilityKind::leech_shields;
     case SpecialAbilityKind::super_laser: return AbilityKind::super_laser;
     case SpecialAbilityKind::concentrate_fire: return AbilityKind::concentrate_fire;
+    case SpecialAbilityKind::lucky_shot: return AbilityKind::lucky_shot;
     default: return std::nullopt;
     }
 }
@@ -99,7 +100,11 @@ public:
     bool publish_damage_changes{true}; // transient observer switch, never canonical
     std::unique_ptr<session_detail::LandSession> land;
     [[nodiscard]] core::Result<void> initialize_land(const TacticalContent& content);
+    [[nodiscard]] core::Result<void> spawn_land_company(const LandTerrain& terrain, const UnitState& entry,
+        const LandCompanyBinding& binding, LandMovement::Checkpoint& moving, std::vector<LiveUnit>& live, LandSpawnFilter& filter);
     [[nodiscard]] core::Result<TacticalTick> step_land(TacticalSession& session, const PartitionExecutor& executor);
+    // G-04..G-07 (session_land_garrison.cpp): the garrison service seam after the movement and occupancy commit.
+    [[nodiscard]] core::Result<void> land_garrison_service(std::vector<LiveUnit>& live, const PartitionExecutor& executor);
     [[nodiscard]] std::vector<std::uint8_t> land_bytes(bool partitioned) const;
     void encode_land_partition(std::size_t partition) const;
     [[nodiscard]] core::Result<void> restore_land(std::span<const std::uint8_t> bytes);
@@ -159,7 +164,7 @@ public:
         const std::vector<PlayerEconomy>& accounts, const EntityId first, const PartitionExecutor& executor) const;
     [[nodiscard]] core::Result<void> service_income_modifiers(std::vector<PlayerEconomy>& accounts,
         std::span<const LiveUnit> live, std::span<const std::pair<EntityId, PlayerId>> streams,
-        std::uint64_t frame, const PartitionExecutor& executor, bool initialization_only = false);
+        std::uint64_t frame, const PartitionExecutor& executor, const NamedAbilityLocks& locks, bool initialization_only = false);
     void retire_income_modifier(PlayerEconomy& account, const CompletedBuild& held) const;
     void reduce_income(const std::vector<PlayerEconomy>& accounts, EntityId stream,
         std::span<IncomeCategory> categories) const;
@@ -239,6 +244,14 @@ public:
 
     // AB-60 (#561): the unit's ION_CANNON_SHOT slot (the container's team slot, or a craft's own),
     // or null.
+    [[nodiscard]] const AbilitySlot* lucky_slot(const LiveUnit& unit) const;
+    [[nodiscard]] AbilitySlot* lucky_slot(LiveUnit& unit) const;
+    [[nodiscard]] const SpecialAbilityProfile* lucky_profile(const LiveUnit& unit) const;
+    [[nodiscard]] bool lucky_target_valid(const LiveUnit& source, const LiveUnit& target) const;
+    [[nodiscard]] bool lucky_in_range(const LiveUnit& source, const LiveUnit& target) const;
+    void end_lucky_shot(LiveUnit& unit, std::uint64_t tick) const;
+    void lock_lucky_shot(LiveUnit& unit, EntityId target, std::uint32_t hardpoint, std::uint64_t tick) const;
+    void reset_lucky_weapon(LiveUnit& unit) const;
     [[nodiscard]] const AbilitySlot* ion_slot(const LiveUnit& unit) const;
     [[nodiscard]] AbilitySlot* ion_slot(LiveUnit& unit) const;
 
@@ -246,6 +259,7 @@ public:
     // live unit of a hostile player that can be hit (a unit with a combat profile; a squadron's team
     // container has no model to aim at, its craft do).
     [[nodiscard]] bool ion_target_valid(const PlayerId owner, const LiveUnit* target) const;
+    [[nodiscard]] bool ion_handler_admits(const LiveUnit& source, const LiveUnit* target, bool from_attack) const;
 
     // AB-65 (#561): the squadron's ION_CANNON_SHOT ends: the container and every craft switch it
     // off; the container recharges only when at least one craft fired (a live craft no longer due).
@@ -373,9 +387,28 @@ public:
     };
 
     [[nodiscard]] PlayerEconomy* ledger_of(std::vector<PlayerEconomy>& staged_ledgers, const PlayerId id) const;
+    // LC-42..51 (#5894), session_land.cpp and session_land_reinforce.cpp.
+    // LC-43..45: every member position of the company laid out at `point` is placeable, enabled by an allied point and
+    // outside every enemy prevention radius; false is a refusal, an error is an arithmetic failure.
+    [[nodiscard]] core::Result<bool> land_company_admission(const LandCompanyBinding& binding, PlayerId player,
+        const math::Vec3& point, math::Fixed yaw_degrees, const UnitStage& staged) const;
+    // LC-48: the capacity the player's live objects (and, in multiplayer, its allies') add to the faction base.
+    [[nodiscard]] std::int64_t land_capacity(PlayerId owner, const UnitStage& staged) const;
+    // LC-46/47: the company cap of one player.
+    [[nodiscard]] std::int64_t land_company_cap(PlayerId owner, std::int64_t capacity) const;
+    // LC-48: companies counted against the cap: the shares of the owner's objects plus its companies in flight.
+    [[nodiscard]] std::int64_t land_company_count(PlayerId owner, const std::map<EntityId, PopulationShare>& owner_shares,
+        const UnitStage& staged) const;
+    [[nodiscard]] core::Result<void> execute_land_reinforcement(const PlayerCommand& command, std::uint64_t tick,
+        UnitStage& staged, EconomyStage& stage, PlayerEconomy& ledger, const EconomyPlayer& player, Event& event,
+        std::vector<Event>& events);
     // WHE-63: append authored escorts immediately; a full team returns false without recharge.
     [[nodiscard]] core::Result<bool> replenish_wingmen(EntityId leader, TypeId team, UnitStage& units,
         EconomyStage& stage, std::uint64_t tick);
+    [[nodiscard]] core::Result<RejectReason> request_replenishment(EntityId leader, UnitStage& units,
+        EconomyStage& stage, std::uint64_t tick);
+    [[nodiscard]] core::Result<void> request_creation_defaults(std::span<const EntityId> created,
+        UnitStage& units, EconomyStage& stage, std::uint64_t tick);
 
     // PU-11: whether `station` (live, staged) builds `type` for `buyer`: an ally's station whose
     // list for its owner's faction offers the type in M2.
@@ -464,6 +497,7 @@ public:
     struct ApproachPlan {
         math::Vec3 slot{};
         std::uint64_t prediction_frame{};
+        std::optional<math::Vec3> centre{}; // OR-28: absent for a last-seen position rather than a target ring.
     };
 
     // The unit the order in force sends a unit towards (OR-08, OR-17): an attack's target while
@@ -634,6 +668,12 @@ public:
 
     core::Result<void> service_healing(std::vector<LiveUnit>& units, const std::map<EntityId, ArrivalState>& arrivals,
         std::uint64_t tick, const PartitionExecutor& executor, std::vector<CombatEvent>& events);
+    core::Result<void> service_jamming(std::vector<LiveUnit>& units, const std::map<EntityId, ArrivalState>& arrivals,
+        const NamedAbilityLocks& locks, std::uint64_t tick, const PartitionExecutor& executor,
+        std::vector<std::int8_t>& transitions);
+    [[nodiscard]] bool jammer_ready(const LiveUnit& unit, const AbilityProfile& ability,
+        const NamedAbilityLocks& locks) const;
+    void jammer_reactivated(LiveUnit& unit, const AbilityProfile& ability) const;
     // WSH-05: the inclusive planar centre test, then the rolled model box; shared by healing and WSH-09 damage.
     [[nodiscard]] bool heal_in_range(const LiveUnit& source, const LiveUnit& target, math::Fixed reach) const;
     // WSH-09: immutable selection of due negative-amount automatic handlers and their victims, in source order.

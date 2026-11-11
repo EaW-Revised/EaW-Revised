@@ -1084,6 +1084,7 @@ int main(const int argc, char** argv) {
     }
     if (argc == 2 && std::string_view(argv[1]) == "--space-population") {
         space_population();
+        check_movie_object();
         return failures == 0 ? 0 : 1;
     }
     // Targeted installed-mod regression: game root, mod chain, craft type. This uses

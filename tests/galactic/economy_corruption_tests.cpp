@@ -11,6 +11,7 @@
 #include "eawr/vfs/vfs.hpp"
 #include "../support/result.hpp"
 #include "galactic_support.hpp"
+#include "restore_patch.hpp"
 #include "eawr/sim/galactic/economy_corruption.hpp"
 #include "eawr/sim/galactic/income.hpp"
 #include "eawr/sim/galactic/production.hpp"
@@ -98,6 +99,7 @@ gc::GalacticSetup setup() {
     state.planets[0].corruption = cf::Type::racketeering;
     state.planets[0].siphon = {true, 2, d("0.25"), 3}; state.planets[0].piracy = f(10);
     state.items = {{50, 10, 3, 1, f(100), f(7), d("5.5")}, {51, 20, 2, 2, f(80), f(4), f(1)}, {52, 10, 1, 1, f(10), f(2), f(1)}};
+    state.items[0].ability_names = {"FirstAbility", "SecondAbility"};
     gc::BlackMarketBuyer buyer; buyer.buyer = 10000; buyer.owner = 2; buyer.opposing_planet = true; buyer.causes_despawn = true;
     buyer.price_modifier = d("1.5"); buyer.absence_min = {f(10), f(20), f(30), f(40), f(50)};
     buyer.absence_max = {f(12), f(24), f(36), f(48), f(60)}; state.buyers.push_back(buyer);
@@ -287,6 +289,29 @@ void market_contracts(const eawr::sim::PartitionExecutor& pool) {
     adjusted = take(gc::prepared_production_offer(offer, nullptr, s.planets, 1, 2, &state));
     expect(adjusted.price == f(100) && adjusted.seconds == f(10), "beneficiary production factors are one");
 }
+// Restore applies the table rules of the setup validator to the loaded corruption economy and holds the authored inputs
+// to the setup's; each case writes one violation and expects its own cause.
+void malformed_corruption_restore() {
+    const auto config = setup();
+    auto probe = take(gc::GalacticSession::create(config));
+    const std::optional<gc::EconomyCorruptionState> table = *probe.snapshot()->economy_corruption();
+    using galactic_test::restore_message_after;
+    using galactic_test::expect_refusal;
+    expect(restore_message_after(config, table, [](auto&) {}).empty(), "unchanged corruption economy restores");
+    const auto refused = [&](const char* phrase, const char* label, auto mutate) {
+        expect_refusal(restore_message_after(config, table, mutate), phrase, label);
+    };
+    refused("inputs differ from setup", "authored market items that differ from setup are refused", [](auto& t) { t->items[0].base_cost = f(1); });
+    refused("inputs differ from setup", "income factors that differ from setup are refused", [](auto& t) { t->income_factors[1] = f(7); });
+    refused("unknown unlock", "unlock of an unregistered item is refused", [](auto& t) { t->players[0].unlocks.insert(999); });
+    refused("technology-price cache differs", "multiplier cache that disagrees with its ledger is refused", [](auto& t) {
+        t->players[0].tech_purchase_multiplier = f(2); });
+    refused("invalid planet", "negative planet income factor is refused", [](auto& t) { t->planets[0].factor = f(-1); });
+    refused("invalid buyer", "buyer of an unlisted player is refused", [](auto& t) { t->buyers[0].owner = 99; });
+    refused("invalid tables or factor range", "unordered buyers are refused", [](auto& t) {
+        auto second = t->buyers[0]; second.buyer = 5; t->buyers.push_back(second); });
+    refused("invalid menu", "menu of an unknown buyer is refused", [](auto& t) { t->menus.push_back({77, 1, {}, {}, false}); });
+}
 void replay_and_checkpoint() {
     technology_price_math();
     technology_price_decode();
@@ -357,7 +382,7 @@ void authored_load_guards() {
         n.source = {"data/xml/blackmarketitems.xml", "guard-fixture", "guard-fixture", 7, 1}; return n; };
     constants.root.children = {xml("Corruption_Choice_Income_Percentage", "1 1 1 1 1 1 1 1"),
         xml("Black_Market_Income_Mult_Min", "1"), xml("Black_Market_Income_Mult_Max", "1")};
-    auto item = xml("Item", ""); item.children = {xml("Faction", "Side"), xml("Tech_Level", "3"), xml("Base_Cost_Credits", "27")};
+    auto item = xml("Item", ""); item.children = {xml("Faction", "Side"), xml("Tech_Level", "3"), xml("Base_Cost_Credits", "27"), xml("Ability_Names", "One, Two")};
     auto ordinary_default = xml("Item", ""); ordinary_default.children = {xml("Faction", "Side")};
     auto unbound = xml("Item", ""); unbound.children = {xml("Faction", "Missing")};
     market.root.children = {item, ordinary_default, unbound};
@@ -365,6 +390,7 @@ void authored_load_guards() {
     const auto economy = take(cp::prepare_corruption_economy(constants, market, loaded.catalog, plan, config, &buffer));
     expect(!economy.tutorial && economy.items.size() == 2, "ordinary market loads, skipping only an unbound item");
     expect(economy.items[0].tech == 3 && economy.items[0].base_cost == f(27), "ordinary item values survive loading");
+    expect(economy.items[0].ability_names == std::vector<std::string>{"One", "Two"}, "market ability names retain authored order");
     expect(economy.items[1].tech == 1 && economy.items[1].base_cost == Fixed{} && economy.items[1].uncommon_multiplier == Fixed{}, "B WGEP-105 defaults are 1/0/0");
     const auto buyer = take(cp::prepare_black_market_buyer(loaded.catalog, "Buyer", 10000, 2, true, &buffer));
     expect(buyer.absence_min.empty() && buyer.absence_max.empty(), "B WGEP-107 clears both malformed respawn lists");
@@ -459,7 +485,7 @@ void installed() {
 }
 } // namespace
 int main(int argc, char**) {
-    try { if (argc > 1) installed(); else { authored_load_guards(); replay_and_checkpoint(); } }
+    try { if (argc > 1) installed(); else { authored_load_guards(); malformed_corruption_restore(); replay_and_checkpoint(); } }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
     return galactic_test::failures ? 1 : 0;
 }

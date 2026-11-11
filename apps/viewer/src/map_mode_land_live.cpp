@@ -103,6 +103,8 @@ bool MapMode::State::ready_land_live(Node3D& host, const assets::Map& map,
     population.animation_frames = options.particle_frames; population.live_clock = true;
     population.placed_ships = live_session->placed_ships();
     land_population = std::make_unique<LandBattleScene>(std::move(population), live_session->land_terrain());
+    live_session->trace_frames(perf_trace.has_value());
+    land_population->trace_frames(perf_trace.has_value());
     assets::Map members;
     members.source = map.source; members.kind = assets::MapKind::land;
     if (!land_population->compose(*renderer, members, *filesystem, camera, {}, next_asset, next_entity))
@@ -160,6 +162,19 @@ std::optional<int> MapMode::State::process_land_live(double delta) {
         }
     }
     if (const auto failed = draw_map_frame(delta)) return failed;
+    if (perf_trace) {
+        PerfTrace::Frame trace;
+        trace.frame_ms = delta * 1000.0;
+        trace.presented_tick = static_cast<std::uint64_t>(std::max(0.0, live_session->presented_tick()));
+        trace.units = live_session->visible_units().size();
+        trace.tick_wait_ms = live_session->tick_wait_ms();
+        trace.live_frame_ms = live_session->live_frame_ms();
+        trace.session_tail_ms = live_session->session_tail_ms();
+        trace.clip_pose_ms = live_session->clip_pose_ms();
+        trace.pose_ms = live_session->pose_ms();
+        trace.bookkeeping_ms = live_session->bookkeeping_ms();
+        perf_trace->frame(trace);
+    }
     const auto tick = static_cast<std::uint64_t>(live_session->presented_tick());
     if (!options.report_path.empty() && land_trace_tick != tick && land_pose_trace.size() < 8192) {
         land_trace_tick = tick;
@@ -176,7 +191,10 @@ std::optional<int> MapMode::State::process_land_live(double delta) {
                 << ",\"squad\":" << root->second << ",\"owner\":" << unit.owner << ",\"position\":["
                 << unit.position[0] << ',' << unit.position[1] << ',' << unit.position[2] << "],\"yaw\":" << unit.yaw
                 << ",\"drawn\":" << (land_population->live_ship_drawn(unit.ship) ? "true" : "false")
-                << ",\"ground_height\":";
+                << ",\"clip_type\":";
+            if (const auto clip = live_session->land_animation_type(unit.entity)) row << *clip;
+            else row << "null";
+            row << ",\"ground_height\":";
             if (height) row << static_cast<double>(height->raw()) / static_cast<double>(sim::math::Fixed::scale);
             else row << "null";
             row << '}';

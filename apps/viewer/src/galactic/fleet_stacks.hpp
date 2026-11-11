@@ -88,12 +88,35 @@ using StackHealth = std::function<std::optional<float>(sim::galactic::TypeId)>;
     return (bits & 0x80000000U) ? ~bits : (bits ^ 0x80000000U);
 }
 
+// The "bring heroes to front" bit (the debug build's best-ship helper, GHUDL-16): with it set, the lowest
+// Ranking_In_Category among hero types wins the image, the first group on a tie (strict less-than), and the health
+// winner is only the fallback when the fleet holds no hero. `rank` returns the ranking of a type that is a named hero,
+// or a generic hero with an icon, and nothing for any other type (#6122). Gap: a hero carried inside another ship is
+// not a group of its own here, so it does not count.
+using StackHeroRank = std::function<std::optional<std::int64_t>(sim::galactic::TypeId)>;
+struct StackHeroPreference final {
+    bool prefer{};
+    StackHeroRank rank;
+};
+
 // GHUDL-16 best ship: the greatest max tactical health among the visible groups
 // (debug build best-ship helper with the hero-category filter clear). Unknown
 // health everywhere falls back to the observer's first typed group (GHUD-R11).
+// With the hero preference set, the ranked hero comes first (see StackHeroPreference).
 // Anonymous count-only groups carry no type, so nothing is chosen for them.
 [[nodiscard]] inline std::optional<sim::galactic::TypeId> best_stack_ship(
-    std::span<const sim::galactic::ObservedFleetGroup* const> groups, const StackHealth& health) {
+    std::span<const sim::galactic::ObservedFleetGroup* const> groups, const StackHealth& health,
+    const StackHeroPreference& hero = {}) {
+    if (hero.prefer && hero.rank) {
+        std::optional<sim::galactic::TypeId> hero_type;
+        std::int64_t lowest{};
+        for (const auto* group : groups) {
+            if (!group || !group->type) continue;
+            const auto rank = hero.rank(*group->type);
+            if (rank && (!hero_type || *rank < lowest)) { hero_type = group->type; lowest = *rank; }
+        }
+        if (hero_type) return hero_type;
+    }
     std::optional<sim::galactic::TypeId> best, first;
     float greatest = 0.0F;
     bool measured = false;
@@ -136,7 +159,8 @@ struct StackAccumulator final {
 // not published yet and stay seams.
 [[nodiscard]] inline std::vector<FleetStackIcon> fleet_stack_icons(
     std::span<const sim::galactic::ObservedFleet* const> cards, const StackHealth& health,
-    const std::size_t textures, const std::optional<sim::galactic::PlayerId> aware_other = std::nullopt) {
+    const std::size_t textures, const std::optional<sim::galactic::PlayerId> aware_other = std::nullopt,
+    const StackHeroPreference& hero = {}) {
     std::array<detail::StackAccumulator, 3> slots;
     const bool foreign = aware_other || std::any_of(cards.begin(), cards.end(),
         [](const auto* card) { return card && !card->local; });
@@ -186,7 +210,7 @@ struct StackAccumulator final {
         icon.count = slot.count;
         icon.stealth = slot.stealth;
         icon.texture = stack_texture_index(slot.count, textures);
-        icon.best = slot.overview_type ? slot.overview_type : best_stack_ship(slot.groups, health);
+        icon.best = slot.overview_type ? slot.overview_type : best_stack_ship(slot.groups, health, hero);
         icon.contents = slot.contents;
         icons.push_back(std::move(icon));
     }

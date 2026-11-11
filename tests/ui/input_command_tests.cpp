@@ -209,7 +209,8 @@ void command_sink_contracts() {
                && ability->action == tactical::AbilityAction::deactivate,
         "a unit ability intent becomes an ability command");
     for (const auto kind : {tactical::AbilityKind::ion_cannon_shot, tactical::AbilityKind::concentrate_fire,
-        tactical::AbilityKind::energy_weapon, tactical::AbilityKind::tractor_beam, tactical::AbilityKind::leech_shields}) {
+        tactical::AbilityKind::energy_weapon, tactical::AbilityKind::tractor_beam, tactical::AbilityKind::leech_shields,
+        tactical::AbilityKind::lucky_shot}) {
         auto beam = intent(ui::TacticalVerb::ability, {4}, {}, 12, 0, ui::CommandOrigin::world_click);
         beam.unit_ability = kind;
         beam.hardpoint = 5;
@@ -933,6 +934,11 @@ int main() {
     {
         namespace gb = presentation::godot_backend;
         using Mode = gb::PointerWindowMode;
+        expect(gb::preview_pointer_captured(true, true, false, false), "preview captures the pointer");
+        expect(!gb::preview_pointer_captured(false, true, false, false), "exit or escape releases preview capture");
+        expect(!gb::preview_pointer_captured(true, false, false, false), "focus loss releases preview capture");
+        expect(!gb::preview_pointer_captured(true, true, true, false), "minimize releases preview capture");
+        expect(!gb::preview_pointer_captured(true, true, false, true), "options or modal releases preview capture");
         expect(!gb::pointer_confined(Mode::windowed, true, false, false), "windowed pointer remains free");
         expect(gb::pointer_confined(Mode::fullscreen, true, false, false), "fullscreen pointer is confined");
         expect(gb::pointer_confined(Mode::exclusive_fullscreen, true, false, false), "exclusive fullscreen pointer is confined");

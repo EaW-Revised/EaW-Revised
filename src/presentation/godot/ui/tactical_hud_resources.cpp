@@ -48,6 +48,23 @@ void TacticalHud::set_world_hover(const std::optional<std::pair<std::uint64_t, s
         admitted ? std::optional(state.encyclopedia_type(hovered->second)) : std::nullopt);
 }
 
+void TacticalHud::set_production_hover(const EawrProductionPanel::Hover* hovered) {
+    State& state = *state_;
+    if (!state.cards) return;
+    if (state.production_hover ? hovered && *state.production_hover == *hovered : !hovered) return;
+    if (state.production_hover) state.cards->set_external_hover(0, std::nullopt);
+    state.production_hover = hovered ? std::optional(*hovered) : std::nullopt;
+    if (!hovered) return;
+    state.team_dock_encyclopedia = false;
+    state.ability_hover_type.clear();
+    state.world_hover.reset();
+    const auto& content = state.encyclopedia_type(hovered->type);
+    // PU-73: a queued type retains the full detail header; price alone does
+    // not turn it into the reduced production-card presentation (CARD-14).
+    state.cards->set_external_hover(hovered->identity, content,
+        {hovered->queue ? content.build_cost : std::nullopt, {}, false});
+}
+
 void TacticalHud::set_ability_hover(const std::string& type, const std::uint32_t ability,
                                   const std::size_t component) {
     State& state = *state_;

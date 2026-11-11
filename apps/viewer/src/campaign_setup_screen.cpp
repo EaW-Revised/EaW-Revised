@@ -149,7 +149,7 @@ bool CampaignSetupScreen::build(Control& root, const Resources& resources, const
         failure_ = std::string(model::campaign_staging_dialog) + " is not in the catalogue (rejected or removed by the data)";
         return false;
     }
-    built_.emplace(build_dialog(*found, *resources_.theme_model, resources_.text, model::Placement::centre));
+    built_.emplace(build_dialog(*found, *resources_.theme_model, resources_.text, model::Placement::centre, true));
     // The skin's tooltips go through the database like the captions.
     for (std::size_t i = 0; i < found->controls.size() && i < built_->gadgets.size(); ++i) {
         const auto* tip = resources_.dialogs->tooltip(found->controls[i]);

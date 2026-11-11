@@ -190,9 +190,9 @@ pilot shouting to lock the S-foils, the Nebulon-B's officer engaging the shields
 | BA-51 | **A timed ability that runs out is silent.** FoC's expiry handler deactivates the ability and starts the faction's *enemy* off-event, not the plain one, for the local player's units; every enemy off-entry is blank in the M2 data. Only a switch-off (button, script) plays the off sound. The remake tells the two apart from the snapshot: a timed ability (one that has read frames left while active) whose last read, the final active tick's 0 included, had two frames or fewer left and that is then off ended by itself; an untimed ability's end always plays the off sound. A switch-off within the last two frames of a timed ability is taken for a natural end, silently. A switch that the engines or the shield end (AB-16, AB-17) is not told apart from a switch-off and plays the off sound (**unverified**: the debug build's deactivation for those was not traced). | AU-36 |
 | BA-52 | **Voice line.** A press of an ability's button or key that reaches the simulation plays a voice line from the first pressed unit that has the ability (a squadron resolves to its leading live craft, BA-24): its `SFXEvent_GUI_Unit_Ability_Activated` when the press switches the group on (not every unit was on), its `SFXEvent_GUI_Unit_Ability_Deactivated` when it switches it off. The line is a plain 2D start of the event, not a unit response: it takes no part in the speaker ranking (BA-20) and no acknowledgement follows it. The events are `Preset_UR` ones (BA-23: one instance, `Overlap_Test` per unit type), so a line is refused while another line of the same type plays, and there is no cooldown beyond that. The M2 lines: the Corellian corvette's `TURBO` `Unit_Speed_Corvette`, the Nebulon-B's `DEFEND` `Unit_Defend_Nebulon`, the X-wing's `SPOILER_LOCK` `Unit_Ability_On_X_Wing` and `Unit_Ability_Off_X_Wing`, the Tartan's and the Acclamator's `POWER_TO_WEAPONS` `Unit_Barrage_Tartan` and `Unit_Barrage_Acclamator`; no other M2 ability has a deactivation line. Script and AI switches play no voice. | AU-33, AU-37, data |
 
-Refused ability presses follow BA-28. The ability-active loop
-(`SFXEvent_Special_Ability_Loop`) is not authored by the starting M2 roster.
-Some expanded heroes author beam loops; those remain unimplemented. No default loop is supplied.
+Refused ability presses follow BA-28. The starting M2 roster authors no
+`SFXEvent_Special_Ability_Loop`; expanded space units use authored beam loops
+as described in BA-87. No default loop is supplied.
 
 BA-50's faction effect and BA-52's command-bar voice have separate callers.
 
@@ -212,6 +212,18 @@ enemy relationship selects the enemy entry. A nonempty plain entry is required
 before that selection, even if an enemy entry is authored. Arming autofire
 changes its setting without starting an activation sound. These predicates do
 not grant an AI or script activation the command-bar unit voice.
+
+**BA-87:** Tractor, energy and superlaser handlers request the authored
+`SFXEvent_Special_Ability_Loop` attached to both the source and target. Superlaser
+requests it when firing begins; repeated requests for the same event on the same
+object do not restart it. The request has no owner gate; ordinary attached-sound
+visibility applies. Only loop events are admitted; their authored loop fade-in
+and fade-out times apply. The viewer follows its existing published beam state
+and uses the superlaser fire-delay seam, which does not model the original's
+attack-animation and fire-frame gate. Endpoint cancellation and
+simultaneous different-event interactions still need capture; stealth's nested
+activation cue has no verified caller and remains deferred. Evidence: debug build;
+WHE-26/27, WSPL-04, WLS-05, SND-04/11.
 
 ### Ability payload cues and superweapon scope
 

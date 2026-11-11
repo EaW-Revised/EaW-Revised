@@ -69,6 +69,11 @@ struct LandContentInputs {
 inline constexpr std::uint32_t unverified_contact_quota = 4096;
 inline constexpr std::uint32_t unverified_contact_reset_interval = 1;
 inline constexpr std::uint32_t unverified_last_known_capacity = 50;
+// LC-51 (#5894): the landing clip (phase 1 of the transport landing) is art data of the transport model: its frame count is not
+// in any XML and is not read. Named deviation LR-LANDING: five seconds until the clip length is captured from retail.
+inline constexpr std::uint32_t unverified_landing_frames = 150;
+// LC-51: one unload step is 2 s x (1 + deploy-time modifiers) in the debug build; no land modifier exists yet, so 2 s.
+inline constexpr std::uint32_t retail_unload_step_frames = 60;
 inline constexpr std::size_t max_passability_names = 32; // Clear plus the named bits must fit the uint32_t mask.
 // LSL-02: the debug build's object type defaults for a tag a land member does not author.
 inline constexpr sim::math::Fixed type_default_max_speed = sim::math::Fixed::from_raw(sim::math::Fixed::scale / 4); // 0.25
@@ -215,7 +220,47 @@ inline constexpr sim::math::Fixed land_physical_limit = sim::math::Fixed::from_r
     if (!multiplier || *multiplier <= Fixed{}) return fail("GameConstants", speed_tag, "required positive scalar is absent or invalid");
     LandStartBindings result;
     result.land.contacts = inputs.contacts;
+    // LMF-02..LMF-05: the formation constants; a table that omits one keeps one destination per squad.
+    {
+        const auto constant = [&](const std::string_view tag) {
+            std::optional<Fixed> found;
+            for (const auto& value : tables.constants.scalars) if (equal(value.tag, tag)) found = value.value;
+            return found;
+        };
+        const auto area = constant("Max_Formation_Area"), vehicle = constant("VehicleFormationRecruitmentDistance"),
+            infantry = constant("InfantryFormationRecruitmentDistance"), between = constant("BetweenFormationSpacing"),
+            extension = constant("Destination_Collision_Query_Extension");
+        if (area && vehicle && infantry && between && extension && *area > Fixed{} && *vehicle >= Fixed{}
+            && *infantry >= Fixed{} && *between >= Fixed{} && *extension >= Fixed{})
+            result.land.formation = {true, *area, *vehicle, *infantry, *between, *extension, false, {}, {}};
+        const auto side_min = constant("FormationMinimumSideError"), side_max = constant("FormationMaximumSideError");
+        // The authored side-error range gates speed availability; live lateral correction remains unwired.
+        if (side_min && side_max && *side_min >= Fixed{} && *side_max > *side_min) {
+            result.land.formation.speed_authored = true;
+            result.land.formation.minimum_side_error = *side_min;
+            result.land.formation.maximum_side_error = *side_max;
+        }
+        // LC-102: the loader validated the decimal; an unauthored constant leaves the optional empty.
+        result.land.garrisoned_range_multiplier = constant("Garrisoned_Max_Attack_Distance_Multiplier");
+    }
     result.land.occupations = inputs.occupations;
+    // G-01: retain host and entrant rows independently of obstacle and company admission.
+    const auto add_garrison = [&](const TypeId id, const units::LandGarrisonData& data) {
+        if (!data.host && !data.entrant) return;
+        const auto existing = std::find_if(result.land.garrisons.begin(), result.land.garrisons.end(),
+            [id](const auto& row) { return row.type == id; });
+        if (existing == result.land.garrisons.end()) result.land.garrisons.push_back({id, data});
+    };
+    for (const auto& object : tables.land_static_objects) add_garrison(type_id(object.id), object.garrison);
+    for (const auto& company : tables.land_companies) {
+        add_garrison(type_id(company.id), company.team_garrison);
+        if (!company.team_garrison.entrant && !company.team_garrison.host && !company.member_garrisons.empty())
+            add_garrison(type_id(company.id), company.member_garrisons.front());
+        for (std::size_t i = 0; i < company.members.size() && i < company.member_garrisons.size(); ++i)
+            add_garrison(type_id(company.members[i].type), company.member_garrisons[i]);
+    }
+    std::sort(result.land.garrisons.begin(), result.land.garrisons.end(),
+        [](const auto& a, const auto& b) { return a.type < b.type; });
     result.bounds = inputs.bounds;
     result.last_known_capacity = inputs.last_known_capacity;
     if (inputs.contacts.prediction_seconds < Fixed{} || inputs.contacts.minimum_prediction_distance < Fixed{}
@@ -258,6 +303,19 @@ inline constexpr sim::math::Fixed land_physical_limit = sim::math::Fixed::from_r
         if (!binding) { result.static_notes.push_back(binding.error().code + ": " + binding.error().message); continue; }
         result.land.static_objects.push_back(binding.value().type);
         result.static_objects.push_back(std::move(binding).value());
+    }
+    // LE-LOADER: a build pad that is not an obstacle (every stock faction pad: a 10 x 10 hard extent, collision class "Build Pad",
+    // no LAND_OBSTACLE) is still a session object, so its owner can build on it and it reveals its cell. Its occupation is
+    // an empty cell set: pad occupancy from the authored hard extent is LE-OCCUPY (named, not closed here).
+    for (const auto& object : tables.land_static_objects) {
+        if (object.land_obstacle || static_gates.contains(core::to_lower(object.id))) continue;
+        if (std::none_of(object.behaviors.begin(), object.behaviors.end(),
+                [](const std::string& behavior) { return core::iequals(behavior, "TACTICAL_BUILD_OBJECTS"); })) continue;
+        LandStaticBinding binding;
+        binding.type = type_id(object.id);
+        binding.fine_tune = false;
+        result.land.static_objects.push_back(binding.type);
+        result.static_objects.push_back(std::move(binding));
     }
     std::vector<std::string> collision_names;
     for (const auto& row : inputs.collision_class_order) {
@@ -383,6 +441,34 @@ inline constexpr sim::math::Fixed land_physical_limit = sim::math::Fixed::from_r
                 return fail(member.type, "Custom_Hard_XExtent/Custom_Hard_YExtent", "scaled hard footprint overflows");
             p.walk_transition = authored.walk_transition;
             p.collision_class = authored.collision_class;
+            // WLPA-90/91: a negative or unauthored fraction is the type default 0 (never stop to turn); one is the most. An
+            // unauthored or non-positive move-start angle is the game constant (stock gameconstants: 180 degrees, not read
+            // from the constants file yet); the authored angle is degrees.
+            p.min_speed_fraction_for_turn = std::clamp(authored.min_speed_fraction_for_turn.value_or(Fixed{}), Fixed{}, Fixed::from_raw(Fixed::scale));
+            const auto close_enough = authored.close_enough_angle && *authored.close_enough_angle > Fixed{}
+                ? *authored.close_enough_angle : Fixed::from_raw(180 * Fixed::scale);
+            if (!sim::math::try_divide(close_enough, Fixed::from_raw(360 * Fixed::scale), p.close_enough_angle))
+                return fail(member.type, "Close_Enough_Angle_For_Move_Start", "angle conversion overflows");
+            // LR13-17 (#6115): a Walk_Transition member holds the walk until its MOVESTART clip is almost finished: the clip
+            // has its stored frame count minus 2 frames to play, at its own frame rate times Max_Speed /
+            // Movement_Animation_Speed (a ratio of 1 when the animation speed is zero or absent). The wait is whole logical
+            // frames, rounded up and one frame short (the almost-finished test reads the rate multiplier in clip frames early, which is one frame of playback). A model
+            // without the clip has nothing to wait for.
+            if (authored.walk_transition && authored.start_clip_read) {
+                p.start_clock = true;
+                if (authored.start_clip_frames > 2) {
+                    Fixed playback = Fixed::from_integer(1).value(), clip_rate, clip_seconds;
+                    const auto animation_speed = authored.movement_animation_speed.value_or(Fixed{});
+                    if (animation_speed > Fixed{} && speed > Fixed{} && !sim::math::try_divide(speed, animation_speed, playback))
+                        return fail(member.type, "Movement_Animation_Speed", "animation playback ratio overflows");
+                    if (!sim::math::try_multiply(authored.start_clip_fps, playback, clip_rate) || clip_rate <= Fixed{}
+                        || !sim::math::try_divide(Fixed::from_integer(static_cast<std::int64_t>(authored.start_clip_frames) - 2).value(), clip_rate, clip_seconds))
+                        return fail(member.type, "Movement_Animation_Speed", "start clip duration overflows");
+                    const auto frames = std::min<std::int64_t>(
+                        (clip_seconds.raw() * static_cast<std::int64_t>(logical_frames_per_second) + Fixed::scale - 1) / Fixed::scale, std::int64_t{1} << 20);
+                    p.start_clip_ticks = static_cast<std::uint32_t>(std::max<std::int64_t>(frames - 1, 0));
+                }
+            }
             // Preserve the exact terrain name used for lookup by the session.
             const auto movement_bits = movement->bits;
             if (std::none_of(result.movement_masks.begin(), result.movement_masks.end(),
@@ -424,7 +510,7 @@ inline constexpr sim::math::Fixed land_physical_limit = sim::math::Fixed::from_r
     const auto number = [&](std::uint64_t value) { for (unsigned shift = 0; shift < 64; shift += 8) bytes.push_back(static_cast<std::uint8_t>(value >> shift)); };
     const auto fixed = [&](Fixed value) { number(static_cast<std::uint64_t>(value.raw())); };
     const auto text = [&](const std::string& value) { number(value.size()); bytes.insert(bytes.end(), value.begin(), value.end()); };
-    text("land-content-adapter-v6");
+    text("land-content-adapter-v8");
     number(result.static_objects.size());
     for (const auto& row : result.static_objects) {
         number(row.type); fixed(row.width); fixed(row.height); fixed(row.x_offset); fixed(row.y_offset);
@@ -447,9 +533,14 @@ inline constexpr sim::math::Fixed land_physical_limit = sim::math::Fixed::from_r
             if (member.formation_spacing) fixed(*member.formation_spacing);
             fixed(member.hard_x); fixed(member.hard_y);
             const auto& p = member.locomotion;
-            fixed(p.maximum_speed); fixed(p.acceleration); fixed(p.deceleration); fixed(p.turn_rate); fixed(p.radius); number(p.walk_transition); number(static_cast<std::uint8_t>(p.collision_class));
+            fixed(p.maximum_speed); fixed(p.acceleration); fixed(p.deceleration); fixed(p.turn_rate); fixed(p.radius); fixed(p.min_speed_fraction_for_turn); fixed(p.close_enough_angle); number(p.start_clock); number(p.start_clip_ticks); number(p.walk_transition); number(static_cast<std::uint8_t>(p.collision_class));
         }
     }
+    number(result.land.formation.authored);
+    fixed(result.land.formation.max_area); fixed(result.land.formation.vehicle_recruit); fixed(result.land.formation.infantry_recruit);
+    fixed(result.land.formation.between_spacing); fixed(result.land.formation.query_extension);
+    number(result.land.formation.speed_authored); fixed(result.land.formation.minimum_side_error);
+    fixed(result.land.formation.maximum_side_error);
     number(inputs.contacts.complexity_quota); number(inputs.contacts.reset_interval);
     fixed(inputs.contacts.prediction_seconds); fixed(inputs.contacts.minimum_prediction_distance); fixed(inputs.contacts.stopped_overlap);
     number(inputs.occupations.size());

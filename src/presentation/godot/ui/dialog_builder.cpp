@@ -96,6 +96,7 @@ BuiltDialog build_dialog(const data::Dialog& dialog, const model::ThemeModel& th
         gadget.variation = theme.variation(dialog, &control);
         const model::RcRect rc{control.rect.x, control.rect.y, control.rect.width, control.rect.height};
         gadget.rect = model::place_gadget(built.layout, rc);
+        const double authored_height = gadget.rect.height;
         if (gadget.kind == "combo") {
             // A combo's `.rc` height includes its drop-down list; closed, it is
             // as high as its text box texture.
@@ -140,6 +141,10 @@ BuiltDialog build_dialog(const data::Dialog& dialog, const model::ThemeModel& th
             // clips, as the retail control's does; the box never grows to its longest item) and its list
             // takes the retail list skin (#3167).
             auto* combo = memnew(EawrUiCombo);
+            // UI-COMBO-01: scrolling resources reserve a list rectangle. Project
+            // controls without WS_VSCROLL supply only their closed-box geometry.
+            if (has_style(control, "WS_VSCROLL"))
+                combo->set_list_height(static_cast<float>(std::max(0.0, authored_height - gadget.rect.height)));
             if (retail_combos) {
                 combo->set_fit_to_longest_item(false);
                 combo->set_clip_text(true);

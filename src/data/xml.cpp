@@ -448,7 +448,7 @@ core::Result<LoadResult> load_catalog(
             std::size_t definition_order = 0;
             core::load_profile::Scope merge_scope(core::load_profile::Phase::definition_merge);
             const core::load_profile::FileScope merge_timer(path, included_record.value().layer_id,
-                                                           &core::load_profile::FileCost::merge_ms);
+                                                           core::load_profile::FileField::merge);
             for (const auto definition : included.value().root.children()) {
                 if (definition.type() != pugi::node_element) continue;
                 auto category = registry.category;

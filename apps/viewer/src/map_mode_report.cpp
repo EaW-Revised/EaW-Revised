@@ -5,6 +5,7 @@
 #include "startup_trace.hpp"
 #include "gpu_memory_trace.hpp"
 #include "render_profile_viewport.hpp"
+#include "shader_activation_owner.hpp"
 
 namespace eawr::presentation::godot_backend {
 namespace map_mode_detail {
@@ -138,6 +139,8 @@ bool MapMode::State::write_report() const {
     output << "  \"perf_overlay\": " << perf_report_json() << ",\n";
     output << "  \"net_perf\": " << net_perf_json() << ",\n";
     write_report_scene(output);
+    write_shader_activation_report(output, shader_receipt.get());
+    write_shader_route_report(output, renderer.get());
     write_report_lighting(output);
     write_report_fog(output);
     write_report_population(output);

@@ -1,4 +1,5 @@
 #include "eawr/campaign/mp_lobby_catalog.hpp"
+#include "eawr/data/retail_values.hpp"
 
 #include <algorithm>
 #include <iterator>
@@ -118,6 +119,9 @@ std::vector<sim::galactic::MpLobbyCampaign> list_campaigns(const data::galactic:
         row.supports_custom_settings = campaign.supports_custom_settings.value_or(false);
         row.minimum_custom_tech = campaign.minimum_custom_tech;
         row.maximum_custom_tech = campaign.maximum_custom_tech;
+        // LSA-40: a signed atoi of seconds; a negative timeout reads as already elapsed, so as zero here.
+        if (const auto* timeout = data.constant("Battle_Pending_Timeout_Seconds"))
+            row.vote_timeout_seconds = std::max<std::int64_t>(0, data::retail::integer_constant(timeout->text));
         sim::galactic::PlayerId next{};
         for (const auto& faction : data.factions) {
             const bool neutral = faction.is_neutral.value_or(false);

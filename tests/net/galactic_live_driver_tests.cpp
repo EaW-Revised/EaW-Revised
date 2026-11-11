@@ -305,17 +305,35 @@ void agreed_commands_and_digests(const std::array<std::size_t, 2> workers) {
     pair.order(1, galactic::DebugSetFleetOrbit{pair.setup.fleets[1].id, pair.setup.planets[11 % planets].id});
     expect(pair.run_to(40), label + "ticks keep running while the galaxy is paused");
     expect(pair.pause(0) > 0 && pair.pause(1) > 0, label + "the agreed pause reached both peers");
-    for (const auto& match : pair.matches)
+    std::array<std::uint64_t, 2> clock_events{}, pause_revisions{};
+    for (std::size_t peer = 0; peer < 2; ++peer) {
+        const auto& match = pair.matches[peer];
         expect(match->view().clock_actor == pair.humans[0] && match->view().clock_action == "paused" && match->view().clock_paused,
             label + "the HUD pause receipt names the actual human issuer");
+        pause_revisions[peer] = match->pause_notice_revision();
+        expect(pause_revisions[peer] > 0, label + "the agreed pause publishes the child notice revision");
+        clock_events[peer] = match->clock_events();
+        expect(clock_events[peer] >= 1, label + "the lock-free clock event count moved with the agreed pause (#5355)");
+    }
     const auto frozen = pair.galaxy_frame(0);
     expect(pair.run_to(50), label + "the paused session still ticks");
     expect(pair.galaxy_frame(0) == frozen && pair.galaxy_frame(1) == frozen, label + "the paused galaxy frame does not move");
+    for (std::size_t peer = 0; peer < 2; ++peer)
+        expect(pair.matches[peer]->pause_notice_revision() == pause_revisions[peer],
+            label + "ordinary paused ticks do not invalidate the notice cache");
     pair.order(0, galactic::ResumeGalaxy{});
     pair.order(1, galactic::SetSpeed{false, double_speed});
     expect(pair.run_to(80), label + "resume and speed change are agreed commands");
     expect(pair.pause(0) == 0 && pair.pause(1) == 0, label + "the agreed resume reached both peers");
-    for (const auto& match : pair.matches) expect(!match->view().clock_paused, label + "HUD observes the agreed resume");
+    for (std::size_t peer = 0; peer < 2; ++peer) {
+        expect(!pair.matches[peer]->view().clock_paused, label + "HUD observes the agreed resume");
+        expect(pair.matches[peer]->pause_notice_revision() > pause_revisions[peer],
+            label + "the agreed resume invalidates the paused notice");
+    }
+    for (std::size_t peer = 0; peer < 2; ++peer)
+        expect(pair.matches[peer]->clock_events() >= clock_events[peer] + 2
+            && pair.matches[peer]->view().clock_action == "set the galactic speed to 2x",
+            label + "the resume and the speed change each move the clock event count (#5355)");
     expect(pair.speed(0) == double_speed && pair.speed(1) == double_speed, label + "the agreed speed change reached both peers");
     expect(pair.galaxy_frame(0) > frozen && pair.galaxy_frame(0) == pair.galaxy_frame(1), label + "the galaxy runs again, equally");
     for (auto& live : pair.lives) live->stop();
@@ -1362,6 +1380,10 @@ void child_battle_uses_the_agreed_frontier(const std::array<std::size_t, 2> work
     feeds[1]->set_paused(true);
     expect(pair.run_to(35), label + "battle pause is agreed input");
     expect(feeds[0]->paused() && feeds[1]->paused(), label + "both feeds read the agreed pause");
+    const std::array child_pause_revisions{pair.matches[0]->pause_notice_revision(), pair.matches[1]->pause_notice_revision()};
+    for (const auto& match : pair.matches)
+        expect(match->view().clock_paused && match->pause_notice_revision() > 0,
+            label + "the agreed child pause publishes its notice state");
     const auto paused_tick = pair.lives[0]->frame().battle->completed_tick();
     const auto paused_hash_count = feeds[0]->tick_hashes().size();
     // Deliberately send an order while paused: it must survive until the child resumes.
@@ -1392,6 +1414,9 @@ void child_battle_uses_the_agreed_frontier(const std::array<std::size_t, 2> work
     expect(pair.run_to(60), label + "agreed resume releases the child");
     expect(!feeds[0]->paused() && !feeds[1]->paused()
         && pair.lives[0]->frame().battle->completed_tick() > paused_tick, label + "child resumes on both peers");
+    for (std::size_t peer = 0; peer < 2; ++peer)
+        expect(!pair.matches[peer]->view().clock_paused && pair.matches[peer]->pause_notice_revision() > child_pause_revisions[peer],
+            label + "the agreed child resume invalidates its notice cache");
     expect(acknowledged->load() == 1 && execution_tick->load() >= paused_tick,
         label + "the authenticated producer receives its actual shared execution tick");
     // This seat has issued only one valid Stop; the malformed producer key must not add an acknowledgement.
@@ -1554,8 +1579,10 @@ void child_and_strategic_clock_share_one_limit(const std::array<std::size_t, 2> 
         at += 40;
         expect(pair.run_to(at) && !feeds[0]->paused() && !feeds[1]->paused(), "another human may always resume");
     }
-    // The strategic speed above is the first of the six speed changes; five tactical rate changes spend the rest.
-    const std::array<std::uint32_t, 5> rates{60, 20, 60, 20, 60};
+    // The pause rounds above outlast one speed window, so the strategic slot has expired; the tactical rate changes
+    // spend a fresh per-seat budget (#5355: 2 per 10 session seconds), ending at 60 ticks a second.
+    static_assert(net::ClockThrottle::speed_changes_per_window == 2 && net::ClockThrottle::window_ticks < 320);
+    const std::array<std::uint32_t, 2> rates{20, 60};
     for (const auto rate : rates) {
         feeds[0]->set_target_rate(rate);
         at += 10;
@@ -1563,13 +1590,13 @@ void child_and_strategic_clock_share_one_limit(const std::array<std::size_t, 2> 
     }
     for (net::PeerIndex peer = 0; peer < 2; ++peer)
         expect(pair.lives[peer]->frame().latest->clock().tactical_speed == double_speed,
-            "all six speed changes applied on both peers");
-    feeds[0]->set_target_rate(20); // Seventh speed change from this seat inside 45 session seconds.
+            "every speed change within the budget applied on both peers");
+    feeds[0]->set_target_rate(20); // One more speed change from this seat inside the same window.
     at += 10;
     expect(pair.run_to(at), "rate refusal keeps the shared session running");
     for (net::PeerIndex peer = 0; peer < 2; ++peer) {
         const auto frame = pair.lives[peer]->frame();
-        expect(frame.latest->clock().tactical_speed == double_speed, "the seventh speed change cannot change tactical speed on either peer");
+        expect(frame.latest->clock().tactical_speed == double_speed, "the change past the budget cannot change tactical speed on either peer");
         const auto errors = pair.lives[peer]->rejected_orders();
         expect(std::count_if(errors.begin(), errors.end(), [](const auto& error) {
             return error.message.find("Shared clock limit: speed changes") != std::string::npos

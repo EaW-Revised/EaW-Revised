@@ -1543,5 +1543,93 @@ class LanLobbyGraphical(unittest.TestCase):
         self.assertTrue(any("chat_re" in sound.lower() for sound in join["sounds"]), join["sounds"])
 
 
+
+@unittest.skipUnless(RUNTIME and GAME_ROOT, 'requires the viewer GPU lane and installed game data')
+class SocketLifecycleProbe(unittest.TestCase):
+    def setUp(self):
+        self.directory_owner = tempfile.TemporaryDirectory(prefix='eawr-lan-lobby-')
+        self.directory = pathlib.Path(self.directory_owner.name)
+        self.cache = pathlib.Path(tempfile.mkdtemp(prefix='eawr-font-cache-'))
+        self.pictures = self.directory
+        self.addCleanup(self.directory_owner.cleanup)
+        self.addCleanup(shutil.rmtree, self.cache, ignore_errors=True)
+        extracted = subprocess.run([sys.executable, str(TOOL), '--game-root', GAME_ROOT, '--out', str(self.cache),
+                                    '--allow-unknown-build', '--json'], capture_output=True, text=True, timeout=120)
+        self.assertEqual(extracted.returncode, 0, extracted.stderr)
+
+    def test_real_lan_lifecycle(self):
+        import time
+        ports = free_udp_ports(2)
+        loopback = socket.gethostbyname('localhost')
+        with socket.socket() as probe:
+            probe.bind((loopback, 0))
+            game_port = probe.getsockname()[1]
+        scripts = [
+            ['host:Socket probe', 'wait:room_player:Bob@180', 'shot:host_active', 'wait:chat:ready@600', 'sleep:300',
+             'chat:leaving', 'sleep:90', 'leave', 'source:online', 'shot:host_after', 'sleep:300',
+             'source:lan', 'shot:host_reopen', 'sleep:300', 'cancel'],
+            ['wait:game:Socket probe@180', f'direct:{loopback}:{game_port}', 'wait:room_player:Bob@180',
+             'shot:join_active', 'chat:ready', 'wait:chat:leaving@600', 'leave', 'source:online', 'shot:join_after', 'sleep:300',
+             'source:lan', 'shot:join_reopen', 'sleep:300', 'cancel'],
+        ]
+        processes, streams = [], []
+        samples = {}
+        try:
+            for index, (player, steps) in enumerate(zip(('Alice', 'Bob'), scripts)):
+                name = ('hostprobe', 'joinprobe')[index]
+                actions = [arg for step in steps for arg in ('--eawr-lan-do', step)]
+                args = command(self.cache, name, self.pictures, self.pictures / (name + '.png'),
+                               '--eawr-lan-name', player, '--eawr-lan-broadcast-port', str(ports[index]),
+                               '--eawr-lan-broadcast-extra', str(ports[1-index]),
+                               '--eawr-lan-game-port', str(game_port if index == 0 else 0), *actions)
+                stream = (self.pictures / (name + '.log')).open('w', encoding='utf-8')
+                streams.append(stream)
+                processes.append(subprocess.Popen(args, stdout=stream, stderr=subprocess.STDOUT, text=True))
+            deadline = time.monotonic() + 720
+            wanted = ('host_active', 'join_active', 'host_after', 'join_after', 'host_reopen', 'join_reopen')
+            while len(samples) < len(wanted) and time.monotonic() < deadline:
+                for name in wanted:
+                    if name in samples or not (self.pictures / (name + '.png')).is_file():
+                        continue
+                    who = 'hostprobe.json' if name.startswith('host') else 'joinprobe.json'
+                    ps = r'''$p = @(Get-CimInstance Win32_Process | Where-Object { $_.Name -like 'Godot*.exe' -and $_.CommandLine -and $_.CommandLine.Contains($args[0]) });
+$ids = @($p | ForEach-Object { [int]$_.ProcessId });
+[ordered]@{ processes = @($p | Select-Object ProcessId,ExecutablePath,CommandLine); udp = @(Get-NetUDPEndpoint | Where-Object { $_.OwningProcess -in $ids } | Select-Object OwningProcess,LocalAddress,LocalPort); tcp = @(Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | Where-Object { $_.OwningProcess -in $ids } | Select-Object OwningProcess,LocalAddress,LocalPort) } | ConvertTo-Json -Depth 6 -Compress'''
+                    ps = ps.replace('$args[0]', "'" + who + "'")
+                    query = ['powershell.exe', '-NoProfile', '-Command', ps]
+                    result = subprocess.run(query, capture_output=True, text=True, timeout=30, check=True)
+                    data = json.loads(result.stdout)
+                    self.assertTrue(data['processes'], (name, data))
+                    samples[name] = data
+                    (self.pictures / 'socket-lifecycle.json').write_text(json.dumps({'udp_ports': ports, 'game_port': game_port, 'samples': samples}, indent=2), encoding='utf-8')
+                if any(p.poll() is not None and any(name.startswith(prefix) and name not in samples for name in wanted)
+                       for p, prefix in zip(processes, ('host', 'join'))):
+                    break
+                time.sleep(.2)
+            self.assertEqual(set(samples), set(wanted), samples)
+            for p in processes:
+                p.wait(timeout=600)
+            for stream in streams:
+                stream.flush()
+            for name, p in zip(('hostprobe', 'joinprobe'), processes):
+                self.assertEqual(p.returncode, 0, (self.pictures / (name + '.log')).read_text(encoding='utf-8')[-5000:])
+                load(self, self.pictures, name, 'probe')
+            self.assertTrue(any(int(x['LocalPort']) == game_port for x in samples['host_active']['tcp']), samples)
+            for i, name in enumerate(('host_active', 'join_active')):
+                self.assertTrue(any(int(x['LocalPort']) == ports[i] for x in samples[name]['udp']), samples)
+            for i, name in enumerate(('host_after', 'join_after')):
+                self.assertFalse(any(int(x['LocalPort']) == ports[i] for x in samples[name]['udp']), samples)
+                self.assertFalse(samples[name]['tcp'], samples)
+            for i, name in enumerate(('host_reopen', 'join_reopen')):
+                self.assertTrue(any(int(x['LocalPort']) == ports[i] for x in samples[name]['udp']), samples)
+        finally:
+            for p in processes:
+                if p.poll() is None:
+                    p.kill()
+                    p.wait(timeout=30)
+            for stream in streams:
+                stream.close()
+
+
 if __name__ == "__main__":
     unittest.main()

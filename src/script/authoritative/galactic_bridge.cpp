@@ -122,6 +122,7 @@ struct ScriptedGalacticSession::Impl {
     std::vector<ScriptCommand> pending;
     std::optional<core::Diagnostic> failure;
     std::function<void(ServiceReport&)> global_value_committer;
+    std::function<core::Result<void>(ServiceReport&)> story_command_committer;
     bool stepped{};
 
     Impl(gc::GalacticSession world_in, ScriptScheduler ai_in, ScriptScheduler story_in)
@@ -189,7 +190,8 @@ struct ScriptedGalacticSession::Impl {
 
     core::Result<ServiceReport> service_once(const sim::PartitionExecutor& executor, const gc::GalacticTick& tick,
         ScriptScheduler& scripts, const std::shared_ptr<GalacticScriptEngine>& engine, const bool is_story) {
-        if (auto clock = scripts.set_galactic_frame(world.clock().galactic_frame); !clock)
+        const auto frame = world.clock().galactic_frame + (engine && !is_story ? engine->frame_offset() : 0);
+        if (auto clock = scripts.set_galactic_frame(frame); !clock)
             return core::Result<ServiceReport>::failure(clock.error());
         ServiceOptions options;
         if (engine) {
@@ -200,10 +202,18 @@ struct ScriptedGalacticSession::Impl {
         // The mode clock is the just-stepped galactic frame, while scheduler
         // ticks remain service/RNG/event keys. Story therefore sees frozen
         // time at successive paused command barriers (ADR-013, WST-12).
-        options.time_tick = world.clock().galactic_frame;
+        options.time_tick = frame;
         if (is_story) {
             const auto ids = scripts.instances();
-            const auto now = time_at_tick(world.clock().galactic_frame, scripts.tick_duration());
+            // WST-54: the due test reads the frame synchronizer's elapsed seconds (debug build: its per-frame advance has no
+            // pause test), not the mode clock. So a paused galaxy keeps pumping sub-plot scripts' main threads while their
+            // threads sleeping on mode time (GetCurrentTime, below) stand still: the gap the pause dance of the filter scripts
+            // works around. Not recorded in a paused retail game yet (GFSC-14). One service per step; the scheduler's own
+            // tick is the frame. Differences from the mode clock, all deterministic and saved: in a campaign the frame timer
+            // advances after the scripts have served the step, so every LastService stamp is one tick larger than before this
+            // change (the pump schedule is the same while the galaxy runs, the story script state hash is not); and every
+            // paused step that still serves the story widens the gap, so the pump phase differs after a game's first pause.
+            const auto now = time_at_tick(scripts.completed_tick() + 1, scripts.tick_duration());
             for (const auto id : ids) {
                 auto rate = scripts.read_global(id, "ServiceRate");
                 auto last = scripts.read_global(id, "LastService");
@@ -240,6 +250,10 @@ struct ScriptedGalacticSession::Impl {
                 return core::Result<ServiceReport>::failure(taken.error());
         }
         if (is_story && global_value_committer) global_value_committer(report.value());
+        if (is_story && story_command_committer) {
+            if (auto committed = story_command_committer(report.value()); !committed)
+                return core::Result<ServiceReport>::failure(committed.error());
+        }
         if (is_story) {
             for (const auto id : scripts.instances()) {
                 auto slots = scripts.thread_slots(id);
@@ -255,12 +269,14 @@ struct ScriptedGalacticSession::Impl {
     }
 
     core::Result<std::string> script_hash(bool sync_ai = false, const sim::PartitionExecutor& executor = sim::InlineExecutor{}) {
-        auto a = sync_ai ? ai.sync_hash(executor, ai_engine && ai_engine->verifies_sync_hash()) : ai.state_hash();
+        const auto published = sync_ai && ai_engine ? ai_engine->published_ai_sync_hash() : std::nullopt;
+        auto a = published ? core::Result<std::string>::success(*published)
+            : sync_ai ? ai.sync_hash(executor, ai_engine && ai_engine->verifies_sync_hash()) : ai.state_hash();
         auto s = story.state_hash();
         if (!a) return core::Result<std::string>::failure(a.error());
         if (!s) return core::Result<std::string>::failure(s.error());
         std::string bytes;
-        field(bytes, sync_ai ? "eawr-script-galactic-sync-state-v1" : "eawr-script-galactic-state-v1");
+        field(bytes, sync_ai ? "eawr-script-galactic-sync-state-v2" : "eawr-script-galactic-state-v1");
         field(bytes, "ai"); field(bytes, a.value());
         field(bytes, "story"); field(bytes, s.value());
         field(bytes, std::to_string(next_sequence.size()));
@@ -332,9 +348,12 @@ core::Result<ScriptedGalacticSession> ScriptedGalacticSession::restore_preservin
     // every such held state through `timer_held`, not only the pending-conflict pause.
     const bool paused_service_lead = timer_held && ai.galactic_frame() == saved.galactic_frame && ai.completed_tick() > saved.galactic_frame &&
         ai.completed_tick() <= saved.completed_tick;
-    const bool ai_tick_ok = ai.completed_tick() == saved.galactic_frame || paused_service_lead;
+    const bool ai_tick_ok = (ai.completed_tick() >= saved.galactic_frame && ai.completed_tick() - saved.galactic_frame < galactic_ai_batch_window)
+        || paused_service_lead;
     const bool story_tick_ok = story.completed_tick() <= saved.completed_tick;
-    const bool ai_frame_ok = served_frame(ai.galactic_frame());
+    // The AI serves whole batches on a virtual frame that leads the galaxy's (or, while the galaxy is paused, stays ahead of it).
+    const bool ai_frame_ok = served_frame(ai.galactic_frame())
+        || (ai.galactic_frame() + tail_lag >= saved.galactic_frame && ai.galactic_frame() - saved.galactic_frame < galactic_ai_batch_window);
     const bool story_frame_ok = served_frame(story.galactic_frame());
     const bool instances_ok = unique_instances(ai, story);
     if (!ai_tick_ok || !story_tick_ok || !ai_frame_ok || !story_frame_ok || !instances_ok) {
@@ -457,6 +476,10 @@ core::Result<ScriptedGalacticTick> ScriptedGalacticSession::step(
 
 void ScriptedGalacticSession::set_global_value_committer(std::function<void(ServiceReport&)> committer) {
     impl_->global_value_committer = std::move(committer);
+}
+
+void ScriptedGalacticSession::set_story_command_committer(std::function<core::Result<void>(ServiceReport&)> committer) {
+    impl_->story_command_committer = std::move(committer);
 }
 
 void ScriptedGalacticSession::set_state_hasher(std::shared_ptr<sim::StateHasher> hasher) noexcept {

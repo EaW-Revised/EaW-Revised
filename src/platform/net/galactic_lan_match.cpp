@@ -8,6 +8,7 @@
 #include "galactic_acceptance.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <optional>
 #include <span>
 #include <utility>
@@ -42,6 +43,25 @@ std::optional<net::RecoveryDigest> recovery_digest(std::string_view text) {
     }
     return digest;
 }
+
+// Publish before the view lock is released, including early returns. Only pause notice inputs invalidate the cache;
+// ordinary ticks, waiting notices and speed events do not. A reader seeing the revision can then take its snapshot.
+class PauseNoticePublication final {
+public:
+    PauseNoticePublication(const GalacticLanView& view, std::atomic<std::uint64_t>& revision) noexcept
+        : view_(view), revision_(revision), paused_(view.clock_paused && galactic_lan_gameplay_enabled(view)),
+          actor_(paused_ ? view.clock_actor : sim::SeatId{}) {}
+    ~PauseNoticePublication() {
+        const bool paused = view_.clock_paused && galactic_lan_gameplay_enabled(view_);
+        const auto actor = paused ? view_.clock_actor : sim::SeatId{};
+        if (paused_ != paused || actor_ != actor) revision_.fetch_add(1, std::memory_order_release);
+    }
+private:
+    const GalacticLanView& view_;
+    std::atomic<std::uint64_t>& revision_;
+    bool paused_;
+    sim::SeatId actor_;
+};
 
 // The core advances only while the cadence allows a tick, but it keeps servicing the transport (as the tactical
 // LanMatch gate does): a held presentation never stops receive, seal or send.
@@ -118,6 +138,8 @@ public:
         const std::lock_guard lock(mutex_);
         return view_;
     }
+    [[nodiscard]] std::uint64_t clock_events() const noexcept { return clock_events_.load(std::memory_order_acquire); }
+    [[nodiscard]] std::uint64_t pause_notice_revision() const noexcept { return pause_notice_revision_.load(std::memory_order_acquire); }
 
     Tick drive(platform::LiveGameStepContext& context, std::span<const platform::LiveGameOrder> orders, std::uint64_t now) {
         if (session_ended_) {
@@ -281,6 +303,7 @@ public:
         }
         if (tick && tick->galaxy) {
             const std::lock_guard lock(mutex_);
+            const PauseNoticePublication publish_pause(view_, pause_notice_revision_);
             const auto& game = adapter_->game();
             view_.clock_paused = game.battle() ? game.child_paused()
                 : game.galaxy().clock().pause_depth > (game.pending_conflict() || game.battle_summary_hold() ? 1U : 0U);
@@ -298,12 +321,14 @@ public:
                 std::string action;
                 if (event.kind == Kind::galaxy_paused) action = "paused";
                 else if (event.kind == Kind::galaxy_resumed) action = "resumed";
-                else if (event.kind == Kind::speed_changed) action = "changed speed";
+                else if (event.kind == Kind::speed_changed)
+                    action = speed_action_text(event.subject != 0U, static_cast<std::int64_t>(event.value));
                 const bool human = std::any_of(options_.seats.begin(), options_.seats.end(),
                     [&](const auto& seat) { return seat.may_submit && seat.seat == event.producer; });
                 if (!action.empty() && human) {
                     view_.clock_actor = event.producer; view_.clock_action = std::move(action);
                     view_.clock_change_tick = tick->completed_tick;
+                    clock_events_.fetch_add(1, std::memory_order_release); // under mutex_: a reader seeing it reads this view
                 }
             }
         }
@@ -497,6 +522,7 @@ private:
         });
         {
             const std::lock_guard lock(mutex_);
+            const PauseNoticePublication publish_pause(view_, pause_notice_revision_);
             view_.phase = GalacticLanPhase::running; view_.reason = GalacticLanReason::none; view_.diagnostic_code.clear(); view_.message.clear();
             view_.completed_tick = package.frontier.completed_tick; view_.recovery_refusal.clear(); view_.recovery_anchor = package.checkpoint;
             view_.departed.clear();
@@ -596,6 +622,7 @@ private:
     Tick end_with_failure(core::Diagnostic error) {
         failed_ = error;
         const std::lock_guard lock(mutex_);
+        const PauseNoticePublication publish_pause(view_, pause_notice_revision_);
         view_.phase = GalacticLanPhase::ended;
         view_.diagnostic_code = error.code;
         view_.message = error.message;
@@ -614,6 +641,7 @@ private:
 
     void refresh(const net::PumpResult& pumped, bool due, std::uint64_t now) {
         const std::lock_guard lock(mutex_);
+        const PauseNoticePublication publish_pause(view_, pause_notice_revision_);
         view_.completed_tick = adapter_->completed_tick();
         view_.recovery_refusal = recovery_refusal_;
         view_.recovery_anchor = recovery_log_ && recovery_log_->frontier().epoch && !recovery_split_
@@ -711,6 +739,8 @@ private:
     std::optional<platform::AgreedGameSave> agreed_save_;
     mutable std::mutex mutex_;
     GalacticLanView view_;
+    std::atomic<std::uint64_t> pause_notice_revision_{};
+    std::atomic<std::uint64_t> clock_events_{}; // #5355: see GalacticLanMatch::clock_events()
     std::shared_ptr<const galactic::GalacticSnapshot> clock_snapshot_;
     std::optional<core::Diagnostic> failed_;
     bool session_ended_{};
@@ -772,6 +802,8 @@ std::future<net::GalacticRecoveryRefusal> GalacticLanMatch::publish_recovery(net
     return state_->publish_recovery(std::move(package), std::move(candidate), std::move(proofs), std::move(rejoin));
 }
 GalacticLanView GalacticLanMatch::view() const { return state_->view(); }
+std::uint64_t GalacticLanMatch::clock_events() const noexcept { return state_->clock_events(); }
+std::uint64_t GalacticLanMatch::pause_notice_revision() const noexcept { return state_->pause_notice_revision(); }
 sim::SeatId GalacticLanMatch::local_seat() const { return state_->local_seat(); }
 void GalacticLanMatch::configure_recovery_restore(net::GalacticRecoveryWorker::Restore restore) {
     state_->configure_recovery_restore(std::move(restore));

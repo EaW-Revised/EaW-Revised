@@ -6,6 +6,7 @@
 #include "eawr/platform/campaign_tactical_view.hpp"
 #include "eawr/platform/campaign_end_view.hpp"
 #include "eawr/sim/galactic/victory.hpp"
+#include "eawr/core/prepared_content.hpp"
 
 #include <functional>
 
@@ -23,6 +24,7 @@ struct PreparedCampaignBattle;
 // Engine-owned configuration, deliberately separate from the presentation-safe
 // live facade. Runs before its simulation thread; captured services outlive stop().
 struct CampaignServiceConfiguration {
+    core::PreparedContentIdentity provider_identity{}; // Zero digest outside new MP preparation; layer names are diagnostic only.
     // WGP-97/105/111: named owning scoring and authored faction/movie provider.
     // Called once per admitted local player, before shutdown. No tactical scores
     // or guessed faction movie names substitute for an absent provider.

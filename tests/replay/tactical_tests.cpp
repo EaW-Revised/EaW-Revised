@@ -1058,12 +1058,15 @@ void test_gripper_metadata_is_not_canonical() {
         eawr::sim::math::Fixed::from_raw(100), eawr::sim::math::Fixed::from_raw(200),
         eawr::sim::math::Fixed::from_raw(300)};
     instance.squadron_in_idle_grid = true;
+    instance.presentation_attack_target = 42;
     instance.squadron_idle_anchor = eawr::sim::math::Vec3{
         eawr::sim::math::Fixed::from_raw(400), eawr::sim::math::Fixed::from_raw(500),
         eawr::sim::math::Fixed::from_raw(600)};
     const tactical::TacticalSnapshot presented(0, {{1, 1}}, {instance}, {});
     expect(plain.canonical_bytes() == presented.canonical_bytes() && plain.sha256() == presented.sha256(),
         "WSU-34: icon velocity and idle-grid metadata do not change canonical bytes or hashes");
+    expect(presented.instances().front().presentation_attack_target == 42,
+        "BCAM-05: attack target is available to presentation without changing the hash");
 }
 
 // An empty session steps cheaply, so this walks the real tick limit.
@@ -1332,8 +1335,24 @@ void test_controller_split_and_gates() {
             {18, 100}, {19, 100}, {20, 0}, {99, 9}};
         return rules;
     };
+    // The rule from #5374, restated here independently of the code under test: equal-population roots are
+    // ordered by a stateless SplitMix64 rank of (setup seed, entity id), then by entity id. It must not use the
+    // battle RNG, so it is a pure function of the seed and the id.
+    const auto controller_rank = [](const std::uint64_t seed, const std::uint64_t id) {
+        auto value = (seed ^ id ^ 0x636f6e74726f6c73ULL) + 0x9e3779b97f4a7c15ULL;
+        value = (value ^ (value >> 30U)) * 0xbf58476d1ce4e5b9ULL;
+        value = (value ^ (value >> 27U)) * 0x94d049bb133111ebULL;
+        return value ^ (value >> 31U);
+    };
+    // Root population in this fixture: type 10 + id, except unit 6 (purchase identity 99, population 9).
+    const auto root_population = [&](const std::uint64_t base_id) -> std::uint32_t {
+        const std::array<std::uint32_t, 8> population{0, 8, 8, 2, 0, 0, 9, 3}; // index = base id, 1..7
+        return population[base_id];
+    };
+    for (const auto seed : {std::uint64_t{0}, std::uint64_t{0x5eed}, std::uint64_t{12345}})
     for (const auto humans : {2U, 3U, 4U}) {
         tactical::TacticalSetup setup;
+        setup.seed = seed;
         setup.players = {{1, 1, 1, 1}, {2, 2, 2, 1}, {3, 3, 3, 0}};
         setup.first_free_entity_id = 50;
         setup.campaign.emplace();
@@ -1354,13 +1373,21 @@ void test_controller_split_and_gates() {
         auto rules = population_rules(); rules.players = setup.campaign->players;
         const auto initial = setup;
         expect(static_cast<bool>(tactical::split_initial_controllers(setup, rules)), "initial split succeeds for 2/3/4 humans on each side");
-        const std::array<std::uint64_t, 7> rank{6, 1, 2, 7, 3, 4, 5};
         for (const auto player : {1U, 2U}) {
+            // Expected deal order from the rule: population descending, then seeded rank, then entity id.
+            std::array<std::uint64_t, 7> rank{1, 2, 3, 4, 5, 6, 7};
+            std::sort(rank.begin(), rank.end(), [&](const std::uint64_t a, const std::uint64_t b) {
+                const auto ida = a + (player - 1) * 20, idb = b + (player - 1) * 20;
+                if (root_population(a) != root_population(b)) return root_population(a) > root_population(b);
+                const auto ra = controller_rank(seed, ida), rb = controller_rank(seed, idb);
+                return ra != rb ? ra < rb : ida < idb;
+            });
+            expect(rank[0] == 6 && rank[3] == 7 && rank[4] == 3, "the population tiers themselves are as authored");
             for (std::size_t i = 0; i < rank.size(); ++i) {
                 const auto id = rank[i] + (player - 1) * 20;
                 const auto unit = std::find_if(setup.units.begin(), setup.units.end(), [id](const auto& row) { return row.entity_id == id; });
                 expect(unit->controller_seat.value == (player - 1) * humans + 1 + i % humans,
-                    "population descending, stable-ID ties and zero-population tail are dealt round-robin");
+                    "population descending, seeded-rank ties and zero-population tail are dealt round-robin");
             }
             const auto offset = (player - 1) * 10;
             expect(setup.units[offset + 6].controller_seat == setup.units[offset + 7].controller_seat
@@ -1385,6 +1412,17 @@ void test_controller_split_and_gates() {
     setup.units = {{1, 11, 1}, {2, 11, 1}, {3, 11, 2}, {4, 12, 1}};
     setup.first_free_entity_id = 5; setup.campaign.emplace();
     for (const auto player : {1U, 2U}) { tactical::EconomyPlayer account; account.player = player; account.credit_cap = eawr::sim::math::Fixed{}; setup.campaign->players.push_back(account); }
+    {
+        auto with_market = setup;
+        with_market.campaign->market_abilities = tactical::MarketAbilityPolicy{{{10, {"Cloak", "Other"}}, {20, {"Salvo"}}},
+            {{1, {10}}, {2, {20}}}};
+        const auto encoded = tactical::write_replay({with_market, 0, {}});
+        expect(static_cast<bool>(encoded), "campaign market policy encodes");
+        if (encoded) {
+            const auto decoded = tactical::parse_replay(encoded.value());
+            expect(decoded && decoded.value().setup == with_market, "campaign market policy survives replay round-trip");
+        }
+    }
     setup.controllers = tactical::BattleControllerPolicy{
         {{{1}, 1, eawr::sim::SeatKind::human, true}, {{2}, 1, eawr::sim::SeatKind::human, true},
             {{3}, 2, eawr::sim::SeatKind::ai, true}},

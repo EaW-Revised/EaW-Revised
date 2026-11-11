@@ -17,6 +17,10 @@ struct IncomeStream final {
     std::optional<Fixed> interval_seconds; // Base_Interval_In_Secs
     bool split_with_allies{};              // Split_Income_With_Allies
     bool full_amount_to_everyone{};        // Full_Amount_To_Everyone
+    bool initially_enabled{true};
+    std::string activation_style{}; // omitted means Combat_Automatic (PU-08)
+    bool split_favors_owner{};
+    Fixed owner_income_percentage{};
     bool operator==(const IncomeStream&) const = default;
 };
 
@@ -30,6 +34,7 @@ struct IncomeBonus final {
     std::uint32_t stacking_category{};
     bool all_allied_sources{};
     bool reverse{};
+    bool initially_enabled{true};
     bool operator==(const IncomeBonus&) const = default;
 };
 
@@ -42,6 +47,11 @@ struct BuildGroup final {
 
 // What a type builds and costs in a skirmish (#530, PU-10 to PU-21, PU-31).
 struct Production final {
+    struct RetreatPrevention {
+        std::string name;
+        bool enabled{true};
+        bool operator==(const RetreatPrevention&) const = default;
+    };
     // WGCH-164: authored source-owned tactical salvage modifier.
     struct Bounty {
         Fixed percentage{};
@@ -76,6 +86,7 @@ struct Production final {
     std::vector<CombatBonus> combat_bonuses;
     std::vector<StealthDurationBonus> stealth_duration_bonuses;
     std::vector<BattlefieldBonus> battlefield_bonuses;
+    std::vector<RetreatPrevention> retreat_prevention; // WRP-01: automatic tactical bearer sources
     std::vector<AbilityEnable> ability_enables; // WRB-05
     bool operator==(const Production&) const = default;
 };

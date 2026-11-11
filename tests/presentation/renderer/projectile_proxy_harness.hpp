@@ -43,7 +43,7 @@ public:
     struct ProxyInstance { sim::EntityId entity{}, source{}; sim::AssetId asset{}; };
     struct Impl {
         struct Instance {
-            sim::AssetId asset_id{}; RID rid{}, skeleton{}; bool visible{}, applied_visible{true}, reserved_proxy{};
+            sim::AssetId asset_id{}; RID rid{}, skeleton{}; bool visible{}, applied_visible{true}, created_casts{true}, reserved_proxy{};
             std::uint64_t category_surfaces{};
             render_categories::Role category_role{render_categories::Role::unknown};
             bool category_casts{true};
@@ -74,6 +74,11 @@ public:
         }
         static void bind_instance_skin(RenderingServer& server, Instance& instance, const Resource& resource, const Pending*) {
             if (resource.skinned && resource.bone_count) instance.skeleton = server.skeleton_create();
+        }
+        void batch_forget(RenderingServer*, sim::EntityId, Instance&) {} // Proxies are never batched.
+        static void release_instance_skeleton(RenderingServer* server, Instance& instance) {
+            if (server && instance.skeleton.is_valid()) server->free_rid(instance.skeleton);
+            instance.skeleton = {};
         }
         InstanceMap::iterator remove_instance(RenderingServer*, InstanceMap::iterator);
         void forget_instance_pose(sim::EntityId entity);
@@ -145,6 +150,7 @@ int main() {
     assert(result.outcome == ProxyOutcome::reserved && server->live.size() == 68);
     assert(renderer.impl_->instances_.at(50).category_role == render_categories::Role::effect);
     assert(!renderer.impl_->instances_.at(50).category_casts);
+    assert(!renderer.impl_->instances_.at(50).created_casts && renderer.impl_->instances_.at(1).created_casts);
     // Residency eviction and asset unload both call the production removal
     // funnel directly, bypassing forget_instance_pose. Repeated regrowth must
     // not accumulate a stale charge or silently retain a charged entity.

@@ -26,6 +26,13 @@ void test_patched_engine() {
            "a patched engine proceeds even in automation");
 }
 
+void test_b1_engine() {
+    const auto signature = pres::check_engine_signature("eawr", "5b733a90f6516916dc19d530ecdd433fdd0bc4ee",
+                                                        "4.7.2.stable.eawr.5b733a90f");
+    expect(signature.checked && signature.patched, "the B1 fork build (re-spirv off, hash 5b733a90f...) is patched");
+    expect(signature.display == "eawr 5b733a90f", "B1 display = 'eawr <9-char hash>'");
+}
+
 void test_official_engine() {
     const auto signature = pres::check_engine_signature("official", "ed1daf0bf001b61586d9930840f2f1394092c079",
                                                         "4.7.2.stable.official.ed1daf0bf");
@@ -63,7 +70,7 @@ void test_launcher_unverified_flag() {
 void test_hash_line_names_found_and_expected() {
     const auto signature = pres::check_engine_signature("official", "ed1daf0bf", "4.7.2.stable.official.ed1daf0bf");
     const std::string line = pres::unpatched_engine_hash_line(signature, "ab1824f85bfd");
-    expect(line.starts_with("EAWR-ENGINE-UNPATCHED: UNPATCHED ENGINE: found sha256 ab1824f85bfd expected 453b4ad5"),
+    expect(line.starts_with("EAWR-ENGINE-UNPATCHED: UNPATCHED ENGINE: found sha256 ab1824f85bfd expected 96c03783"),
            "one line names the found and the pinned hash");
     expect(line.find("(tools/engine_pins.json); 4.7.2.stable.official.ed1daf0bf") != std::string::npos,
            "the version text follows the hashes");
@@ -109,6 +116,7 @@ void test_current_signature_is_process_wide() {
 
 int main() {
     test_patched_engine();
+    test_b1_engine();
     test_official_engine();
     test_launcher_unverified_flag();
     test_hash_line_names_found_and_expected();

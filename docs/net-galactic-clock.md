@@ -6,18 +6,19 @@ session tick; the HUD reads the published state. Waiting notices never pause or 
 
 `GalacticClockPolicy::limited` applies `ClockThrottle` ((legacy EAWR-4574), the one place the numbers live). Pause and resume
 spend no budget: resume is always allowed, and a pause is only debounced one session second after the same seat's
-previous pause or resume (double clicks). Strategic and tactical speed changes are limited to six per seat in a
-rolling window of 1,350 session ticks (45 seconds at 30 ticks per second). The refusal names the limit and the
+previous pause or resume (double clicks). Strategic and tactical speed changes are limited to two per seat in a
+rolling window of 300 session ticks (10 seconds at 30 ticks per second), an owner decision of 2026-11-07 (legacy EAWR-5355)
+and a deliberate deviation from the debug build's local throttle of two per 45 seconds. The refusal names the limit and the
 whole session seconds until the next speed change is allowed. Refused requests do not terminate the match.
 The window uses session ticks, including paused and child-battle ticks, rather than local wall time or
 strategic calendar time. `unrestricted` reverses this project policy without changing single-player rules.
 Tactical LAN battles use the same constants: the pause clock applies the debounce at execution, and the local
-speed request window (`MatchSpeedWindow`) allows six requests per 45 session seconds (1,350 session ticks) before they are sent.
+speed request window (`MatchSpeedWindow`) allows two requests per 10 session seconds (300 session ticks) before they are sent.
 The adapter includes policy and retained per-seat request ticks in its canonical state and agreed hash: peers
 must agree on the history that decides future admission, as well as on the campaign state.
 
-Strategic speed controls are separate from the authored fast-forward rule. The existing restriction on 4x
-fast-forward with multiple active humans remains in force. LAN pause submits one command and does not enqueue
+In a LAN match the clock bar's fast-forward button requests the shared 2x and back to 1x (legacy EAWR-5355); with
+multiple active humans the sim refuses any strategic factor above 2x, so 4x fast forward stays single-human. LAN pause submits one command and does not enqueue
 an additional local speed reset. The single-player nested pause and fast-forward behaviour is unchanged.
 
 The HUD displays the driver's waiting peers after its stall threshold and clears that line on progress. It

@@ -19,7 +19,7 @@
   V-03), craft target choice and fire ([space weapon fire](space-weapon-fire.md)), priority sets
   ([space targeting](space-targeting.md) R-09), damage ([space damage](space-damage.md)), capital
   ship movement ([space movement](space-movement.md)).
-- Out of scope: `DEPLOY_SQUAD` (a human player deploys by hand, FL-09), abilities (space ability implementation),
+- Out of scope: other abilities (space ability implementation),
   presentation (live battle presentation), land garrisons and the AI (tactical AI host). The player's squadron orders are FO-01 to
   FO-03 (battle world UI and squadron selection).
 
@@ -57,6 +57,11 @@
   a bay restored disabled at 0.1 health by a station upgrade can launch both authored and free
   pending companies. Its weapon remains disabled under the weapon hardpoint rules.
   A spawner with `DEFEND` active launches nothing (no M2 unit has it).
+- **FL-19** (owner confirmation, 2026-11-08; debug build E6364-01..04) Hangar ownership is independent
+  of the locomotor: a mobile object with `FIGHTER_LOCOMOTOR` and `SPAWN_SQUADRON` can use its authored
+  complement and a standing bay. The locomotor still controls its flight; its hangar follows the same
+  readiness and launch rules as other mobile spawners. A spawned object's own hangar is independent
+  of how that object entered the battle.
 - **FL-04** (research E75-03, E75-05) The entry is chosen from a random start in cyclic order: the
   first entry with fewer squadrons alive than its count and some left to launch. Launching
   increments its alive count and uses one of its left (an unlimited entry stays unlimited).
@@ -72,7 +77,26 @@
   its entry's alive count drops. If every entry up to and including that one was full before the
   drop, the next launch waits a full delay from that frame; otherwise the running delay stands.
 - **FL-09** (research E75-04) A human player's spawner with `DEPLOY_SQUAD` waits for the player.
-  No M2 spawner has the ability; the remake does not model it.
+  No pinned M2 spawner has the ability. Manual deployment follows FL-17 and FL-18.
+- **FL-17** (debug build, DS-R01 to DS-R04) In space, an eligible human-owned hangar
+  with `DEPLOY_SQUAD` retains a ready-to-deploy state instead of launching automatically.
+  Subsequent hangar services leave that state waiting. AI-owned hangars continue ordinary
+  automatic launches. The ability is non-modal and belongs to the object, rather than its team.
+  Its readiness requires the retained ready state, at least one surviving fighter-bay hardpoint,
+  the ordinary ability admission checks and a finished recharge. Nebula contact disables it.
+  Readiness uses the existing ability status, UI and Lua paths. The retained hangar state is
+  included in canonical state and checkpoints; ordinary hangars retain the same canonical bytes.
+- **FL-18** (debug build, DS-R03 to DS-R06) Each admitted activation selects one eligible
+  authored entry through FL-04 and launches its squadron or single ship through the existing
+  bay path (FL-06, WSL-16). Starting counts limit simultaneous live entries; reserves limit total
+  replacements, including unlimited authored reserves. There is no separate ability spawn type
+  or count. The activation returns the hangar to idle and starts its `Recharge_Seconds` countdown.
+  Its next hangar deadline is the activation frame plus trunc((`Recharge_Seconds` - 1) x logical
+  frames per second); a deadline before the current frame is equivalent to immediately due.
+  This manual deadline replaces `Spawned_Squadron_Delay_Seconds`, which still spaces automatic
+  launches. The remake stages an admitted request for the same tick's partitioned hangar pass
+  and ordered birth commit, keeping the existing command/service phase boundary (FD-01).
+  The ready state is consumed and recharge begins even when selection creates no object.
 - **FL-11** (owner, SK-36) The M2 fixture ignores `Reserve_Spawned_Units_Tech_0`: every entry of
   the FoC table has a reserve of 0, so each spawner launches its starting squadrons once and a
   lost squadron is not replaced (m2-skirmish SK-23, SK-36; the replenishment decision in the starting-force and AI discussion). The hangar keeps FL-02 and

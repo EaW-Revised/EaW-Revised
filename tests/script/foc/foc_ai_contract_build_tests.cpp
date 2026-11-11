@@ -33,10 +33,10 @@ struct BuildRig {
     std::optional<t::TacticalSession> session;
     std::shared_ptr<ai::Host> host;
     std::optional<auth::ScriptScheduler> scripts;
-    eawr::platform::ThreadWorkerAdapter executor{1};
+    eawr::platform::ThreadWorkerAdapter executor;
     std::uint64_t sequence{};
 
-    BuildRig() {
+    explicit BuildRig(std::size_t workers = 1) : executor(workers) {
         t::TacticalSetup start;
         start.players = {{1, 1, 100, 1}, {3, 3, 300, 0}};
         start.units = {{1, pad_type, 1}, {2, unit_type, 1}};
@@ -105,6 +105,9 @@ struct BuildRig {
         expect(scripts->submit_event(std::move(event)).has_value(), "EXP-E01: the call queues");
         auto report = scripts->service(executor);
         if (!report) { expect(false, "EXP-E01: the script service runs: " + report.error().message); return std::nullopt; }
+        if (!foc::tactical_ai_detail::resolve_commands(*host, report.value())) {
+            expect(false, "EXP-E01: ordered commands resolve"); return std::nullopt;
+        }
         return std::move(report).value();
     }
     // "true", "false", "nil" or "other" for a global of the last script.
@@ -204,16 +207,18 @@ void answers_match_the_simulation() {
             "EXP-E01: a type the simulation would reject (not on the owner's menu) is an error and nil even unchecked");
         expect(rig.deliver(*run) && rig.session->pads().at(1).under_construction == 0, "EXP-E01: nothing started");
     }
-    // Two Builds on one free pad in one turn: the first starts, the second sees the pad taken.
-    BuildRig twice;
+    // Both calls answer from the completed view; the ordered merge admits one start.
+    for (const auto workers : {1U, 8U}) {
+    BuildRig twice(workers);
     if (!twice.session) return;
     auto both = twice.run("first = pad.Build('UC_E')\nsecond = pad.Build('UC_E')");
-    expect(both && both->commands.size() == 1 && twice.kind("first") == "true" && twice.kind("second") == "nil"
-        && !both->diagnostics.empty(), "EXP-E01: a second same-turn Build on the pad is an error and nil (one start, one charge)");
+    expect(both && both->commands.size() == 1 && twice.kind("first") == "true" && twice.kind("second") == "true"
+        && both->diagnostics.empty(), "EXP-E01: both calls answer true and one same-turn start is admitted");
     expect(both && twice.deliver(*both) && twice.session->pads().at(1).under_construction != 0, "EXP-E01: the one start happens");
     // A new turn starts clean: the same pad is occupied by the real child, not by the stale reservation.
     auto later = twice.run("result = pad.Build('UC_E')");
     expect(refused(later) && twice.kind("result") == "nil", "EXP-E01: the next turn sees the started child");
+    }
 }
 
 void same_turn_debits_floor_at_zero() {
@@ -230,6 +235,55 @@ void same_turn_debits_floor_at_zero() {
         "WGA-100: the debit clamps to the balance including the grant queued before it");
     expect(grant_then_debit && rig.deliver(*grant_then_debit) && rig.credits() == q(0),
         "WGA-100: grant then debit in one turn floors at zero");
+}
+
+void parallel_wallet_and_turn_grant() {
+    for (const auto workers : {1U, 8U}) {
+        BuildRig rig(workers);
+        if (!rig.session) return;
+        auth::ModuleManifest manifest;
+        expect(manifest.add("WALLET.LUA", "function Spend(p) p.Give_Money(-800) end\n").has_value(), "wallet script loads");
+        auth::SessionConfig config;
+        config.tick_duration = auth::TickDuration{1, 30};
+        auto made = auth::ScriptScheduler::create(std::move(config), std::move(manifest));
+        if (!made) { expect(false, "wallet scheduler starts"); continue; }
+        auto scripts = std::move(made).value();
+        std::vector<eawr::core::Diagnostic> errors;
+        foc::tactical_ai_detail::register_methods(scripts, rig.host, errors);
+        for (std::uint64_t id = 1; id <= 3; ++id) {
+            expect(scripts.create_instance(id, "WALLET.LUA").has_value(), "wallet instance starts");
+            auth::ScriptEvent event;
+            event.key = {1, auth::first_simulation_producer, id, id};
+            event.target = id; event.kind = auth::ScriptEvent::Kind::call; event.name = "Spend";
+            event.arguments = {auth::Value{auth::Handle{foc::handle_player, 1}}};
+            expect(scripts.submit_event(std::move(event)).has_value(), "wallet call queues");
+        }
+        auto report = scripts.service(rig.executor);
+        expect(report.has_value(), "wallet service succeeds");
+        if (!report) continue;
+        expect(report.value().commands.size() == 3, "every call stages a debit request");
+        for (const auto& command : report.value().commands) {
+            expect(command.verb == foc::tactical_ai_detail::pending_debit
+                && eawr::script::numeric::to_fixed(std::get<eawr::script::numeric::LuaNumber>(command.arguments[2].data)).value() == q(-800),
+                "each partition stages the full requested debit");
+        }
+        // A grant from object turn routes to the world but does not fund this barrier's shadow.
+        auto turn = report.value().commands.front();
+        turn.issuer = 0; turn.verb = std::string(foc::tactical_ai_detail::turn_grant);
+        turn.arguments[2] = foc::detail::number(eawr::script::numeric::LuaNumber(500));
+        report.value().commands.insert(report.value().commands.begin(), std::move(turn));
+        expect(foc::tactical_ai_detail::resolve_commands(*rig.host, report.value()).has_value(), "wallet merge succeeds");
+        expect(report.value().commands.size() == 3, "turn grant and two clamped debits survive");
+        if (report.value().commands.size() == 3) {
+            const auto second = std::get<eawr::script::numeric::LuaNumber>(report.value().commands[2].arguments[2].data);
+            expect(eawr::script::numeric::to_fixed(second).value() == q(200), "turn grant does not increase barrier balance");
+        }
+        rig.host->in_object_turn = true;
+        auto rejected = rig.run("player.Give_Money(-1)");
+        rig.host->in_object_turn = false;
+        expect(rejected && rejected->commands.empty() && !rejected->diagnostics.empty(),
+            "object-turn negative Give_Money remains an error");
+    }
 }
 
 void refusals() {
@@ -255,6 +309,7 @@ void object_build_contracts() {
     refusals();
     answers_match_the_simulation();
     same_turn_debits_floor_at_zero();
+    parallel_wallet_and_turn_grant();
     std::cout << "Object Build contracts: " << failures << " failures\n";
 }
 

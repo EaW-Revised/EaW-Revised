@@ -111,10 +111,30 @@ bool LiveSessionView::request_speed(const std::uint32_t step) {
 }
 
 void LiveSessionView::press_fast_forward() {
-    if (options_.lan) return;
     if (phase_ != Phase::running) return;
+    if (options_.lan) {
+        // #5355 (TP-MP06): the shared 2x (speed step 4) and back to the default step through the agreed options input,
+        // one request in flight; the local 120 of TM-03 is never used in multiplayer.
+        const auto view = options_.lan->view();
+        if (view.clock_paused || !lan_gameplay_enabled(view)) return;
+        const auto agreed = ui::speed_step_rates[std::min<std::size_t>(view.options.tactical_speed, ui::speed_step_rates.size() - 1)];
+        shared_speed_.observe(agreed, view.session_tick);
+        const auto target = ui::shared_fast_forward_target(agreed);
+        const auto step = target == ui::shared_fast_forward_rate ? static_cast<std::uint32_t>(ui::speed_step_rates.size() - 1)
+                                                                 : ui::default_speed_step;
+        if (!shared_speed_.begin(agreed, target, view.session_tick)) return;
+        if (!options_.lan->request_speed(step)) shared_speed_.reset();
+        else shared_fast_forward_pressed_ = target == ui::shared_fast_forward_rate; // immediate feedback until the next frame
+        return;
+    }
     if (session_) if (const auto pace = session_->agreed_pacing()) {
-        if (!pace->paused && time_.press_fast_forward(session_->completed_tick())) session_->set_target_rate(time_.target_rate());
+        // #5355 (TP-MP06): the agreed battle-child clock toggles the shared 2x, one request in flight at a time.
+        shared_speed_.observe(pace->target_rate, session_->completed_tick());
+        const auto target = ui::shared_fast_forward_target(pace->target_rate);
+        if (!pace->paused && shared_speed_.begin(pace->target_rate, target, session_->completed_tick())) {
+            session_->set_target_rate(target);
+            shared_fast_forward_pressed_ = target == ui::shared_fast_forward_rate; // immediate feedback until the next frame
+        }
         return;
     }
     if (session_ && time_.press_fast_forward(session_->completed_tick())) apply_time();
@@ -185,7 +205,11 @@ std::optional<double> LiveSessionView::clone_birth_tick(const std::size_t ship) 
 
 core::Result<BattleScene::Update> LiveSessionView::frame(BattleScene& population, GodotRenderer& renderer,
                                                      const double delta) {
-    if (trace_frames_) clock_trace_.valid = false;
+    if (trace_frames_) {
+        clock_trace_.valid = false;
+        clock_trace_.frame_us = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now().time_since_epoch()).count();
+        clock_trace_.newest_published_us = 0.0;
+    }
     particles::lane::guard_main(); // L1.2: counts a main-thread call while a lane job owns this state; never aborts
     FrameTimer frame_timer(trace_frames_ ? &live_frame_ms_ : nullptr);
     arrival_slots_.population = &population;
@@ -194,9 +218,10 @@ core::Result<BattleScene::Update> LiveSessionView::frame(BattleScene& population
     arrival_slots_.remaining = options_.arrival_slot_budget;
     // A battle loaded from a save composes everything present at its first frame at once, so a later frame
     // never measures that catch-up.
-    if (std::exchange(unbounded_arrivals_, false))
-        arrival_slots_.remaining = std::numeric_limits<decltype(arrival_slots_.remaining)>::max();
+    const bool catch_up = std::exchange(unbounded_arrivals_, false);
+    if (catch_up) arrival_slots_.remaining = std::numeric_limits<decltype(arrival_slots_.remaining)>::max();
     arrival_slots_.frame_grown = 0;
+    arrival_slots_.frame_launch_read_bytes = 0;
     arrival_slots_.growth_ms = 0.0;
     arrival_slots_.undrawn.clear();
     struct GrowthScope final {
@@ -243,7 +268,8 @@ core::Result<BattleScene::Update> LiveSessionView::frame(BattleScene& population
             ? 1000.0 / static_cast<double>(1000U / time_.target_rate()) : 0.0;
         const double advance = std::isfinite(delta) && delta > 0.0 ? delta * rate : 0.0;
         if (trace_frames_) {
-            clock_trace_ = {newest, presented_tick_, 0.0, advance, delta, rate, static_cast<double>(time_.target_rate()), true, time_.running()};
+            clock_trace_ = {newest, presented_tick_, 0.0, advance, delta, rate, static_cast<double>(time_.target_rate()), true, time_.running(),
+                clock_trace_.frame_us, std::chrono::duration<double, std::micro>(frame.latest_published.time_since_epoch()).count()};
         }
         presented_tick_ = std::clamp(presented_tick_ + advance, std::max(0.0, newest - 1.0), newest);
         alpha = presented_tick_ - (newest - 1.0);
@@ -296,6 +322,7 @@ core::Result<BattleScene::Update> LiveSessionView::frame(BattleScene& population
     }
     FrameTimer bookkeeping_timer(trace_frames_ ? &bookkeeping_ms_ : nullptr);
     register_frame_squadrons(previous, latest);
+    if (catch_up) warm_live_rosters(population, renderer, *latest);
     // The events of the ticks this frame reached, from the session's event log rather than the
     // snapshot history, so a stall longer than the history loses none (#370 review 3). Should
     // the log's own bound have dropped some, the gap is reported, never silently skipped.
@@ -395,8 +422,13 @@ core::Diagnostic LiveSessionView::frame_failure(std::string message) const {
 }
 
 void LiveSessionView::synchronize_frame_lan() {
-    if (session_) if (const auto pace = session_->agreed_pacing()) {
+    // #5355: the one pacing read per frame; the HUD's button state is derived from it here (see agreed_pacing()).
+    agreed_pace_ = session_ ? session_->agreed_pacing() : std::nullopt;
+    shared_fast_forward_pressed_ = false;
+    if (const auto& pace = agreed_pace_) {
         const auto tick = session_->completed_tick();
+        if (shared_speed_.target()) shared_speed_.observe(pace->target_rate, tick); // expiry only while a request exists
+        shared_fast_forward_pressed_ = shared_speed_.target().value_or(pace->target_rate) == ui::shared_fast_forward_rate;
         const auto rate = std::find(ui::speed_step_rates.begin(), ui::speed_step_rates.end(), pace->target_rate);
         if (rate != ui::speed_step_rates.end()) static_cast<void>(time_.set_speed_step(
             static_cast<std::uint32_t>(rate - ui::speed_step_rates.begin()), tick));
@@ -412,6 +444,11 @@ void LiveSessionView::synchronize_frame_lan() {
         const auto view = options_.lan->view();
         if (lan_gameplay_enabled(view)) recovery_input_feedback_.clear();
         static_cast<void>(time_.set_speed_step(view.options.tactical_speed, view.options_tick));
+        // #5355: the skirmish LAN button state from the view read here once per frame (agreed options, or the request
+        // in flight); expiry only while a request exists.
+        const auto agreed = ui::speed_step_rates[std::min<std::size_t>(view.options.tactical_speed, ui::speed_step_rates.size() - 1)];
+        if (shared_speed_.target()) shared_speed_.observe(agreed, view.session_tick);
+        shared_fast_forward_pressed_ = shared_speed_.target().value_or(agreed) == ui::shared_fast_forward_rate;
         if (view.clock_paused && !time_.paused()) static_cast<void>(time_.press_pause(view.world_tick));
         if (!view.clock_paused && time_.paused()) static_cast<void>(time_.resume(view.world_tick));
     }
@@ -552,8 +589,10 @@ void LiveSessionView::observe_frame_ability_lights(const std::shared_ptr<const s
         const double birth = static_cast<double>(record.tick) - 1.0;
         healing_lights_[event.shooter] = {light_effect::Kind::color_flash, colour(heal.heal_owner_colour), birth,
             static_cast<double>(heal.heal_owner_light_frames), heal.heal_owner_light_pulses};
-        healing_lights_[event.target] = {light_effect::Kind::color_flash, colour(heal.heal_target_colour), birth,
-            static_cast<double>(heal.heal_target_light_frames), heal.heal_target_light_pulses};
+        // WSH-10: zero-range self-healing presents owner effects only.
+        if (heal.heal_range.raw() > 0)
+            healing_lights_[event.target] = {light_effect::Kind::color_flash, colour(heal.heal_target_colour), birth,
+                static_cast<double>(heal.heal_target_light_frames), heal.heal_target_light_pulses};
     }
     std::erase_if(healing_lights_, [&](const auto& light) {
         return !space::find_instance(*latest, light.first)
@@ -949,6 +988,20 @@ std::optional<core::Diagnostic> LiveSessionView::compose_frame_units(BattleScene
         const std::vector<live::LiveUnitPose>& spinning,
         std::vector<BattleScene::LivePose>& live,
         std::vector<BattleScene::LiveClipPose>& clip_poses) {
+    if (session_ && land_content_) {
+        if (!land_playback_started_) {
+            const auto initial = session_->land_motion();
+            if (initial && initial->tick == 0) advance_land_playback(population, *initial);
+            land_playback_started_ = true;
+        }
+        const auto presented = static_cast<std::uint64_t>(std::max(0.0, std::floor(presented_tick_)));
+        const auto count = session_->land_motion_through(land_playback_tick_, presented, land_motion_buffer_);
+        for (std::size_t index = 0; index < count; ++index) {
+            const auto& frame = land_motion_buffer_[index];
+            advance_land_playback(population, frame);
+            land_playback_tick_ = frame.tick;
+        }
+    }
     for (const auto* drawn : {&poses, &spinning}) {
         for (const live::LiveUnitPose& pose : *drawn) {
             // Spawned after tick zero without a launch slot (a squadron's container): nothing composed.
@@ -971,6 +1024,22 @@ std::optional<core::Diagnostic> LiveSessionView::compose_frame_units(BattleScene
             placed.yaw_degrees = values[3];
             placed.roll_degrees = values[4];
             placed.pitch_degrees = values[5];
+            if (const auto land = land_playback_.find(pose.entity); land != land_playback_.end() && land->second.initialized) {
+                const auto& playback = land->second;
+                BattleScene::LiveClipPose request;
+                request.ship = *ship; request.land_type = playback.type; request.position = {playback.position, 1024};
+                if (playback.blending) {
+                    request.outgoing_land_type = playback.outgoing_type;
+                    request.outgoing_position = {playback.outgoing_position, 1024};
+                    request.land_blend = 1.0F - static_cast<float>(playback.tick - playback.blend_start)
+                        / static_cast<float>(playback.blend_ticks);
+                }
+                clip_poses.push_back(request);
+                if (const auto roll = scene::fixed_from_binary32(playback.roll); roll) {
+                    if (const auto combined = sim::math::add(placed.roll_degrees, roll.value()); combined)
+                        placed.roll_degrees = combined.value();
+                }
+            }
             if (const auto* pad = pad_view(pose.entity)) {
                 if (const auto emptied = pad_empty_since_.find(pose.entity); emptied != pad_empty_since_.end()
                     && !pad->state.constructed && !pad->state.under_construction) {

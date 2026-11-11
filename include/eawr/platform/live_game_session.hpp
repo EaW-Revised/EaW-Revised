@@ -68,6 +68,9 @@ struct LiveSaveOptions {
     std::string directory;
     // Snapshot of the mounted chain, copied at session creation.
     mods::ModDescription mounted_mods;
+    // Optional thread-safe snapshot of the mounted metadata as background discovery
+    // settles. Must perform no I/O or waiting; each operation copies its result once.
+    std::function<mods::ModDescription()> mounted_mods_snapshot;
     // Filled from a prepared authored campaign when absent; synthetic galaxies save without one.
     std::optional<LiveSaveCampaignSource> campaign;
 };

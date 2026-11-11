@@ -192,6 +192,38 @@ inline constexpr double upper_centre_extra_fraction = 0.02625;
 // A gadget's `.rc` rect (relative to its dialog) on screen.
 [[nodiscard]] PixelRect place_gadget(const DialogLayout& dialog, const RcRect& gadget) noexcept;
 
+// A centred modal panel: a header, a body that may be longer than the screen, and a footer button row
+// (#6065: a story chapter 3314 px tall pushed its OK button to y=2052 on a 720 px screen, so no seat could
+// dismiss it). The rule only keeps the header, the scrolling text and the footer button inside the panel and the
+// panel inside the screen, for any content length; the panel is as high as its content. Retail's story dialogs are
+// fixed-size frames with art (IDD_STORY_DIALOG 382 x 519, IDD_STORY_SUMMARY_DIALOG 545 x 572, menu-screens.md MNU-36,
+// recorded .rc sizes, not captured) whose text sits in a scrolling list; that frame size and art are NOT implemented
+// here, and MNU-36 stays "blocked (story system)". Sizes are screen pixels.
+struct ScrollPanelSpec {
+    double width{};            // wanted panel width, border to border
+    double margin{};           // content margin inside the panel, on every side
+    double separation{};       // gap between neighbouring parts
+    double header_height{};    // 0 = no header
+    double body_height{};      // the body's natural, unscrolled height
+    double footer_height{};    // 0 = no footer
+    double screen_margin{};    // least gap kept between the panel and each screen edge
+};
+
+struct ScrollPanelLayout {
+    PixelRect panel;           // centred on the screen
+    PixelRect header;          // zero height when the spec has no header
+    PixelRect body;            // the visible window onto the body: scrolls when `body_scrolls`
+    PixelRect footer;          // always inside the panel and, when the fixed parts fit, inside the screen
+    bool body_scrolls{};       // the body's content is taller than its window
+};
+
+// The panel is as high as its content, but never higher than the screen less twice the screen margin, and never
+// wider than the screen less the same margin. The body gives up height first: it shrinks (and scrolls) so the header
+// and the footer keep their size and the footer sits at the panel's bottom. When even the fixed parts do not fit the
+// body is empty and the panel is as high as the fixed parts, kept inside the screen as far as its size allows.
+// A zero-sized viewport yields an empty layout.
+[[nodiscard]] ScrollPanelLayout scroll_panel_layout(Viewport viewport, const ScrollPanelSpec& spec) noexcept;
+
 // UI-F1: em height in pixels = floor(floor(96*H/600)*pt/72) for screen
 // height H; a `static size` font uses pt as pixels. Non-positive sizes give 0.
 [[nodiscard]] std::int32_t font_pixel_height(std::int32_t point_size, std::uint32_t screen_height,

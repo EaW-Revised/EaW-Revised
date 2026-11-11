@@ -26,6 +26,9 @@ struct InitialCampaignRelations {
 };
 [[nodiscard]] core::Result<sim::galactic::NestedCreationSetup> prepare_nested_creation(const StartingForceInputs&,
     core::LoadNoteBuffer* notes = nullptr, std::set<sim::galactic::TypeId>* omitted = nullptr);
+// Load-only indexed equivalent; first matching type and binding retain precedence.
+[[nodiscard]] core::Result<sim::galactic::NestedCreationSetup> prepare_initial_nested_creation(
+    const StartingForceInputs&, core::LoadNoteBuffer*, std::set<sim::galactic::TypeId>*);
 // WGA-99: the same original-type placement allocator for ordered native magic
 // requests. Additional creation expansion retains the plan's supplied owner.
 [[nodiscard]] sim::galactic::GalacticSession::NativeForceBuilder stock_native_force_builder(

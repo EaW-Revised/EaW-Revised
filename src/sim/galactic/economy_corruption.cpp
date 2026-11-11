@@ -20,7 +20,7 @@ template<class Rows, class Id, class Key> auto find(Rows& rows, Id id, Key key) 
     const auto at = std::lower_bound(rows.begin(), rows.end(), id, [&](const auto& row, auto value) { return key(row) < value; });
     return at != rows.end() && key(*at) == id ? &*at : nullptr;
 }
-bool bounded(Fixed n) { return n.raw() >= -(std::int64_t{1} << 48) && n.raw() <= (std::int64_t{1} << 48); }
+bool bounded(Fixed n) { return n.raw() >= -economy_arithmetic_bound_raw && n.raw() <= economy_arithmetic_bound_raw; }
 } // namespace
 
 core::Result<Fixed> technology_purchase_multiplier(std::span<const TechnologyPriceModifier> modifiers) {
@@ -35,7 +35,7 @@ core::Result<Fixed> technology_purchase_multiplier(std::span<const TechnologyPri
         const auto raw = modifier.additive.raw();
         // Every subset remains safe after expiry, independently of cancellation.
         magnitude += raw < 0 ? -raw : raw;
-        if (magnitude > (std::int64_t{1} << 48) - Fixed::scale) return fail<Fixed>("technology-price ledger exceeds arithmetic bounds");
+        if (magnitude > economy_arithmetic_bound_raw - Fixed::scale) return fail<Fixed>("technology-price ledger exceeds arithmetic bounds");
         auto next = math::add(total, modifier.additive);
         if (!next) return core::Result<Fixed>::failure(next.error());
         total = next.value();
@@ -173,8 +173,13 @@ core::Result<void> GalacticSession::Impl::replay_technology_price(GalacticSessio
 
 core::Result<void> validate_economy_corruption(const GalacticSetup& setup) {
     if (!setup.economy_corruption) return core::Result<void>::success();
-    const auto& s = *setup.economy_corruption;
-    if (!setup.fiscal || !setup.player_economy || s.players.size() != setup.players.size()
+    if (!setup.fiscal || !setup.player_economy) return fail<void>("invalid tables or factor range");
+    return validate_economy_corruption_tables(setup, *setup.economy_corruption);
+}
+
+// The table rules below hold for live state as well as at tick zero (restore uses them on a loaded checkpoint).
+core::Result<void> validate_economy_corruption_tables(const GalacticSetup& setup, const EconomyCorruptionState& s) {
+    if (s.players.size() != setup.players.size()
         || s.planets.size() != setup.planets.size() || s.items.size() > galactic_max_objects
         || s.buyers.size() > galactic_max_objects || s.menus.size() > s.buyers.size()
         || !ordered(s.buyers, [](const auto& r) { return r.buyer; })

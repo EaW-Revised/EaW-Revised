@@ -1,5 +1,6 @@
 #include "eawr/presentation/shader_material.hpp"
 #include "../../support/check.hpp"
+#include "../../../src/presentation/godot/upload_winding.hpp"
 
 #include <iostream>
 #include <bit>
@@ -120,8 +121,22 @@ void contracts() {
     Fixture builtin;
     builtin.vertex.glsl = "layout(location=0) in vec4 p; layout(location=0) out vec2 uv; void main(){gl_Position=p;gl_PointSize=1.0;uv=p.xy;}";
     const auto builtin_program = builtin.assemble();
-    check(builtin_program && builtin_program.value().material.program.find("POINT_SIZE =") != std::string::npos,
-        "typed unread vertex point size proven one maps to the target builtin");
+    check(builtin_program && builtin_program.value().material.program.find("POINT_SIZE") == std::string::npos,
+        "producer-default point size stays local so triangle stages retain triangle rasterization");
+    constexpr std::array<std::array<float, 2U>, 3U> source_front{{{0, 0}, {1, 0}, {0, -1}}};
+    constexpr std::array<std::uint16_t, 3U> source_indices{0U, 1U, 2U};
+    const auto uploaded_area = [&](float y_sign) {
+        const auto point = [&](std::size_t corner) {
+            return source_front[presentation::godot_backend::detail::uploaded_triangle_index(source_indices, corner)];
+        };
+        const auto a = point(0U), b = point(1U), c = point(2U);
+        return ((b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])) * y_sign;
+    };
+    // Ordinary Compatibility targets flip Y with CCW front; right-side-up
+    // targets use CW front. The uploaded source-front face is back in both.
+    check(uploaded_area(-1.0F) < 0 && uploaded_area(1.0F) > 0
+        && builtin_program && builtin_program.value().material.program.find("cull_front") != std::string::npos,
+        "baseline source culling preserves clockwise clip faces after the upload and target Y corrections");
     builtin.vertex.glsl.replace(builtin.vertex.glsl.find("gl_PointSize=1.0"), 16U, "gl_PointSize=2.0");
     const auto builtin_refusal = builtin.assemble();
     check(!builtin_refusal && builtin_refusal.error().message.find("builtin=gl_PointSize stage=vertex direction=output type=float") != std::string::npos
@@ -137,6 +152,27 @@ void contracts() {
     auto program = fixture.assemble();
     check(bool(program), "qualified reflected stages assemble into an owned complete spatial program");
     if (!program) { std::cerr << program.error().message << '\n'; return; }
+    check(!program.value().extended_vertex_inputs, "position-only stages need no unqualified vertex channels");
+    for (const auto usage : {3U, 6U, 7U}) {
+        Fixture vectors;
+        vectors.vertex.glsl = "layout(location=0) in vec3 p;layout(location=0) out vec2 uv;void main(){gl_Position=vec4(p,1.0);uv=p.xy;}";
+        auto vector3 = vectors.vertex.reflection.types[0U]; vector3.vector_width = 3U;
+        vectors.vertex.reflection.types.push_back(vector3);
+        vectors.vertex.reflection.interfaces[0U].type = 2U;
+        vectors.vertex.reflection.interfaces[0U].source.semantic = runtime::D3dSemanticIdentity{usage, 0U, {}};
+        const auto extended = vectors.assemble();
+        check(extended && extended.value().extended_vertex_inputs, "typed authored-vector usage retains its renderer payload requirement");
+    }
+    Fixture colors;
+    colors.vertex.reflection.interfaces[0U].source.semantic = runtime::D3dSemanticIdentity{10U, 0U, "COLOR"};
+    const auto color_program = colors.assemble();
+    check(color_program && color_program.value().extended_vertex_inputs, "float colour usage cannot silently assume a packed renderer colour channel");
+    Fixture secondary_uv;
+    secondary_uv.vertex.glsl = "layout(location=0) in vec2 p;layout(location=0) out vec2 uv;void main(){gl_Position=vec4(p,0.0,1.0);uv=p;}";
+    secondary_uv.vertex.reflection.interfaces[0U].type = 1U;
+    secondary_uv.vertex.reflection.interfaces[0U].source.semantic = runtime::D3dSemanticIdentity{5U, 1U, "TEXCOORD"};
+    const auto secondary_program = secondary_uv.assemble();
+    check(secondary_program && secondary_program.value().extended_vertex_inputs, "secondary UV usage retains its missing renderer channel requirement");
     check(program.value().material.route == presentation::MaterialRoute::modern_spatial,
         "wrapper uses the production modern material route");
     const auto source = program.value().material.program;
@@ -204,6 +240,9 @@ void contracts() {
     const auto numeric_program = numeric.assemble();
     check(bool(numeric_program), "typed material defaults reconcile with reflected constant-bank offsets");
     if (numeric_program) {
+        check(numeric_program.value().parameters.size() == 1U
+            && numeric_program.value().parameters[0U].name == "Tint",
+            "used authored numeric recipes retain their actual parameter names");
         auto values = material::make_instance(numeric_program.value());
         check(bool(material::update(numeric_program.value(), {}, values)), "P5 material default update");
         const auto* tint = std::get_if<assets::Vec4f>(&values.material.bindings[0U].value);
@@ -222,6 +261,8 @@ void contracts() {
     check(!absent_layout.assemble(), "an explicitly conflicting GLSL binding still refuses");
     const auto engine_program = engine.assemble();
     check(bool(engine_program), "scene input gets a qualified numeric update plan");
+    check(engine_program && engine_program.value().parameters.empty(),
+        "engine-owned inputs cannot acquire authored numeric overrides");
     if (engine_program) {
         auto values = material::make_instance(engine_program.value());
         check(!material::update(engine_program.value(), {}, values) && !values.valid,

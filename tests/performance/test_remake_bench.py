@@ -243,9 +243,9 @@ class RemakeBenchTests(unittest.TestCase):
             (root / "stock-bespin.csv").write_text("tick,wall_frame_ms,projectiles\n600,20,1\n2300,30,1\n")
             receipt = root / "rig.json"
             # The engine guard needs the run's pins: the shipped patched engine (tools/engine_pins.json default).
-            (root / "engine-pins.json").write_text(json.dumps({"label": "eawr-fad06b579-ltofull", "files": {
-                "Godot_v4.7.2-stable_win64.exe": "453b4ad56a8f5c64b39c1d75e77468c5227475b2483922dee44ade51cff43442",
-                "Godot_v4.7.2-stable_win64_console.exe": "194a5bbf60f76a3717aca706fb715ac6645655b3eca8e0f959b277ac1fe3cd61"}}))
+            (root / "engine-pins.json").write_text(json.dumps({"label": "eawr-5b733a90f-ltofull", "files": {
+                "Godot_v4.7.2-stable_win64.exe": "96c03783011f197aff146e92c1e33e0000e8975b3a873fbfcc52cd86dff12b7f",
+                "Godot_v4.7.2-stable_win64_console.exe": "4dac692f4db14f55eb1090b64939e4f2b7744f2773206194eeaee9b730614e8d"}}))
             receipt.write_text('{"machine":"fixture", "privateDesktop":false, "timedOut":false}')
             self.assertFalse(bench.analyse(root, {}))
             self.assertIn("private desktop", json.loads((root / "results.json").read_text())["protocol_errors"][0])

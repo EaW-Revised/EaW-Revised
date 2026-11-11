@@ -3,7 +3,7 @@
 // Engine guard, viewer side (owner rule 11-03): the viewer runs on OUR patched Godot (fork Thom-Ernst/godot,
 // eawr/4.7.2-stable, built with BUILD_NAME=eawr), never on the official download. The engine reports itself through
 // Engine.get_version_info(): build "eawr" and the fork commit (official: build "official", hash ed1daf0bf...); the same
-// fields make up `--version` (4.7.2.stable.eawr.fad06b579), which the player zip's runtime.json records.
+// fields make up `--version` (4.7.2.stable.eawr.5b733a90f), which the player zip's runtime.json records.
 // This header is the pure decision; apps/viewer/src/engine_guard_startup.hpp feeds it the engine's values at startup:
 //   patched                        -> one log line;
 //   unpatched + automation run     -> loud log line, exit with unpatched_engine_exit_code (gates, tests, perf);
@@ -19,11 +19,11 @@
 namespace eawr::presentation {
 
 // The fork commits whose builds tools/engine_pins.json accepts (short form; the engine's hash starts with it).
-inline constexpr std::array<std::string_view, 1> patched_engine_commits{"fad06b579"};
+inline constexpr std::array<std::string_view, 2> patched_engine_commits{"5b733a90f", "fad06b579"};
 inline constexpr std::string_view patched_engine_build = "eawr";
 // The shipped player exe (tools/engine_pins.json default, GUI file): the hash an unpatched run is told it should have.
 inline constexpr std::string_view pinned_player_engine_sha256 =
-    "453b4ad56a8f5c64b39c1d75e77468c5227475b2483922dee44ade51cff43442";
+    "96c03783011f197aff146e92c1e33e0000e8975b3a873fbfcc52cd86dff12b7f";
 // The viewer's exit code for an automation run on an unpatched engine (1-3 are other startup failures).
 inline constexpr int unpatched_engine_exit_code = 7;
 inline constexpr std::string_view unpatched_engine_marker = "EAWR-ENGINE-UNPATCHED";

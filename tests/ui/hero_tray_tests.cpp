@@ -63,10 +63,11 @@ struct Fixture {
     ui::HeroTypeTable types_{types()};
     std::vector<tactical::TacticalInstance> instances;
     std::vector<sim::EntityId> visible;
+    std::map<sim::EntityId, sim::EntityId> squadron_of;
     ui::HeroTrayPolicy policy;
     ui::HeroRoster roster;
     void collect() {
-        ui::collect_heroes({instances, players_, me, visible, &types_, nullptr}, policy, roster);
+        ui::collect_heroes({instances, players_, me, visible, &types_, nullptr, &squadron_of}, policy, roster);
     }
 };
 
@@ -83,7 +84,7 @@ public:
     }
     void click(Fixture& fixture, const sim::EntityId hero, const bool hostile, const bool right,
                const bool double_click, const ui::HeroEntityResolver& resolve = {}) {
-        ui::dispatch_hero_click({fixture.instances, fixture.players_, me, fixture.visible, &fixture.types_, nullptr},
+        ui::dispatch_hero_click({fixture.instances, fixture.players_, me, fixture.visible, &fixture.types_, nullptr, &fixture.squadron_of},
             fixture.policy, fixture.roster, hero, hostile, right, double_click, resolve,
             [&](const tactical::TacticalInstance& target, const bool focus, const bool own) {
                 const std::array<sim::EntityId, 1> next{target.entity_id};
@@ -330,6 +331,20 @@ void test_capacity_and_duplicates() {
     expect(g.roster.friendly.size() == 1, "one hero id is listed once");
 }
 
+void test_coop_squadron_heroes_share_one_icon() {
+    Fixture f;
+    f.instances = {instance(10, vader, me), instance(11, vader, me), instance(12, tyber, me),
+                   instance(20, tyber, ally), instance(30, vader, me)};
+    f.squadron_of = {{10, 100}, {11, 100}, {12, 100}};
+    f.collect();
+    expect(f.roster.friendly.size() == 3, "two co-op seats show one squadron icon and distinct heroes");
+    expect(f.roster.friendly.back().hero == 10, "the first surviving member supplies the portrait");
+    f.instances.erase(f.instances.begin());
+    f.collect();
+    expect(f.roster.friendly.size() == 3 && f.roster.friendly.back().hero == 11,
+           "the icon remains when its represented member dies");
+}
+
 void test_automatic_highlight() {
     Fixture f;
     auto hero = instance(2, vader, me);
@@ -375,6 +390,7 @@ int main() {
     test_fog_policy_applies_to_the_hostile_tray_only();
     test_generic_heroes_follow_the_policy();
     test_capacity_and_duplicates();
+    test_coop_squadron_heroes_share_one_icon();
     test_automatic_highlight();
     test_steady_state_is_stable();
     if (test::ui::failures() != 0) {

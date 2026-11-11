@@ -55,7 +55,12 @@ they choose to share one; neither the viewer nor the symbol tools upload them.
 
 ## Release status
 
-The last published release is v0.3.1 (2026-10-28); the next candidate is v0.3.2.
+The release version lives in one place, `config/release-version.json`. The root and viewer CMake projects read it (so the
+project version, the mods service version and the default build identity follow it), a kit label is that version plus a
+suffix (`python tools/release/release_version.py label <suffix>`), and a release tag must equal `v` plus that version
+(`python tools/release/release_version.py check-tag <tag>`; `cut_kit.py --release-tag` runs the same check). The launcher executables' file and product versions are generated from the same
+version. The launcher pin (`config/launcher-pin.json`) is a separate
+product and keeps its own version. The last published release is v0.3.2.
 The published release includes the portable player download with its double-click launcher,
 a debug download, playable space skirmish, LAN and online multiplayer and a partially working Galactic Conquest. The galactic AI is on by default
 in live campaigns; `--eawr-galactic-ai off` switches it off. Keep a candidate local until the
@@ -125,6 +130,13 @@ publication gate. The pool route requires all of these conditions:
   non-blocking and file follow-up tickets on failure. **They can never block or pull
   a release.** The x64 assets are proven by the pool route, without duplicate hosted work.
 
+Cut the pool package from the tagged public checkout with `python tools/release/cut_kit.py --release-tag v<version> --layer
+<reviewed Revised layer> --engine-dir ... --launcher-artifact ... --changes ... --work <new dir> --host any` (or `--cross-host`), finish it with
+`finish_kit.py` and add the replay76 and fresh-user receipts with `release_evidence.py`. The manifest then records the signed tag
+object, the exact commit and tree, the pinned inputs, the host receipt (tree check, input hashes, toolchain), the delivered archive
+hashes and the evidence, and `kit_manifest.py verify --release` checks all of it; `tools/release/KIT-RUNBOOK.md` ("The release
+package") has the rules and what each step refuses.
+
 The maintainer creates the pool draft with
 `gh release create <tag> --repo <public-repo> --draft --verify-tag`
 and uploads tested archives, `SHA256SUMS.txt` and provenance with
@@ -144,8 +156,8 @@ The maintainer tags and pushes the reviewed public commit explicitly (never thro
 NO-PUSH remote):
 
 ```text
-git -C <public-clone> tag -s v0.3.2 <reviewed-public-commit> -m "EaW Revised v0.3.2"
-git -C <public-clone> push https://github.com/EaW-Revised/EaW-Revised.git refs/tags/v0.3.2
+git -C <public-clone> tag -s v<version> <reviewed-public-commit> -m "EaW Revised v<version>"
+git -C <public-clone> push https://github.com/EaW-Revised/EaW-Revised.git refs/tags/v<version>
 ```
 
 The Windows publish scan must see the reviewed LF bytes of pinned text fixtures after
@@ -218,7 +230,7 @@ The native launcher is required by the player CLI; the former option to omit it 
 The normal layout is `EAWR.exe` (the native launcher) (legacy EAWR-3962) at the root; `godot/` with the pinned patched
 GUI runtime (the patched EAWR fork build, see `third_party/godot/README.md`: its SHA-256 must equal
 `PINNED_GODOT_SHA256` in `tools/release/package_release.py` and its `--version` must
-report `4.7.2.stable.eawr.fad06b579`; the console companion is not
+report `4.7.2.stable.eawr.5b733a90f`; the console companion is not
 shipped, so no console window opens); `project/` with the viewer project and its GDExtension; `licenses/`
 with the project, Godot and godot-cpp licence texts, plus `LICENSE` and `THIRD_PARTY_NOTICES.md`;
 `README.md` (this repository's `docs/player-guide.md`); and `runtime.json` (Godot identity and SHA-256, launcher
@@ -252,15 +264,17 @@ The acceptance checklist for a candidate (clean machine plus a normal user) is a
 
 ### The debug folder
 
+**0.3.3 ships no Debug zip (owner, 2026-11-09).** The clang Debug recipe below (`Build-DebugOnHost.ps1`) is left in place but was NOT built or verified; its PDB identities are unchecked. Verify it before the next release that includes a Debug archive.
+
 `package_release.py --debug --build-dir <Debug root build> --platform windows-x64 --version <version> --godot <Godot exe>
 --launcher <EAWR.exe>` writes `eaw-revised-<version>-windows-x64-debug.zip`. The parallel release route
 uses separate worktrees (or separate hosts), each with its own `apps/viewer/project/bin`, so Release
 and Debug builds cannot overwrite each other. For a single-worktree fallback, package the Release
 archives first, then build and package Debug; never run both viewer builds concurrently in one worktree. It is laid out like the player folder with the viewer extension and the headless tools built in the
 Debug configuration and their PDBs (`tools/`), plus `DEBUG-BUILD.md` ([the debug build guide](debug-build.md)). The
-pool build uses: `cmake --preset windows-msvc -B out/build/windows-msvc-debug
--DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDebug -DEAWR_WARNINGS_AS_ERRORS=OFF -DBUILD_TESTING=OFF`, the tool targets in
-Debug, then `apps/viewer` with `--config Debug`. The static debug C runtime keeps the programs runnable on a PC without
+pool build uses: `cmake --preset windows-clang-ninja -B out/build/release-clang-debug
+-DCMAKE_BUILD_TYPE=Debug -DCMAKE_LINKER=lld-link -DEAWR_DEBUG_SYMBOLS=ON -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDebug -DEAWR_WARNINGS_AS_ERRORS=OFF -DBUILD_TESTING=OFF`, the tool targets in
+Debug, then `apps/viewer` with clang-cl, lld-link and `--config Debug` (see `Build-DebugOnHost.ps1`). The static debug C runtime keeps the programs runnable on a PC without
 Visual Studio. The Debug archive is not performance-representative. Fresh-user 10/10 on BOTH the player
 and Debug archives is a publication gate.
 
@@ -298,20 +312,74 @@ An owner test kit is built like a release but is local, unsigned and never publi
 - **Engine:** the kit takes its engine only through `tools/release/kit_engine.py` (`stage_engine`: the pinned patched player and console exe from `tools/engine_pins.json`, fail closed on anything else). Run `python tools/release/kit_engine.py verify <kit folder or zip>` before handing the kit over. Never copy `godot/*` from an older kit.
 - **Layout:** the kit is the player layout, the same file list as a release player folder: `EAWR.exe`, `EAWR Mods.exe`, `eawr_loadcheck.exe`, `eawr_mods_service.exe`, `godot/`, `launcher/`, `launcher-pin.json`, `project/`, `Revised/`, `runtime.json`, `SHA256SUMS`, `README.md` (plus `LICENSE`, `THIRD_PARTY_NOTICES.md`, `licenses/`). It is built by `tools/release/package_release.py --with-mods-manager` through `tools/release/pool_host/Package-OnHost.ps1`, from a root-tools build of the same commit (EAWR, EAWR Mods, the mods service, the load check and the tools). The old dev layout (`start_test.py`, `demo.py`, `start-*.cmd`) is not an owner kit. Compare the finished folder's file list with the last accepted kit before reporting it ready.
 
+The cut also writes a hash-pinned `kit-manifest.json` (plan, host and finish sections) that `finish_kit.py` checks and delivers as
+a sidecar `<kit>.zip.manifest.json`; see the [owner kit runbook](../tools/release/KIT-RUNBOOK.md#the-kit-manifest). The manifest is
+hash-pinned and checked against git objects, not signed: signing is out of scope, and its `host` section is host-attested.
+
 ### Owner test kit (one job)
 
+The tracked [owner kit runbook](../tools/release/KIT-RUNBOOK.md) covers the cut and finish commands.
 One pool job builds and packages a kit; no hand re-run of `package_release.py`:
 
 ```
-python tools/offload/windows_build.py --ref <sha> --viewer --viewer-relay-only --preset windows-msvc-ninja-relay --require-symbols --no-test --no-probe-build --no-werror-probe --host <host> --package-on-host cfg.json \
+python tools/offload/windows_build.py --ref <sha> --viewer --viewer-relay-only --preset windows-clang-ninja-relay --require-symbols --no-test --no-probe-build --no-werror-probe --host <host> --package-on-host cfg.json \
   --target sim_headless --target sim_bench --target path_bench --target asset_scan --target asset_validate --target xml_scan --target scene_scan --target sky_scan --target unit_scan --target script_smoke --target hud_movie_prepare --target eawr_launcher --target eawr_mods_start --target eawr_mods_service --target eawr_loadcheck
 ```
 
 `eawr_mods_service` and `eawr_loadcheck` are not in the default `ALL` target, so the explicit target list is part of the recipe (`--target` is accepted beside `--viewer` when a root preset is given). `--viewer-relay-only` skips the plain viewer build (the player ships only the relay viewer, which overwrites the plain one in `apps/viewer/project/bin` anyway; about an hour saved on a cold tree). The whole remote command must stay under 8000 characters (`tests/ci/test_windows_build.py` measures 7761 on build host).
 
-`cfg.json` (host paths): `version` (`<semver>[-<label>]`, label `[0-9A-Za-z.+-]`, e.g. `0.3.2m-f8bf25ed` or `0.1.0+4e2da633`), `godot` (the patched engine, checked by `tools/release/kit_engine.py`), `launcher_artifact` (the pinned manager zip), optional `viewer_tree`.
+`cfg.json` names `version` (`<semver>[-<label>]`, label `[0-9A-Za-z.+-]`, e.g. `0.3.2m-f8bf25ed` or `0.1.0+4e2da633`), `godot` (the patched engine), `launcher_artifact` (the pinned manager zip), and optional `viewer_tree`. Host paths may be relative to the granted host's base; absolute paths are also accepted for explicitly selected hosts.
 
-When the job cannot link with symbols (no `--require-symbols`, or a viewer reused from a job without them), add `"symbols": false` to `cfg.json` (`-NoSymbols` on Package-OnHost, `--no-symbols` on `package_release.py`). The kit then keeps no private symbol archive and its `README.md` and `update-manifest.json` notes say `symbols: none (test kit)`. `"allow_missing_revised_layer": true` (`-AllowMissingRevisedLayer`) packages without the private Revised layer, which is not on the pool hosts; the owner-kit finish step adds it locally. `--public` refuses `--no-symbols`. Without it the packager checks every retained binary for a PDB identity first and lists all that lack one ("rebuild with `--require-symbols` (and `--viewer`)"). `Package-OnHost.ps1 -BuildDir` defaults to `out\build\windows-msvc-ninja-relay` and fails at once when that directory or an expected binary is missing.
+Linux and Windows pool hosts require PowerShell 7.6.0 or newer; verify `pwsh --version` during host setup. The Windows provisioning script rejects an older machine-wide installation.
+
+For a pool-selected host, replace `godot` and `launcher_artifact` with
+`"local_inputs": {"engine_dir": "<local engine directory>", "launcher_artifact": "<local launcher zip>"}` and add
+`"plan": "<plan.json of the cut>"` (`cut_kit.py` writes it; the plan names the kit commit, which must be `--ref`, and carries
+`tools/release/host_package.py` as a payload file). The directory must contain both pinned Windows engine executables. The
+client checks the inputs exist before queueing, then copies them and the plan to a job-specific directory under the selected
+host's base only after the job acquires its slot. The host runs `tools/release/host_package.py verify` from its own tree
+(after comparing that file's blob id with the plan's): it verifies the tree is the kit commit with no changed tracked file, the
+transferred hashes and the pins in the plan, stages the engine through `kit_engine.py`, and the packager verifies the
+launcher against the cut's pin. Missing or mismatched inputs fail the job; a failed transfer is reported by the client within
+seconds.
+For a public package, add `local_inputs.revised_layer` pointing to a zip whose root contains the reviewed layer's
+`Data/Audio` and `Data/XML` directories, and set `public` to `true`. The selected host verifies the transfer and safely
+extracts it; the packager checks the extracted files against the reviewed manifest. A pre-staged `revised_layer`
+path relative to the host base is also supported.
+
+For a Linux cross-build, `linux_cross_build.py --ref <sha> --host <cross-host> --kit --no-test` builds the kit targets,
+relay viewer and private symbols under the normal VM admission and slot queue. On the source checkout that owns those
+outputs, `tools/release/package_cross.py --sha <sha> --version <version> --build-dir <root-build> --engine-dir <engine-dir>
+--launcher-artifact <zip> --symbol-store <private-dir> --out <output-dir> --allow-missing-revised-layer` runs the same
+player packager and symbol checks. On Linux, set `EAWR_GODOT_RUNNER` to the executable
+`tools/release/godot_wine.py`, and set `EAWR_WINE` to a working Wine executable if it is not on PATH. Wine runs the
+pinned Windows engine for both the identity probe and the headless project import; these checks remain required.
+The resulting archive still needs the normal Windows fresh-user and GPU verification before delivery.
+
+For a queued build and package on the cross host, pass `--kit --no-test --package-on-host <config.json>` to
+`linux_cross_build.py`. Use the same `local_inputs` object as the Windows pool configuration and add `wine`, the
+Wine executable's path relative to the host base, and `plan`, the `plan.json` of a kit cut (`cut_kit.py` writes it). Optional
+`wine_lib_dir` names a private Wine library directory, also relative to the base. The slot holder runs
+`tools/release/host_package.py verify` from its own tree after comparing that file's blob id with the plan's, which checks the
+tree, the plan and the staged input hashes (see `tools/release/KIT-RUNBOOK.md`), and produces a hash-verified
+`package.tar.gz` containing the release artifacts and private symbol store. `cut_kit.py --cross-host <host> --wine
+<base-relative-path>` automates this route and prepares the work directory for `finish_kit.py`.
+
+The fresh-user gate exercises Windows process launch, user profiles and the installed graphics driver, so it runs on a
+Windows GPU host after packaging. Player crash-dump symbolization uses Windows DbgHelp and likewise stays on Windows;
+PE/PDB identity checks and symbol-store creation themselves are portable. The existing `Build-DebugOnHost.ps1` route
+uses the Windows build environment and `Package-OnHost.ps1` uses `robocopy`; the cross route does not invoke either. Both
+routes check their inputs with the same `host_package.py`.
+
+For a cross-built Debug archive, the host's `release-debug-crt` directory under its base must contain the matching
+x64 Debug CRT and UCRT libraries, including `libcmtd.lib`, `libcpmtd.lib`, `libvcruntimed.lib` and `libucrtd.lib`.
+The build fails if a required library is missing and records the library hashes in `debug-runtime.log`. Pass
+`--kit-debug --no-test --package-on-host <config.json>`; set `debug` to `true` in that config and add
+`local_inputs.release_dir` containing `EAWR.exe`, `EAWR Mods.exe`, `eawr_mods_service.exe` and
+`eawr_loadcheck.exe` from the same commit's Release build. The packager checks the embedded identities and retains
+the Debug symbols. Verify the Debug archive with the Windows fresh-user gate before a release that includes it.
+
+When the job cannot link with symbols (no `--require-symbols`, or a viewer reused from a job without them), add `"symbols": false` to `cfg.json` (`-NoSymbols` on Package-OnHost, `--no-symbols` on `package_release.py`). The kit then keeps no private symbol archive and its `README.md` and `update-manifest.json` notes say `symbols: none (test kit)`. `"allow_missing_revised_layer": true` (`-AllowMissingRevisedLayer`) packages without the private Revised layer, which is not on the pool hosts; the owner-kit finish step adds it locally. `--public` refuses `--no-symbols`. Without it the packager checks every retained binary for a PDB identity first and lists all that lack one ("rebuild with `--require-symbols` (and `--viewer`)"). `Package-OnHost.ps1 -BuildDir` defaults to `out\build\windows-clang-ninja-relay` and fails at once when that directory or an expected binary is missing.
 
 ## What a release does not contain
 
@@ -332,3 +400,25 @@ When the job cannot link with symbols (no `--require-symbols`, or a viewer reuse
   A standalone exported viewer is a later step (`apps/viewer/tools/export_package.py` already bundles
   the Godot licence texts for it).
 - **No graphical test results.** GPU tests are not run on the hosted runners.
+
+## Optional signing handoff
+
+Signing is OFF by default and nothing in the recipe calls it. `tools/release/sign_release.py` is a disabled stub:
+without `EAWR_SIGNING=1` it changes nothing and exits 0; with it, it exits 2 until the step below exists. When off, every
+release stays exactly unsigned and the update manifest `signature` stays `""` (the manifest validator requires that).
+
+Design for turning it on (a decision for the owner; no Azure calls are made by this recipe):
+
+1. The pool builds and packages unsigned, as today. Keys and credentials never exist on a build worker.
+2. On a machine the owner controls, a prepare step unpacks the player zip, checks every member against `update-manifest.json`
+   and lists the binaries to sign: `EAWR.exe`, `EAWR Mods.exe`, `eawr_mods_service.exe`, `eawr_loadcheck.exe`, the viewer DLL
+   and the Bink helper. Azure Artifact Signing (formerly Trusted Signing) signs those files only.
+3. **Never sign `godot/Godot_v4.7.2-stable_win64.exe`:** its SHA-256 is the engine pin (`tools/engine_pins.json`,
+   `tools/release/kit_engine.py verify`). The earlier signing draft (legacy EAWR-6018) lists the Godot exe among the binaries to sign; drop it there.
+4. A finish step rewrites `runtime.json` hashes for the signed files, regenerates the folder `SHA256SUMS`, re-zips, rewrites
+   `update-manifest.json` (still `signature: ""`) and `SHA256SUMS.txt`, and records signed vs unsigned hashes in a receipt.
+   Then run `kit_engine.py verify` on the result and the fresh-user gate on the signed bytes.
+5. Symbols: signing a binary does not change its PDB identity, but re-check with the packager's identity check before upload.
+
+Reusable from the draft (legacy EAWR-6018) (`sign_release.py` prepare/finish, `sign-release.yml`): the manifest-vs-archive verification and the
+signed/unsigned receipt. Not reusable as is: the hosted workflow (credentials must stay on the owner's machine) and the Godot entry.

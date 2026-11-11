@@ -948,18 +948,38 @@ std::string QualifiedFreestore::record_sync_hash(bool cold) const {
     }
     return cold ? rebuild_records().digest("qualified-freestore-v3") : records_.digest("qualified-freestore-v3");
 }
+void encode_freestore_facts(std::vector<std::uint8_t>& bytes, sim::EntityId id, const FreestoreFacts& row) {
+    store_word(bytes, id); store_word(bytes, row.object.type); store_word(bytes, row.object.owner); store_word(bytes, row.object.planet);
+    store_word(bytes, static_cast<std::uint64_t>(row.object.kind)); store_word(bytes, row.object.transport); store_word(bytes, row.object.transit);
+    store_word(bytes, row.object.directly_parented_to_planet); store_word(bytes, row.object.safe ? (*row.object.safe ? 2 : 1) : 0);
+    store_word(bytes, row.current_type); store_word(bytes, row.parent); store_word(bytes, row.parent_is_planet); store_word(bytes, row.current_type_member);
+    store_word(bytes, row.hero); store_word(bytes, row.ai_usable); store_word(bytes, row.dead); store_word(bytes, row.deleting);
+    store_word(bytes, row.death_clone); store_word(bytes, row.qualified); store_word(bytes, row.enroute); store_word(bytes, row.tracked_movement);
+    store_word(bytes, row.unit_ai); bytes.push_back(row.prefer_ground ? 1 : 0);
+}
+bool decode_freestore_facts(std::span<const std::uint8_t> bytes, std::size_t& at, FreestoreFacts& row) {
+    bool valid = true;
+    const auto read = [&]() { std::uint64_t value{}; if (bytes.size() - at < 8) { valid = false; return value; }
+        for (unsigned i = 0; i < 8; ++i) { value |= static_cast<std::uint64_t>(bytes[at++]) << (8 * i); }
+        return value; };
+    const auto flag = [&]() { const auto value = read(); if (value > 1) valid = false; return value != 0; };
+    row = {}; row.object.id = read(); row.object.type = read(); const auto player = read(); row.object.planet = read();
+    const auto kind = read(); row.object.kind = static_cast<FreestoreKind>(kind);
+    row.object.transport = flag(); row.object.transit = flag(); row.object.directly_parented_to_planet = flag(); const auto safe = read();
+    if (safe) row.object.safe = safe == 2;
+    row.current_type = read(); row.parent = read(); row.parent_is_planet = flag(); row.current_type_member = flag(); row.hero = flag();
+    row.ai_usable = flag(); row.dead = flag(); row.deleting = flag(); row.death_clone = flag(); row.qualified = flag(); row.enroute = flag(); row.tracked_movement = flag();
+    row.unit_ai = flag();
+    if (!valid || at == bytes.size() || bytes[at] > 1 || player > std::numeric_limits<gc::PlayerId>::max()
+        || kind > static_cast<std::uint64_t>(FreestoreKind::space_structure) || safe > 2) return false;
+    row.prefer_ground = bytes[at++] != 0;
+    row.object.owner = static_cast<gc::PlayerId>(player);
+    return true;
+}
 std::vector<std::uint8_t> QualifiedFreestore::encode() const {
     if (phase_abandoned_) throw std::logic_error("unsettled freestore phase");
     std::vector<std::uint8_t> bytes; store_word(bytes, 3); store_word(bytes, facts_.size());
-    for (const auto& [id, row] : facts_) {
-        store_word(bytes, id); store_word(bytes, row.object.type); store_word(bytes, row.object.owner); store_word(bytes, row.object.planet);
-        store_word(bytes, static_cast<std::uint64_t>(row.object.kind)); store_word(bytes, row.object.transport); store_word(bytes, row.object.transit);
-        store_word(bytes, row.object.directly_parented_to_planet); store_word(bytes, row.object.safe ? (*row.object.safe ? 2 : 1) : 0);
-        store_word(bytes, row.current_type); store_word(bytes, row.parent); store_word(bytes, row.parent_is_planet); store_word(bytes, row.current_type_member);
-        store_word(bytes, row.hero); store_word(bytes, row.ai_usable); store_word(bytes, row.dead); store_word(bytes, row.deleting);
-        store_word(bytes, row.death_clone); store_word(bytes, row.qualified); store_word(bytes, row.enroute); store_word(bytes, row.tracked_movement);
-        store_word(bytes, row.unit_ai); bytes.push_back(row.prefer_ground ? 1 : 0);
-    }
+    for (const auto& [id, row] : facts_) encode_freestore_facts(bytes, id, row);
     store_word(bytes, stores_.size());
     for (const auto& [player, store] : stores_) {
         store_word(bytes, player); store_word(bytes, store->members.size()); for (const auto id : store->members) store_word(bytes, id);

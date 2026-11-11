@@ -1025,8 +1025,19 @@ public:
     // WGA-452: exact category membership of the current manager's active set.
     [[nodiscard]] std::optional<std::uint64_t> active_goal_count(tactical::PlayerId player, std::uint64_t category) const;
     using GlobalScalar = std::variant<Real, std::string, bool>;
+    using GlobalValues = std::map<std::string, GlobalScalar, std::less<>>;
     [[nodiscard]] std::optional<authoritative::Value> global_value(const std::string& name) const;
+    [[nodiscard]] static authoritative::Value global_value_of(const GlobalScalar&);
     void commit_global_values(authoritative::ServiceReport&);
+    // W1 S5 (async lane): the AI's own GlobalValue writes since the last take, in commit order (no value = deleted). The window
+    // publishes them; the world merges them into the story-owned store when the publication becomes visible.
+    using GlobalWrite = std::pair<std::string, std::optional<GlobalScalar>>;
+    [[nodiscard]] std::vector<GlobalWrite> take_global_writes() { return std::exchange(global_writes_, {}); }
+    void clear_global_writes() noexcept { global_writes_.clear(); }
+    // W1 S5 (async lane): at its window start the AI's registry becomes the story-owned store with its own unpublished writes
+    // replayed (it sees its own writes at once and the story's from its next window).
+    void replace_globals(GlobalValues values);
+    [[nodiscard]] const GlobalValues& globals() const noexcept { return globals_; }
     // A unit's type as the goal system counts it (a squadron container's squadron type).
     [[nodiscard]] bool in_freestore(const ViewUnit& unit, tactical::PlayerId player) const;
     // FH-11, AI-08: a freestore unit the freestore's unit service calls On_Unit_Service for: one
@@ -1429,7 +1440,8 @@ private:
     std::map<sim::EntityId, std::map<sim::EntityId, Real>> threats_;
     // This tick's first hit on each object: (attacker, deliberate) (EX-44).
     std::map<sim::EntityId, std::pair<sim::EntityId, bool>> last_hits_;
-    std::map<std::string, GlobalScalar, std::less<>> globals_;
+    GlobalValues globals_;
+    std::vector<GlobalWrite> global_writes_; // W1 S5: not saved (taken at the window's commit, cleared at each attempt)
     std::vector<PlanRecord> records_;
     std::vector<TickCost> costs_;
     std::uint64_t records_dropped_{};

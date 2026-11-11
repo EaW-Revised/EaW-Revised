@@ -28,6 +28,31 @@
 using namespace eawr;
 using namespace viewer::galactic;
 
+template<class Catalog>
+void destruction_art_authoring(const Catalog& catalog) {
+    if constexpr (requires { load_destruction_effect_art(catalog, "Mod_Weapon", "Mod_Destroy"); }) {
+        for (const auto source : {"Mod_Weapon", "Mod_Weapon_Variant"}) {
+            const auto art = load_destruction_effect_art(catalog, source, "MOD_DESTROY");
+            assert(art.target_sfx == "Mod_Target_A" && art.target_particle == "Mod_Base");
+            assert(art.layer == SceneLayer::midground && art.lifetime_seconds == 2.0F && art.scale == 1.75F);
+            const std::array overrides{
+                data::ValueOverride{"Mod_Weapon", "Abilities/Planet_Destruction_Ability/SFXEvent_Target_Affected", {"Mod_Target_B"}},
+                data::ValueOverride{"Mod_Weapon", "Abilities/Planet_Destruction_Ability/Target_Particle_Effect", {"Mod_Line"}},
+                data::ValueOverride{"Mod_Line", "Particle_Lifetime_Frames", {"120"}},
+                data::ValueOverride{"Mod_Line", "Scale_Factor", {"2.5"}}};
+            const auto perturbed = data::with_overrides(catalog, overrides);
+            assert(perturbed);
+            const auto changed = load_destruction_effect_art(perturbed.value(), source, "Mod_Destroy");
+            assert(changed.target_sfx == "Mod_Target_B" && changed.target_particle == "Mod_Line");
+            assert(changed.layer == SceneLayer::midforeground && changed.lifetime_seconds == 4.0F && changed.scale == 2.5F);
+            const auto wrong_name = load_destruction_effect_art(catalog, source, "Wrong_Name");
+            assert(wrong_name.target_sfx.empty() && wrong_name.target_particle.empty());
+        }
+    } else {
+        assert(false && "planet destruction target art must follow authored ability references");
+    }
+}
+
 namespace {
 void planet_bonus_metadata(const data::galactic::GalacticData& tables) {
     data::ui::TextDatabase text;
@@ -134,7 +159,12 @@ void campaign_art_is_data_driven() {
       <SpaceUnit Name="Modded_Ship"><Text_ID>TEXT_MISSING</Text_ID></SpaceUnit>
       <SpaceUnit Name="Modded_Variant"><Variant_Of_Existing_Type>Crusader_Gunship</Variant_Of_Existing_Type>
       <Icon_Name>i_variant.tga</Icon_Name><GUI_Row>7</GUI_Row></SpaceUnit>
-      <Particle Name="Mod_Base"><In_Midground>Yes</In_Midground></Particle>
+      <SpaceUnit Name="Mod_Weapon"><Abilities><Planet_Destruction_Ability Name="Mod_Destroy">
+      <SFXEvent_Target_Affected>Mod_Target_A</SFXEvent_Target_Affected><Target_Particle_Effect>Mod_Base</Target_Particle_Effect>
+      </Planet_Destruction_Ability></Abilities></SpaceUnit>
+      <SpaceUnit Name="Mod_Weapon_Variant"><Variant_Of_Existing_Type>Mod_Weapon</Variant_Of_Existing_Type></SpaceUnit>
+      <Particle Name="Mod_Base"><In_Midground>Yes</In_Midground><Particle_Lifetime_Frames>60</Particle_Lifetime_Frames>
+      <Scale_Factor>1.75</Scale_Factor></Particle>
       <Particle Name="Mod_Line"><Variant_Of_Existing_Type>Mod_Base</Variant_Of_Existing_Type>
       <In_Midground>No</In_Midground><In_Midforeground>Yes</In_Midforeground></Particle>
     </Planets>)XML");
@@ -175,6 +205,7 @@ void campaign_art_is_data_driven() {
     assert(galactic_particle_layer(catalog.value().catalog, "Mod_Base") == SceneLayer::midground);
     assert(galactic_particle_layer(catalog.value().catalog, "Mod_Line") == SceneLayer::midforeground);
     production_names_localize_once(catalog.value().catalog);
+    destruction_art_authoring(catalog.value().catalog);
     auto tables = data::galactic::load_galactic_data(filesystem.value(), catalog.value().catalog);
     assert(tables);
     planet_bonus_metadata(tables.value());

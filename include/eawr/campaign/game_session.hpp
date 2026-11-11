@@ -248,8 +248,10 @@ public:
     using LayerInstaller = std::function<core::Result<void>(GameSession&)>;
     [[nodiscard]] static core::Result<GameSession> from_recording(const GameRecording& recording,
         ContentResolver content, ScriptFactory scripts, ScriptRequirement requirement, LayerInstaller install_layers);
-    [[nodiscard]] core::Result<std::vector<std::uint8_t>> save_checkpoint_state() const;
-    [[nodiscard]] core::Result<void> load_checkpoint_state(std::span<const std::uint8_t>);
+    // With an offer pool the galaxy's production offer tables are pool indices (the checkpoint stores them once);
+    // loading needs the same form the bytes were saved in.
+    [[nodiscard]] core::Result<std::vector<std::uint8_t>> save_checkpoint_state(sim::galactic::OfferPool* pool = nullptr) const;
+    [[nodiscard]] core::Result<void> load_checkpoint_state(std::span<const std::uint8_t>, sim::galactic::OfferPool* pool = nullptr);
     using AutoResolveStateWriter = std::function<core::Result<std::vector<std::uint8_t>>()>;
     using AutoResolveStateReader = std::function<core::Result<void>(std::span<const std::uint8_t>,
         const ConflictRecord&, const sim::galactic::GalacticSnapshot&)>;
@@ -361,6 +363,9 @@ public:
     // when the GameSession object is moved; it is valid only while the session lives (the AI runtime that holds it is
     // owned by the session).
     [[nodiscard]] std::function<core::Result<void>(const sim::galactic::story::PlotCommand&)> story_plot_applier();
+    // Connects the story scripts' link to this session's plot engine and installs the ordered commit of what the scripts
+    // stage (see GalacticStoryLink). Needs the plots and the galactic schedulers installed; before the first step.
+    [[nodiscard]] core::Result<void> connect_story_link(const std::shared_ptr<GalacticStoryLink>&);
     // WST-58: a plot owner's holocron goals; null before the owner's first story dialog. Checkpointed, not hashed.
     [[nodiscard]] const sim::galactic::story::GoalsState* story_goals(sim::galactic::story::Player) const noexcept;
     void set_feedback_notice_handler(sim::galactic::GalacticSession::FeedbackNoticeHandler);

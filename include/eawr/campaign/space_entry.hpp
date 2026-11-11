@@ -9,9 +9,12 @@
 
 #include "eawr/data/xml.hpp"
 #include "eawr/core/load_note.hpp"
+#include "eawr/core/prepared_content.hpp"
 
 #include <memory>
+#include <cstdint>
 #include <optional>
+#include <span>
 #include <set>
 #include <string>
 #include <string_view>
@@ -20,6 +23,9 @@
 namespace eawr::sim::tactical { class TacticalSession; }
 
 namespace eawr::campaign {
+
+[[nodiscard]] std::vector<core::ContentLayerIdentity> prepared_content_layers(
+    std::span<const std::string> ordered_layers, std::span<const core::ContentInputReceipt> inputs);
 
 // WGT-07/08: explicit GC-to-tactical binding, never an equality of numeric domains.
 struct SpaceEntryType {
@@ -122,6 +128,14 @@ struct SpaceFormationResult {
 
 // Pure split and marker/defence preparation; allocations are committed only by staging
 // the returned conflict. A failure consumes no parent allocator or random stream.
+// WGT-119: the type a flagship rating reads, in the source context. A squadron rates by its container's own health and
+// shields (WSQ-60). A type whose Tactical_Health tag is absent rates by the object type's default hull of 100 (#6076,
+// the debug build, WGT-119), scaled by the mode multiplier like any authored hull.
+[[nodiscard]] units::UnitType flagship_rating_source(const units::UnitType& source);
+// The rating of a source type that has no durability row: an authored non-positive hull adds nothing (the
+// debug-build rating is maximum health plus maximum shields, WGT-119), so only its shields count. Zero without shields.
+[[nodiscard]] sim::math::Fixed flagship_shield_rating(const units::UnitType& rated);
+
 [[nodiscard]] core::Result<SpaceEntryPlan> prepare_space_entry(const ConflictRecord&,
     const SpaceEntryInputs&, sim::EntityId first_free, std::uint64_t session_seed);
 [[nodiscard]] core::Result<ConflictEntry> build_space_entry(const ConflictRecord&,
@@ -136,6 +150,8 @@ struct SpaceFormationResult {
 
 class StockSpaceEntry final {
 public:
+    // Immutable simulation closure, evaluated once for new multiplayer preparation; SP/restore never pay this cost.
+    [[nodiscard]] const core::PreparedContentIdentity& prepared_identity(const vfs::Vfs&) const;
     void memory_inventory(diagnostics::GcMemory&) const;
     [[nodiscard]] std::vector<core::LoadNote> load_notes() const;
     [[nodiscard]] core::Result<ResolvedConflictEntry> resolve(const ConflictRecord&,

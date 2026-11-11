@@ -232,6 +232,10 @@ if(EAWR_ENABLE_SIM_BOUNDARY_CHECK)
             --root "${PROJECT_SOURCE_DIR}"
             --clang "${_eawr_sim_boundary_clangxx}"
     )
+    foreach(_suffix project fixtures supplemental)
+        string(CONCAT _compiler_test "sim" "_boundary_" "${_suffix}")
+        set_property(TEST "${_compiler_test}" APPEND PROPERTY LABELS compiler-test)
+    endforeach()
     if(_eawr_clang_toolset_env)
         set_tests_properties(
             sim_boundary_project sim_boundary_fixtures sim_boundary_supplemental
@@ -269,6 +273,8 @@ if(EAWR_ENABLE_SIM_BOUNDARY_CHECK)
             --clang "${_eawr_sim_boundary_clangxx}"
     )
     set_tests_properties(lua_numeric_boundary_project PROPERTIES PROCESSORS 4)
+    set_tests_properties(lua_numeric_boundary_project lua_numeric_boundary_fixtures
+        PROPERTIES LABELS "compiler-test")
     if(_eawr_clang_toolset_env)
         set_tests_properties(
             lua_numeric_boundary_project lua_numeric_boundary_fixtures

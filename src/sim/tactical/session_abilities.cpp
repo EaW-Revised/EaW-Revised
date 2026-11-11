@@ -1,5 +1,6 @@
 #include "eawr/core/load_profile.hpp"
 #include "eawr/sim/tactical/session.hpp"
+#include "eawr/core/text.hpp"
 
 #include "eawr/sim/tactical/formation.hpp"
 #include "eawr/sim/tactical/pathfind.hpp"
@@ -40,6 +41,123 @@
 
 
 namespace eawr::sim::tactical {
+
+bool TacticalSession::Impl::jammer_ready(const LiveUnit& unit, const AbilityProfile& ability,
+    const NamedAbilityLocks& locks) const {
+    if (!unit.abilities) return false;
+    const auto* profile = abilities.find(unit.state.type_id);
+    if (!profile) return false;
+    // Direct synthetic profiles without an authored name retain their existing slot-only behaviour.
+    if (ability.gui_activated_ability_name.empty()) return true;
+    for (std::size_t slot = 0; slot < profile->special.size(); ++slot) {
+        const auto& handler = profile->special[slot];
+        if (handler.kind != SpecialAbilityKind::sensor_jamming || handler.name != ability.gui_activated_ability_name) continue;
+        return !unit.abilities->special.service_cancelled && !unit.abilities->special.slots[slot].cancelled
+            && named_ability_enabled(locks, unit.state.owner, unit.state.type_id, handler);
+    }
+    return false;
+}
+
+void TacticalSession::Impl::jammer_reactivated(LiveUnit& unit, const AbilityProfile& ability) const {
+    if (!unit.abilities) return;
+    const auto* profile = abilities.find(unit.state.type_id);
+    if (!profile) return;
+    for (std::size_t slot = 0; slot < profile->special.size(); ++slot) {
+        const auto& handler = profile->special[slot];
+        if (handler.kind == SpecialAbilityKind::sensor_jamming && handler.name == ability.gui_activated_ability_name) {
+            unit.abilities->special.slots[slot].jammer_unregistered = false;
+            unit.abilities->special.slots[slot].jammer_disabled_registration = false;
+            unit.abilities->special.slots[slot].jammer_registered = true;
+            unit.abilities->special.slots[slot].jammer_initialized = false;
+        }
+    }
+}
+
+core::Result<void> TacticalSession::Impl::service_jamming(std::vector<LiveUnit>& units,
+    const std::map<EntityId, ArrivalState>& arriving, const NamedAbilityLocks& locks,
+    const std::uint64_t tick, const PartitionExecutor& executor, std::vector<std::int8_t>& transitions) {
+    if (std::none_of(abilities.profiles.begin(), abilities.profiles.end(), [](const auto& profile) {
+        return std::any_of(profile.special.begin(), profile.special.end(), [](const auto& handler) {
+            return handler.kind == SpecialAbilityKind::sensor_jamming;
+        });
+    })) return core::Result<void>::success();
+    transitions.assign(units.size(), 0);
+    // FC-77 interval: poll every logical frame (10 refreshes to 9); randomized first due is #6418.
+    return executor.execute_phase("jamming-service", tick_partition_count, [&](const std::size_t partition) {
+        const auto range = partition_range(partition, units.size());
+        for (auto index = range.begin; index < range.end; ++index) {
+            auto& source = units[index];
+            if (!source.abilities || arriving.contains(source.state.entity_id)
+                || (source.durability && source.durability->hull.raw() <= 0)) continue;
+            const auto* profile = abilities.find(source.state.type_id);
+            if (!profile) continue;
+            const auto ordinary = ability_slot(*profile, AbilityKind::sensor_jamming);
+            bool previous = false;
+            bool registered = false;
+            for (std::size_t slot = 0; slot < profile->special.size(); ++slot) {
+                const auto& handler = profile->special[slot];
+                if (handler.kind != SpecialAbilityKind::sensor_jamming) continue;
+                auto& state = source.abilities->special.slots[slot];
+                previous = previous || state.jammer_registered;
+                const bool enabled = !source.abilities->special.service_cancelled && !state.cancelled
+                    && named_ability_enabled(locks, source.state.owner, source.state.type_id, handler);
+                const bool automatic = automatic_ability_style(handler.style, setup.domain,
+                    setup.native_scene ? setup.native_scene->multiplayer : !setup.campaign);
+                const bool manual = ordinary && profile->abilities[*ordinary].gui_activated_ability_name == handler.name
+                    && source.abilities->slots[*ordinary].active;
+                if (!enabled) {
+                    if (state.jammer_registered) {
+                        state.jammer_unregistered = true;
+                        if (automatic) state.jammer_disabled_registration = true;
+                    }
+                    state.jammer_initialized = false;
+                    state.jammer_remaining = 0;
+                    state.jammer_active = false;
+                    state.jammer_registered = false;
+                } else if (automatic) {
+                    // FC-77: enabling reapplies the holder only when disable removed it;
+                    // a prior nebula/expiry termination keeps its independent reason.
+                    if (state.jammer_disabled_registration) {
+                        state.jammer_unregistered = false;
+                        state.jammer_disabled_registration = false;
+                    }
+                    if (!state.jammer_initialized) {
+                        state.jammer_initialized = true;
+                        state.jammer_registered = !state.jammer_unregistered;
+                        state.jammer_remaining = ordinary ? profile->abilities[*ordinary].expiration_frames
+                                                         : handler.jamming_duration_frames;
+                    }
+                    if (handler.style == SpecialActivationStyle::combat_automatic) state.jammer_remaining = 10;
+                    state.jammer_active = state.jammer_remaining > 0;
+                    if (state.jammer_active && --state.jammer_remaining == 0) {
+                        state.jammer_registered = false;
+                        state.jammer_unregistered = true;
+                    }
+                } else {
+                    if (manual && !state.jammer_initialized) state.jammer_registered = !state.jammer_unregistered;
+                    if (!manual && state.jammer_registered) {
+                        state.jammer_registered = false;
+                        state.jammer_unregistered = true;
+                    }
+                    state.jammer_initialized = manual;
+                    state.jammer_active = manual && profile->abilities[*ordinary].expiration_frames > 0;
+                    state.jammer_remaining = 0;
+                }
+                if (source.nebula && source.nebula->present) {
+                    // FC-77 / UFS-38: termination is known; nebula-exit reapplication remains open.
+                    if (state.jammer_active || state.jammer_registered || manual) state.jammer_unregistered = true;
+                    state.jammer_active = false;
+                    state.jammer_registered = false;
+                    state.jammer_remaining = 0;
+                    if (manual) static_cast<void>(deactivate_ability(profile->abilities[*ordinary],
+                        source.abilities->slots[*ordinary], tick));
+                }
+                registered = registered || state.jammer_registered;
+            }
+            if (registered != previous) transitions[index] = registered ? 1 : -1;
+        }
+    });
+}
 
 bool TacticalSession::Impl::heal_in_range(const LiveUnit& source, const LiveUnit& target, const math::Fixed reach) const {
     // WSH-05, ABF-02: inclusive planar centre first, then the rolled model box.
@@ -109,7 +227,9 @@ core::Result<void> TacticalSession::Impl::service_healing(std::vector<LiveUnit>&
             for (std::size_t slot = 0; slot < handlers.size(); ++slot) {
                 const auto& handler = handlers[slot];
                 auto& state = source.abilities->special.slots[slot];
-                if (handler.kind != SpecialAbilityKind::force_healing || handler.style != automatic_special_style(setup.domain)
+                if (handler.kind != SpecialAbilityKind::force_healing
+                    || !automatic_ability_style(handler.style, setup.domain,
+                        setup.native_scene ? setup.native_scene->multiplayer : !setup.campaign)
                     || !state.enabled || state.cancelled || tick < state.next_service_frame) continue;
                 // WSH-09: a negative amount without a percent is passive damage, served in the combat step.
                 if (handler.heal_amount.raw() < 0 && handler.heal_percent.raw() <= 0) continue;
@@ -198,7 +318,9 @@ core::Result<void> TacticalSession::Impl::select_passive_damage(const UnitStage&
             for (std::size_t slot = 0; slot < profile->special.size(); ++slot) {
                 const auto& handler = profile->special[slot];
                 const auto& state = source.abilities->special.slots[slot];
-                if (handler.kind != SpecialAbilityKind::force_healing || handler.style != automatic_special_style(setup.domain)
+                if (handler.kind != SpecialAbilityKind::force_healing
+                    || !automatic_ability_style(handler.style, setup.domain,
+                        setup.native_scene ? setup.native_scene->multiplayer : !setup.campaign)
                     || !state.enabled || state.cancelled || tick < state.next_service_frame
                     || handler.heal_amount.raw() >= 0 || handler.heal_percent.raw() > 0) continue;
                 output.push_back({source.state.entity_id, invalid_entity_id, slot});
@@ -403,7 +525,8 @@ void TacticalSession::Impl::release_beam(LiveUnit& unit, const AbilityKind kind,
     auto& special = unit.abilities->special.slots[static_cast<std::size_t>(nested - profile.special.data())];
     special.targets.clear();
     special.context.reset();
-    unit.formation.reset();
+    // FM-08/FM-10: inactive beam housekeeping must preserve delayed move planning.
+    if (switched.changed) unit.formation.reset();
     refresh_damage_modes(unit);
 }
 
@@ -812,8 +935,37 @@ std::optional<AbilityState> TacticalSession::Impl::entering_abilities(const Type
 
 AbilityGate TacticalSession::Impl::ability_gate(const LiveUnit& unit, const std::uint64_t tick) const {
         AbilityGate gate;
+        if (setup.campaign && setup.campaign->market_abilities) gate.market = &*setup.campaign->market_abilities;
+        gate.market_owner = unit.state.owner;
+        gate.market_profile = abilities.find(unit.state.type_id);
+        if (gate.market && gate.market_profile && std::any_of(gate.market_profile->abilities.begin(),
+                gate.market_profile->abilities.end(), [](const auto& ability) { return ability.team; })) {
+            const auto team = std::find_if(squadrons.begin(), squadrons.end(), [&](const auto& group) {
+                return group.container == unit.state.entity_id;
+            });
+            if (team != squadrons.end() && !team->members.empty()) {
+                const auto member = handles.find(team->members.front());
+                if (member != handles.end()) {
+                    gate.market_member_type = registry.get<Identity>(member->second).type_id;
+                    gate.market_team_member = abilities.find(gate.market_member_type);
+                    gate.market_member_abilities = abilities.market_team_members.data();
+                    gate.market_member_ability_count = abilities.market_team_members.size();
+                }
+            }
+        }
         gate.corrupted = unit.corrupt.has_value();
         gate.in_nebula = unit.nebula && unit.nebula->frame && unit.nebula->present;
+        const auto hangar = spawners.find(unit.state.entity_id);
+        const auto* launch = hangar != spawners.end() && hangar->second.selected_tech
+            ? motion.squadrons.find_spawner_at_tech(unit.state.type_id, unit.state.owner, *hangar->second.selected_tech)
+            : motion.squadrons.find_spawner(unit.state.type_id, unit.state.owner);
+        if (hangar != spawners.end() && hangar->second.ready_to_deploy && launch != nullptr) {
+            const auto* hull = health_profile(unit);
+            gate.deploy_squad_ready = std::any_of(launch->bays.begin(), launch->bays.end(), [&](const auto& bay) {
+                return !unit.durability || hull == nullptr || bay.hardpoint >= hull->hardpoints.size()
+                    || !hardpoint_destroyed(*hull, *unit.durability, bay.hardpoint);
+            });
+        }
         if (!unit.durability) return gate;
         const auto& profile = *health_profile(unit);
         gate.hardpoint_profile = &profile;
@@ -847,6 +999,36 @@ bool TacticalSession::Impl::ion_target_valid(const PlayerId owner, const LiveUni
         return target != nullptr && players_hostile(snapshot_players, owner, target->state.owner)
             && combat.find(target->state.type_id) != nullptr && !(target->nebula && target->nebula->present);
     }
+
+bool TacticalSession::Impl::ion_handler_admits(const LiveUnit& source, const LiveUnit* target, const bool from_attack) const {
+    // AB-70: the named team handler supplies admission, never a craft's firing slot.
+    if (!source.abilities || !ion_target_valid(source.state.owner, target)) return false;
+    const auto* profile = abilities.find(source.state.type_id);
+    const auto ordinary = profile ? ability_slot(*profile, AbilityKind::ion_cannon_shot) : std::nullopt;
+    if (!ordinary || source.abilities->special.service_cancelled) return false;
+    const auto& name = profile->abilities[*ordinary].gui_activated_ability_name;
+    const auto found = std::find_if(profile->special.begin(), profile->special.end(), [&](const auto& handler) {
+        return core::iequals(handler.name, name);
+    });
+    if (found == profile->special.end() || found->kind != SpecialAbilityKind::ion_cannon_shot) return false;
+    const auto slot = static_cast<std::size_t>(found - profile->special.begin());
+    if (slot >= source.abilities->special.slots.size()) return false;
+    const auto& state = source.abilities->special.slots[slot];
+    const bool mode = found->style == SpecialActivationStyle::user_input
+        || found->style == SpecialActivationStyle::special_attack
+        || (found->style == SpecialActivationStyle::ground_activated && setup.domain == BattleDomain::land)
+        || automatic_ability_style(found->style, setup.domain,
+            setup.native_scene ? setup.native_scene->multiplayer : !setup.campaign);
+    // An exact attack-trigger style needs no autofire flag; user-input joins only while armed.
+    const auto* team = ion_slot(source);
+    const bool attack_pass = found->style == SpecialActivationStyle::special_attack
+        || (found->style == SpecialActivationStyle::user_input && team
+            && (team->autofire || !abilities.human(source.state.owner)));
+    return mode && (!from_attack || attack_pass)
+        && named_ability_enabled(named_ability_locks, source.state.owner, source.state.type_id, *found)
+        && !state.cancelled
+        && special_type_matches(found->filter, target->state.type_id, combat.find(target->state.type_id)->category_bits);
+}
 
 void TacticalSession::Impl::finish_ion_shot(AbilitySlot& team, const std::vector<AbilitySlot*>& craft, const TypeId container_type,
     const std::uint64_t tick) const {
@@ -1338,7 +1520,7 @@ std::vector<AbilityStatus> TacticalSession::Impl::ability_statuses(const LiveUni
             }
             if (slot.active && (ability.kind == AbilityKind::energy_weapon || ability.kind == AbilityKind::tractor_beam
                 || ability.kind == AbilityKind::leech_shields || ability.kind == AbilityKind::concentrate_fire
-                || ability.kind == AbilityKind::super_laser)) {
+                || ability.kind == AbilityKind::super_laser || ability.kind == AbilityKind::lucky_shot)) {
                 status.target = slot.target;
                 status.target_hardpoint = slot.target_hardpoint;
             }

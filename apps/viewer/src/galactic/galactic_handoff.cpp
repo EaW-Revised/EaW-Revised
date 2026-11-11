@@ -73,7 +73,7 @@ void GalacticMode::State::release_battle_presentation() {
     if (galaxy_container) galaxy_container->show();
     if (galaxy_viewport) galaxy_viewport->set_update_mode(SubViewport::UPDATE_ALWAYS);
     for (auto& layer : scenes) layer.viewport->set_update_mode(SubViewport::UPDATE_ALWAYS);
-    held.clear(); orbiting = false; scrolling = false;
+    held.clear(); orbiting = false; scrolling = false; scroll_hold.end();
     if (audio) audio->ambient(); // WGP-24: return without changing player pause.
 }
 
@@ -490,7 +490,7 @@ bool GalacticMode::State::process_battle_transition(double delta) {
         child_lifetime = frame.battle_lifetime;
         galaxy_memory = OS::get_singleton()->get_static_memory_usage();
         galaxy_video_memory = video_memory();
-        held.clear(); orbiting = false; scrolling = false;
+        held.clear(); orbiting = false; scrolling = false; scroll_hold.end();
         galaxy_container->hide();
         galaxy_viewport->set_update_mode(SubViewport::UPDATE_DISABLED);
         for (auto& layer : scenes) layer.viewport->set_update_mode(SubViewport::UPDATE_DISABLED);
@@ -573,17 +573,22 @@ bool GalacticMode::State::process_battle_transition(double delta) {
             if (identity != options.lan_players.end() && !identity->player.empty())
                 map.observer_names.emplace_back(binding.player, identity->player);
         }
-        if (options.lan_match) map.shared_pause_notice = [match = options.lan_match, players = options.lan_players] {
-            const auto view = match->view();
-            if (!view.clock_paused || !galactic_lan_gameplay_enabled(view)) return std::string{};
-            const auto at = std::find_if(players.begin(), players.end(), [&](const auto& player) { return player.seat == view.clock_actor; });
-            return "Paused by " + (at != players.end() ? at->player : "Player " + std::to_string(view.clock_actor.value));
+        if (options.lan_match) map.shared_pause_notice = [match = options.lan_match, players = options.lan_players,
+                                                          notice = viewer::galactic::BattlePauseNotice{}]() mutable -> const std::string& {
+            return notice.refresh(match->pause_notice_revision(), [&] { return match->view(); }, players);
+        };
+        // #5355: the agreed battle speed change of the shared clock, named for every seat. The view (owner lock) is read
+        // only for a clock event the HUD has not taken yet; events from before this battle are not shown.
+        if (options.lan_match) map.shared_speed_notice = [match = options.lan_match, players = options.lan_players,
+                                                          since = options.lan_match->clock_events()](const std::uint64_t known, std::string& line) {
+            return viewer::galactic::battle_speed_notice(match->clock_events(), since, known, [&] { return match->view(); }, players, line);
         };
         map.report_path = options.report_path.parent_path() / "tactical.json";
         map.lighting = "sh"; map.shadows = "on"; map.environment = "map";
         feed_lifetime = feed;
         tactical_host = memnew(Node3D); host->add_child(tactical_host);
         tactical_instance = tactical_host->get_instance_id();
+        if (mouse_cursor) mouse_cursor->suspend(); // Release before the child installs its own cursor.
         tactical = std::make_shared<MapMode>(std::move(map));
         scene_lifetime = tactical;
         // The battle's options button opens the campaign's menu, the one Escape opens.
@@ -808,7 +813,7 @@ bool GalacticMode::State::process_handoff(double delta) {
         galaxy_viewport->set_update_mode(SubViewport::UPDATE_DISABLED);
         for (auto& layer : scenes) layer.viewport->set_update_mode(SubViewport::UPDATE_DISABLED);
         held.clear();
-        orbiting = false;
+        orbiting = false; scrolling = false; scroll_hold.end();
         loading = memnew(EawrLoadingScreen);
         EawrLoadingScreen::Options load;
         load.content = battle_content;
@@ -848,11 +853,15 @@ bool GalacticMode::State::process_handoff(double delta) {
         map.controller_seat = sim::SeatId{galaxy->local.seat};
         for (const auto& identity : options.lan_players)
             map.controller_names.emplace_back(identity.seat, identity.player);
-        if (options.lan_match) map.shared_pause_notice = [match = options.lan_match, players = options.lan_players] {
-            const auto view = match->view();
-            if (!view.clock_paused || !galactic_lan_gameplay_enabled(view)) return std::string{};
-            const auto at = std::find_if(players.begin(), players.end(), [&](const auto& player) { return player.seat == view.clock_actor; });
-            return "Paused by " + (at != players.end() ? at->player : "Player " + std::to_string(view.clock_actor.value));
+        if (options.lan_match) map.shared_pause_notice = [match = options.lan_match, players = options.lan_players,
+                                                          notice = viewer::galactic::BattlePauseNotice{}]() mutable -> const std::string& {
+            return notice.refresh(match->pause_notice_revision(), [&] { return match->view(); }, players);
+        };
+        // #5355: the agreed battle speed change of the shared clock, named for every seat. The view (owner lock) is read
+        // only for a clock event the HUD has not taken yet; events from before this battle are not shown.
+        if (options.lan_match) map.shared_speed_notice = [match = options.lan_match, players = options.lan_players,
+                                                          since = options.lan_match->clock_events()](const std::uint64_t known, std::string& line) {
+            return viewer::galactic::battle_speed_notice(match->clock_events(), since, known, [&] { return match->view(); }, players, line);
         };
         map.report_path = options.report_path.parent_path() / "tactical.json";
         map.lighting = "sh";
@@ -863,6 +872,7 @@ bool GalacticMode::State::process_handoff(double delta) {
         tactical_host = memnew(Node3D);
         host->add_child(tactical_host);
         tactical_instance = tactical_host->get_instance_id();
+        if (mouse_cursor) mouse_cursor->suspend();
         tactical = std::make_shared<MapMode>(std::move(map));
         scene_lifetime = tactical;
         tactical->set_menu_handler([this] { if (save_controls) save_controls->open_menu(); });

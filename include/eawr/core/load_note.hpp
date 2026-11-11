@@ -41,6 +41,7 @@ struct LoadNote {
     LoadPhase phase{LoadPhase::load};
     std::string diagnostic_code;
     std::string message;
+    friend bool operator==(const LoadNote&, const LoadNote&) = default;
 };
 struct LoadNoteHeader {
     std::string chain_fingerprint;

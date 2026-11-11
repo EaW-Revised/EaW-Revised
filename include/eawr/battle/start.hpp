@@ -59,6 +59,9 @@ struct MapPlacement final {
     bool loads_when_faction_present{};
     std::int8_t enable_at_level{}; // TED mini 11; absent defaults to zero.
     bool marker_behavior{}; // WGT-121: MARKER in generic Behavior; mode-specific lists do not qualify.
+    // LC-44..53: a land-map placement whose type carries the REINFORCEMENT_POINT behaviour. Stock points are Marker
+    // objects, so this keeps them out of the marker set; space maps never set it.
+    bool reinforcement_point{};
 };
 
 struct LobbyColour final {

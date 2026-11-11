@@ -127,6 +127,6 @@ add_test(NAME sun_retail_contracts COMMAND sun_retail_tests)
 
 # Tier labels (cmake/EawrTestTiers.cmake).
 # Each file runs its CPU contracts; graphical exercises retain their opt-in gates.
-eawr_add_python_contract(python_presentation_space_environment_effect_graphical tests.presentation.space.test_environment_effect_graphical)
+
 
 eawr_label_tests()

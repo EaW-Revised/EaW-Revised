@@ -52,6 +52,10 @@ struct CampaignSetupOptions {
     // player and co-op admit them, a versus lobby keeps retail's refusal. The lobby host's choice (a later
     // wire field) arrives here.
     std::optional<sim::galactic::PausePolicy> pause_policy;
+    // #6156: the lobby host's battle-vote timeout in seconds, agreed in the roster. Absent: the campaign's own
+    // Battle_Pending_Timeout_Seconds applies (setups that did not come from a lobby). Not part of the campaign identity:
+    // the roster that carries it is already compared byte for byte between peers.
+    std::optional<std::uint32_t> vote_timeout_seconds;
     [[nodiscard]] CampaignRulesFlavour resolved_rules_flavour() const noexcept {
         return rules_flavour.value_or(mode == CampaignSetupMode::multiplayer
             ? CampaignRulesFlavour::multiplayer : CampaignRulesFlavour::single_player);
@@ -102,6 +106,7 @@ public:
     [[nodiscard]] const sim::galactic::GalacticSetup& galaxy() const noexcept { return galaxy_; }
     [[nodiscard]] CampaignSetupMode mode() const noexcept { return mode_; }
     [[nodiscard]] CampaignRulesFlavour rules_flavour() const noexcept { return rules_flavour_; }
+    [[nodiscard]] std::optional<std::uint32_t> vote_timeout_seconds() const noexcept { return vote_timeout_seconds_; }
     [[nodiscard]] std::span<const CampaignPlayerBinding> player_bindings() const noexcept { return player_bindings_; }
     [[nodiscard]] std::optional<sim::galactic::PlayerId> solo_reference_human() const noexcept { return solo_reference_human_; }
     [[nodiscard]] std::span<const sim::galactic::PlayerId> human_observers() const noexcept { return human_observers_; }
@@ -135,6 +140,7 @@ private:
     sim::galactic::GalacticSetup galaxy_;
     CampaignSetupMode mode_{CampaignSetupMode::single_player};
     CampaignRulesFlavour rules_flavour_{CampaignRulesFlavour::single_player};
+    std::optional<std::uint32_t> vote_timeout_seconds_;
     std::vector<CampaignPlayerBinding> player_bindings_;
     std::optional<sim::galactic::PlayerId> solo_reference_human_;
     std::vector<sim::galactic::PlayerId> human_observers_;

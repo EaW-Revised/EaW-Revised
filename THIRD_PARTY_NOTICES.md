@@ -90,10 +90,10 @@ URLs and the licence files a viewer package bundles are pinned in
 `apps/viewer/dependencies.json`. Godot's own `COPYRIGHT.txt` lists the third-party
 code the engine includes (FreeType, mbedTLS and others) and ships in each package.
 
-The player and debug archives bundle a patched Godot 4.7.2 built from our public fork
+The player and debug archives bundle the patched Godot 4.7.2 fork eawr/4.7.2-stable 5b733a90f (B1: re-spirv off), built from our public fork
 https://github.com/Thom-Ernst/godot (branch `eawr/4.7.2-stable`, commit
-`fad06b57944fbf17833fe3c65dc9ff1d7446c639`): upstream 4.7.2-stable plus two small fixes for the
-Separate render thread (see `third_party/godot/README.md`). Godot is MIT-licensed
+`5b733a90f6516916dc19d530ecdd433fdd0bc4ee`): upstream 4.7.2-stable plus three small changes (two fixes for the
+Separate render thread, and re-spirv switched off to drop retained shader copies) (see `third_party/godot/README.md`). Godot is MIT-licensed
 (Copyright (c) 2014-present Godot Engine contributors, 2007-2014 Juan Linietsky, Ariel Manzur);
 the fork keeps the upstream licence files and every package bundles them.
 

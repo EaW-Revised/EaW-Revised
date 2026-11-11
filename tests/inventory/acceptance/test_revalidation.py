@@ -25,7 +25,7 @@ EXPECTED = {
     "lua-api.json": "77b957769db3593c14586ce6288baa1d35f270cde6c5a944e228354936416468",
     "lua-unresolved.json": "85c0f3c27ff96702a952ea73827bd91adfd50dd7558aa9419af4942208dce0c4",
     "lua-manifest.json": "d8898233a211d2164bf94a95574c2ddd5cb0c3891eac84ea0bf638c3ae982b35",
-    "xml-tags.json": "98e238844d7f1eb641082aa0dc1b163af07360f4ad8602ee26fd99738411dc33",
+    "xml-tags.json": "d497f826efcb8c83392e10eb9698577f21bcac8e1ea8d79ca71ae3975733fef1",
     "xml-unresolved.json": "61656a37bdee3da67f8a68471d366c6951f41305001129a329ffff3f6c1bfe3b",
     "xml-manifest.json": "2d5c9c78b253bcb45366f925166add05f62077ea4cda08b0de88fee81b29b64a",
 }

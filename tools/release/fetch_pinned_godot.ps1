@@ -7,10 +7,10 @@
 param([string]$Out = "out/godot-runtime", [switch]$Console)
 
 $ErrorActionPreference = "Stop"
-$release = "https://github.com/Thom-Ernst/godot/releases/download/eawr-4.7.2-fad06b579"
+$release = "https://github.com/Thom-Ernst/godot/releases/download/eawr-4.7.2-5b733a90f"
 $name = "Godot_v4.7.2-stable_win64.exe"      # the exe inside the zip, and the name the player folder keeps
-$asset = "Godot_v4.7.2-stable-eawr-fad06b579_win64.exe.zip"
-$sha512 = "16b255f4b50ebe4fca9cbb89b53ec06e1f625b905e78f6effa886359f7bbdceaa00e7ee27a4c6814c1a8ae8a11f5b5a8fab5e0e04bc9efefdc18b3f682f8d97d"
+$asset = "Godot_v4.7.2-stable-eawr-5b733a90f_win64.exe.zip"
+$sha512 = "0fbb1b1daf97e1c19c6fbad9dd8ed6f5f73e9dc64b0bfc5db23a6f84cdeaef7f602d424327d7ed5a21d8731e5ef3aca49cb9128a8f6adef064e555a9b3fd1da4"
 
 New-Item -ItemType Directory -Force -Path $Out | Out-Null
 function Get-PinnedAsset([string]$asset, [string]$sha512, [string]$name) {
@@ -28,6 +28,6 @@ function Get-PinnedAsset([string]$asset, [string]$sha512, [string]$name) {
 }
 $gui = Get-PinnedAsset $asset $sha512 $name
 if ($Console) {
-    $null = Get-PinnedAsset "Godot_v4.7.2-stable-eawr-fad06b579_win64_console.exe.zip" "ed74cc5bb12933aa35c1c86b52b17d4054ad9be137d011bf9162f79f0068a8794e0de6da944c0b2d226a3d89224fce0f37947ddee05c33974cf011290cba76e9" "Godot_v4.7.2-stable_win64_console.exe"
+    $null = Get-PinnedAsset "Godot_v4.7.2-stable-eawr-5b733a90f_win64_console.exe.zip" "caa0c59b5eaa18447edea597c7c53fdc7444ec509562839c4b9e977c2b293fd937e914e2eafcd1580e9c8a9d109b22085fc42f87f72ca54fa6596b298caf8c94" "Godot_v4.7.2-stable_win64_console.exe"
 }
 $gui

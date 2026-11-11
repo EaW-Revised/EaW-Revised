@@ -1,3 +1,4 @@
+#include "../support/runtime_path.hpp"
 #include "host_support.hpp"
 
 namespace host_test_support {
@@ -64,7 +65,7 @@ function FailFunction() error("synthetic function failure") end
     // while the script host still proves that its module-cache keys retain spelling.
     write_text(tree.root / "Scripts" / "lib" / "FalseModule.lua", "false_counter=(false_counter or 0)+1; return false\n");
     write_text(tree.root / "Scripts" / "lib" / "setter.lua", "loaded_v=37\n");
-    const auto fixtures = std::filesystem::path(EAWR_SCRIPT_FIXTURES);
+    const auto fixtures = eawr::testing::runtime_path("EAWR_TEST_SOURCE_ROOT", "tests/script/fixtures", EAWR_SCRIPT_FIXTURES);
     write_bytes(tree.root / "Scripts" / "minimal.lua", read_hex(fixtures / "minimal-valid.pglua.hex"));
     write_bytes(tree.root / "Scripts" / "nested.lua", read_hex(fixtures / "nested-debug.pglua.hex"));
 

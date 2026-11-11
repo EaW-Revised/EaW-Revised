@@ -102,7 +102,6 @@ bool EawrLanLobby::build(Options options, const skirmish::SetupMapCache* shared_
             BattleContent{std::move(filesystem), std::move(catalog), profile, std::move(layers)});
     }
     const vfs::Vfs& filesystem = *resources.content->filesystem;
-    if (!options_.game_root.empty()) prime_mounted_mods(options_.game_root);
 
     auto colours = skirmish::read_lobby_colours(filesystem);
     if (!colours) {
@@ -231,6 +230,8 @@ void EawrLanLobby::clear_page() {
 
 void EawrLanLobby::close_screen(const bool emit) {
     if (!shown_) return;
+    impl_->load_digest_wait.reset();
+    impl_->review_digest_wait.reset();
     cancel_join();
     ++impl_->checkpoint_request;
     impl_->checkpoint_store.reset();
@@ -511,6 +512,7 @@ void EawrLanLobby::_process(const double) {
             && impl_->join_selection.source() == model::LobbySourceKind::online && window && window->has_focus());
     }
     Impl& impl = *impl_;
+    if (page_ != Page::staging || !match_->galactic_room()) impl.review_digest_wait.reset();
     bool changed = false;
     const bool online = impl.join_selection.source() == model::LobbySourceKind::online;
     if (online) {
@@ -594,8 +596,10 @@ void EawrLanLobby::handle_button(const std::string& id) {
     if (page_ == Page::staging && match_->galactic_room()) {
         if (id == "EAWR_GC_LOAD_GAME") {
             // #5512: a Load Game press before the campaign content is in waits for it on a worker, never on this thread.
-            if (!prefetch_galactic_content()) {
+            // Load Game compares the save's mod list with the mounted one, so it also waits for the mod content digests (#6349).
+            if (!prefetch_galactic_content(true)) {
                 impl_->load_pending = true;
+                impl_->pending_text.clear();   // finish_pending_galactic draws the waiting line (it names the digest progress)
                 impl_->checkpoint_problem = "Loading campaign content...";
                 impl_->checkpoint_signature.clear();
                 return;

@@ -1,6 +1,8 @@
 #include "eawr/presentation/shader_material_activation.hpp"
 #include "eawr/vfs/vfs.hpp"
 #include "eawr/core/sha256.hpp"
+#include "../../../apps/viewer/src/shader_prewarm_diagnostics.hpp"
+#include "../../../src/presentation/shader_stage/internal.hpp"
 #include "../../support/check.hpp"
 #include "../../support/temp_dir.hpp"
 
@@ -22,7 +24,196 @@ void check(bool condition, std::string_view message) { checks.check(condition, m
 struct Device final : activation::Artifact {};
 // Synthetic recognized PCI vendor; this is not the build host's adapter.
 constexpr presentation::shader_techniques::Settings desktop_settings{3U, 2U, 0x10deU, false};
+std::vector<std::byte> refusal_effect() {
+    // EFX-02/08: authored object slots and shader words, independent of game data.
+    using Bytes = std::vector<std::byte>;
+    const auto append = [](Bytes& bytes, const std::initializer_list<std::uint32_t> words) {
+        for (const auto word : words) for (unsigned shift = 0U; shift < 32U; shift += 8U)
+            bytes.push_back(static_cast<std::byte>((word >> shift) & 255U));
+    };
+    Bytes pool;
+    append(pool, {0U});
+    const auto add = [&](const std::initializer_list<std::uint32_t> words) {
+        const auto offset = static_cast<std::uint32_t>(pool.size());
+        append(pool, words); return offset;
+    };
+    const auto vertex = add({16U, 4U, 0U, 0U, 0U});
+    const auto pixel = add({15U, 4U, 0U, 0U, 0U});
+    const auto one = add({1U}), two = add({2U});
+    Bytes bytes;
+    append(bytes, {0xfeff0901U, static_cast<std::uint32_t>(pool.size())});
+    bytes.insert(bytes.end(), pool.begin(), pool.end());
+    append(bytes, {0U, 1U, 0U, 3U, 0U, 0U, 1U, 0U, 0U, 2U,
+        146U, 0U, vertex, one, 147U, 0U, pixel, two, 2U, 0U});
+    // Same late semantic refusal used by the public stage-wrapper contracts:
+    // valid bytecode framing/scan, followed by an invalid constant destination.
+    Bytes late;
+    append(late, {0xfffe0200U, 0x0200001fU, 0x80000000U, 0x900f0000U,
+        0x02000001U, 0xa00f0000U, 0x90e40000U, 0xffffU});
+    append(bytes, {1U, static_cast<std::uint32_t>(late.size())});
+    bytes.insert(bytes.end(), late.begin(), late.end());
+    Bytes color;
+    append(color, {0xffff0200U, 0x05000051U, 0xa00f0000U,
+        0x3f800000U, 0x3f800000U, 0x3f800000U, 0x3f800000U,
+        0x02000001U, 0x800f0800U, 0xa0e40000U, 0xffffU});
+    append(bytes, {2U, static_cast<std::uint32_t>(color.size())});
+    bytes.insert(bytes.end(), color.begin(), color.end());
+    return bytes;
+}
+int forced_compile_status{};
+int fail_compile(const runtime::abi::Compile*, runtime::abi::Code*, char**) { return forced_compile_status; }
+void refusal_reuse(const std::filesystem::path& directory, const std::filesystem::path& root) {
+    activation::Input input;
+    input.effect = "invented-refusal"; input.logical = "data/art/shaders/invented-refusal.fxo";
+    input.form = presentation::shader_report::SelectedForm::compiled;
+    input.bytes = refusal_effect();
+    input.sha256 = core::sha256_hex({reinterpret_cast<const std::uint8_t*>(input.bytes.data()), input.bytes.size()});
+    input.cache_key = presentation::shader_cache::Key{input.sha256};
+    const auto parsed = assets::read_compiled_effect(input.bytes);
+    check(parsed && parsed.value().programs.size() == 2U, "refusal effect has two authored stage descriptors");
+    if (!parsed) return;
+    const auto run = [&](const char* label, std::optional<int> status = {}, unsigned identity_field = 5U) {
+        runtime::Runtime library;
+        check(library.open(directory) == runtime::Status::ready, "refusal regression opens the verified package");
+        // Each launch uses a fresh session and cache object; only disk survives.
+        auto cache = std::make_shared<presentation::shader_cache::Cache>(root / "refusal-cache",
+            presentation::shader_cache::Limits{16U * 1024U * 1024U, 4U * 1024U * 1024U, 64U, 128U});
+        runtime::CompilerSession session(std::move(library));
+        // Deliberately perturb only this test session's private identity/status.
+        // Production still verifies the complete package before every lookup.
+        auto& internal = runtime::StageSessionAccess::get(session);
+        if (status) { forced_compile_status = *status; internal.api.vkd3d_shader_compile = fail_compile; }
+        if (identity_field == 0U) internal.identity.package_lock_sha256[0U] ^= std::byte{1U};
+        if (identity_field == 1U) internal.identity.capability_manifest_sha256[0U] ^= std::byte{1U};
+        if (identity_field == 2U) internal.identity.public_c_abi.manifest_sha256[0U] ^= std::byte{1U};
+        if (identity_field == 3U) ++internal.identity.result_schema_version;
+        if (identity_field == 4U) ++internal.identity.options_manifest_version;
+        material::Compiler compiler(std::move(session), cache, {}, desktop_settings);
+        activation::Job job(1U, label, {input}, compiler.operations());
+        job.step(16U);
+        const auto result = job.result();
+        check(result && result->effects.size() == 1U && job.progress().admitted == 0U,
+            "refusal never publishes a resident material");
+        std::vector<activation::Diagnostic> diagnostics;
+        if (result && result->effects.size() == 1U) {
+            check(result->effects.front().fallback == presentation::shader_report::Route::surface_omitted,
+                "cached refusal retains the established omission");
+            diagnostics = result->effects.front().diagnostics;
+        }
+        check(std::any_of(diagnostics.begin(), diagnostics.end(), [](const auto& diagnostic) {
+            return diagnostic.stage == presentation::shader_report::FailureStage::stage_compile
+                && diagnostic.reason == presentation::shader_report::Reason::compile_failure;
+        }), "late failure retains its typed compile refusal");
+        return std::pair{compiler.work(), diagnostics};
+    };
+    const auto cold = run("refusal-cold"), warm = run("refusal-warm");
+    check(cold.first.translations > 0U, "cold refusal reaches the actual stage compiler");
+    check(warm.first.translations == 0U && warm.first.source_compilations == 0U && warm.first.cache_hits > 0U,
+        "fresh-session warm refusal performs zero translation or source compilation");
+    const auto same = [](const activation::Diagnostic& a, const activation::Diagnostic& b) {
+        return a.stage == b.stage && a.reason == b.reason && a.severity == b.severity;
+    };
+    check(cold.second.size() == warm.second.size()
+        && std::equal(cold.second.begin(), cold.second.end(), warm.second.begin(), same),
+        "warm refusal preserves every typed diagnostic in order");
+    std::cout << "refusal work cold_translate=" << cold.first.translations
+        << " warm_translate=" << warm.first.translations << " warm_cache_hits=" << warm.first.cache_hits << '\n';
+    auto warm_disk = std::make_shared<presentation::shader_cache::Cache>(root / "refusal-cache",
+        presentation::shader_cache::Limits{16U * 1024U * 1024U, 4U * 1024U * 1024U, 64U, 128U});
+    material::Compiler unavailable(runtime::CompilerSession(runtime::Runtime{}), warm_disk, {}, desktop_settings);
+    activation::Cancellation cancellation;
+    const auto missing = unavailable.prepare(input, cancellation);
+    check(!missing.artifact && missing.diagnostics.size() == 1U
+        && missing.diagnostics.front().reason == presentation::shader_report::Reason::dependency_unavailable
+        && unavailable.work().cache_hits == 0U && unavailable.work().translations == 0U,
+        "a negative entry never substitutes for the current verified compiler dependency");
+    runtime::Runtime library;
+    check(library.open(directory) == runtime::Status::ready, "cancellation control opens the verified package");
+    material::Compiler cancelled(runtime::CompilerSession(std::move(library)), warm_disk, {}, desktop_settings);
+    cancellation.requested.store(true);
+    const auto stopped = cancelled.prepare(input, cancellation);
+    check(!stopped.artifact && stopped.diagnostics.size() == 1U
+        && stopped.diagnostics.front().reason == presentation::shader_report::Reason::cancelled
+        && cancelled.work().cache_hits == 0U && cancelled.work().translations == 0U,
+        "cancellation takes priority over a persisted refusal");
+    const auto outer = input.cache_key;
+    for (unsigned field = 0U; field < 5U; ++field) {
+        const auto changed = run("changed-compiler", {}, field);
+        check(changed.first.translations == cold.first.translations,
+            "every current compiler identity component partitions negative reuse");
+    }
+    input.cache_key = presentation::shader_cache::Key{std::string(64U, '9')};
+    check(run("changed-outer").first.translations == cold.first.translations,
+        "the current outer input identity partitions negative reuse");
+    input.cache_key = outer;
+    const auto program_offset = static_cast<std::size_t>(parsed.value().programs.front().bytes.data() - input.bytes.data());
+    input.bytes[program_offset + 26U] = std::byte{0xe0U}; // different source swizzle, still an invalid destination
+    input.sha256 = core::sha256_hex({reinterpret_cast<const std::uint8_t*>(input.bytes.data()), input.bytes.size()});
+    check(run("changed-stage").first.translations == 1U,
+        "fresh stage bytes partition refusals even with the same outer cache key");
+    input.bytes = refusal_effect();
+    input.sha256 = core::sha256_hex({reinterpret_cast<const std::uint8_t*>(input.bytes.data()), input.bytes.size()});
+    presentation::shader_cache::Cache disk(root / "refusal-cache",
+        {16U * 1024U * 1024U, 4U * 1024U * 1024U, 64U, 128U});
+    std::optional<presentation::shader_cache::Key> negative;
+    const auto any = [](auto) { return true; };
+    for (const auto& entry : std::filesystem::directory_iterator(root / "refusal-cache")) {
+        if (entry.path().extension() != ".eawrshader") continue;
+        presentation::shader_cache::Key candidate{entry.path().stem().string()};
+        const auto cached = disk.lookup(candidate, true, any);
+        constexpr std::string_view marker = "eawr-stage-refusal/1:stage_compile:invalid_shader:error";
+        if (cached.payload.size() == marker.size()
+            && std::equal(cached.payload.begin(), cached.payload.end(), marker.begin())) {
+            // Invalidate every negative record; rebuilding the current one
+            // below identifies its key without duplicating key derivation.
+            check(disk.invalidate(candidate, true) == presentation::shader_cache::Status::invalidated,
+                "test owns and invalidates a negative entry");
+        }
+    }
+    check(run("identify-current-negative").first.translations == 1U, "only the invalid stage recompiles after invalidation");
+    for (const auto& entry : std::filesystem::directory_iterator(root / "refusal-cache")) {
+        if (entry.path().extension() != ".eawrshader") continue;
+        presentation::shader_cache::Key candidate{entry.path().stem().string()};
+        const auto cached = disk.lookup(candidate, true, any);
+        if (cached.payload.size() < 100U) negative = candidate;
+    }
+    check(negative.has_value(), "canonical refusal has a bounded independent disk record");
+    if (negative) {
+        const auto original = disk.lookup(*negative, true, any).payload;
+        for (unsigned mutation = 0U; mutation < 3U; ++mutation) {
+            auto damaged = original;
+            if (mutation == 0U) damaged.push_back(0U);
+            else if (mutation == 1U) damaged.pop_back();
+            else damaged.front() ^= 1U;
+            check(disk.store(*negative, true, damaged, any) == presentation::shader_cache::Status::stored,
+                "semantic corruption control has a valid outer checksum");
+            check(run("corrupt-negative").first.translations == 1U,
+                "malformed negative payload is a recoverable miss");
+        }
+    }
+    for (const auto status : {-2, -1, -3, -5, -999, 1}) {
+        input.cache_key = presentation::shader_cache::Key{core::sha256_hex(
+            {reinterpret_cast<const std::uint8_t*>(&status), sizeof(status)})};
+        const auto failed = run("retryable-cold", status);
+        const auto retried = run("retryable-warm", status);
+        check(failed.first.translations == 2U && retried.first.translations == 2U && retried.first.cache_hits == 0U,
+            "resource, unknown and other non-qualified compiler failures retry in a fresh session");
+    }
+}
 void offline() {
+    std::string refusal_details;
+    core::Diagnostic prewarm_error{.code = "EAWR-RENDER-0007", .severity = core::Severity::error,
+        .message = "offscreen coverage incomplete; draw_calls=0\n\"bounded\"", .logical_path = {},
+        .line = {}, .column = {}, .source_id = {}};
+    presentation::godot_backend::append_prewarm_refusal(refusal_details, prewarm_error);
+    check(refusal_details.find("EAWR-RENDER-0007") != std::string::npos
+        && refusal_details.find("draw_calls=0\\n\\\"bounded\\\"") != std::string::npos,
+        "the report retains the exact prewarm reason and quotes controls");
+    prewarm_error.message.assign(65536U, 'x');
+    for (unsigned i = 0U; i < 128U; ++i)
+        presentation::godot_backend::append_prewarm_refusal(refusal_details, prewarm_error);
+    check(refusal_details.size() <= presentation::godot_backend::prewarm_diagnostic_bytes,
+        "prewarm refusals cannot exhaust the activation report budget");
     runtime::CompilerIdentity identity;
     const presentation::shader_cache::Key outer{std::string(64U, '7')};
     const auto original = material::source_stage_cache_key(outer, "VertexEntry", "vs_3_0", identity);
@@ -73,12 +264,20 @@ void package(const std::filesystem::path& directory) {
         + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
     struct Cleanup { std::filesystem::path path; ~Cleanup() { testing::remove_temp_directory(path); } } cleanup{root};
     std::filesystem::create_directories(root / "mod/art/shaders");
+    refusal_reuse(directory, root);
     constexpr std::string_view text =
         "float4 Tint=float4(1.0,1.0,1.0,1.0);\n"
         "float4 VertexEntry(float4 p:POSITION):POSITION{return p*Tint;}\n"
         "float4 PixelEntry():COLOR0{return float4(0.25,0.5,0.75,1.0);}\n"
         "technique main {pass draw {VertexShader=compile vs_3_0 VertexEntry();PixelShader=compile ps_3_0 PixelEntry();}}\n";
+    // Same position-only source as the shipped five-launch control. This
+    // exercises real compilation, lowering and renderer CPU validation without a GPU.
+    constexpr std::string_view route_text =
+        "float4 VertexEntry(float4 p:POSITION):POSITION {return float4(p.x * 0.002, p.z * 0.002, 0.5, 1.0);}\n"
+        "float4 PixelEntry():COLOR0 {return float4(0.25,0.5,0.75,1.0);}\n"
+        "technique main {pass draw {VertexShader=compile vs_3_0 VertexEntry();PixelShader=compile ps_3_0 PixelEntry();}}\n";
     { std::ofstream output(root / "mod/art/shaders/invented.fx", std::ios::binary); output << text; }
+    { std::ofstream output(root / "mod/art/shaders/route.fx", std::ios::binary); output << route_text; }
     auto unsupported_profile = std::string(text);
     unsupported_profile.replace(unsupported_profile.find("vs_3_0"), 6U, "vs_4_0");
     auto unsupported_semantic = std::string(text);
@@ -107,7 +306,14 @@ void package(const std::filesystem::path& directory) {
     auto cache = std::make_shared<presentation::shader_cache::Cache>(root / "cache",
         presentation::shader_cache::Limits{16U * 1024U * 1024U, 4U * 1024U * 1024U, 64U, 128U});
     std::size_t prewarms{};
-    material::Compiler compiler(std::move(session), cache, [&](const material::Program&) {
+    material::Compiler compiler(std::move(session), cache, [&](const material::Program& program)
+        -> std::shared_ptr<const activation::Artifact> {
+        const auto valid = presentation::validate_material(program.material);
+        check(bool(valid), "translated program passes production renderer CPU preflight");
+        if (!valid) {
+            std::cerr << valid.error().code << ": " << valid.error().message << '\n';
+            return {};
+        }
         ++prewarms; return std::make_shared<Device>();
     }, desktop_settings);
     activation::Publisher publisher;
@@ -265,6 +471,21 @@ void package(const std::filesystem::path& directory) {
     };
     refusal("profile", presentation::shader_report::Reason::unsupported_profile);
     refusal("semantic", presentation::shader_report::Reason::unsupported_semantic);
+    auto route_source = runtime::preprocess_source(acquisition, provider, "data/art/shaders/route.fx");
+    check(route_source.source.has_value(), "five-launch source preprocesses without a GPU");
+    if (route_source.source) {
+        auto route_snapshot = std::make_shared<activation::SourceSnapshot>();
+        route_snapshot->source = std::move(*route_source.source);
+        auto route_input = input;
+        route_input.effect = "route"; route_input.logical = "data/art/shaders/route.fx";
+        route_input.context = route_snapshot; route_input.cache_key.reset();
+        route_input.bytes = route_snapshot->source.expanded;
+        route_input.sha256 = core::sha256_hex({reinterpret_cast<const std::uint8_t*>(route_input.bytes.data()), route_input.bytes.size()});
+        activation::Job route_cpu(publisher.begin(), "route-cpu", {route_input}, compiler.operations());
+        route_cpu.step(16U);
+        check(route_cpu.progress().admitted == 1U,
+            "five-launch source reaches successful renderer CPU preflight before device admission");
+    }
     std::cout << "material work cold_source=" << counts.source_compilations << " cold_translate=" << counts.translations
         << " warm_source=" << warm_counts.source_compilations - counts.source_compilations
         << " warm_translate=" << warm_counts.translations - counts.translations

@@ -3,6 +3,10 @@
 Invoked only by the opt-in galactic_corpus_upgrade target. Generates into a fresh
 directory, verifies the existing fixture inventory, then publishes fixtures and
 their binary allowlist digests together. The zip is a portable offload artifact.
+
+Format 13 note (asynchronous galactic AI): the upgrade does not interpret native-effect payloads. A recording made with the asynchronous AI may carry identity_reservation effects (kind 21,
+fixed 32-byte payload) in the backward form (entity next < expected, invasion pair unchanged): see
+docs/galactic-replay-format.md; that form needs no conversion.
 """
 from __future__ import annotations
 

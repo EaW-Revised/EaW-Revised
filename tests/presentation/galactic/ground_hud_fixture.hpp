@@ -19,7 +19,9 @@ inline void configure_ground_fixture(sim::galactic::GalacticSetup& setup,
     const auto enemy = local == 1 ? 2U : 1U;
     const bool representative = name == "ground-representative";
     // The hidden-structures variant is the opponent's planet: a local owner always knows its structures.
-    const auto owner = (name == "ground-count" || representative) || name == "ground-foreign" || name == "ground-structures-hidden" ? enemy : local;
+    // "ground-unseen" is an opponent planet whose ground force size is not known to the local player (UNKNOWN line).
+    const bool unseen = name == "ground-unseen";
+    const auto owner = (name == "ground-count" || representative) || name == "ground-foreign" || name == "ground-structures-hidden" || unseen ? enemy : local;
     std::erase_if(setup.fleets, [local](const auto& row) { return row.owner != local; });
     setup.fleet_control->types[0].transport = true;
     if (name == "ground-launch-move" || name == "ground-transfer" || name == "ground-slot-return") {
@@ -141,9 +143,9 @@ inline void configure_ground_fixture(sim::galactic::GalacticSetup& setup,
         std::sort(setup.movement->contents.begin(), setup.movement->contents.end(),
             [](const auto& a, const auto& b) { return a.container < b.container; });
     }
-    const auto mask = g::bit(g::Intelligence::ground_count) | g::bit(g::Intelligence::ownership)
+    const auto mask = (unseen ? 0U : g::bit(g::Intelligence::ground_count)) | g::bit(g::Intelligence::ownership)
         | g::bit(g::Intelligence::fleet_presence) | g::bit(g::Intelligence::fleet_count)
-        | ((name == "ground-count" || representative) ? 0U : g::bit(g::Intelligence::ground_contents))
+        | ((name == "ground-count" || representative || unseen) ? 0U : g::bit(g::Intelligence::ground_contents))
         | (structures && name != "ground-structures-hidden" ? g::bit(g::Intelligence::structures) : 0U);
     for (auto& player : setup.observer->players) player.default_intelligence = mask;
     for (auto& row : setup.observer->records) row.mask = mask;

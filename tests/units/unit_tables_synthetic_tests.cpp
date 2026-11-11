@@ -18,6 +18,32 @@
 
 namespace unit_tables_test_support {
 
+void check_movie_object() {
+    for (const bool disabled : {false, true}) {
+        TempTree tree;
+        auto xml = units_xml("200", "Select_Test");
+        const auto tag = xml.find("<SpaceUnit Name=\"Test_Frigate\">");
+        if (tag == std::string::npos) { expect(false, "battlecam fixture has its ship"); return; }
+        if (disabled) xml.insert(xml.find('>', tag) + 1,
+            "<Movie_Object>No</Movie_Object><Glory_Cinematics>first.tec, second.tec</Glory_Cinematics>");
+        write_fixture(tree.root, xml);
+        auto loaded = load(tree.root, models(0.0F));
+        expect(loaded.tables.has_value(), "battlecam type fixture loads");
+        if (!loaded.tables) continue;
+        const auto* ship = loaded.tables->find("Test_Frigate");
+        expect(ship && ship->movie_object == !disabled, "Movie_Object defaults true and honors authored false");
+        expect(ship && (disabled ? ship->glory_cinematics == std::vector<std::string>{"first.tec", "second.tec"}
+                                 : ship->glory_cinematics.empty()), "glory list retains empty and modified authored lists");
+        auto changed = *loaded.tables;
+        auto* edited = const_cast<eawr::units::UnitType*>(changed.find("Test_Frigate"));
+        if (edited) {
+            edited->movie_object = !edited->movie_object;
+            expect(eawr::units::content_identity(changed) == eawr::units::content_identity(*loaded.tables),
+                "presentation eligibility does not alter simulation content identity");
+        }
+    }
+}
+
 void space_population() {
     // The inherited zero and negative sentinel are distinct from a positive override.
     for (const auto override_text : {std::string_view{""}, std::string_view{"3"},

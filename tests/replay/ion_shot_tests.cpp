@@ -136,9 +136,16 @@ constexpr eawr::sim::EntityId escort = 31; // a Rebel frigate: not a valid targe
     team.recharge_frames = 600;
     team.supports_autofire = true;
     team.team = true;
+    team.gui_activated_ability_name = "Ion_Handler";
     tactical::AbilityProfile own;
     own.kind = tactical::AbilityKind::ion_cannon_shot;
     table.profiles = {{squadron_type, {team}, false}, {craft_type, {own}, false}};
+    tactical::SpecialAbilityProfile handler;
+    handler.name = "Ion_Handler";
+    handler.kind = tactical::special_ability_kind("Ion_Cannon_Shot_Attack_Ability");
+    handler.style = tactical::SpecialActivationStyle::user_input;
+    handler.filter.applicable_categories = ~std::uint64_t{};
+    table.profiles.front().special = {handler};
     table.humans = humans;
     return table;
 }
@@ -592,6 +599,92 @@ void test_retaliation_skips_ion_shot() {
 }
 
 // The player's shot hashes the same at every worker count.
+
+// AB-70: perturb the same named handler the XML loader supplies, before commands and autofire.
+void test_named_handler_admission() {
+    const auto observe = [&](const std::size_t workers) {
+        const eawr::platform::ThreadWorkerAdapter executor(workers);
+        std::vector<std::string> hashes;
+        for (unsigned scenario = 0; scenario < 19; ++scenario) {
+            auto table = abilities({rebel});
+            auto& ordinary = table.profiles.front().abilities.front();
+            auto& handler = table.profiles.front().special.front();
+            const bool automatic = scenario == 11 || scenario == 12 || scenario == 13 || scenario == 17 || scenario == 18;
+            bool admitted = true;
+            switch (scenario) {
+            case 0: handler.filter.applicable_categories = 1; admitted = false; break;
+            case 1: handler.filter.applicable_categories = 0; admitted = false; break;
+            case 2: handler.filter.applicable_categories = 0; handler.filter.applicable_types = {frigate_type}; break;
+            case 3: handler.filter.excluded_categories = 2; admitted = false; break;
+            case 4: handler.filter.excluded_categories = 2; handler.filter.applicable_types = {frigate_type}; break;
+            case 5: handler.filter.excluded_types = {frigate_type}; admitted = false; break;
+            case 6: ordinary.gui_activated_ability_name = "Missing"; admitted = false; break;
+            case 7: ordinary.gui_activated_ability_name = "iON_hANDLER"; break;
+            case 8: handler.style = tactical::SpecialActivationStyle::unspecified; admitted = false; break;
+            case 9: handler.style = tactical::SpecialActivationStyle::ground_automatic; admitted = false; break;
+            case 10: handler.style = tactical::SpecialActivationStyle::space_automatic; break;
+            case 11: handler.style = tactical::SpecialActivationStyle::space_automatic; admitted = false; break;
+            case 12: break;
+            case 13: handler.filter.applicable_categories = 1; admitted = false; break;
+            case 14: handler.initially_enabled = false; admitted = false; break;
+            case 16: handler.style = tactical::special_activation_style("Special_Attack"); break;
+            case 17: handler.style = tactical::special_activation_style("Special_Attack"); break;
+            case 18: admitted = false; break;
+            case 15: {
+                auto decoy = handler;
+                decoy.name = "First_Unnamed_By_GUI";
+                decoy.filter.applicable_categories = 0;
+                table.profiles.front().special.insert(table.profiles.front().special.begin(), decoy);
+                break;
+            }
+            }
+            const auto created = tactical::validate_abilities(table);
+            expect(static_cast<bool>(created), "AB-70: authored handler table validates");
+            if (!created) continue;
+            auto made = tactical::TacticalSession::create(setup(), sensors(), durability(), motion(), std::nullopt,
+                combat(), {}, table);
+            expect(static_cast<bool>(made), "AB-70: perturbed handler session builds");
+            if (!made) continue;
+            auto world = std::move(made).value();
+            if (automatic) {
+                expect(world.submit({{0, rebel, 0}, {container}, tactical::AttackPayload{frigate}}).has_value(),
+                    "AB-70: attack for autofire submits");
+                if (scenario != 17 && scenario != 18)
+                    expect(world.submit(shot(0, 1, container, eawr::sim::invalid_entity_id, tactical::AbilityAction::autofire_on)).has_value(),
+                        "AB-70: explicit autofire submits");
+            } else expect(world.submit(shot(0, 0, container, frigate)).has_value(), "AB-70: manual ion submits");
+            std::optional<tactical::TacticalSession> restored;
+            bool active = false;
+            for (unsigned tick = 0; tick < 8; ++tick) {
+                const auto step = world.step(executor);
+                expect(static_cast<bool>(step), "AB-70: admission fixture steps");
+                if (!step) break;
+                hashes.push_back(step.value().state_sha256);
+                active = active || world.ability_state(container)->slots.front().active;
+                if (restored) {
+                    const auto continued = restored->step(executor);
+                    expect(continued && continued.value().state_sha256 == step.value().state_sha256,
+                        "AB-70: checkpoint continuation preserves named admission and target");
+                } else {
+                    const auto saved = world.save_checkpoint_state();
+                    auto fresh = tactical::TacticalSession::from_replay(world.record(), sensors(), durability(), motion(),
+                        std::nullopt, combat(), {}, table);
+                    expect(saved && fresh, "AB-70: checkpoint and fresh world create");
+                    if (saved && fresh) {
+                        restored.emplace(std::move(fresh).value());
+                        expect(restored->load_checkpoint_state(saved.value()).has_value(), "AB-70: checkpoint restores");
+                    }
+                }
+            }
+            expect(active == admitted, "AB-70: named handler admission scenario " + std::to_string(scenario));
+        }
+        return hashes;
+    };
+    const auto baseline = observe(1);
+    for (const std::size_t workers : {2U, 4U, 8U})
+        expect(observe(workers) == baseline, "AB-70: perturbed handler hashes agree at every worker count");
+}
+
 void test_workers() {
     const eawr::sim::InlineExecutor inline_executor;
     const auto reference = run({shot(1, 1, container, frigate)}, {rebel}, inline_executor, 300);
@@ -605,6 +698,7 @@ void test_workers() {
 } // namespace
 
 int main() {
+    test_named_handler_admission();
     test_player_shot();
     test_rejections();
     test_new_orders();

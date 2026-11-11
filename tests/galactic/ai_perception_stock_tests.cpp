@@ -1190,7 +1190,7 @@ end
     }
     auto broken_native = native; broken_native.components.at("GALACTIC_PERCEPTION").push_back(0);
     expect(!host.world->restore(broken_native) && host.world->state_hash().value() == hash, "trailing component bytes refuse atomically");
-    broken_native = native; broken_native.version = 2;
+    broken_native = native; broken_native.version = foc::galactic_ai::native_state_version + 1;
     expect(!host.world->restore(broken_native), "unsupported envelope version refuses");
     broken_native = native; broken_native.components.clear();
     expect(!host.world->restore(broken_native), "missing mandatory perception component refuses");

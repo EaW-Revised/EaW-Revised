@@ -120,7 +120,16 @@ void pause_clocks_and_throttle() {
     expect(tick && tick.value().story.commands.size() == 1, "elapsed strictly greater than ServiceRate pumps");
     std::vector<galactic::GameCommand> hold{{{2, {1}, 1}, galactic::PauseGalaxy{}}};
     tick = throttled.step(executor, hold);
-    expect(tick && tick.value().story.commands.empty(), "frozen story time respects LastService throttle");
+    const auto frozen = throttled.world().clock().galactic_frame;
+    // One step later is exactly the rate (equal to within rounding), two steps later is past it: over three paused steps the
+    // pump comes due again, while the mode clock (GetCurrentTime) stays frozen.
+    std::size_t pumped = tick ? tick.value().story.commands.size() : 0;
+    for (int step = 0; step < 3; ++step) {
+        tick = throttled.step(executor);
+        pumped += tick ? tick.value().story.commands.size() : 0;
+    }
+    expect(pumped >= 1, "WST-54 the pump clock is the synchronizer's, which runs through a pause: a paused script is pumped again");
+    expect(throttled.world().clock().galactic_frame == frozen, "while the mode clock (GetCurrentTime) stays frozen");
 }
 
 void named_fault_and_guardrails() {

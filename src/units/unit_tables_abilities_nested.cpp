@@ -1,6 +1,7 @@
 #include "unit_tables_decode.hpp"
 
 #include <algorithm>
+#include <limits>
 
 namespace eawr::units::unit_tables_detail {
 
@@ -95,10 +96,26 @@ void Loader::load_unit_abilities(Object& object, UnitType& unit) {
                 } else if (iequals(child.name, "Supports_Autofire")) {
                     data::tag_trace::used(child);
                     ability.supports_autofire = boolean(value).value_or(false);
+                } else if (iequals(child.name, "Active_By_Default")) {
+                    data::tag_trace::used(child);
+                    // FS-51: only kinds with a creation-time activation consumer read the default; another kind
+                    // keeps it unread and says so at load.
+                    const auto kind = sim::tactical::ability_kind(ability.type);
+                    if (kind == sim::tactical::AbilityKind::interdict || kind == sim::tactical::AbilityKind::replenish_wingmen)
+                        ability.active_by_default = boolean(value).value_or(false);
+                    else
+                        report_.note(unit.id, child.name, value,
+                            "Active_By_Default is applied only to INTERDICT and REPLENISH_WINGMEN; ignored on this ability kind (FS-51, #6244)");
+                } else if (iequals(child.name, "Must_Be_Bought_On_Black_Market")) {
+                    data::tag_trace::used(child);
+                    ability.market_purchase_required = boolean(value).value_or(false);
                 } else if ((ability.type == "INTERDICT" || ability.type == "MISSILE_SHIELD")
                     && iequals(child.name, "Disable_Movement")) {
                     data::tag_trace::used(child);
                     ability.disable_movement = boolean(value).value_or(false);
+                } else if (ability.type == "SELF_DESTRUCT" && iequals(child.name, "Stop_When_Activated")) {
+                    data::tag_trace::used(child);
+                    ability.stop_when_activated = boolean(value).value_or(true);
                 } else if (iequals(child.name, "Projectile_Types_Override")) {
                     data::tag_trace::used(child);
                     ability.projectile_override = value;
@@ -115,10 +132,11 @@ void Loader::load_unit_abilities(Object& object, UnitType& unit) {
                 } else if (ability.type == "WEAKEN_ENEMY" && iequals(child.name, "Target_Position_Z_Offset")) {
                     data::tag_trace::used(child);
                     ability.target_position_z_offset = number(value);
-                } else if (ability.type == "CORRUPT_SYSTEMS" && iequals(child.name, "Area_Effect_Decal_Distance")) {
+                } else if (iequals(child.name, "Area_Effect_Decal_Distance")) {
                     data::tag_trace::used(child);
-                    ability.effective_radius = number(value);
-                    if (!ability.effective_radius) report_.missing(unit.id, child.name, value, "not a decimal");
+                    ability.area_effect_decal_distance = number(value);
+                    if (!ability.area_effect_decal_distance) report_.missing(unit.id, child.name, value, "not a decimal");
+                    if (ability.type == "CORRUPT_SYSTEMS") ability.effective_radius = ability.area_effect_decal_distance;
                 } else if (iequals(child.name, "Targeting_Fire_Inaccuracy_Fixed_Radius_Override")) {
                     data::tag_trace::used(child);
                     ability.fixed_inaccuracy = number(value);
@@ -162,6 +180,7 @@ void Loader::load_unit_abilities(Object& object, UnitType& unit) {
             unit.abilities.push_back(std::move(ability));
         }
     }
+    unit.ability_team_dispatch = has_behavior(object, "TEAM");
     if (std::any_of(unit.abilities.begin(), unit.abilities.end(), [](const Ability& ability) {
             return ability.type == "REPLENISH_WINGMEN";
         })) {
@@ -220,6 +239,7 @@ void Loader::load_buzz_droids_ability(UnitType& unit, const std::string& name, c
     if (iequals(node.name, "Buzz_Droids_Ability")) {
         // WAB-70/71: the nested data Apply copies onto the droid object it creates.
         BuzzDroids buzz;
+        buzz.market_purchase_required = boolean(child_text("Must_Be_Bought_On_Black_Market")).value_or(false);
         buzz.name = name;
         const auto read = [&](const std::string_view tag) -> std::optional<Fixed> {
             const auto value = child_text(tag);
@@ -245,14 +265,14 @@ void Loader::load_buzz_droids_ability(UnitType& unit, const std::string& name, c
 bool Loader::load_special_ability(UnitType& unit, const std::string& name, const AbilityFields& child_text) {
     const auto& node = child_text.node;
     const auto special_kind = sim::tactical::special_ability_kind(node.name);
-    // WSH-01: only authored automatic space healers belong to this consumer.
+    // WSH-10: retain automatic healers for this domain; multiplayer admission is a session decision.
     if (special_kind == sim::tactical::SpecialAbilityKind::force_healing
-        && std::none_of(node.children.begin(), node.children.end(), [this](const auto& child) {
-            return iequals(child.name, "Activation_Style") && iequals(trim(child.raw_text), automatic_activation_name(input_.domain));
-        })) return false;
+        && !sim::tactical::automatic_ability_style(
+            sim::tactical::special_activation_style(child_text("Activation_Style")), input_.domain, true)) return false;
     if (special_kind != sim::tactical::SpecialAbilityKind::none) {
         sim::tactical::SpecialAbilityProfile special;
         special.name = name;
+        special.market_purchase_required = boolean(child_text("Must_Be_Bought_On_Black_Market")).value_or(false);
         special.kind = special_kind;
         if (special_kind == sim::tactical::SpecialAbilityKind::enable_radar) {
             const auto allies = child_text("Affects_All_Allies");
@@ -262,8 +282,28 @@ bool Loader::load_special_ability(UnitType& unit, const std::string& name, const
                 else special.affects_all_allies = *parsed;
             }
         }
-        special.style = sim::tactical::special_activation_style(child_text("Activation_Style"));
+        const auto style = child_text("Activation_Style");
+        // AB-70: the ion constructor defaults to the attack trigger, overriding the base's unspecified style.
+        special.style = style.empty() && special_kind == sim::tactical::SpecialAbilityKind::ion_cannon_shot
+            ? sim::tactical::SpecialActivationStyle::special_attack : sim::tactical::special_activation_style(style);
         special.service_interval = sim::tactical::special_service_interval(special_kind);
+        if (special_kind == sim::tactical::SpecialAbilityKind::sensor_jamming) {
+            special.initially_enabled = true; // WRB-05: absent Initially_Enabled is taken as on; unverified.
+            const auto duration = child_text("Duration_In_Secs");
+            if (!duration.empty()) {
+                const auto parsed = number(duration);
+                if (!parsed || parsed->raw() < 0) report_.missing(unit.id, "Duration_In_Secs", duration, "not a nonnegative decimal");
+                else {
+                    const auto raw = static_cast<std::uint64_t>(parsed->raw());
+                    constexpr auto scale = static_cast<std::uint64_t>(Fixed::scale);
+                    const auto count = (raw / scale) * sim::tactical::logical_frames_per_second
+                        + (raw % scale) * sim::tactical::logical_frames_per_second / scale;
+                    if (count > std::numeric_limits<std::uint32_t>::max())
+                        report_.missing(unit.id, "Duration_In_Secs", duration, "exceeds the supported frame count");
+                    else special.jamming_duration_frames = static_cast<std::uint32_t>(count);
+                }
+            }
+        }
         const auto enabled = child_text("Initially_Enabled");
         if (!enabled.empty()) {
             special.initially_enabled = boolean(enabled);
@@ -289,6 +329,30 @@ bool Loader::load_special_ability(UnitType& unit, const std::string& name, const
         special.filter.excluded_categories = enum_bits(tables_.categories, mask(child_text("Excluded_Unit_Categories")),
             unit.id, "Excluded_Unit_Categories", report_);
         load_special_healing(unit, special, child_text);
+        if (special_kind == sim::tactical::SpecialAbilityKind::force_healing) {
+            UnitType::HealingBlob blob;
+            blob.material = child_text("Heal_Range_Blob_Material");
+            blob.range = special.heal_range;
+            blob.style = special.style;
+            const auto values = tokens(child_text("Blob_Color"));
+            if (!values.empty()) {
+                if (values.size() != blob.colour.size()) {
+                    report_.missing(unit.id, "Blob_Color", child_text("Blob_Color"), "expected four channels");
+                    blob.material.clear();
+                } else {
+                    for (std::size_t i = 0; i < values.size(); ++i) {
+                        const auto value = number(values[i]);
+                        if (!value || value->raw() < 0 || value->raw() > 255 * Fixed::scale) {
+                            report_.missing(unit.id, "Blob_Color", child_text("Blob_Color"), "invalid channel");
+                            blob.material.clear();
+                            break;
+                        }
+                        blob.colour[i] = static_cast<std::uint8_t>(value->raw() / Fixed::scale);
+                    }
+                }
+            }
+            unit.healing_blobs.push_back(std::move(blob));
+        }
         load_special_beam(unit, special, child_text);
         load_special_blast(unit, special, child_text);
         load_special_stealth(unit, special, child_text);
@@ -303,6 +367,22 @@ bool Loader::load_special_ability(UnitType& unit, const std::string& name, const
             unit.special_abilities.push_back(std::move(special));
     }
     return true;
+}
+
+void Loader::load_land_income_abilities(Object& object, UnitType& unit) {
+    for (const auto* abilities : object.list("Abilities", report_)) {
+        for (const auto& node : abilities->children) {
+            if (!iequals(node.name, "Income_Stream_Ability") && !iequals(node.name, "Income_Stream_Mod_Ability")) continue;
+            std::string name;
+            for (const auto& attribute : node.attributes) {
+                if (iequals(attribute.name, "Name")) {
+                    data::tag_trace::used_attribute(node, attribute.name);
+                    name = attribute.value;
+                }
+            }
+            load_bonus_abilities(object, unit, name, AbilityFields{node});
+        }
+    }
 }
 
 void Loader::load_nested_abilities(Object& object, UnitType& unit) {
@@ -324,6 +404,16 @@ void Loader::load_nested_abilities(Object& object, UnitType& unit) {
             if (!load_special_ability(unit, name, child_text)) continue;
             load_bonus_abilities(object, unit, name, child_text);
         }
+    }
+    for (const auto& ability : unit.abilities) {
+        if (ability.type != "SENSOR_JAMMING") continue;
+        const auto& name = ability.gui_activated_ability_name;
+        const auto handler = std::find_if(unit.special_abilities.begin(), unit.special_abilities.end(),
+            [&](const auto& special) { return special.kind == sim::tactical::SpecialAbilityKind::sensor_jamming
+                && special.name == name; });
+        if (name.empty() || handler == unit.special_abilities.end())
+            report_.missing(unit.id, "GUI_Activated_Ability_Name", name,
+                "SENSOR_JAMMING requires a named matching nested handler");
     }
 }
 

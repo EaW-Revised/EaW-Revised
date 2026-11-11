@@ -22,6 +22,7 @@
 #include "eawr/core/diagnostic.hpp"
 #include "eawr/core/gc_load_trace.hpp"
 #include "eawr/core/text.hpp"
+#include "eawr/presentation/ui/cursors.hpp"
 
 #include <godot_cpp/classes/input.hpp>
 #include <godot_cpp/classes/input_event_key.hpp>
@@ -428,7 +429,16 @@ sim::math::Fixed GalacticMode::State::strategic_speed_now() const {
     return displayed_snapshot ? displayed_snapshot->clock().strategic_speed : sim::math::Fixed::from_raw(sim::math::Fixed::scale);
 }
 
+bool GalacticMode::State::fast_forward_shown_pressed(const sim::galactic::GalacticClock& clock) const {
+    if (!fast_forward_factor) return false;
+    if (const auto pending = speed_guard.target()) return *pending == fast_forward_factor->raw();
+    return clock.strategic_speed == *fast_forward_factor;
+}
+
 void GalacticMode::State::submit_strategic_speed(const sim::math::Fixed factor) {
+    // #5355: a second press before the agreed snapshot answers would spend the shared speed budget twice.
+    if (options.lan_match && !speed_guard.begin(strategic_speed_now().raw(), factor.raw(), options.lan_match->view().completed_tick))
+        return;
     game->submit(platform::LiveGameOrder{sim::SeatId{galaxy->local.seat}, sim::galactic::SetSpeed{false, factor}, {}});
     ++submitted_orders;
     if (options.lan_match) return; // The agreed snapshot is the only LAN clock authority.
@@ -838,6 +848,7 @@ void GalacticMode::State::submit() {
             target.set_instance_visible(instance.entity_id, visible);
             if (visible) ++scenes[index].submitted_instances;
         }
+        target.flush_instance_changes();
     }
 }
 
@@ -1217,11 +1228,11 @@ void GalacticMode::State::service_lan_acceptance_battle() {
     }
 }
 
-static bool pointer_confine_allowed(const GalacticMode::State& state) {
+static bool pointer_confine_allowed(const GalacticMode::State& state, const bool allow_movie = false) {
     if (!state.interactive || state.completed || state.retreat_dialog_open
         || (state.save_controls && state.save_controls->visible())) return false;
     if (state.tactical) return !(state.loading && state.loading->shown())
-        && state.tactical->pointer_confine_allowed();
+        && state.tactical->pointer_confine_allowed(allow_movie);
     if (state.loading) return false;
     if (!state.galaxy || !state.map_input.gates.world_allowed() || state.map_input.gates.tutorial_locked
         || state.map_input.gates.action_menu
@@ -1238,6 +1249,19 @@ std::optional<int> GalacticMode::process(const double delta) {
     State& state = *state_;
     auto* display = DisplayServer::get_singleton();
     auto* input = Input::get_singleton();
+    if (state.tactical) {
+        if (state.mouse_cursor) state.mouse_cursor->suspend();
+    } else if (state.interactive && state.filesystem) {
+        if (!state.mouse_cursor) {
+            state.mouse_cursor = std::make_unique<BattleCursor>();
+            state.mouse_cursor->prepare(*state.filesystem);
+        }
+        const bool ctrl = input && input->is_physical_key_pressed(KEY_CTRL);
+        ui::CursorInput cursor;
+        cursor.camera_pan = state.scrolling || (state.orbiting && !ctrl);
+        cursor.camera_rotate = state.orbiting && ctrl;
+        state.mouse_cursor->update(ui::battle_cursor(cursor), delta);
+    }
     if (state.tactical) state.tactical->set_pointer_blocked(false);
     const auto mode = display ? display->window_get_mode() : DisplayServer::WINDOW_MODE_WINDOWED;
     const bool modal = state.host && input_focus(*state.host->get_viewport()).modal_open;
@@ -1246,8 +1270,13 @@ std::optional<int> GalacticMode::process(const double delta) {
         mode == DisplayServer::WINDOW_MODE_MINIMIZED, modal);
     const bool confine = pointer_confined(pointer_window_mode(mode), display && display->window_is_focused(),
         mode == DisplayServer::WINDOW_MODE_MINIMIZED, !world_allowed || modal);
+    const bool capture_preview = preview_pointer_captured(state.tactical && state.tactical->battlecam_preview(),
+        display && display->window_is_focused(), mode == DisplayServer::WINDOW_MODE_MINIMIZED,
+        !state.host || !pointer_confine_allowed(state, true) || modal);
     if (state.tactical) state.tactical->set_pointer_blocked(!feed_allowed);
-    const auto mouse_mode = confine ? Input::MOUSE_MODE_CONFINED : Input::MOUSE_MODE_VISIBLE;
+    const auto mouse_mode = capture_preview ? Input::MOUSE_MODE_CAPTURED
+        : state.tactical && ui::hide_battlecam_cursor(state.tactical->battlecam_active(), world_allowed, modal)
+        ? Input::MOUSE_MODE_HIDDEN : confine ? Input::MOUSE_MODE_CONFINED : Input::MOUSE_MODE_VISIBLE;
     if (input && input->get_mouse_mode() != mouse_mode) input->set_mouse_mode(mouse_mode);
     // The first frame is drawn once the second process call runs; one log line per load.
     if (state.load_trace_frames < 2 && ++state.load_trace_frames == 2) {
@@ -1408,6 +1437,17 @@ std::optional<int> GalacticMode::process(const double delta) {
             state.audio->consume(published, state.galaxy->local.player);
             using Kind = sim::galactic::GalacticEventKind;
             const auto& event = published.event;
+            if (event.kind == Kind::corruption_removal_started && state.galaxy_setup.ability_host
+                && std::find(state.galaxy->local.faction_seats.begin(), state.galaxy->local.faction_seats.end(),
+                    event.producer.value) != state.galaxy->local.faction_seats.end()) {
+                const auto& profiles = state.galaxy_setup.ability_host->profiles;
+                const auto profile = std::find_if(profiles.begin(), profiles.end(), [&](const auto& row) { return row.type == event.value; });
+                const auto planet = std::find_if(state.galaxy->planets.begin(), state.galaxy->planets.end(), [&](const auto& row) { return row.id == event.subject; });
+                if (profile != profiles.end() && profile->removal && planet != state.galaxy->planets.end()) {
+                    const auto& point = planet->position;
+                    state.audio->ability_sound(profile->removal->activation_sfx, {point.x, point.y, point.z});
+                }
+            }
             if (event.kind == Kind::production_started && event.producer == sim::SeatId{state.galaxy->local.seat})
                 state.local_builds.insert(event.sequence);
             // WGP-181 / WGM-07 policy: confirm accepted local moves, including paused departures.
@@ -1498,7 +1538,25 @@ std::optional<int> GalacticMode::process(const double delta) {
             if ((wasd && key == KEY_W) || key == KEY_UP) forward += 1.0F;
             if ((wasd && key == KEY_S) || key == KEY_DOWN) forward -= 1.0F;
         }
-        if (feed_allowed && state.edge_scroll_constants) {
+        // #5990: warp the held scroll cursor back each frame; any reason the feed is off ends the drag.
+        // A hold with no drag flag is stale (the save menu, a dialog or a panel cleared the flags): end it.
+        if (::eawr::viewer::camera_input::drag_hold_step(state.scrolling || state.orbiting,
+                state.scroll_hold.active(), false, false, false) == ::eawr::viewer::camera_input::DragHold::end) {
+            state.scroll_hold.end();
+        }
+        const bool drag_held = (state.scrolling || state.orbiting) && state.scroll_hold.active();
+        const auto hold_step = ::eawr::viewer::camera_input::hold_step(drag_held, feed_allowed);
+        if (hold_step == ::eawr::viewer::camera_input::HoldStep::release) {
+            state.scrolling = state.map_input.held_scroll = false;
+            state.orbiting = state.map_input.held_rotate = false;
+            state.scroll_hold.end();
+        } else if (hold_step == ::eawr::viewer::camera_input::HoldStep::warp) {
+            const auto& anchor = *state.scroll_hold.anchor();
+            state.host->get_viewport()->warp_mouse(Vector2(anchor[0], anchor[1]));
+            state.scroll_hold.note_warp();
+        }
+        // A stale hold (a drag flag cleared by a path that did not end it) must not switch edge scroll off.
+        if (feed_allowed && state.edge_scroll_constants && !drag_held) {
             const auto point = polled_pointer(*state.host);
             const auto edge = presentation::camera::edge_scroll(*state.edge_scroll_constants, point.x, point.y,
                 static_cast<float>(state.camera.width), static_cast<float>(state.camera.height));
@@ -1648,7 +1706,7 @@ void GalacticMode::input(const Ref<InputEvent>& event) {
     if (const auto* mouse = Object::cast_to<InputEventMouse>(event.ptr());
         mouse && !wheel && state.hud && pointer_over_panel(*state.hud, mouse->get_position())) {
         state.scrolling = state.orbiting = false;
-        state.pointer_warp.reset();
+        state.scroll_hold.end();
         state.map_input.held_scroll = state.map_input.held_rotate = false;
         return;
     }
@@ -1701,7 +1759,7 @@ void GalacticMode::input(const Ref<InputEvent>& event) {
                         state.galaxy->local.player, state.selected_fleet, picked->id, planets, stack)) {
                     if (stack.size() > 1 ? state.submit_fleet_stack(*intent, stack) : widget_drop(*intent)) {
                         state.scrolling = state.map_input.held_scroll = false;
-                        state.pointer_warp.reset();
+                        state.scroll_hold.end();
                         return;
                     }
                 }
@@ -1709,7 +1767,6 @@ void GalacticMode::input(const Ref<InputEvent>& event) {
         }
         if (index == MOUSE_BUTTON_RIGHT) state.scrolling = button->is_pressed()
             && flight.state() == galactic_view::CameraState::overview;
-        if (index == MOUSE_BUTTON_RIGHT) state.pointer_warp.reset();
         if (index == MOUSE_BUTTON_MIDDLE) {
             const bool was_orbiting = state.orbiting;
             state.orbiting = button->is_pressed();
@@ -1721,6 +1778,16 @@ void GalacticMode::input(const Ref<InputEvent>& event) {
                 flight.reset_tilt();
                 state.apply_camera();
             }
+        }
+        // #5990: one hold for the right-button scroll and the middle-button drag (plain pans, Ctrl tilts and
+        // yaws, as retail switches by Ctrl mid-drag). It starts at the first press and ends with the last release.
+        if (index == MOUSE_BUTTON_RIGHT || index == MOUSE_BUTTON_MIDDLE) {
+            const auto press = button->get_position();
+            const auto hold = ::eawr::viewer::camera_input::drag_hold_step(state.scrolling || state.orbiting,
+                state.scroll_hold.active(), button->is_pressed(), flight.state() == galactic_view::CameraState::overview,
+                ::eawr::viewer::camera_input::pointer_hold_supported);
+            if (hold == ::eawr::viewer::camera_input::DragHold::end) state.scroll_hold.end();
+            else if (hold == ::eawr::viewer::camera_input::DragHold::begin) state.scroll_hold.begin(press.x, press.y);
         }
         state.map_input.held_scroll = state.scrolling;
         state.map_input.held_rotate = state.orbiting;
@@ -1762,10 +1829,19 @@ void GalacticMode::input(const Ref<InputEvent>& event) {
         return;
     }
     if (const auto* motion = Object::cast_to<InputEventMouseMotion>(event.ptr())) {
+        if (!state.orbiting && !state.scrolling) return;
+        // #5990 (WGUI-78): the cursor stays at its press point. The drag is the position's distance from
+        // where the cursor was last known, not Godot's relative, which carries our own warp-back and merges
+        // with real motion on a busy frame. The warp itself happens once per frame in process().
+        const Vector2 position = motion->get_position();
+        Vector2 relative = motion->get_relative();
+        if (state.scroll_hold.active()) {
+            const auto moved = state.scroll_hold.delta(position.x, position.y);
+            relative = Vector2(moved[0], moved[1]);
+        }
+        const float fx = relative.x / static_cast<float>(std::max(1U, state.camera.width));
+        const float fy = relative.y / static_cast<float>(std::max(1U, state.camera.height));
         if (state.orbiting && !state.scrolling) {
-            const Vector2 move = motion->get_relative();
-            const float fx = move.x / static_cast<float>(std::max(1U, state.camera.width));
-            const float fy = move.y / static_cast<float>(std::max(1U, state.camera.height));
             state.orbit_travel[0] += fx;
             state.orbit_travel[1] += fy;
             // #5601/#5617: Ctrl+middle-drag tilts (vertical) and yaws (horizontal).
@@ -1773,25 +1849,15 @@ void GalacticMode::input(const Ref<InputEvent>& event) {
                 const bool tilted = flight.tilt(fy);
                 const bool turned = flight.yaw(fx);
                 if (tilted || turned) state.apply_camera();
+            } else if (flight.state() == galactic_view::CameraState::overview && relative != Vector2()) {
+                // Retail's default galaxy pan is the plain middle drag (debug build); Ctrl switches it to
+                // tilt and yaw mid-drag. Right drag below retains its existing Y direction.
+                static_cast<void>(flight.right_drag(*state.galaxy, fx, fy, true, false));
             }
             return;
         }
-        if (!state.scrolling) return;
-        const Vector2 position = motion->get_position();
-        if (state.pointer_warp) {
-            const auto expected = *state.pointer_warp;
-            state.pointer_warp.reset();
-            if (std::abs(position.x - expected[0]) < 0.5F && std::abs(position.y - expected[1]) < 0.5F) return;
-        }
-        const Vector2 relative = motion->get_relative();
         if (relative == Vector2()) return;
-        if (flight.right_drag(*state.galaxy, relative.x / static_cast<float>(state.camera.width),
-                relative.y / static_cast<float>(state.camera.height), true, motion->is_ctrl_pressed())) {
-            // WGUI-78: retain the cursor's pre-move point; ignore the OS warp echo.
-            const Vector2 old_position = position - relative;
-            state.pointer_warp = std::array<float, 2>{old_position.x, old_position.y};
-            state.host->get_viewport()->warp_mouse(old_position);
-        }
+        static_cast<void>(flight.right_drag(*state.galaxy, fx, -fy, true, motion->is_ctrl_pressed()));
     }
 }
 
@@ -1802,7 +1868,7 @@ void GalacticMode::cancel_input() {
     state_->held.clear();
     state_->orbiting = false;
     state_->scrolling = false;
-    state_->pointer_warp.reset();
+    state_->scroll_hold.end();
     state_->map_input.cancel_pointer();
     state_->ground_hud.pressed = 0; state_->ground_hud.double_release = false;
     if (state_->ground_hud.input) state_->ground_hud.input->queue_redraw();
@@ -1819,7 +1885,7 @@ void GalacticMode::pointer_left() {
     if (state_->tactical) state_->tactical->pointer_left();
     state_->orbiting = false;
     state_->scrolling = false;
-    state_->pointer_warp.reset();
+    state_->scroll_hold.end();
     state_->map_input.cancel_pointer();
     state_->ground_hud.pressed = 0; state_->ground_hud.double_release = false;
     if (state_->ground_hud.input) state_->ground_hud.input->queue_redraw();

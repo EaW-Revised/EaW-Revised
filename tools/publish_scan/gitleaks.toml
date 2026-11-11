@@ -20,3 +20,9 @@ description = "Mods profile diagnostic code EAWR-MODS-0107 named profile_missing
 condition = "AND"
 paths = ['''include/eawr/mods/profile\.hpp''']
 regexes = ['''^EAWR-MODS-[0-9]{4}$''']
+
+[[allowlists]]
+description = "Vendored xxHash header, AVX-512 lines data_key_lo/data_key_hi = _mm512_srli_epi64 (data_key, 32): generic-api-key false positive on the variable names, the captured value is the intrinsic name; never a credential."
+condition = "AND"
+paths = ['''third_party/xxhash/xxhash\.h''']
+regexes = ['''^_mm512_srli_epi64$''']

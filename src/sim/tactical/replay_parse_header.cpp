@@ -585,6 +585,51 @@ core::Result<void> parse_header_extensions(
                 return fail<Parsed>(diagnostic_codes::malformed, "replay header extension tags must increase", logical_path);
             }
             previous_tag = tag;
+            if (tag == replay_extension_market_purchases) {
+                if (!replay.setup.campaign || replay.setup.campaign->market_abilities)
+                    return fail<Parsed>(diagnostic_codes::malformed, "market purchases require a campaign", logical_path);
+                Reader body(bytes.subspan(reader.offset(), length));
+                std::uint32_t version{};
+                if (!body.read_u32(version) || version != 1)
+                    return fail<Parsed>(diagnostic_codes::version, "invalid market purchases version", logical_path);
+                MarketAbilityPolicy policy;
+                std::uint32_t entry_count{};
+                if (!body.read_u32(entry_count) || entry_count > body.remaining() / 8U)
+                    return fail<Parsed>(diagnostic_codes::malformed, "invalid market item count", logical_path);
+                for (std::uint32_t i = 0; i < entry_count; ++i) {
+                    MarketAbilityItem item; std::uint32_t names{};
+                    if (!body.read_u32(item.item) || !body.read_u32(names) || names > body.remaining() / 4U)
+                        return fail<Parsed>(diagnostic_codes::malformed, "invalid market item", logical_path);
+                    for (std::uint32_t j = 0; j < names; ++j) {
+                        std::uint32_t size{};
+                        if (!body.read_u32(size) || size > body.remaining())
+                            return fail<Parsed>(diagnostic_codes::malformed, "invalid market ability name", logical_path);
+                        std::string name(size, '\0');
+                        if (!body.read_bytes(std::span(reinterpret_cast<std::uint8_t*>(name.data()), name.size())))
+                            return fail<Parsed>(diagnostic_codes::malformed, "truncated market ability name", logical_path);
+                        item.abilities.push_back(std::move(name));
+                    }
+                    policy.items.push_back(std::move(item));
+                }
+                if (!body.read_u32(entry_count) || entry_count > body.remaining() / 8U)
+                    return fail<Parsed>(diagnostic_codes::malformed, "invalid market owner count", logical_path);
+                for (std::uint32_t i = 0; i < entry_count; ++i) {
+                    MarketAbilityOwner owner; std::uint32_t items{};
+                    if (!body.read_u32(owner.player) || !body.read_u32(items) || items > body.remaining() / 4U)
+                        return fail<Parsed>(diagnostic_codes::malformed, "invalid market owner", logical_path);
+                    owner.purchased.resize(items);
+                    for (auto& item : owner.purchased) if (!body.read_u32(item))
+                        return fail<Parsed>(diagnostic_codes::malformed, "truncated market purchases", logical_path);
+                    policy.owners.push_back(std::move(owner));
+                }
+                if (body.remaining() != 0)
+                    return fail<Parsed>(diagnostic_codes::malformed, "invalid market purchases length", logical_path);
+                std::vector<std::uint8_t> consumed(length);
+                if (!reader.read_bytes(consumed))
+                    return fail<Parsed>(diagnostic_codes::malformed, "truncated market purchases", logical_path);
+                replay.setup.campaign->market_abilities = std::move(policy);
+                continue;
+            }
             if (tag == replay_extension_controllers) {
                 Reader body(bytes.subspan(reader.offset(), length));
                 const auto end = reader.offset() + length;

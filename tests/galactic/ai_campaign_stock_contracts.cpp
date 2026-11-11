@@ -41,6 +41,7 @@ class ExternalFixture final : public ga::TrackedStateContributor {
 public:
     explicit ExternalFixture(std::string key = "TEST_EXTERNAL") : key_(std::move(key)) {}
     std::uint8_t value{1}; bool fail_once{};
+    std::function<void()> on_restore; // observes what the composed restore has restored by the time this owner restores
     void set(std::uint8_t next) { value = next; mark_state_changed(); }
     void refuse_capture() { refuse_capture_ = true; mark_state_changed(); }
     eawr::core::Result<ga::NativeState> capture() const override {
@@ -53,6 +54,7 @@ public:
         return eawr::core::Result<ga::NativeState>::success(std::move(state));
     }
     eawr::core::Result<void> restore(const ga::NativeState& state) override {
+        if (on_restore) on_restore();
         const auto at = state.components.find(key_);
         if (at != state.components.end() && at->second.size() == 1) {
             value = at->second.front(); mark_state_changed();
@@ -394,47 +396,87 @@ void sparse_actor_change_contracts() {
         must(owner.update(source)); must(owner.initialize(1, {})); must(owner.initialize(2, {}));
         must(owner.set_prefer_ground(source.object.id, false));
         std::map<eawr::sim::EntityId, ga::FreestoreFacts> facts;
-        for (const auto id : {10ULL, 20ULL, 21ULL, 22ULL, 23ULL, 30ULL}) {
+        for (const auto id : {10ULL, 20ULL, 21ULL, 22ULL, 23ULL, 24ULL, 30ULL}) {
             auto row = source; row.object.id = id; row.ai_usable = true;
+            if (id == 24) row.object.owner = 3; // an owner without an initialized pool
             facts.emplace(id, row);
         }
         const cp::GalacticAiActorFactsReader reader = [&facts](auto id) {
             return eawr::core::Result<ga::FreestoreFacts>::success(facts.at(id));
         };
-        const std::vector<Change> births{{Change::Kind::created, 20, 0, {}, {}, {}}, {Change::Kind::created, 21, 10, {}, {}, {}}};
+        const std::vector<Change> births{{Change::Kind::created, 20, 0, {}, {}, {}, {}, {}}, {Change::Kind::created, 21, 10, {}, {}, {}, {}, {}}};
         must(cp::apply_galactic_ai_actor_changes(owner, births, reader, executor));
         expect(owner.contains(1, 20) && !owner.contains(1, 21) && !owner.facts(21)->ai_usable,
             "ordinary birth offers once while generated actor inherits false source flag before admission");
         const auto before_refusal = owner.encode();
         facts.at(23).qualified = false;
-        const std::vector<Change> refused{{Change::Kind::created, 22, 0, {}, {}, {}}, {Change::Kind::created, 23, 0, {}, {}, {}}};
+        const std::vector<Change> refused{{Change::Kind::created, 22, 0, {}, {}, {}, {}, {}}, {Change::Kind::created, 23, 0, {}, {}, {}, {}, {}}};
         expect(!cp::apply_galactic_ai_actor_changes(owner, refused, reader, executor)
             && owner.encode() == before_refusal && !owner.facts(22),
             "a later unqualified event leaves all facts, membership and added callbacks unchanged");
-        const std::vector<Change> missing_source{{Change::Kind::created, 30, 999, {}, {}, {}}};
+        const std::vector<Change> missing_source{{Change::Kind::created, 30, 999, {}, {}, {}, {}, {}}};
         expect(!cp::apply_galactic_ai_actor_changes(owner, missing_source, reader, executor)
             && owner.encode() == before_refusal, "missing generated source refuses the whole creation batch");
         facts.at(10).object.owner = 2; facts.at(10).current_type = 502;
         facts.at(20).object.planet = facts.at(20).parent = 200;
-        Change representation{Change::Kind::changed, 20, 0, {}, {}, {}}; representation.death_clone = true;
-        const std::vector<Change> changed{{Change::Kind::changed, 10, 0, {}, {}, {}}, representation};
+        Change representation{Change::Kind::changed, 20, 0, {}, {}, {}, {}, {}}; representation.death_clone = true;
+        const std::vector<Change> changed{{Change::Kind::changed, 10, 0, {}, {}, {}, {}, {}}, representation};
         must(cp::apply_galactic_ai_actor_changes(owner, changed, reader, executor));
         expect(owner.facts(10)->current_type == 502 && !owner.facts(10)->ai_usable && !owner.contains(2, 10),
             "owner/current representation changes preserve retained source flags instead of repeating birth defaults");
         expect(!owner.facts(10)->prefer_ground, "WGA-409 owner/current representation and return-location changes preserve false ground preference");
         expect(owner.contains(1, 20) && owner.facts(20)->parent == 200 && owner.facts(20)->death_clone,
             "raw flag and parent changes preserve membership until an actual removal event");
-        const std::vector<Change> repeated_birth{{Change::Kind::created, 20, 0, {}, {}, {}}};
+        const std::vector<Change> repeated_birth{{Change::Kind::created, 20, 0, {}, {}, {}, {}, {}}};
         const auto changed_bytes = owner.encode();
         expect(!cp::apply_galactic_ai_actor_changes(owner, repeated_birth, reader, executor)
             && owner.encode() == changed_bytes, "repeated birth cannot reset a retained actor");
         auto retained = *owner.facts(20); retained.tracked_movement = true; must(owner.update(retained));
-        Change deleting{Change::Kind::changed, 20, 0, {}, {}, {}}; deleting.deleting = true;
+        Change deleting{Change::Kind::changed, 20, 0, {}, {}, {}, {}, {}}; deleting.deleting = true;
         must(cp::apply_galactic_ai_actor_changes(owner, std::span(&deleting, 1), reader, executor));
         expect(owner.facts(20) && owner.facts(20)->deleting && owner.facts(20)->tracked_movement
             && !owner.contains(1, 20) && owner.additions(1).empty(),
             "delete-pending removes membership and queued additions while retaining flags and actual block state until native retirement");
-        const std::vector<Change> loss{{Change::Kind::lost, 20, 0, {}, {}, {}}};
+        // #6378: a world script's AI-usage writes ride `changed` notifications; the AI applies them when they reach it, in order
+        // with the births of the same batch (Spawn_Unit then Prevent_AI_Usage on the new object).
+        facts.at(23).qualified = true;
+        Change spawned_prevented{Change::Kind::changed, 22, 0, {}, {}, {}, true, {}};
+        const std::vector<Change> spawn_then_prevent{{Change::Kind::created, 22, 0, {}, {}, {}, {}, {}}, spawned_prevented,
+            {Change::Kind::created, 23, 0, {}, {}, {}, {}, {}}};
+        must(cp::apply_galactic_ai_actor_changes(owner, spawn_then_prevent, reader, executor));
+        expect(owner.facts(22) && !owner.contains(1, 22) && owner.facts(22)->ai_usable && owner.contains(1, 23),
+            "Prevent_AI_Usage after Spawn_Unit removes the new actor from its pool (no false flag write); the next birth is offered");
+        Change allowed{Change::Kind::changed, 22, 0, {}, {}, {}, false, {}};
+        must(cp::apply_galactic_ai_actor_changes(owner, std::span(&allowed, 1), reader, executor));
+        expect(owner.contains(1, 22), "Prevent_AI_Usage(false) offers the actor again");
+        Change preferred{Change::Kind::changed, 22, 0, {}, {}, {}, {}, true};
+        must(cp::apply_galactic_ai_actor_changes(owner, std::span(&preferred, 1), reader, executor));
+        expect(owner.facts(22)->prefer_ground, "Set_Prefer_Ground_Over_Space reaches a unit-AI actor's facts");
+        const std::vector<Change> no_pool{{Change::Kind::created, 24, 0, {}, {}, {}, {}, {}}, {Change::Kind::changed, 24, 0, {}, {}, {}, true, {}}};
+        must(cp::apply_galactic_ai_actor_changes(owner, no_pool, reader, executor));
+        expect(owner.facts(24) && owner.facts(24)->ai_usable, "an uninitialized pool defers its membership write to world-fact seeding");
+        galactic::CensusObject world_actor; world_actor.id = 24; world_actor.owner = 3;
+        world_actor.story_prevent_ai_usage = true; world_actor.story_prefer_ground = false;
+        const std::array<galactic::CensusObject, 1> world_actors{world_actor};
+        const std::array<eawr::sim::EntityId, 1> offers{24};
+        ga::QualifiedFreestore missing_actor;
+        expect(!cp::initialize_freestore_with_world_usage(missing_actor, 3, {}, world_actors)
+            && !missing_actor.initialized(3), "missing world-fact actor refuses initialization without losing the write");
+        auto tracked = owner.clone({}, true); std::size_t tracked_writes{};
+        tracked.set_intent_sink([&](auto) { ++tracked_writes; });
+        must(cp::initialize_freestore_with_world_usage(tracked, 3, offers, world_actors));
+        expect(tracked_writes >= 3, "late pool initialization publishes its tracked membership and fact writes");
+        must(cp::initialize_freestore_with_world_usage(owner, 3, offers, world_actors));
+        expect(owner.initialized(3) && !owner.contains(3, 24) && !owner.facts(24)->prefer_ground,
+            "a pool initialized later takes the retained world prevent and preference facts");
+        const auto usage_bytes = owner.encode();
+        Change ghost{Change::Kind::changed, 777, 0, {}, {}, {}, true, {}};
+        must(cp::apply_galactic_ai_actor_changes(owner, std::span(&ghost, 1), reader, executor));
+        expect(owner.encode() == usage_bytes, "an AI-usage write for an actor the AI does not hold has no effect and reads no facts");
+        Change lost_with_write{Change::Kind::lost, 22, 0, {}, {}, {}, true, {}};
+        expect(!cp::apply_galactic_ai_actor_changes(owner, std::span(&lost_with_write, 1), reader, executor) && owner.encode() == usage_bytes,
+            "a loss notification never carries an AI-usage write");
+        const std::vector<Change> loss{{Change::Kind::lost, 20, 0, {}, {}, {}, {}, {}}};
         must(cp::apply_galactic_ai_actor_changes(owner, loss, reader, executor));
         expect(!owner.facts(20) && !owner.contains(1, 20), "actual loss retires both actor facts and retained membership");
         const auto bytes = owner.encode();
@@ -481,7 +523,7 @@ void free_fleet_signal_contracts() {
             const auto listener = ga::retained_movement_battle_listener(actions, {}, std::function<auth::ScriptScheduler*()>{[] { return nullptr; }});
             cp::ConflictRecord conflict; conflict.id = 100000; conflict.planet = fleet.orbit;
             conflict.invader = fleet.owner; conflict.defender = 2; conflict.forces = {{actor.id, actor.type, fleet.owner, fleet.id}};
-            must(listener({cp::GalacticAiBattleKind::entered, 1, conflict, *world.snapshot(), {}, false}));
+            must(listener(cp::galactic_ai_battle_facts({cp::GalacticAiBattleKind::entered, 1, conflict, *world.snapshot(), {}, false})));
             expect(!actions->movements().at(request).advance_requested && !actions->movements().at(request).finished,
                 "fleet-subject begin clears both flags without TaskForce owners");
             cp::BattleResult returned; returned.conflict = conflict.id; returned.winner = fleet.owner;
@@ -489,17 +531,17 @@ void free_fleet_signal_contracts() {
             if (scenario == 1) returned.retreat_player = fleet.owner;
             conflict.layer = cp::BattleLayer::land;
             const auto before_ground = must(actions->capture());
-            must(listener({cp::GalacticAiBattleKind::returned, 2, conflict, *world.snapshot(), &returned, true}));
+            must(listener(cp::galactic_ai_battle_facts({cp::GalacticAiBattleKind::returned, 2, conflict, *world.snapshot(), &returned, true})));
             expect(must(actions->capture()).components == before_ground.components, "ground return never forwards a free space signal");
             conflict.layer = cp::BattleLayer::space;
             expect(!actions->invalidate_freestore_actor(request, fleet.id + 1000)
                 && must(actions->capture()).components == before_ground.components, "wrong actor subject refuses without changing block");
             auto unrelated = conflict; unrelated.forces.front().parent = fleet.id + 1000;
-            must(listener({cp::GalacticAiBattleKind::returned, 2, unrelated, *world.snapshot(), &returned, false}));
+            must(listener(cp::galactic_ai_battle_facts({cp::GalacticAiBattleKind::returned, 2, unrelated, *world.snapshot(), &returned, false})));
             expect(must(actions->capture()).components == before_ground.components, "unrelated same-planet fleet return leaves the block unchanged");
             if (scenario >= 2) { const std::array lost{actor.id}; must(world.apply_battle_losses(lost)); returned.forces.front().disposition = cp::ForceDisposition::destroyed; }
             if (scenario == 3) must(actions->retire_freestore_movement(actor.id, true));
-            must(listener({cp::GalacticAiBattleKind::returned, 3, conflict, *world.snapshot(), &returned, false}));
+            must(listener(cp::galactic_ai_battle_facts({cp::GalacticAiBattleKind::returned, 3, conflict, *world.snapshot(), &returned, false})));
             const auto& block = actions->movements().at(request);
             expect(block.advance_requested == (scenario != 3) && block.finished == (scenario != 0) && block.actor == (scenario ? 0 : fleet.id),
                 "space end and early loss retirement preserve their advance flags while clearing invalid fleet actors");
@@ -1014,7 +1056,7 @@ void real_factory_contracts(bool configured_cadence, bool invalid_freestore) {
         expect(worlds.back()->state().cache.size() == 1,
             "saved perception has an expired archived row and a missing row requiring an unpublished getter");
         const auto captured = must(game.save_galactic_ai());
-        expect(captured.state && captured.state->components.size() == 8, "serviced runtime captures six real native owners and two qualified external fixtures");
+        expect(captured.state && captured.state->components.size() == 9, "serviced runtime captures six real native owners, the galactic-async lane and two qualified external fixtures");
         const auto composed = states.back().lock(); expect(static_cast<bool>(composed), "real composed state is retained");
         const auto warm_hash = must(composed->state_hash());
         external.back()->set(2); tails.back()->refuse_capture();
@@ -1038,7 +1080,17 @@ void real_factory_contracts(bool configured_cadence, bool invalid_freestore) {
         must(game.restore_galactic_ai(changed));
         expect(external.back()->value == 2 && copied_inputs.back()->value == 2 && game.state_sha256() != original_hash,
             "successful publication observes restored external state after final production owner");
-        must(game.restore_galactic_ai(captured));
+        {   // The external owners (the async outbox) restore before the goals and the world: goal validation asks the outbox
+            // whether a lane-decided invasion is still pending, and a save made while one is pending must load.
+            auto emptied = worlds.back()->state(); const auto saved_rows = emptied.cache.size(); emptied.cache.clear();
+            must(worlds.back()->restore(emptied));
+            std::size_t seen_rows = saved_rows + 1; bool observed = false;
+            external.back()->on_restore = [&] { observed = true; seen_rows = worlds.back()->state().cache.size(); };
+            must(game.restore_galactic_ai(captured));
+            external.back()->on_restore = nullptr;
+            expect(observed && seen_rows == 0 && worlds.back()->state().cache.size() == saved_rows,
+                "external native owners restore before the perception and goal owners");
+        }
         expect(game.state_sha256() == original_hash, "external restoration reproduces canonical native hash");
         ga::ExecutionStateContributor execution_codec([&](const ga::ExecutionRetainedState& state) {
             const auto snapshot = game.galaxy().snapshot();

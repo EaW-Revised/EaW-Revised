@@ -99,6 +99,15 @@ mods::ContentDigests& content_digests(ModelState& m) {
     if (!m.digests) {
         mods::ContentDigestOptions options;
         options.cache_folder = content_cache_folder(m.user_data);
+        // The manager's digests are background work: two hashing threads (not eight), and nothing at all while a game
+        // instance runs. The running game hashes the layers it mounts itself into the same cache folder; the paused job
+        // takes that result when it is there (#6588).
+        options.worker_count = 2;
+        options.background_io = false;   // below-normal CPU only: background I/O mode is ~6x slower and ~4x the kernel CPU
+        options.pause_while = [user_data = m.user_data] {
+            const ProfileLocks locks = read_profile_locks(user_data);
+            return !locks.locks.empty() || !locks.unreadable.empty();
+        };
         m.digests = std::make_shared<mods::ContentDigests>(std::move(options));
     }
     return *m.digests;

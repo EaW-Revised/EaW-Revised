@@ -270,6 +270,7 @@ inline constexpr std::uint32_t hull_target = 0xffffffffU;
 struct DamageOutcome {
     std::optional<std::uint32_t> destroyed_hardpoint; // the target hardpoint reached zero health
     bool unit_destroyed{};                            // the hull reached zero (HD-20)
+    bool invalid_target{};                            // inconsistent target or durability state
 };
 
 // Applies `amount` (>= 0) to a valid target (HD-02, HD-03, HD-20, HD-21). Hardpoint damage never

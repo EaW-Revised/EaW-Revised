@@ -99,6 +99,11 @@ void run(const tactical::TacticalReplay& replay) {
     const auto scripts = host_scripts();
     const std::uint64_t saved_tick = replay.final_tick_count + 2U;
     const std::uint64_t end = saved_tick + 12U;
+    if (replay.commands.empty()) { expect(false, "the fixture supplies an order to repeat after saving"); return; }
+    const auto submit_later = [&](LiveSession& session) {
+        const auto& command = replay.commands.front();
+        static_cast<void>(session.submit({command.key.player_id, command.units, command.payload, saved_tick + 2U}));
+    };
     std::optional<std::vector<std::string>> reference;
     for (const std::size_t workers : {std::size_t{1}, std::size_t{8}}) {
         const auto label = " on " + std::to_string(workers) + " workers";
@@ -112,12 +117,17 @@ void run(const tactical::TacticalReplay& replay) {
         if (!first) return;
         for (const auto& command : replay.commands)
             static_cast<void>(first.value()->submit({command.key.player_id, command.units, command.payload, command.key.tick}));
+        expect(run_to(*first.value(), saved_tick), "run A reaches its save" + label);
+        submit_later(*first.value());
         expect(run_to(*first.value(), end), "run A reaches its end" + label);
         first.value()->stop();
         expect(save->has_value() && save->value() && !save->value().value().empty(), "run A hands its save to the sink once" + label);
         if (!save->has_value() || !save->value()) return;
         const auto hashes = first.value()->tick_hashes();
         const auto record = first.value()->record();
+        bool later_order = false;
+        for (const auto& command : record.commands) later_order = later_order || command.key.tick > saved_tick;
+        expect(later_order, "run A records an order after the save" + label);
         expect(hashes.size() == end && !hashes.back().empty(), "run A hashes every tick" + label);
         if (!reference) reference = hashes;
         expect(hashes == *reference, "saving leaves run A's hashes equal at every worker count" + label);
@@ -137,6 +147,7 @@ void run(const tactical::TacticalReplay& replay) {
                 "run B's issuers continue past every saved key" + label);
         }
         expect(saved_keys > 0, "run A recorded commands before its save" + label);
+        submit_later(*second.value());
         expect(run_to(*second.value(), end), "run B reaches the same end" + label);
         second.value()->stop();
         const auto loaded = second.value()->tick_hashes();
@@ -158,6 +169,15 @@ void run(const tactical::TacticalReplay& replay) {
     // battle is paused, at the paused tick; loading it continues with run A's hashes.
     for (const std::size_t workers : {std::size_t{1}, std::size_t{8}}) {
         const auto label = " on " + std::to_string(workers) + " workers";
+        auto uninterrupted = LiveSession::start(replay.setup, content, options_for(workers, scripts));
+        if (!uninterrupted) { expect(false, "the never-saved battle starts" + label); return; }
+        for (const auto& command : replay.commands)
+            static_cast<void>(uninterrupted.value()->submit({command.key.player_id, command.units, command.payload, command.key.tick}));
+        if (!run_to(*uninterrupted.value(), saved_tick)) { expect(false, "the never-saved battle reaches the save tick" + label); return; }
+        submit_later(*uninterrupted.value());
+        if (!run_to(*uninterrupted.value(), end)) { expect(false, "the never-saved battle finishes" + label); return; }
+        uninterrupted.value()->stop();
+        const auto uninterrupted_hashes = uninterrupted.value()->tick_hashes();
         struct Taken {
             std::mutex mutex;
             std::optional<std::pair<std::uint64_t, eawr::core::Result<Bytes>>> result;
@@ -188,19 +208,26 @@ void run(const tactical::TacticalReplay& replay) {
         });
         expect(wait_taken(), "a paused battle takes the requested save" + label);
         expect(session.value()->completed_tick() == saved_tick, "the requested save runs no tick" + label);
+        submit_later(*session.value());
+        session.value()->set_paused(false);
+        expect(run_to(*session.value(), end), "the requested-save battle continues" + label);
         session.value()->stop();
+        const auto saved_hashes = session.value()->tick_hashes();
+        expect(uninterrupted_hashes.size() == end && saved_hashes == uninterrupted_hashes,
+            "requesting a save leaves every tick equal to a never-saved battle" + label);
         const std::lock_guard lock(taken->mutex);
         if (!taken->result || !taken->result->second) { expect(false, "the requested save succeeds" + label); return; }
         expect(taken->result->first == saved_tick, "the requested save names the paused tick" + label);
         expect(taken->thread != std::this_thread::get_id(), "the requested save runs on the simulation thread" + label);
         auto loaded = LiveSession::start(taken->result->second.value(), replay.setup, content, options_for(workers, scripts));
         if (!loaded) { expect(false, "the requested save loads" + label + ": " + loaded.error().message); return; }
+        submit_later(*loaded.value());
         expect(run_to(*loaded.value(), end), "the requested save continues" + label);
         loaded.value()->stop();
         const auto continued = loaded.value()->tick_hashes();
         bool equal = reference && continued.size() == reference->size();
-        for (std::size_t index = saved_tick; equal && index < continued.size(); ++index) equal = continued[index] == (*reference)[index];
-        expect(equal, "the requested save continues with run A's hashes" + label);
+        for (std::size_t index = saved_tick; equal && index < continued.size(); ++index) equal = continued[index] == uninterrupted_hashes[index];
+        expect(equal, "the requested save continues with the never-saved battle's hashes" + label);
     }
     {
         // A battle without the AI host's save reports why on the simulation thread instead of saving.

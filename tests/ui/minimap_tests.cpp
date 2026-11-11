@@ -8,6 +8,7 @@
 #include "eawr/presentation/ui/battle_messages.hpp"
 #include "eawr/presentation/space/fog_field.hpp"
 #include "ui_test_support.hpp"
+#include "minimap_legacy_footprint.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -244,6 +245,65 @@ void test_blips() {
 }
 
 // MM-09.
+void test_skirmish_footprint_independent_geometry() {
+    // A top-down 45-degree camera sees half-height distance * tan(pi/8).
+    // tan(pi/8) = sqrt(2)-1, independently of the footprint/ray implementation.
+    const auto extents = ui::minimap_extents(-6100, 6100, -6100, 6100);
+    for (const auto size : {std::array<std::uint32_t, 2>{1280,720}, {3440,1440}}) {
+        const presentation::FixedCamera camera{
+            .width = size[0], .height = size[1], .vertical_fov_degrees = 45,
+            .near_plane = 10, .far_plane = 5000,
+            .eye = {250,1000,400}, .target = {250,0,400}, .up = {0,0,-1}};
+        for (const double height : {0.0, 50.0, -25.0}) {
+            const double half_height = (1000.0-height) * (std::sqrt(2.0)-1.0);
+            const double half_width = half_height * size[0] / size[1];
+            const std::array<std::array<double, 2>, 4> expected{{
+                {250-half_width, -400+half_height}, {250+half_width, -400+half_height},
+                {250+half_width, -400-half_height}, {250-half_width, -400-half_height}}};
+            const auto ground = ui::minimap_ground_corners(camera, height);
+            expect(ground.has_value(), "fixed skirmish camera has a ground footprint");
+            if (!ground) continue;
+            const auto rectangle = ui::minimap_guide(*ground, extents, true);
+            for (std::size_t corner = 0; corner < expected.size(); ++corner) {
+                expect(near((*ground)[corner][0], expected[corner][0], 0.001)
+                    && near((*ground)[corner][1], expected[corner][1], 0.001),
+                    "1280x720 and 3440x1440 footprints match independent perspective geometry");
+                expect(near(rectangle[corner].x, expected[corner][0]/6100, 0.000001)
+                    && near(rectangle[corner].y, expected[corner][1]/6100, 0.000001),
+                    "skirmish rectangle matches independent world-to-radar scale");
+            }
+        }
+    }
+}
+
+void test_skirmish_footprint_before_after() {
+    const auto extents = ui::minimap_extents(-6100, 6100, -6100, 6100);
+    for (const auto size : {std::array<std::uint32_t, 2>{1280,720}, {3440,1440}}) {
+        for (const float pitch : {12.0F, 21.5F, 60.0F}) {
+            const float radians = pitch * 3.14159265358979323846F / 180.0F;
+            for (const float near_plane : {10.0F, 1500.0F}) {
+                const presentation::FixedCamera camera{
+                    .width = size[0], .height = size[1], .vertical_fov_degrees = 45,
+                    .near_plane = near_plane, .far_plane = 5000,
+                    .eye = {250, std::sin(radians)*1000, std::cos(radians)*1000},
+                    .target = {250,0,0}, .up = {0,1,0}};
+                const test::skirmish_footprint_before::Footprint before(camera);
+                for (const double height : {0.0, 50.0, -25.0}) {
+                    const auto previous = before.ground_corners(height);
+                    const auto shared = ui::minimap_ground_corners(camera, height);
+                    expect(previous && shared, "skirmish footprint exists before/after at both viewport sizes");
+                    if (!previous || !shared) continue;
+                    expect(*previous == *shared, "skirmish ground footprint is byte-for-byte numerically unchanged");
+                    for (const bool rectangle : {false, true})
+                        expect(ui::minimap_guide(*previous, extents, rectangle)
+                            == ui::minimap_guide(*shared, extents, rectangle),
+                            "skirmish minimap rectangle/trapezoid is identical before/after at 1280x720 and 3440x1440");
+                }
+            }
+        }
+    }
+}
+
 void test_guide() {
     const ui::MinimapExtents extents = ui::minimap_extents(-1000.0, 1000.0, -1000.0, 1000.0);
     const std::array<std::array<double, 2>, 4> ground{{{-600.0, 800.0}, {600.0, 800.0}, {200.0, -200.0}, {-200.0, -200.0}}};
@@ -694,6 +754,8 @@ int main() {
     test_mapping();
     test_blips();
     test_point_and_scale();
+    test_skirmish_footprint_independent_geometry();
+    test_skirmish_footprint_before_after();
     test_guide();
     test_clip();
     test_fog();

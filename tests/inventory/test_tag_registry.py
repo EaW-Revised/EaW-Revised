@@ -437,7 +437,7 @@ class LayoutTests(Fixture):
         self.assertEqual(tr.main(args), 0)  # no rendered file to keep in step: parallel row edits merge green
         report = self.root / "out" / "statuses.md"
         self.assertEqual(tr.main(["render", "--statuses", str(statuses), "--inventory", str(inventory),
-                                  "--out", str(report)]), 0)
+                                  "--repo", str(self.root), "--out", str(report)]), 0)
         self.assertEqual(tr.main(args), 0)
         self.assertFalse((directory / "statuses.md").exists())
         text = report.read_text(encoding="utf-8")
@@ -685,15 +685,10 @@ class CheckedInRegistryTests(unittest.TestCase):
         self.assertFalse(any(classes.intersection(row["classes"]) for row in root["rows"]))
         self.assertTrue(classes.issubset({c for c, _t, _r in tr.expand(child)}))
         registry = tr.load_registry(tr.DEFAULT_STATUSES)
-        universe = tr.load_universe(tr.load_inventory(tr.DEFAULT_INVENTORY), registry=registry)
+        universe = tr.required_universe(tr.DEFAULT_INVENTORY, registry, ROOT)
         registered = {tr.pair_key(c, tag) for c, tag, _row in tr.expand(registry)}
-        # The tactical registry also reviews the two mod-authorable turret tags
-        # absent from the pinned authored stock inventory. Retain exact coverage
-        # and reject any other unexplained extra class/tag pair.
-        extra = {tr.pair_key(c, tag) for c in ("SpaceBuildable", "SpaceUnit", "SpecialStructure")
-                 for tag in ("Turret_Rotate_To_Rest_Delay_Sec", "Turret_XY_Only")}
-        self.assertEqual(registered - set(universe), extra)
-        self.assertEqual(sum(tr.counts(registry)[0].values()), len(universe) + len(extra))
+        self.assertEqual(registered, set(universe))
+        self.assertEqual(sum(tr.counts(registry)[0].values()), len(universe))
 
     def test_gate(self) -> None:
         """The gate itself: the committed registry against the committed FoC tag inventory and the sources."""

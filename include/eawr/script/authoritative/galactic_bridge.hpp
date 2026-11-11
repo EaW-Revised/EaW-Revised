@@ -59,6 +59,10 @@ struct ScriptedGalacticTick {
 // The script section's barrier data for checkpoint composition. The parent
 // owns the galaxy checkpoint and adapter state; shared scheduler blobs own the
 // Lua graphs. Pending orders and routing cursors must travel with those graphs.
+// Async AI: the AI scheduler serves a whole batch of virtual ticks at once, so between batches its tick leads the
+// galaxy's frame by less than this (an upper bound on the batch length, not the batch length).
+inline constexpr std::uint64_t galactic_ai_batch_window = 64;
+
 struct GalacticScriptSave {
     std::uint64_t completed_tick{};
     std::uint64_t galactic_frame{};
@@ -84,6 +88,11 @@ public:
     virtual ~GalacticScriptEngine() = default;
     [[nodiscard]] virtual bool uses_sync_hash() const noexcept { return false; }
     [[nodiscard]] virtual bool verifies_sync_hash() const noexcept { return false; }
+    // Async AI (W1 S4): the AI scheduler's sync hash as the engine published it at its last visible window commit; nullopt: hash
+    // the scheduler live.
+    [[nodiscard]] virtual std::optional<std::string> published_ai_sync_hash() const { return std::nullopt; }
+    // Async AI: frames to add to the world's galactic frame while the current virtual tick of a batch is serviced.
+    [[nodiscard]] virtual std::uint64_t frame_offset() const noexcept { return 0; }
     // Generic hosts follow world service. A retained galactic manager may admit
     // due planning alone under processing suppression during auto-resolve.
     [[nodiscard]] virtual bool admits_service(const sim::galactic::GalacticTick& tick) const noexcept {
@@ -133,6 +142,10 @@ public:
     void set_state_hasher(std::shared_ptr<sim::StateHasher> hasher) noexcept;
     // Ordered story tail; the same owner commits AI/object writes in after_service.
     void set_global_value_committer(std::function<void(ServiceReport&)>);
+    // The story service's ordered commit of the commands that edit the plot engine (Set_Reward_Parameter, Story_Event,
+    // Check_Story_Flag's clear): run after the service, in command order, and it removes what it consumed from the report
+    // so those commands are never routed as seat orders. A failure ends the step like any other story fault.
+    void set_story_command_committer(std::function<core::Result<void>(ServiceReport&)>);
     [[nodiscard]] core::Result<ScriptedGalacticTick> step(const sim::PartitionExecutor& executor,
         std::span<const sim::galactic::GameCommand> input = {}, bool local_conflict_pending = false);
 

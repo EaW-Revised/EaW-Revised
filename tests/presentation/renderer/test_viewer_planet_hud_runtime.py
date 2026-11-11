@@ -14,6 +14,24 @@ GAME_ROOT = os.environ.get("EAWR_EAW_GAME_ROOT")
 
 @unittest.skipUnless(RUNTIME and GAME_ROOT, "requires GPU viewer and installed FoC")
 class PlanetHudRuntime(unittest.TestCase):
+    def test_authored_gc_menu_controls_are_present(self):
+        data, _ = self.capture("Sandbox_Equal_Footing_Rebel")
+        controls = {row["name"]: row for row in data["command_bar"]["controls"]}
+        for name in ("b_story_arc_g", "b_option_g", "b_camera_g"):
+            with self.subTest(control=name):
+                self.assertIn(name, controls)
+                self.assertTrue(controls[name]["visible"])
+        self.assertTrue(controls["b_story_arc_g"]["enabled"])
+        self.assertTrue(controls["b_option_g"]["enabled"])
+        self.assertFalse(controls["b_camera_g"]["enabled"])
+
+    def test_localized_date_and_technology_readouts_keep_their_case(self):
+        data, _ = self.capture("Sandbox_Equal_Footing_Rebel")
+        labels = {row["name"]: row for row in data["command_bar"]["planet_block"]}
+        self.assertEqual(labels["Text_Day_Counter"]["text"], "Day: 1")
+        self.assertEqual(labels["Text_Tech_Level"]["text"], "Tech: 2")
+        self.assertTrue(labels["Text_Tech_Level"]["visible"])
+
     def capture(self, campaign, *extra, engine_args=()):
         # Imported BASE/HEAD capture helpers keep their original verification policy.
         verify = isinstance(self, PlanetHudRuntime)
@@ -26,6 +44,7 @@ class PlanetHudRuntime(unittest.TestCase):
             *verify_args, "--eawr-game-root", GAME_ROOT, "--eawr-galactic-paused", "yes",
             "--eawr-report", str(report), "--eawr-capture", str(capture), *extra],
             cwd=ROOT, capture_output=True, text=True, timeout=300, check=False)
+        (directory / "viewer.log").write_text(result.stdout + result.stderr, encoding="utf-8")
         self.assertTrue(report.is_file(), result.stdout + result.stderr)
         data = json.loads(report.read_text(encoding="utf-8"))
         if verify:
@@ -259,6 +278,15 @@ func _process(_delta):
         else:
             self.assertEqual(data["hud"]["selected_income"], "")
 
+    def test_gc_shell_omissions_are_logged_once(self):
+        data, capture = self.capture("Sandbox_Equal_Footing_Rebel")
+        self.assertGreater(data["command_bar"]["meshes"], 0)
+        log = (capture.parent / "viewer.log").read_text(encoding="utf-8")
+        summary = [line for line in log.splitlines() if "optional binding diagnostics;" in line]
+        self.assertEqual(len(summary), 1)
+        self.assertIn("tactical-only controls may remain absent", summary[0])
+        self.assertIn("is not in the shell", summary[0])
+        self.assertIn("GC shell (", summary[0])
 
 if __name__ == "__main__":
     unittest.main()

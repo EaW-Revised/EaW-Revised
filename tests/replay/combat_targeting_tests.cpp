@@ -352,6 +352,11 @@ void test_attack_order() {
     const auto events = run(value, 150);
     const auto state = value.combat_state(1);
     expect(state && state->attack_target == 2 && state->direct, "attack order sets the unit's direct target");
+    const auto publication = value.snapshot();
+    const auto shooter = std::find_if(publication->instances().begin(), publication->instances().end(),
+        [](const auto& item) { return item.entity_id == 1; });
+    expect(shooter != publication->instances().end() && shooter->presentation_attack_target == 2,
+        "BCAM-05: the immutable snapshot publishes the active attack target");
     expect(!events.empty() && std::all_of(events.begin(), events.end(), [](const Shot& shot) {
         return shot.kind == tactical::CombatEventKind::weapon_fired && shot.target == 2;
     }), "the hardpoint fires at the ordered fighter, not the better-priority bomber, and acquires nothing");

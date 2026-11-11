@@ -1,4 +1,5 @@
 #include "eawr/core/json_text.hpp"
+#include "eawr/battle/start.hpp"
 #include "eawr/vfs/vfs.hpp"
 #include "battle_input.hpp"
 
@@ -54,6 +55,35 @@ void BattleInput::draw() {
         view.ray = [this](const std::array<float, 2> screen) { return ray(screen[0], screen[1]); };
         view.live = live_;
         view.abilities = ability_state_ != nullptr ? ability_state_ : &ready_abilities_;
+        if (ability_target_ && pointer_ && live_->tables() && live_->battle_frame().latest) {
+            const auto aim = ray((*pointer_)[0], (*pointer_)[1]);
+            const auto point = aim ? ground_point(*aim) : std::nullopt;
+            if (point) {
+                const auto instances = live_->battle_frame().latest->instances();
+                const auto find_preview = [&](const sim::EntityId candidate) {
+                    const auto source = std::find_if(instances.begin(), instances.end(),
+                        [&](const auto& instance) { return instance.entity_id == candidate; });
+                    if (source == instances.end()) return false;
+                    const auto& types = live_->tables()->units;
+                    const auto type = std::find_if(types.begin(), types.end(),
+                        [&](const auto& unit) { return battle::type_id(unit.id) == source->type_id; });
+                    if (type == types.end()) return false;
+                    const auto ability = std::find_if(type->abilities.begin(), type->abilities.end(),
+                        [&](const auto& item) { return item.type == ui::ability_name(ability_target_->ability); });
+                    if (ability == type->abilities.end() || !ability->area_effect_decal_distance) return false;
+                    const auto distance = *ability->area_effect_decal_distance;
+                    if (distance.raw() > 0) view.area_preview = WorldUiView::Frame::AreaPreview{*point,
+                        static_cast<float>(static_cast<double>(distance.raw()) / static_cast<double>(sim::math::Fixed::scale))};
+                    return true;
+                };
+                for (const auto entity : ability_target_->units) {
+                    bool found = false;
+                    if (const auto team = live_->squadron_members().find(entity); team != live_->squadron_members().end())
+                        for (const auto member : team->second) if ((found = find_preview(member))) break;
+                    if (found || find_preview(entity)) break;
+                }
+            }
+        }
         view.waypoints = (live_->order_input() && live_->order_input()->mode() == ui::OrderMode::waypoint)
             || (Input::get_singleton() && Input::get_singleton()->is_physical_key_pressed(KEY_ALT));
         view.brackets = overview_ui_.unit_brackets;

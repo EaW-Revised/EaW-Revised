@@ -187,6 +187,89 @@ void test_income() {
         if (reference.empty()) reference = hashes;
         else expect(hashes == reference, "WHD-05: supply dock hashes equal at 1/2/4/8 workers");
     }
+    // PU-08/WHD-05: the latest dock notification controls every same-owner/type
+    // source, remains after its writer is removed, and stays isolated by owner.
+    reference.clear();
+    for (const auto workers : {1U, 2U, 4U, 8U}) {
+        auto start = setup();
+        start.units.push_back({3, station_type, human, at(0, 0), math::identity_quat(), {}});
+        auto economy = rules();
+        economy.income.front().per_frame = {};
+        auto& bonus = economy.income.front().bonuses.front();
+        bonus.per_frame = units(1);
+        bonus.name = "income_dock";
+        bonus.initially_enabled = false;
+        tactical::AbilityTable abilities;
+        tactical::UnitAbilityProfile handler;
+        handler.type_id = station_type;
+        handler.income_defaults.emplace("Income_Dock", false);
+        abilities.profiles.push_back(handler);
+        tactical::DurabilityProfile station;
+        station.type_id = station_type;
+        station.max_hull = units(1000);
+        station.hardpoints = {{tactical::HardpointRole::other, true, units(50)},
+            {tactical::HardpointRole::other, true, units(500)}};
+        station.hardpoints.front().special_ability_name = "INCOME_DOCK";
+        tactical::DurabilityTable health;
+        health.profiles = {station};
+        auto created = tactical::TacticalSession::create(start, sensors, health, motion(), {}, {}, {}, abilities, economy);
+        expect(static_cast<bool>(created), "PU-08 named dock session creates");
+        if (!created) continue;
+        auto& live = created.value();
+        expect(static_cast<bool>(live.submit({{2, human, 0}, {human_station},
+            tactical::DamagePayload{units(100), 0}})), "PU-08 named dock loss submits");
+        eawr::platform::ThreadWorkerAdapter executor(workers);
+        std::vector<std::string> hashes;
+        Fixed previous = ledger(live, human)->credits;
+        const auto advance = [&] {
+            const auto result = live.step(executor);
+            expect(static_cast<bool>(result), "PU-08 named dock lifecycle steps");
+            if (result) hashes.push_back(result.value().state_sha256);
+            return static_cast<bool>(result);
+        };
+        for (unsigned frame = 1; frame <= 5; ++frame) {
+            if (!advance()) break;
+            const auto current = ledger(live, human)->credits;
+            if (frame == 1) expect(current.raw() - previous.raw() == units(2).raw(),
+                "PU-08 creation unlock enables both same-owner income sources");
+            if (frame == 5) expect(current == previous,
+                "PU-08 losing one dock locks both same-owner sources despite the second dock");
+            previous = current;
+        }
+        expect(ledger(live, ai)->credits == units(6005), "PU-08 named dock lock is isolated by owner");
+        const auto checkpoint = live.save_checkpoint_state();
+        auto restored = tactical::TacticalSession::create(start, sensors, health, motion(), {}, {}, {}, abilities, economy);
+        expect(checkpoint && restored, "PU-08 locked income checkpoint and fresh session create");
+        bool restored_ok = false;
+        if (checkpoint && restored) {
+            restored_ok = static_cast<bool>(restored.value().load_checkpoint_state(checkpoint.value()));
+            expect(restored_ok && restored.value().state_sha256() == live.state_sha256(),
+                "PU-08 checkpoint restores the retained owner/type income locks exactly");
+            const auto recaptured = restored.value().save_checkpoint_state();
+            expect(recaptured && recaptured.value() == checkpoint.value(), "PU-08 named-lock checkpoint bytes round trip");
+        }
+        expect(static_cast<bool>(live.stage_remove(human_station)), "PU-08 dock writer removal succeeds");
+        if (restored_ok) expect(static_cast<bool>(restored.value().stage_remove(human_station)), "PU-08 restored dock writer removal succeeds");
+        advance();
+        expect(ledger(live, human)->credits == previous, "PU-08 removing the lock writer does not unlock the remaining source");
+        if (restored_ok) {
+            const auto resumed = restored.value().step(executor);
+            expect(resumed && resumed.value().state_sha256 == live.state_sha256(), "PU-08 restored lock survives writer removal identically");
+        }
+        expect(static_cast<bool>(live.stage_spawn({4, station_type, human, at(-1000, 0), math::identity_quat(), {}})),
+            "PU-08 new dock source spawns");
+        if (restored_ok) expect(static_cast<bool>(restored.value().stage_spawn({4, station_type, human, at(-1000, 0), math::identity_quat(), {}})),
+            "PU-08 restored new dock source spawns");
+        advance();
+        if (restored_ok) {
+            const auto resumed = restored.value().step(executor);
+            expect(resumed && resumed.value().state_sha256 == live.state_sha256(), "PU-08 restored lock re-enables income identically");
+        }
+        expect(ledger(live, human)->credits.raw() - previous.raw() == units(2).raw(),
+            "PU-08 fresh dock unlock restores both same-owner sources");
+        if (reference.empty()) reference = hashes;
+        else expect(hashes == reference, "PU-08 named dock lifecycle hashes equal on 1/2/4/8 workers");
+    }
 }
 
 // PC-02, PU-15, PU-16.

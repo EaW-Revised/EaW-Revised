@@ -1123,7 +1123,7 @@ const Fixture& m2_fixture() {
 
 bool is_map_object_placement(const MapPlacement& placement) noexcept {
     // WHZ-01: authored hazard participation admits space props to the simulation.
-    return !placement.marker && !placement.type.empty()
+    return (!placement.marker || placement.reinforcement_point) && !placement.type.empty()
         && (placement.space_hazard || !detail::iequals(placement.element, "SpaceProp"));
 }
 

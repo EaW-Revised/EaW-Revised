@@ -155,7 +155,7 @@ template<class Owner> core::Result<GalacticSession::NativeInvasionReceipt> admit
     if (native_owner.native_invasions.size() >= galactic_max_objects || native_owner.next_native_invasion == std::numeric_limits<std::uint64_t>::max()) return native_control_error<NativeInvasionReceipt>("native invasion identity budget exhausted");
     if constexpr (requires { native_owner.native_invasion_range_end; }) {
         if (native_owner.next_native_invasion >= native_owner.native_invasion_range_end)
-            return native_control_error<NativeInvasionReceipt>("native player invasion identity block exhausted");
+            return Result::success({false, 0, false, GalacticRejectReason::resource_limit});
     }
     const auto* surface = native_find_row(native_owner.control->planets, planet, [](const auto& row) { return row.planet; });
     // WGS-186: sparse adapters select the target state by planet identity.

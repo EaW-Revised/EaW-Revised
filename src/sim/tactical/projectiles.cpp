@@ -787,6 +787,8 @@ void append_projectile(std::vector<std::uint8_t>& bytes, const Projectile& proje
         sim::detail::append_u64(bytes, projectile.profile_key->type);
         sim::detail::append_u32(bytes, projectile.profile_key->weapon);
         sim::detail::append_u32(bytes, static_cast<std::uint32_t>(projectile.profile_key->kind));
+        if (projectile.profile_key->kind == ProjectileProfileKind::lucky_shot)
+            sim::detail::append_u64(bytes, projectile.profile_key->holder);
     }
 }
 

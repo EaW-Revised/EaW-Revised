@@ -8,6 +8,7 @@
 #include "eawr/core/diagnostic.hpp"
 #include "eawr/battle/start.hpp"
 #include "eawr/data/ui/command_bar.hpp"
+#include "eawr/data/xml.hpp"
 #include "eawr/data/ui/text_database.hpp"
 #include "eawr/presentation/ui/layout.hpp"
 #include "eawr/presentation/ui/pads.hpp"
@@ -223,6 +224,44 @@ void WorldUiView::prepare(const vfs::Vfs& filesystem, const data::Catalog& catal
         ring_mesh_->set_material(ring_material_);
     }
 
+    // The target-area overlay uses the local faction's named material and its own scale and tint.
+    if (auto object = catalog.resolve(faction, data::Category::faction)) {
+        const auto name = tag(object.value(), "Land_Area_Effect_Range_Overlay_Material_Name");
+        const auto tint_text = tag(object.value(), "Land_Area_Effect_Range_Overlay_RGBA");
+        const auto tint = rgba(tint_text);
+        const auto comma = tint_text.rfind(',');
+        const auto alpha = comma == std::string::npos ? std::nullopt : number(tint_text.substr(comma + 1));
+        area_preview_scale_ = number(tag(object.value(), "Land_Area_Effect_Range_Overlay_Scale_Factor")).value_or(1.0F);
+        std::string texture;
+        if (auto document = data::load_document(filesystem, "Data/XML/ShadowBlobMaterials.xml")) {
+            for (const auto& material : document.value().root.children) {
+                if (lower(material.name) != "material") continue;
+                const auto attribute = std::find_if(material.attributes.begin(), material.attributes.end(),
+                    [&](const auto& entry) { return lower(entry.name) == "name" && lower(entry.value) == lower(name); });
+                if (attribute == material.attributes.end()) continue;
+                for (const auto& child : material.children) if (lower(child.name) == "texture_name") texture = trim(child.raw_text);
+                break;
+            }
+        }
+        if (!texture.empty() && tint && alpha && *alpha >= 0.0F && *alpha <= 255.0F && area_preview_scale_ > 0.0F) {
+            const auto dot = texture.find_last_of('.');
+            if (dot != std::string::npos) texture.resize(dot);
+            const auto image = standalone(filesystem, texture);
+            if (image.is_valid()) {
+                area_preview_material_.instantiate();
+                area_preview_material_->set_shading_mode(BaseMaterial3D::SHADING_MODE_UNSHADED);
+                area_preview_material_->set_transparency(BaseMaterial3D::TRANSPARENCY_ALPHA);
+                area_preview_material_->set_cull_mode(BaseMaterial3D::CULL_DISABLED);
+                area_preview_material_->set_texture(BaseMaterial3D::TEXTURE_ALBEDO, image);
+                area_preview_material_->set_albedo(colour(*tint, *alpha / 255.0F));
+                area_preview_material_->set_flag(BaseMaterial3D::FLAG_DISABLE_FOG, true);
+                area_preview_mesh_.instantiate();
+                area_preview_mesh_->set_size(Vector2(1.0F, 1.0F));
+                area_preview_mesh_->set_material(area_preview_material_);
+            }
+        }
+    }
+
     // The command bar atlas holds the squadron icon frames and the unit icons.
     if (auto atlas = assets::load_mega_texture_atlas(filesystem, "Data/Art/Textures/MT_CommandBar.mtd")) {
         std::string failure;
@@ -243,6 +282,25 @@ void WorldUiView::prepare(const vfs::Vfs& filesystem, const data::Catalog& catal
 
     const units::UnitTables* tables = live.tables();
     const sim::tactical::CombatTable* combat = live.combat();
+    struct BlobMaterial { std::string texture; bool modulate{}; };
+    std::map<std::string, BlobMaterial> blob_textures;
+    if (auto materials = data::load_document(filesystem, "data/xml/shadowblobmaterials.xml")) {
+        for (const auto& material_node : materials.value().root.children) {
+            if (lower(material_node.name) != "material") continue;
+            std::string name, texture = "w_shadow_blob.tga", mode = "modulate";
+            for (const auto& attribute : material_node.attributes)
+                if (lower(attribute.name) == "name") name = lower(trim(attribute.value));
+            for (const auto& child : material_node.children) {
+                if (lower(child.name) == "texture_name") texture = trim(child.raw_text);
+                if (lower(child.name) == "render_mode") mode = lower(trim(child.raw_text));
+            }
+            if (!name.empty() && !texture.empty()) {
+                const auto dot = texture.find_last_of('.');
+                if (dot != std::string::npos) texture.resize(dot);
+                if (mode == "alpha" || mode == "modulate") blob_textures[name] = {texture, mode == "modulate"};
+            }
+        }
+    }
     const sim::tactical::DurabilityTable* durability = live.durability();
     if (tables == nullptr) return;
     for (const units::UnitType& type : tables->units) {
@@ -254,6 +312,29 @@ void WorldUiView::prepare(const vfs::Vfs& filesystem, const data::Catalog& catal
         ui_type.shielded = type.shielded;
         ui_type.layer_z = to_float(type.movement.layer_z_adjust.value_or(sim::math::Fixed{}));
         ui_type.max_thrust = to_float(type.movement.max_thrust.value_or(sim::math::Fixed{}));
+        for (const auto& blob : type.healing_blobs) {
+            if (!tactical::automatic_ability_style(blob.style, tactical::BattleDomain::space,
+                    !tables->campaign_scene || tables->campaign_multiplayer)) continue;
+            const auto blob_material = blob_textures.find(lower(blob.material));
+            if (blob_material == blob_textures.end() || blob.range.raw() <= 0) continue;
+            const auto texture = standalone(filesystem, blob_material->second.texture);
+            if (texture.is_null()) continue;
+            Ref<StandardMaterial3D> art;
+            art.instantiate();
+            art->set_shading_mode(BaseMaterial3D::SHADING_MODE_UNSHADED);
+            art->set_transparency(BaseMaterial3D::TRANSPARENCY_ALPHA);
+            if (blob_material->second.modulate) art->set_blend_mode(BaseMaterial3D::BLEND_MODE_MUL);
+            art->set_cull_mode(BaseMaterial3D::CULL_DISABLED);
+            art->set_flag(BaseMaterial3D::FLAG_DISABLE_FOG, true);
+            art->set_texture(BaseMaterial3D::TEXTURE_ALBEDO, texture);
+            art->set_albedo(Color(blob.colour[0] / 255.0F, blob.colour[1] / 255.0F,
+                blob.colour[2] / 255.0F, blob.colour[3] / 255.0F));
+            Ref<PlaneMesh> mesh;
+            mesh.instantiate();
+            mesh->set_size(Vector2(1.0F, 1.0F));
+            mesh->set_material(art);
+            ui_type.healing_blobs.push_back({mesh, 2.0F * to_float(blob.range), blob.material, blob.colour});
+        }
         for (std::size_t slot = 0; slot < std::min(type.abilities.size(), ui_type.abilities.size()); ++slot) {
             ui_type.abilities[slot] = ui::ability_index(type.abilities[slot].type);
             ui_type.ability_regions[slot] = atlas_region(std::string(ui::ability_icon(ui_type.abilities[slot])));

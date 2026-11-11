@@ -132,13 +132,14 @@ offer. A qualifying transport advances its supplied marker cursor once after all
 passengers, wrapping at the end; all-deferred flagship passengers leave it alone
 (WGT-114). The flagship uses source-context maximum hull plus shields before
 deployment substitution, requires a strictly positive rating and keeps the first
-source-roster entry on a positive tie (WGT-119). A source type with no durability
-profile (no positive `Tactical_Health` in the effective data) is not considered for
-flagship: the entry starts and reports it once as a note. This is a project rule, not
-the retail rating: retail rates a type with the tag absent by its default hull
-(100 times the mode multiplier, plus shields), and only an authored non-positive hull
-rates zero. Nothing depends on a positive rating (a side whose ratings are all zero
-has no flagship), so using the default hull in code stays a follow-up. Squadron source ratings use the
+source-roster entry on a positive tie (WGT-119). A source type whose `Tactical_Health` tag is absent
+rates by the object type's default hull of 100 (debug build, WGT-119: the type's maximum
+health starts at 100 before the data is read), scaled by the space mode multiplier like
+an authored hull, plus its shields (the debug-build rating is maximum health plus maximum
+shields, zero only for containers). An authored non-positive hull adds nothing, so
+only its shields rate, and a type with neither has no durability profile: it rates zero, is
+not considered for flagship, and the entry starts and reports it once as a note (legacy EAWR-6076). A type with a shield and
+a non-positive hull has a rating and raises no note. Squadron source ratings use the
 container's own scaled health and shields, independently of its craft (WSQ-60).
 Background owner bindings remain in the setup but do not enter its recorded
 commandable seats. Child replay extension 8 records the complete
@@ -246,7 +247,15 @@ free-space search the debug build runs when a script spawns the object (xy only,
   tank (= frigate), artillery (= transport), walker (= capital). Any other word, or none,
   leaves the class unset; form-up gives an unset class no bucket, so that ship keeps its
   creation pose and the other buckets lay out as if it were absent. The entry reports it
-  once per type and does not refuse. A squadron whose craft did not load is likewise
+  once per type and does not refuse. An unset class does not switch the prebattle cinematic
+  off: it is about who attacks, and the debug build's formation pass runs its cinematic step
+  over every registered member whatever its class (WGT-23), so an
+  invader fleet of only unclassed ships still gets the intro when the target is present
+  (legacy EAWR-6075). A variant whose own `Ship_Class` word is unknown keeps its base type's valid
+  class in retail (WGA-364); the effective-XML read replaces the base value with the unknown
+  word, so such a variant is unclassed here and classed in retail. No loaded type is
+  affected today (the 30 effective Remake gunship types have no valid word along their
+  chain); this divergence is named, not fixed. A squadron whose craft did not load is likewise
   skipped with a note. A ring whose model bounds are all zero uses one unit of spacing and
   reports it (unverified). A negative authored population or faction cap reads as zero with
   a note (project rule, no retail source for refusing). A missing

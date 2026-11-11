@@ -137,6 +137,8 @@ private:
     void submit(std::shared_ptr<const sim::RenderSnapshot> snapshot, std::size_t expected,
         std::size_t drawn = static_cast<std::size_t>(-1));
     void expect_drawn(const std::string& step);
+    // Objects the batched hulls collapse: a group of n members draws one multimesh object instead of n instances.
+    [[nodiscard]] std::int64_t batch_collapsed() const;
     [[nodiscard]] std::size_t count_code(std::string_view code) const;
     [[nodiscard]] bool has_message(std::string_view text) const;
     [[nodiscard]] std::vector<std::string> tail(std::size_t count) const;

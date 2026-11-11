@@ -28,9 +28,9 @@ struct ControlStateRules final {
     // "full list restored" is an offer list the script owns, and the script clears its own filter button through a forced
     // click, so a clear here would invert that button's selected state. The rule stays for a capture that shows otherwise.
     bool domain_change_clears = false;
-    // A press made by a FORCE_CLICK_GUI reward raises the story click like a human press. Off: the debug build's
-    // Reward_Force_Click_GUI calls only the control's click slot, while Handle_Mouse_Event calls the slot and then, as a
-    // separate call, Tutorial_Click_UI, which raises STORY_CLICK_GUI (WST-75). Raising it would also close a loop for
+    // A press made by a FORCE_CLICK_GUI reward raises the story click like a human press. Off: in the debug build the
+    // reward calls only the control's click slot, while the command bar's mouse handler calls the slot and then, as a
+    // separate call, raises STORY_CLICK_GUI (WST-75). Raising it would also close a loop for
     // plots that force a tab after each filter click and a filter after each tab click.
     bool forced_press_raises_story_click = false;
 

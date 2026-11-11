@@ -12,13 +12,15 @@
 #include <string_view>
 #include <vector>
 
+namespace eawr::sim::galactic { class OfferPool; }
+
 // Canonical little-endian encodings of the galaxy's state sections and snapshot parts. The state
 // hash, the snapshot hash and (later) the checkpoint's galaxy sections share them.
 namespace eawr::sim::galactic::detail {
 
 inline constexpr std::array<std::uint8_t, 8> state_magic{'E', 'A', 'W', 'R', 'G', 'S', 'T', 0};
 inline constexpr std::array<std::uint8_t, 8> snapshot_magic{'E', 'A', 'W', 'R', 'G', 'S', 'N', 0};
-inline constexpr std::uint32_t state_encoding_version = 18;
+inline constexpr std::uint32_t state_encoding_version = 21;
 inline constexpr std::uint16_t section_version = 1;
 
 void put_u8(std::vector<std::uint8_t>& bytes, std::uint8_t value);
@@ -61,7 +63,16 @@ void encode_production(std::vector<std::uint8_t>& bytes, const ProductionSetup& 
 // Mutable admission inputs, excluding offer content and queue payment/countdown fields.
 void encode_production_menu_inputs(std::vector<std::uint8_t>&, const ProductionSetup&, PlayerId,
     std::span<const PlanetId> visible);
-[[nodiscard]] std::optional<ProductionSetup> decode_production(std::span<const std::uint8_t> bytes);
+// Checkpoint form (wire marker 9): each planet's offer table is one u32 index into `pool`, which the caller writes as the
+// checkpoint's offer-pool section. decode_production with a pool reads only marker 9; without one, only marker 7.
+void encode_production_pooled(std::vector<std::uint8_t>& bytes, const ProductionSetup& production, OfferPool& pool);
+[[nodiscard]] std::optional<ProductionSetup> decode_production(std::span<const std::uint8_t> bytes, const OfferPool* pool = nullptr);
+// The pool section's payload, split from OfferPool so the row layout stays beside the replay's offer rows.
+[[nodiscard]] std::vector<std::uint8_t> encode_offer_pool(const std::vector<ProductionOffer>& offers,
+    const std::vector<std::vector<std::uint32_t>>& tables);
+[[nodiscard]] bool decode_offer_pool(std::span<const std::uint8_t> bytes, std::vector<ProductionOffer>& offers,
+    std::vector<std::vector<std::uint32_t>>& tables);
+[[nodiscard]] std::uint64_t offer_row_hash(const ProductionOffer& offer, std::vector<std::uint8_t>& scratch);
 void encode_observer(std::vector<std::uint8_t>&, const ObserverSetup&);
 void encode_planet_access(std::vector<std::uint8_t>&, const PlanetAccessState&);
 [[nodiscard]] std::optional<PlanetAccessState> decode_planet_access(std::span<const std::uint8_t>);

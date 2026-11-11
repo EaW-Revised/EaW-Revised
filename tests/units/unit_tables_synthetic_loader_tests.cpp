@@ -1,9 +1,11 @@
 #include "unit_tables_support.hpp"
 #include "eawr/skirmish/ai.hpp"
+#include "eawr/sim/tactical/fighters.hpp"
 #include "eawr/units/content_selection.hpp"
 #include "unit_tables_synthetic_fixtures.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <fstream>
@@ -18,6 +20,189 @@
 
 namespace unit_tables_test_support {
 void synthetic_tables() {
+    // AB-70: XML-authored ion filters survive both ordinary and Create_Team_Type binding.
+    for (const std::string_view style : {"User_Input", "Space_Automatic", "Ground_Automatic", "Special_Attack", ""}) {
+        for (const std::string_view category : {"Frigate", "Fighter", ""}) {
+            TempTree tree;
+            auto xml = units_xml("3600", "Unit_Select_Test");
+            const std::string binding =
+                "<Unit_Abilities_Data SubObjectList=\"Yes\"><Unit_Ability><Type>ION_CANNON_SHOT</Type>"
+                "<GUI_Activated_Ability_Name>Mixed_Case_Ion</GUI_Activated_Ability_Name>"
+                "<Supports_Autofire>True</Supports_Autofire></Unit_Ability></Unit_Abilities_Data>"
+                "<Abilities SubObjectList=\"Yes\"><Ion_Cannon_Shot_Attack_Ability Name=\"Mixed_Case_Ion\">"
+                + (style.empty() ? std::string{} : "<Activation_Style>" + std::string(style) + "</Activation_Style>")
+                + (category.empty() ? std::string{} : "<Applicable_Unit_Categories>" + std::string(category)
+                    + "</Applicable_Unit_Categories>")
+                + "<Applicable_Unit_Types>Test_Fighter</Applicable_Unit_Types>"
+                "<Excluded_Unit_Categories>Bomber</Excluded_Unit_Categories>"
+                "<Excluded_Unit_Types>Test_Frigate</Excluded_Unit_Types>"
+                "</Ion_Cannon_Shot_Attack_Ability></Abilities>";
+            const auto frigate = xml.find("<SpaceUnit Name=\"Test_Frigate\">");
+            const auto ordinary = xml.find("<Unit_Abilities_Data", frigate);
+            const auto end = xml.find("</Unit_Abilities_Data>", ordinary);
+            expect(ordinary != std::string::npos && end != std::string::npos, "AB-70: replace the original ordinary row");
+            if (ordinary != std::string::npos && end != std::string::npos)
+                xml.erase(ordinary, end + std::string_view{"</Unit_Abilities_Data>"}.size() - ordinary);
+            for (const std::string_view start : {"<Container Name=\"Test_Pair_Base_Container\">",
+                    "<SpaceUnit Name=\"Test_Frigate\">"}) {
+                const auto at = xml.find(start);
+                expect(at != std::string::npos, "AB-70: fixture insertion point exists");
+                if (at != std::string::npos) xml.insert(at + start.size(), binding);
+            }
+            write_fixture(tree.root, xml);
+            const auto loaded = load(tree.root, models(-40.0F));
+            expect(loaded.tables.has_value(), "AB-70: authored nested ion XML loads");
+            if (!loaded.tables) continue;
+            const auto compiled = eawr::units::ability_table(*loaded.tables);
+            expect(static_cast<bool>(compiled), "AB-70: nested ion profiles compile");
+            if (!compiled) continue;
+            for (const std::string_view id : {"Test_Frigate", "Test_Squadron_Pair"}) {
+                const auto* profile = compiled.value().find(eawr::assets::object_type_crc(id));
+                const auto slot = profile ? eawr::sim::tactical::ability_slot(*profile,
+                    eawr::sim::tactical::AbilityKind::ion_cannon_shot) : std::nullopt;
+                expect(profile && slot && profile->special.size() == 1, "AB-70: team and unit retain a named ion handler");
+                if (!profile || !slot || profile->special.size() != 1) continue;
+                const auto& handler = profile->special.front();
+                const std::uint64_t mask = category == "Frigate" ? 0x10U : category == "Fighter" ? 1U : 0U;
+                expect(profile->abilities[*slot].gui_activated_ability_name == "Mixed_Case_Ion"
+                    && handler.name == "Mixed_Case_Ion"
+                    && handler.kind == eawr::sim::tactical::special_ability_kind("Ion_Cannon_Shot_Attack_Ability")
+                    && handler.style == eawr::sim::tactical::special_activation_style(style.empty() ? "Special_Attack" : style)
+                    && handler.filter.applicable_categories == mask
+                    && handler.filter.applicable_types == std::vector<eawr::sim::tactical::TypeId>{eawr::assets::object_type_crc("Test_Fighter")}
+                    && handler.filter.excluded_categories == 2
+                    && handler.filter.excluded_types == std::vector<eawr::sim::tactical::TypeId>{eawr::assets::object_type_crc("Test_Frigate")},
+                    "AB-70: authored style, default empty categories, names and exact filters survive the team loader");
+            }
+        }
+    }
+    for (const std::string_view starting : {"", "<Starting_Spawned_Units_Tech_0></Starting_Spawned_Units_Tech_0>"}) {
+        TempTree tree;
+        auto xml = units_xml("3600", "Unit_Select_Test");
+        const std::string tag = "<Starting_Spawned_Units_Tech_0>Test_Squadron, 2</Starting_Spawned_Units_Tech_0>";
+        const auto at = xml.find(tag);
+        const auto base = xml.find("<StarBase Name=\"Test_Base\">");
+        if (at != std::string::npos) xml.replace(at, tag.size(), starting);
+        if (base != std::string::npos) xml.insert(base + std::string_view{"<StarBase Name=\"Test_Base\">"}.size(),
+            "<Behavior>DUMMY_STAR_BASE</Behavior>");
+        write_fixture(tree.root, xml);
+        const auto loaded = load(tree.root, models(-40.0F));
+        if (!loaded.tables) {
+            expect(false, "WSL-26: empty authored station hangar loads");
+            continue;
+        }
+        const auto* station = loaded.tables->find("Skirmish_Test_Base");
+        const auto motion = eawr::units::motion_table(*loaded.tables);
+        const auto id = eawr::assets::object_type_crc("Skirmish_Test_Base");
+        bool empty = at != std::string::npos && base != std::string::npos && station && station->spawner
+            && station->spawner->starting.empty() && motion;
+        for (unsigned tech = 0; tech < 6 && empty; ++tech) {
+            const auto* profile = motion.value().squadrons.find_spawner_at_tech(id, 1, tech);
+            empty = profile && profile->starbase && !profile->bays.empty() && profile->entries.empty();
+        }
+        expect(empty, "WSL-26: omitted or empty XML starting garrison binds an empty station hangar at every tech");
+    }
+    {
+        TempTree tree;
+        auto xml = units_xml("3600", "Unit_Select_Test");
+        const std::string tag = "<Starting_Spawned_Units_Tech_0>Test_Squadron, 2</Starting_Spawned_Units_Tech_0>";
+        const auto at = xml.find(tag);
+        if (at != std::string::npos) xml.insert(at + tag.size(),
+            "<Starting_Spawned_Units_Tech_3>Test_Squadron_Pair, 4</Starting_Spawned_Units_Tech_3>"
+            "<Reserve_Spawned_Units_Tech_2>Test_Squadron_Pair, 7</Reserve_Spawned_Units_Tech_2>");
+        write_fixture(tree.root, xml);
+        const auto loaded = load(tree.root, models(-40.0F));
+        const auto* station = loaded.tables ? loaded.tables->find("Skirmish_Test_Base") : nullptr;
+        expect(at != std::string::npos && station && station->spawner
+            && station->spawner->campaign_starting[3].size() == 1
+            && station->spawner->campaign_starting[3][0].squadron == "Test_Squadron_Pair"
+            && station->spawner->campaign_starting[3][0].count == 4
+            && station->spawner->campaign_reserves[2].size() == 1
+            && station->spawner->campaign_reserves[2][0].count == 7,
+            "WSL-11: skirmish loading retains higher starting and reserve tiers independently");
+        if (loaded.tables) {
+            const auto motion = eawr::units::motion_table(*loaded.tables);
+            const auto id = eawr::assets::object_type_crc("Skirmish_Test_Base");
+            const auto* low = motion ? motion.value().squadrons.find_spawner_at_tech(id, 1, 1) : nullptr;
+            const auto* high = motion ? motion.value().squadrons.find_spawner_at_tech(id, 1, 4) : nullptr;
+            expect(low && low->entries.size() == 1 && low->entries[0].starting == 2
+                && low->entries[0].reserve == -1,
+                "WSL-11: tech 1 falls back to both tech 0 rows");
+            expect(high && high->entries.size() == 1 && high->entries[0].squadron == eawr::assets::object_type_crc("Test_Squadron_Pair")
+                && high->entries[0].starting == 4 && high->entries[0].reserve == 7,
+                "WSL-11: tech 4 selects starting tier 3 and reserve tier 2 independently");
+        }
+    }
+    {
+        // A mobile carrier with no Tech_0 row must still bind and launch its Tech_1 complement.
+        TempTree tree;
+        auto xml = units_xml("3600", "Unit_Select_Test");
+        const auto replace = [&](const std::string& from, const std::string& to) {
+            const auto at = xml.find(from);
+            if (at == std::string::npos) return false;
+            xml.replace(at, from.size(), to);
+            return true;
+        };
+        const bool authored = replace("<Space_Model_Name>TEST_FRIGATE.ALO</Space_Model_Name>",
+                "<Space_Model_Name>Test_Station.alo</Space_Model_Name>")
+            && replace("<SpaceBehavior>TARGETING,REVEAL , HIDE_WHEN_FOGGED, SIMPLE_SPACE_LOCOMOTOR</SpaceBehavior>",
+                "<SpaceBehavior>SPAWN_SQUADRON, SIMPLE_SPACE_LOCOMOTOR</SpaceBehavior>"
+                "<Starting_Spawned_Units_Tech_1>Test_Squadron, 3</Starting_Spawned_Units_Tech_1>"
+                "<Starting_Spawned_Units_Tech_1>Test_Squadron_Pair, 2</Starting_Spawned_Units_Tech_1>"
+                "<Spawned_Squadron_Delay_Seconds>0</Spawned_Squadron_Delay_Seconds>")
+            && replace("<HardPoints> HP_Test_Laser, HP_Test_Engine, HP_Test_Missing </HardPoints>",
+                "<HardPoints>HP_Test_Bay</HardPoints>");
+        write_fixture(tree.root, xml);
+        const auto loaded = load(tree.root, models(-40.0F));
+        const auto* carrier = loaded.tables ? loaded.tables->find("Test_Frigate") : nullptr;
+        const auto id = eawr::assets::object_type_crc("Test_Frigate");
+        const auto fighter = eawr::assets::object_type_crc("Test_Squadron");
+        const auto bomber = eawr::assets::object_type_crc("Test_Squadron_Pair");
+        expect(authored && carrier && carrier->spawner && carrier->spawner->starting.empty()
+            && carrier->spawner->campaign_starting[1].size() == 2,
+            "WSL-11: mobile carrier loads Tech_1-only starting rows");
+        if (loaded.tables) {
+            const auto motion = eawr::units::motion_table(*loaded.tables);
+            const auto* profile = motion ? motion.value().squadrons.find_spawner_at_tech(id, 1, 1) : nullptr;
+            expect(profile && profile->mobile && !profile->bays.empty() && profile->entries.size() == 2
+                && profile->entries[0].squadron == fighter && profile->entries[0].starting == 3
+                && profile->entries[1].squadron == bomber && profile->entries[1].starting == 2,
+                "WSL-11: Tech_1-only carrier binds its complete mobile spawner");
+            const std::array<unsigned, 2> higher_techs{2, 3};
+            expect(std::all_of(higher_techs.begin(), higher_techs.end(), [&](const unsigned tech) {
+                const auto* higher = motion ? motion.value().squadrons.find_spawner_at_tech(id, 1, tech) : nullptr;
+                return higher && higher->mobile && !higher->bays.empty() && higher->entries.size() == 2
+                    && higher->entries[0].squadron == fighter && higher->entries[0].starting == 3
+                    && higher->entries[1].squadron == bomber && higher->entries[1].starting == 2;
+            }), "WSL-11: tech 2 and 3 fall back to the complete Tech_1-only mobile carrier complement");
+            if (profile && profile->entries.size() == 2) {
+                namespace tactical = eawr::sim::tactical;
+                tactical::TacticalSetup setup;
+                setup.seed = 540;
+                setup.players = {{1, 0, 100, 1}, {2, 1, 200, 1}};
+                setup.units = {{1, id, 1, {}, eawr::sim::math::identity_quat(), {}}};
+                tactical::EconomyRules economy;
+                economy.players = {{1, {}, 25, false, {}, 1, 5}, {2, {}, 25, false, {}, 1, 5}};
+                auto session = tactical::TacticalSession::create(setup, {}, {}, motion.value(), std::nullopt, {}, {}, {}, economy);
+                expect(static_cast<bool>(session), "WSL-11: Tech_1-only carrier session creates");
+                if (session) {
+                    const eawr::sim::InlineExecutor executor;
+                    bool stepped = true;
+                    for (unsigned tick = 0; tick < 180 && stepped; ++tick)
+                        stepped = static_cast<bool>(session.value().step(executor));
+                    unsigned fighters = 0, bombers = 0;
+                    for (const auto& squadron : session.value().squadrons()) {
+                        const auto state = session.value().squadron_state(squadron.container);
+                        if (!state || state->spawner != 1) continue;
+                        fighters += state->squadron_type == fighter ? 1U : 0U;
+                        bombers += state->squadron_type == bomber ? 1U : 0U;
+                    }
+                    expect(stepped && fighters == 3 && bombers == 2,
+                        "WSL-11: Tech_1-only carrier launches three and two starting squadrons");
+                }
+            }
+        }
+    }
     // HD-06: omission, zero and malformed Health retain every authored hardpoint.
     for (const std::string_view value : {"", "<Health></Health>", "<Health>   </Health>",
             "<Health>0</Health>", "<Health>-1</Health>",
@@ -750,6 +935,12 @@ void synthetic_tables() {
         expect(laser.attachment.position == point(raw(10), raw(20), raw(30)), "attachment bone position");
         expect(laser.fire_a.position == point(raw(10), raw(22), raw(30)) && laser.fire_a.from_attached_model,
                "fire bone from the attached model, placed through the rotated attachment frame");
+        expect(laser.attachment.owner_bone_index.has_value() && !laser.fire_a.owner_bone_index,
+               "BCAM-21: only owner-model bones expose an index for posed owner lookup");
+        auto metadata_changed = tables;
+        metadata_changed.units[1].hardpoints[0].attachment.owner_bone_index.reset();
+        expect(eawr::units::content_identity(metadata_changed) == eawr::units::content_identity(tables),
+               "BCAM-21: presentation bone indices do not change content identity");
         expect(!laser.fire_b.position, "missing fire bone stays unresolved");
         expect(laser.weapon.has_value(), "weapon hardpoint has a weapon");
         if (laser.weapon) {
@@ -965,6 +1156,7 @@ void synthetic_tables() {
             unit.footprint.hazard.behavior = {general};
             unit.footprint.hazard.space_behavior = {space};
             unit.spawner->starting.clear();
+            for (auto& tier : unit.spawner->campaign_starting) tier.clear();
         }
         const auto rebound = eawr::units::motion_table(changed);
         const auto* profile = rebound ? rebound.value().squadrons.find_spawner(

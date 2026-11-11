@@ -67,7 +67,189 @@ void priority_rules() {
     expect(hard_point_priority(set, HardpointType::tractor_beam) == unlisted_priority, "an unlisted hardpoint ranks last");
 }
 
+// PU-08/09: authored perturbations exercise the loader, compiler, named gates and
+// observable payments. This test also compiles against the pre-fix interfaces.
+static void income_authoring_contracts() {
+    namespace tactical = eawr::sim::tactical;
+    const auto whole = [](const int value) { return Fixed::from_integer(value).value(); };
+    const auto station_id = eawr::assets::object_type_crc("Skirmish_Test_Base");
+    const auto make_xml = [](const std::string& fields, const std::string& bonus) {
+        auto xml = units_xml("3600", "Unit_Select_Test");
+        const std::string old = "<Income_Stream_Ability Name=\"Test_Income\"><Base_Income_Value>30</Base_Income_Value><Base_Interval_In_Secs>10</Base_Interval_In_Secs></Income_Stream_Ability>";
+        const std::string replacement = "<Income_Stream_Ability Name=\"Test_Income\"><Base_Income_Value>90</Base_Income_Value>"
+            "<Base_Interval_In_Secs>1</Base_Interval_In_Secs><Split_Income_With_Allies>Yes</Split_Income_With_Allies>"
+            + fields + "</Income_Stream_Ability>" + bonus;
+        xml.replace(xml.find(old), old.size(), replacement);
+        return xml;
+    };
+    struct Case { const char* fields; const char* bonus; bool dock; const char* owner; const char* ally;
+        const char* lock_name{"Income_Dock"}; };
+    const auto dock = R"(<Income_Stream_Mod_Ability Name="Income_Dock"><Initially_Enabled>No</Initially_Enabled>
+        <Activation_Style>Skirmish_Automatic</Activation_Style><Income_Additive_Value>30</Income_Additive_Value>
+        </Income_Stream_Mod_Ability>)";
+    const Case cases[]{
+        {"", "", false, "1", "1"},
+        {"<Initially_Enabled>No</Initially_Enabled>", "", false, "0", "0"},
+        {"<Initially_Enabled>No</Initially_Enabled>", "", true, "1", "1", "Test_Income"},
+        {"<Activation_Style>Space_Automatic</Activation_Style>", "", false, "1", "1"},
+        {"<Activation_Style>Global_Automatic</Activation_Style>", "", false, "1", "1"},
+        {"<Activation_Style>Combat_Automatic</Activation_Style>", "", false, "1", "1"},
+        {"<Activation_Style>Skirmish_Automatic</Activation_Style>", "", false, "1", "1"},
+        {"<Activation_Style>Ground_Automatic</Activation_Style>", "", false, "0", "0"},
+        {"<Activation_Style>Galactic_Automatic</Activation_Style>", "", false, "0", "0"},
+        {"<Activation_Style>User_Input</Activation_Style>", "", false, "0", "0"},
+        {"<Activation_Style>Take_Damage</Activation_Style>", "", false, "0", "0"},
+        {"<Activation_Style>Invalid</Activation_Style>", "", false, "0", "0"},
+        {"", dock, false, "1", "1"},
+        {"", dock, true, "1.33333333", "1.33333333"},
+        {"", R"(<Income_Stream_Mod_Ability Name="Income_Dock"><Initially_Enabled>Yes</Initially_Enabled>
+            <Income_Additive_Value>30</Income_Additive_Value></Income_Stream_Mod_Ability>)", false, "1.33333333", "1.33333333"},
+        {"", R"(<Income_Stream_Mod_Ability Name="Income_Dock"><Initially_Enabled>Yes</Initially_Enabled>
+            <Activation_Style>User_Input</Activation_Style><Income_Additive_Value>30</Income_Additive_Value>
+            </Income_Stream_Mod_Ability>)", true, "1", "1"},
+        {"<Full_Amount_To_Everyone>Yes</Full_Amount_To_Everyone>", "", false, "3", "3"},
+        {"<Split_Favors_Owner>Yes</Split_Favors_Owner><Owner_Income_Percentage>0.6</Owner_Income_Percentage>"
+            "<Full_Amount_To_Everyone>Yes</Full_Amount_To_Everyone>", "", false, "1.8", "0.4"},
+        {"<Split_Favors_Owner>Yes</Split_Favors_Owner>", "", false, "0", "1"},
+        {"<Split_Favors_Owner>Yes</Split_Favors_Owner><Owner_Income_Percentage>1</Owner_Income_Percentage>", "", false, "3", "0"},
+        {"<Split_Favors_Owner>Yes</Split_Favors_Owner><Owner_Income_Percentage>2</Owner_Income_Percentage>", "", false, "0", "1"},
+    };
+    TempTree tree;
+    for (const auto& row : cases) {
+        write_fixture(tree.root, make_xml(row.fields, row.bonus));
+        const auto loaded = load(tree.root, models(-40.0F));
+        expect(loaded.tables.has_value(), "PU-08 authored income fixture loads");
+        if (!loaded.tables) continue;
+        eawr::skirmish::SkirmishStart start;
+        start.setup.seed = 6236;
+        start.setup.players = {{1, 0, 1, 1}, {2, 0, 1, 1}, {3, 0, 1, 1}};
+        start.setup.units = {{1, station_id, 1, {}, eawr::sim::math::identity_quat(), {}}};
+        auto compiled = eawr::skirmish::economy_rules(start, {}, *loaded.tables);
+        auto abilities = eawr::units::ability_table(*loaded.tables);
+        expect(compiled && abilities, "PU-08 authored income content compiles");
+        if (!compiled || !abilities) continue;
+        compiled.value().players = {{1, {}, 100, false, {}}, {2, {}, 100, false, {}}, {3, {}, 100, false, {}}};
+        tactical::DurabilityTable health;
+        if (row.dock) {
+            tactical::DurabilityProfile station;
+            station.type_id = station_id;
+            station.max_hull = whole(1000);
+            tactical::HardpointProfile point;
+            point.destroyable = true;
+            point.max_health = whole(50);
+            point.special_ability_name = row.lock_name;
+            station.hardpoints.push_back(point);
+            health.profiles.push_back(station);
+        }
+        std::vector<std::string> reference;
+        for (const auto workers : {1U, 2U, 4U, 8U}) {
+            auto created = tactical::TacticalSession::create(start.setup, {}, health, {}, {}, {}, {}, abilities.value(), compiled.value());
+            expect(static_cast<bool>(created), "PU-08 income payment session creates");
+            if (!created) continue;
+            eawr::platform::ThreadWorkerAdapter executor(workers);
+            std::vector<std::string> hashes;
+            for (unsigned tick = 1; tick <= 3; ++tick) {
+                const auto step = created.value().step(executor);
+                expect(static_cast<bool>(step), "PU-08 income payment step succeeds");
+                if (!step) break;
+                hashes.push_back(step.value().state_sha256);
+                for (const auto& account : created.value().ledgers()) {
+                    const auto rate = Fixed::from_decimal(account.player == 1 ? row.owner : row.ally).value();
+                    const auto difference = account.credits.raw() - rate.raw() * tick;
+                    expect(difference >= -6 && difference <= 6, "PU-08/09 authored gates and owner/allied split set the actual balance");
+                }
+            }
+            if (reference.empty()) reference = hashes;
+            else expect(hashes == reference, "PU-08/09 authored income hashes equal on 1/2/4/8 workers");
+        }
+    }
+    // An upgrade object's disabled nested modifier must not attach to existing streams.
+    for (const auto enabled : {"Yes", "No"}) {
+        auto xml = make_xml("", "");
+        const std::string source = "<StarBase Name=\"Skirmish_Test_Base\">";
+        xml.insert(xml.find(source) + source.size(),
+            "<Tactical_Buildable_Objects_Multiplayer>Rebel, Income_Upgrade</Tactical_Buildable_Objects_Multiplayer>");
+        const std::string upgrade = std::string(R"(<UpgradeObject Name="Income_Upgrade"><Affiliation>Rebel</Affiliation>
+            <Tactical_Health>1</Tactical_Health><Tactical_Build_Cost_Multiplayer>1</Tactical_Build_Cost_Multiplayer>
+            <Tactical_Build_Time_Seconds>1</Tactical_Build_Time_Seconds><Tactical_Production_Queue>Tactical_Upgrades</Tactical_Production_Queue>
+            <Abilities><Income_Stream_Mod_Ability Name="Upgrade_Income"><Target_Stream_Source>Skirmish_Test_Base</Target_Stream_Source>
+            <Income_Multiplier>2</Income_Multiplier><Initially_Enabled>)") + enabled
+            + "</Initially_Enabled></Income_Stream_Mod_Ability></Abilities></UpgradeObject>";
+        xml.insert(xml.find("</Objects>"), upgrade);
+        write_fixture(tree.root, xml);
+        // Production lists resolve faction tokens through the catalog; without
+        // this definition the upgrade is never reached by the source's menu.
+        write(tree.root / "XML" / "FactionFiles.xml", "<Faction_Files><File>Income_Factions.xml</File></Faction_Files>");
+        write(tree.root / "XML" / "Income_Factions.xml", "<Factions><Faction Name=\"Rebel\" /></Factions>");
+        const auto loaded = load(tree.root, models(-40.0F));
+        expect(loaded.tables.has_value(), "PU-08 upgrade income authoring loads");
+        if (!loaded.tables) continue;
+        eawr::skirmish::SkirmishStart start;
+        const auto faction = eawr::skirmish::faction_id("Rebel");
+        start.setup.players = {{1, 0, faction, 1}};
+        start.setup.units = {{1, station_id, 1, {}, eawr::sim::math::identity_quat(), {}}};
+        auto compiled = eawr::skirmish::economy_rules(start, {}, *loaded.tables);
+        expect(static_cast<bool>(compiled), "PU-08 upgrade income content compiles");
+        if (!compiled) continue;
+        compiled.value().players = {{1, whole(10), 100, false, {}}};
+        const auto upgrade_id = eawr::skirmish::type_id("Income_Upgrade");
+        const auto* profile = compiled.value().upgrade(upgrade_id);
+        expect(profile && profile->income_modifiers.size() == 1, "PU-08 upgrade retains its authored income modifier");
+        if (!profile) continue;
+        auto created = tactical::TacticalSession::create(start.setup, {}, {}, {}, {}, {}, {}, {}, compiled.value());
+        expect(static_cast<bool>(created), "PU-08 upgrade income session creates");
+        if (!created) continue;
+        expect(static_cast<bool>(created.value().submit({{0, 1, 0}, {1}, tactical::BuyPayload{upgrade_id}})),
+            "PU-08 income upgrade purchase submits");
+        Fixed previous;
+        for (unsigned tick = 1; tick <= 40; ++tick) {
+            const auto step = created.value().step(eawr::sim::InlineExecutor{});
+            expect(static_cast<bool>(step), "PU-08 purchased income upgrade steps");
+            if (!step) break;
+            const auto& account = created.value().ledgers().front();
+            if (tick == 40) {
+                expect(!account.completed.empty(), "PU-08 authored income upgrade was actually completed");
+                expect(account.credits.raw() - previous.raw() == whole(std::string_view(enabled) == "Yes" ? 6 : 3).raw(),
+                    "PU-08 only the initially enabled upgrade changes live stream income");
+            }
+            previous = account.credits;
+        }
+    }
+    // Every newly consumed tag changes identity through real XML loading.
+    write_fixture(tree.root, make_xml("", ""));
+    const auto baseline = load(tree.root, models(-40.0F));
+    if (baseline.tables) for (const auto field : {"<Initially_Enabled>No</Initially_Enabled>",
+        "<Activation_Style>User_Input</Activation_Style>", "<Split_Favors_Owner>Yes</Split_Favors_Owner>",
+        "<Owner_Income_Percentage>0.6</Owner_Income_Percentage>"}) {
+        write_fixture(tree.root, make_xml(field, ""));
+        const auto changed = load(tree.root, models(-40.0F));
+        expect(changed.tables && eawr::units::content_identity(*changed.tables) != eawr::units::content_identity(*baseline.tables),
+            "PU-08/09 income authoring changes replay content identity");
+    }
+    const auto local_bonus = [](const char* style, const char* enabled = "Yes") {
+        return std::string("<Income_Stream_Mod_Ability Name=\"Local_Income\">")
+            + "<Initially_Enabled>" + enabled + "</Initially_Enabled>"
+            + "<Income_Additive_Value>30</Income_Additive_Value>"
+            + "<Activation_Style>" + style + "</Activation_Style>"
+            + "</Income_Stream_Mod_Ability>";
+    };
+    write_fixture(tree.root, make_xml("", local_bonus("Combat_Automatic")));
+    const auto automatic = load(tree.root, models(-40.0F));
+    write_fixture(tree.root, make_xml("", local_bonus("User_Input")));
+    const auto manual = load(tree.root, models(-40.0F));
+    write_fixture(tree.root, make_xml("", local_bonus("Combat_Automatic", "No")));
+    const auto disabled = load(tree.root, models(-40.0F));
+    expect(automatic.tables && manual.tables && disabled.tables, "PU-08 local modifier identity fixtures load");
+    if (automatic.tables && manual.tables && disabled.tables) {
+        expect(eawr::units::content_identity(*automatic.tables) != eawr::units::content_identity(*manual.tables),
+            "PU-08 local modifier activation changes content identity without Target_Stream_Source");
+        expect(eawr::units::content_identity(*automatic.tables) != eawr::units::content_identity(*disabled.tables),
+            "PU-08 local modifier initial enablement changes content identity without Target_Stream_Source");
+    }
+}
+
 void content_identity() {
+    income_authoring_contracts();
     // Duplicate names are a known catalog seam (legacy #3741), not a retail overlay rule.
     // Pin today's deterministic winner position until separate indexed entries are supported.
     {
@@ -97,6 +279,28 @@ void content_identity() {
     if (!first.tables || !second.tables) return;
     const auto identity = eawr::units::content_identity(*first.tables);
     expect(identity == eawr::units::content_identity(*second.tables), "identity is stable across loads");
+    {
+        auto pads = *first.tables;
+        pads.domain = eawr::sim::tactical::BattleDomain::land;
+        for (auto& unit : pads.units) { unit.capture_point = false; unit.build_pad = false; }
+        expect(!pads.units.empty(), "pad-only identity fixture has a unit");
+        if (!pads.units.empty()) {
+            pads.units.front().build_pad = true;
+            pads.pad_ai_build_multiplier = Fixed{};
+            auto changed_pad = pads;
+            changed_pad.pad_ai_build_multiplier = Fixed::from_raw(Fixed::scale);
+            expect(eawr::units::content_identity(pads) != eawr::units::content_identity(changed_pad),
+                "PADS-v1 binds land build pads without capture points");
+            auto changed_prebuilt = pads;
+            changed_prebuilt.units.front().respects_prebuilt_base = false;
+            expect(eawr::units::content_identity(pads) != eawr::units::content_identity(changed_prebuilt),
+                "land pad identity binds the prebuilt-respect flag");
+            pads.domain = eawr::sim::tactical::BattleDomain::space;
+            changed_pad.domain = pads.domain;
+            expect(eawr::units::content_identity(pads) == eawr::units::content_identity(changed_pad),
+                "a space build pad without capture does not enable PADS-v1");
+        }
+    }
     // PL-20: table_order is the object's place in the authored files, whatever its name hashes to.
     {
         const auto xml = units_xml("3600", "Unit_Select_Test");

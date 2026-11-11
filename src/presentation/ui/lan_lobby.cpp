@@ -109,6 +109,19 @@ std::optional<std::string> normalize_invitation_code(const std::string_view type
     return code;
 }
 
+std::string galactic_content_gate_text(const GalacticContentGate gate, const std::uint64_t files_done,
+                                       const std::uint64_t files_total) {
+    switch (gate) {
+    case GalacticContentGate::open: return {};
+    case GalacticContentGate::loading_content: return "Loading campaign content...";
+    case GalacticContentGate::checking_mod_files:
+        // The first check of a large mod reads every file; say how far it is instead of showing a static line.
+        if (files_total == 0) return "Checking mod files...";
+        return "Checking mod files (" + std::to_string(std::min(files_done, files_total)) + " of " + std::to_string(files_total) + ")...";
+    }
+    return {};
+}
+
 std::string_view private_online_empty_notice() noexcept {
     return "Online games are private. Ask the host for an invitation code.";
 }

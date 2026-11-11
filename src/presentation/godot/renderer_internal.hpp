@@ -3,6 +3,7 @@
 #include "eawr/presentation/space/environment_scene.hpp"
 #include "eawr/presentation/skin_pose.hpp"
 #include "eawr/presentation/render_churn.hpp"
+#include "eawr/presentation/hull_batching.hpp"
 
 #include "diagnostic_buffer.hpp"
 #include "fog_adapter.hpp"
@@ -26,6 +27,8 @@
 #include "resource_residency.hpp"
 #include "upload_winding.hpp"
 #include "distance_band.hpp"
+
+namespace eawr::presentation::shader_material::routing { struct Surface; }
 
 #include <godot_cpp/classes/global_constants.hpp>
 #include <godot_cpp/classes/engine.hpp>
@@ -130,6 +133,8 @@ public:
         std::uint64_t diagnostic_model_meshes{}, diagnostic_model_submeshes{};
         std::vector<std::string> diagnostic_surface_names;
         std::optional<AABB> diagnostic_bounds;
+        // Rest-pose model-space bounds (all visible surfaces); sizes a batch group's culling box.
+        std::optional<AABB> batch_bounds;
         RID texture;
         // Per-binding textures (upload with BindingTexture entries), by name.
         std::vector<std::pair<std::string, RID>> binding_textures;
@@ -188,13 +193,28 @@ public:
         bool derive_legacy_stages{};
     };
 
+    struct SharedIdleSkeleton final {
+        RID rid;
+        std::uint64_t group{};
+        std::vector<animation::Matrix> palette;
+        std::vector<std::uint8_t> valid_bones;
+        ~SharedIdleSkeleton();
+    };
+    struct SharedIdlePlan final {
+        std::size_t surfaces{};
+        std::vector<std::uint8_t> used;
+    };
     struct Instance final {
         sim::AssetId asset_id{};
         RID rid;
         RID skeleton;
+        std::shared_ptr<SharedIdleSkeleton> shared_idle_skeleton;
         Transform3D object_transform;
         detail::PlacedPiece placement; // #888: what it last sent, and the submit that carried it
         bool visible{true};
+        // Shadow policy the RID got when it was created. set_casts_shadows only affects instances
+        // created afterwards, so batching keys on this value, never on the asset's current flag.
+        bool created_casts{true};
         bool reserved_proxy{};
         bool applied_visible{true};
         std::uint64_t category_submit_frame{~std::uint64_t{0}};
@@ -204,6 +224,10 @@ public:
         bool band_hidden{}, group_hidden{}, part_hidden{};
         mutable RID diagnostic_cast_rid;
         mutable RenderingServer::ShadowCastingSetting diagnostic_cast_setting{RenderingServer::SHADOW_CASTING_SETTING_ON};
+        // Instanced hulls (opt-in): while batched the retained instance stays, hidden, and its
+        // transform lives in a group's multimesh slot. Leaving the group just unhides it.
+        bool batch_hidden{}, batch_dirty{}, translated_parameters{};
+        std::uint32_t batch_group{}, batch_slot{};
     };
 
     struct PendingPose final {
@@ -221,9 +245,9 @@ public:
 
     [[nodiscard]] core::Result<void> bind_skin_pose(sim::EntityId entity_id, sim::AssetId asset_id,
         const Resource& resource,
-        std::shared_ptr<const SkinPosePalette<Transform3D>> prepared);
+        std::shared_ptr<const SkinPosePalette<Transform3D>> prepared, std::uint64_t shared_idle_group = 0);
     [[nodiscard]] core::Result<void> set_prepared_skin_pose(sim::EntityId entity_id, sim::AssetId asset_id,
-        std::shared_ptr<const SkinPosePalette<Transform3D>> prepared) {
+        std::shared_ptr<const SkinPosePalette<Transform3D>> prepared, std::uint64_t shared_idle_group) {
         if (!prepared) return failure(diagnostic_codes::invalid_skin_pose,
             "skin pose contains a non-finite palette matrix");
         const auto resource = resources_.find(asset_id);
@@ -232,7 +256,7 @@ public:
         if (!resource->second.skinned || prepared->palette.size() != resource->second.bone_count)
             return failure(diagnostic_codes::invalid_skin_pose,
                 "skin pose bone count does not match the uploaded skinned asset");
-        return bind_skin_pose(entity_id, asset_id, resource->second, std::move(prepared));
+        return bind_skin_pose(entity_id, asset_id, resource->second, std::move(prepared), shared_idle_group);
     }
     explicit Impl(Node3D& owner, std::shared_ptr<GodotShaderCache> shaders, bool attach_scene);
     bool census_registered_{}; // texture census switch was on at construction
@@ -268,7 +292,18 @@ public:
             sample.grouped_units += self.diagnostic_groups_.grouped_units;
             sample.potential_colour_saving += self.diagnostic_groups_.potential_colour_saving;
             sample.group_hidden_units += self.diagnostic_groups_.group_hidden_units;
+            sample.t1_visible_pieces += self.diagnostic_groups_.t1_visible_pieces;
+            sample.t1_visible_surfaces += self.diagnostic_groups_.t1_visible_surfaces;
+            sample.t1_eligible_pieces += self.diagnostic_groups_.t1_eligible_pieces;
+            sample.t1_groups += self.diagnostic_groups_.t1_groups;
+            sample.t1_collapsed_surfaces += self.diagnostic_groups_.t1_collapsed_surfaces;
+            sample.t1_collapsed_shadow_surfaces += self.diagnostic_groups_.t1_collapsed_shadow_surfaces;
+            sample.t1_excluded_pass += self.diagnostic_groups_.t1_excluded_pass;
+            sample.t1_excluded_billboard += self.diagnostic_groups_.t1_excluded_billboard;
+            sample.t1_excluded_proxy += self.diagnostic_groups_.t1_excluded_proxy;
+            sample.t1_excluded_pose += self.diagnostic_groups_.t1_excluded_pose;
         }
+        self.batch_fill_sample(sample);
         for (const auto& [entity, instance] : self.instances_) {
             static_cast<void>(entity);
             sample.record(instance.category_role, instance.category_submit_frame == sample.frame,
@@ -343,6 +378,20 @@ public:
         const MaterialDescription& description,
         const std::span<const GodotRenderer::BindingTexture> binding_textures = {},
         ModelUpload retained_model = {});
+    [[nodiscard]] core::Result<void> upload_resource(sim::AssetId asset_id, const ModelView& model,
+        const assets::Texture& texture, const MaterialDescription& description,
+        std::span<const GodotRenderer::BindingTexture> binding_textures, ModelUpload retained_model);
+    [[nodiscard]] bool batch_translated_asset(sim::AssetId asset) const;
+    struct TranslationState;
+    [[nodiscard]] core::Result<bool> upload_translation(sim::AssetId asset, const ModelView& model,
+        const assets::Texture& texture, ModelUpload retained_model, const MaterialDescription* overrides = nullptr);
+    std::shared_ptr<TranslationState> translation_;
+    void set_translation_camera(const FixedCamera& camera);
+    void retire_translation(sim::AssetId asset);
+    [[nodiscard]] core::Result<std::unique_ptr<shader_material::routing::Surface>> prepare_translation(
+        const assets::Submesh& surface, std::vector<GodotRenderer::BindingTexture>& resolved,
+        std::span<const MaterialBinding> overrides = {});
+    void update_translation(RenderingServer& rendering, sim::EntityId entity, Instance& instance, Resource& resource);
 
     [[nodiscard]] core::Result<void> retain(const sim::AssetId asset_id);
 
@@ -362,15 +411,20 @@ public:
         skin_profile_ = enabled;
         skin_batch_active_ = true;
         skin_batch_.clear();
+        shared_idle_batch_.clear();
+        shared_idle_plans_.clear();
     }
     [[nodiscard]] SkinPoseWork end_skin_batch() {
         skin_profile_ = false;
         skin_batch_active_ = false;
         skin_batch_.clear();
+        shared_idle_batch_.clear();
+        shared_idle_plans_.clear();
         return skin_work_;
     }
 
     void clear_skin_pose(const sim::EntityId entity_id);
+    void prepare_shared_idle_surface(std::uint64_t group, sim::EntityId entity_id, sim::AssetId asset_id);
 
     void set_billboard_light(const sim::AssetId asset_id, const std::array<float, 3>& toward_light);
     [[nodiscard]] core::Result<void> set_material_scalar(sim::AssetId asset_id, std::string_view binding, float value);
@@ -421,7 +475,7 @@ public:
     static void apply_visibility(RenderingServer& rendering, Instance& instance, bool requested) {
         const bool applied = render_categories::engine_visible(instance.category_role, requested)
             && !(instance.band_hidden && !render_categories::ablation.starts_with("shadows-band-"))
-            && !instance.group_hidden && !instance.part_hidden;
+            && !instance.group_hidden && !instance.part_hidden && !instance.batch_hidden;
         if (instance.applied_visible != applied) {
             rendering.instance_set_visible(instance.rid, applied);
             instance.applied_visible = applied;
@@ -488,6 +542,36 @@ private:
     [[nodiscard]] core::Diagnostic pushed(const std::string_view code, std::string message);
 
     [[nodiscard]] core::Result<void> failure(const std::string_view code, std::string message);
+
+    // Instanced hulls (renderer_batching.cpp). All of this is inert unless hull_batching::enabled.
+    struct BatchGroup final {
+        RID multimesh, instance;
+        sim::AssetId asset{};
+        std::uint32_t capacity{}, members{};
+        std::uint64_t surfaces{};
+        bool casts{true}, dirty{};
+        std::array<float, 4> local_sphere{};          // rest-pose centre xyz + radius
+        std::vector<float> transforms;                // capacity * 12, row-major 3x4 per slot
+        std::vector<std::array<float, 4>> spheres;    // per-slot world bounding sphere
+    };
+    struct BatchCounters final { std::uint64_t flushes{}, uploads{}, audits{}, repairs{}, key_builds{}; };
+    [[nodiscard]] bool batch_active() const noexcept;
+    void batch_mark(sim::EntityId entity);
+    void batch_mark_asset(sim::AssetId asset);
+    void batch_write_transform(sim::EntityId entity, const Instance& instance);
+    void batch_update(RenderingServer& rendering, bool advance = true);
+    void batch_forget(RenderingServer* rendering, sim::EntityId entity, Instance& instance);
+    void batch_shutdown(RenderingServer& rendering);
+    void batch_apply(RenderingServer& rendering, std::vector<hull_batching::Registry::Change> changes);
+    [[nodiscard]] std::optional<hull_batching::Key> batch_key(sim::EntityId entity, const Instance& instance,
+                                                              bool* pose_exit = nullptr) const;
+    [[nodiscard]] bool rest_pose(sim::EntityId entity, const Instance& instance, const Resource& resource) const;
+    void batch_fill_sample(render_categories::Sample& sample) const;
+    hull_batching::Registry batch_registry_;
+    std::unordered_map<std::uint32_t, BatchGroup> batch_groups_;
+    std::vector<sim::EntityId> batch_dirty_;
+    std::uint64_t batch_serial_{};
+    mutable BatchCounters batch_counters_;
 
     using InstanceMap = std::unordered_map<sim::EntityId, Instance>;
     InstanceMap::iterator remove_instance(RenderingServer* rendering, const InstanceMap::iterator instance);
@@ -627,6 +711,12 @@ private:
     bool skin_profile_{};
     SkinPoseBatch<Transform3D> skin_batch_;
     bool skin_batch_active_{};
+    // Each idle index has exactly one prepared palette object in a batch;
+    // pointer identity therefore identifies its placement for this batch only.
+    std::unordered_map<const SkinPosePalette<Transform3D>*, std::shared_ptr<SharedIdleSkeleton>> shared_idle_batch_;
+    std::unordered_map<std::uint64_t, SharedIdlePlan> shared_idle_plans_;
+    static void detach_shared_idle(RenderingServer& rendering, Instance& instance);
+    static void release_instance_skeleton(RenderingServer* rendering, Instance& instance);
     BillboardPoseScratch<Transform3D> billboard_pose_;
     // Per-entity light scale RGB (set_light_scale); absent means (1, 1, 1).
     std::unordered_map<sim::EntityId, std::array<float, 3>> light_scales_;

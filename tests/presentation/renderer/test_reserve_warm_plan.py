@@ -15,6 +15,7 @@ from native_cpp_fixture import compile_fixture, select_toolchain
 HARNESS = r'''
 #include "__HEADER__"
 #include "__CAMPAIGN_HEADER__"
+#include "__RESTORED_HEADER__"
 #include <iostream>
 using namespace eawr;
 using namespace presentation;
@@ -95,11 +96,38 @@ int main() {
         "same-ship repeats, nested hangars and selected owner profiles retain authored counts");
     types.push_back({1, "drone", {{"carrier", 1}}});
     campaign = campaign_warm_arrivals(seeds, types);
-    check(!campaign.complete && campaign.plan.rows.size() == 5,
+    check(!campaign.complete && campaign.cyclic && campaign.plan.rows.size() == 5,
         "cyclic mod hangars retain a bounded prefix and report partial coverage");
     seeds = {{1, "carrier", std::numeric_limits<std::size_t>::max(), 0}};
     campaign = campaign_warm_arrivals(seeds, types);
-    check(!campaign.complete, "nested demand multiplication cannot wrap into a small allocation");
+    check(!campaign.complete && campaign.overflow, "nested demand multiplication cannot wrap into a small allocation");
+    // A restored battle: the carriers' selected tier is unknown, so the largest roster up to the owner's tech counts.
+    const std::vector<RosterCraft> tiers{{{"fighter", 4}}, {{"fighter", 6}, {"bomber", 2}}, {{"interceptor", 8}}, {{"fighter", 99}}};
+    const auto up_to_one = largest_roster_up_to(tiers, 1);
+    check(up_to_one.size() == 2 && up_to_one[0] == RosterCraft::value_type{"bomber", 2}
+        && up_to_one[1] == RosterCraft::value_type{"fighter", 6}, "tiers up to the owner's tech keep the largest count per craft");
+    check(largest_roster_up_to(tiers, 2).size() == 3 && largest_roster_up_to(tiers, 0).size() == 1
+        && largest_roster_up_to(tiers, 9)[1].second == 99, "higher tiers join only when the owner's tech reaches them");
+    battle::ArrivalPlan planned, restored;
+    planned.add(1, "fighter", 4, Source::launch, 7);
+    planned.add(1, "fighter", 2, Source::purchase, 7);
+    planned.add(1, "bomber", 3, Source::launch, 7);
+    restored.add(1, "fighter", 6, Source::launch, 0);
+    restored.add(1, "bomber", 2, Source::launch, 0);
+    restored.add(1, "interceptor", 5, Source::launch, 0);
+    restored.add(2, "fighter", 1, Source::launch, 0);
+    // Live craft count on top of the carriers' hangars, but only for types the plan or the carriers name.
+    const auto with_alive = with_alive_demand(planned, restored, {{{1, "fighter"}, 5}, {{1, "bomber"}, 1}, {{1, "frigate"}, 9}});
+    check(with_alive.rows.size() == restored.rows.size() + 2 && with_alive.rows[restored.rows.size()].type == "bomber"
+        && with_alive.rows.back().type == "fighter" && with_alive.rows.back().simultaneous_maximum == 10,
+        "live craft join the wanted capacity for named types only");
+    const auto delta = restored_roster_delta(planned, restored);
+    check(delta.additions.size() == 3 && delta.additions[0].owner == 1 && delta.additions[0].type == "fighter"
+        && delta.additions[0].simultaneous_maximum == 2 && delta.additions[1].type == "interceptor"
+        && delta.additions[1].simultaneous_maximum == 5 && delta.additions[2].owner == 2,
+        "only the shortfall over the planned launch rows is added; purchases do not count as launch capacity");
+    check(delta.fresh.size() == 2 && delta.fresh[0].second == "interceptor" && delta.fresh[1].first == 2,
+        "only types the plan never named need a recipe read at load");
     return failed;
 }
 '''
@@ -119,7 +147,8 @@ class ReserveWarmPlanner(unittest.TestCase):
             executable = directory / ('reserve_warm.exe' if os.name == 'nt' else 'reserve_warm')
             header = (ROOT / 'apps/viewer/src/reserve_warm_plan.hpp').as_posix()
             campaign_header = (ROOT / 'apps/viewer/src/campaign_warm_arrivals.hpp').as_posix()
-            source.write_text(HARNESS.replace('__HEADER__', header).replace('__CAMPAIGN_HEADER__', campaign_header), encoding='utf-8')
+            restored_header = (ROOT / 'apps/viewer/src/restored_roster_warm.hpp').as_posix()
+            source.write_text(HARNESS.replace('__HEADER__', header).replace('__CAMPAIGN_HEADER__', campaign_header).replace('__RESTORED_HEADER__', restored_header), encoding='utf-8')
             compile_fixture(toolchain, source, executable)
             ran = subprocess.run([str(executable)], capture_output=True, text=True, timeout=10)
             self.assertEqual(ran.returncode, 0, ran.stdout + ran.stderr)

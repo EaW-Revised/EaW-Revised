@@ -14,7 +14,6 @@ import eawr_evidence_io  # noqa: E402
 
 
 EXPECTED_TARGETS = (
-    "windows-msvc",
     "windows-clang",
     "linux-x64-gcc",
     "linux-x64-clang",

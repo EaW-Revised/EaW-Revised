@@ -21,6 +21,7 @@ bool EawrLanLobby::action_options(const std::string& argument,
             else if (key == "credits") state_->gc_credits->set_text(text(value));
             else if (key == "start_tech") state_->gc_start_tech->set_text(text(value));
             else if (key == "max_tech") state_->gc_max_tech->set_text(text(value));
+            else if (key == "vote_timeout") state_->gc_vote_timeout->set_text(text(value));
             else if (key == "difficulty") {
                 int picked = -1;
                 for (int item = 0; item < state_->gc_difficulty->get_item_count(); ++item)
@@ -270,8 +271,10 @@ void EawrLanLobby::build_galactic_options_overlay() {
     place(state.gc_auto_resolve, "EAWR_GC_AUTO_RESOLVE", 460, 400, 440, 38);
     // WAR-01: the four protocol values, shared with GalacticLobbyOptions.
     for (const char* caption : {"Always", "Never", "Ask", "Overwhelming odds"}) state.gc_auto_resolve->add_item(caption);
-    state.gc_error = label("EAWR_GC_ERROR", "", 450);
-    state.gc_error->set_size(Vector2(880, 110));
+    // #6156: the battle-vote timeout between different human sides; a whole number of seconds the host edits, clamped on Accept.
+    state.gc_vote_timeout = edit("EAWR_GC_VOTE_TIMEOUT", "Battle vote timeout (seconds)", 455);
+    state.gc_error = label("EAWR_GC_ERROR", "", 510);
+    state.gc_error->set_size(Vector2(880, 70));
     for (const auto& [caption, id, x] : {
             std::tuple{"Accept", "EAWR_OPT_ACCEPT", 20.0F},
             std::tuple{"Cancel", "EAWR_OPT_CANCEL", 320.0F},
@@ -317,6 +320,10 @@ void EawrLanLobby::show_galactic_options_values() {
     if (state.gc_difficulty->get_item_count() == 0) selected = add_choice(edit.difficulty);
     state.gc_difficulty->select(selected >= 0 ? selected : fallback >= 0 ? fallback : 0);
     state.gc_auto_resolve->select(static_cast<int>(edit.auto_resolve));
+    state.gc_vote_timeout->set_text(text(std::to_string(edit.vote_timeout)));
+    state.gc_vote_timeout->set_tooltip_text(text("Seconds a battle vote waits between different human sides, "
+        + std::to_string(net::galactic_lobby_min_vote_timeout) + " to " + std::to_string(net::galactic_lobby_max_vote_timeout)
+        + ". Players on one side never vote against a clock."));
     state.gc_error->set_text("");
     const bool supported = campaign != campaigns.end() && campaign->supports_custom_settings;
     if (supported && !edit.custom) {
@@ -345,6 +352,9 @@ void EawrLanLobby::reset_galactic_options() {
     const auto campaign = std::find_if(campaigns.begin(), campaigns.end(), [&](const auto& value) { return value.name == edit.campaign; });
     edit.difficulty = campaign != campaigns.end() ? sim::galactic::lobby_default_difficulty(*campaign, "Normal_Default") : "Normal_Default";
     edit.auto_resolve = net::galactic_lobby_default_auto_resolve;
+    // As when the room opened: the campaign's own constant clamped to the host range, else the retail 15.
+    edit.vote_timeout = campaign != campaigns.end() && campaign->vote_timeout_seconds
+        ? net::galactic_lobby_clamp_vote_timeout(*campaign->vote_timeout_seconds) : net::galactic_lobby_default_vote_timeout;
     show_galactic_options_values();
 }
 
@@ -367,7 +377,18 @@ void EawrLanLobby::close_galactic_options(const bool accept) {
             state.gc_error->set_text("Enter whole numbers for credits and tech levels.");
             return;
         }
+        std::int64_t timeout{};
+        if (!integer(state.gc_vote_timeout, timeout)) {
+            state.gc_error->set_text("Enter a whole number of seconds for the battle vote timeout.");
+            return;
+        }
+        edited.vote_timeout = net::galactic_lobby_clamp_vote_timeout(timeout);
         if (!edited.custom) edited.credits = edited.starting_tech = edited.maximum_tech = 0;
+        // The modal edits settings, not rows. A guest can move to a free faction while it is open (#6134), which reshapes the planned
+        // rows, so the rows are taken from the room as it is now; the stale copy would plan the guest's new row as AI.
+        if (const auto room = match_->lobby_state())
+            if (auto current = net::decode_galactic_lobby_game(room->snapshot.game); current && current.value().campaign == edited.campaign)
+                edited.rows = std::move(current).value().rows;
         // Publish through the normal validator; a refused edit leaves the room and modal copy intact.
         if (!match_->lobby_galactic_game(edited)) {
             const auto room = match_->lobby_state();

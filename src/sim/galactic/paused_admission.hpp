@@ -48,4 +48,12 @@ template<class Owner>
     });
 }
 
+// A lane window owns a fixed block of entity identities (its owner carries `native_id_end`); the live world has no block.
+// Taking an identity past the block is a deterministic refusal, never an abort.
+template<class Owner>
+[[nodiscard]] bool native_id_block_exhausted(const Owner& owner) noexcept {
+    if constexpr (requires { owner.native_id_end; }) return owner.next_id >= owner.native_id_end;
+    else return false;
+}
+
 } // namespace eawr::sim::galactic::session_detail

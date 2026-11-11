@@ -29,6 +29,12 @@ namespace eawr::presentation::ui {
 
 using Rgb = std::array<std::uint8_t, 3>;
 
+// Cursor-area preview dimensions in world units; nonpositive inputs produce no overlay.
+[[nodiscard]] constexpr std::optional<float> area_preview_side(float distance, float faction_scale) noexcept {
+    if (!(distance > 0.0F) || !(faction_scale > 0.0F)) return std::nullopt;
+    return distance * 2.0F * faction_scale;
+}
+
 // #5130 project policy: observer-only identity, never simulation/replay metadata.
 // The resolver is the extension seam for per-unit controller seats (#4590).
 struct ObserverOwner final {

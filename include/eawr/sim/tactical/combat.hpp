@@ -99,6 +99,12 @@ struct ShotProfile {
 // FC-61/EFSB-06: unauthored ordinary turret rest hold, in synchronized seconds.
 inline constexpr auto default_object_turret_rest_delay = math::Fixed::from_raw(2 * math::Fixed::scale);
 
+struct HolderShotProfile {
+    TypeId holder{};
+    std::optional<ShotProfile> shot{};
+    friend bool operator==(const HolderShotProfile&, const HolderShotProfile&) = default;
+};
+
 struct WeaponProfile {
     std::uint32_t hardpoint{object_weapon}; // index in the type's HardPoints list
     math::Fixed range{};                    // Fire_Range_Distance; the object weapon uses Targeting_Max_Attack_Distance
@@ -155,8 +161,10 @@ struct WeaponProfile {
     [[nodiscard]] bool fires_in_mode(const bool rocket) const noexcept {
         return rocket ? fire_in_rocket_mode : fire_in_normal_mode;
     }
+    std::vector<HolderShotProfile> lucky_shots{}; // WLK-02: each holder keeps its authored override.
     friend bool operator==(const WeaponProfile&, const WeaponProfile&) = default;
 };
+[[nodiscard]] const std::optional<ShotProfile>& lucky_shot(const WeaponProfile&, TypeId holder) noexcept;
 
 // A hardpoint as a target (R-10, R-13): where it sits, and whether a shot may pick it.
 struct TargetHardpoint {
@@ -589,6 +597,7 @@ inline constexpr std::uint32_t hit_outcome_shield_absorbed = 1U; // the shield t
 // A weapon_fired event's outcome: the shot is the weapon's ability shot (#561, AB-66).
 inline constexpr std::uint32_t fired_ability_shot = 1U;
 inline constexpr std::uint32_t fired_barrage_shot = 2U;
+inline constexpr std::uint32_t fired_lucky_shot = 8U; // WLK-02: projectile selection only.
 inline constexpr std::uint32_t fired_charged_shot = 4U; // coordinator-reserved, WAD-36
 inline constexpr std::uint32_t hit_outcome_armor_reduced = 2U;   // hull armor multiplier <= 0.75
 inline constexpr std::uint32_t hit_outcome_storm_shield = 4U; // coordinator-reserved, WHZ-32 flash branch

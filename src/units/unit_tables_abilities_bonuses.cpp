@@ -1,11 +1,19 @@
 #include "unit_tables_decode.hpp"
 
+#include "eawr/sim/tactical/abilities.hpp"
+
 #include <algorithm>
 
 namespace eawr::units::unit_tables_detail {
 
 void Loader::load_bonus_abilities(Object& object, UnitType& unit, const std::string& name, const AbilityFields& child_text) {
     const auto& node = child_text.node;
+    if (input_.campaign_scene && input_.domain == sim::tactical::BattleDomain::space
+        && iequals(node.name, "Retreat_Prevention_Ability")
+        && sim::tactical::automatic_ability_style(
+            sim::tactical::special_activation_style(child_text("Activation_Style")), input_.domain, false)) {
+        unit.production.retreat_prevention.push_back({name, boolean(child_text("Initially_Enabled")).value_or(true)});
+    }
     if (input_.campaign_scene && (iequals(node.name, "Enhance_Defense_Ability") || iequals(node.name, "Battlefield_Modifier_Ability"))
         && iequals(child_text("Activation_Style"), automatic_activation_name(input_.domain))) {
         BattlefieldBonus bonus; bonus.name = name;
@@ -47,7 +55,14 @@ void Loader::load_bonus_abilities(Object& object, UnitType& unit, const std::str
         unlock.reverse = boolean(child_text("Reverse_Application_Logic")).value_or(false);
         if (unlock.enable) unit.special_unlocks.push_back(unlock);
     }
-    if (iequals(node.name, "Combat_Bonus_Ability") && iequals(child_text("Activation_Style"), automatic_activation_name(input_.domain))) {
+    const auto bonus_style = iequals(node.name, "Combat_Bonus_Ability")
+        ? sim::tactical::special_activation_style(child_text("Activation_Style"))
+        : sim::tactical::SpecialActivationStyle::unspecified;
+    if (iequals(node.name, "Combat_Bonus_Ability")
+        && (iequals(child_text("Activation_Style"), automatic_activation_name(input_.domain))
+            || (input_.domain == sim::tactical::BattleDomain::space
+                && bonus_style == sim::tactical::SpecialActivationStyle::combat_automatic
+                && sim::tactical::automatic_ability_style(bonus_style, input_.domain, !input_.campaign_scene)))) {
         CombatBonus bonus;
         bonus.name = name;
         bonus.filter = unit.special_abilities.back().filter;
@@ -89,6 +104,14 @@ void Loader::load_bonus_abilities(Object& object, UnitType& unit, const std::str
         stream.interval_seconds = number(child_text("Base_Interval_In_Secs"));
         stream.split_with_allies = boolean(child_text("Split_Income_With_Allies")).value_or(false);
         stream.full_amount_to_everyone = boolean(child_text("Full_Amount_To_Everyone")).value_or(false);
+        stream.initially_enabled = boolean(child_text("Initially_Enabled")).value_or(true);
+        stream.activation_style = child_text("Activation_Style");
+        stream.split_favors_owner = boolean(child_text("Split_Favors_Owner")).value_or(false);
+        const auto percentage = number(child_text("Owner_Income_Percentage")).value_or(Fixed{});
+        // PU-09: an out-of-range percentage leaves the constructor's zero default.
+        if (percentage >= Fixed{} && percentage <= Fixed::from_raw(Fixed::scale))
+            stream.owner_income_percentage = percentage;
+        else report_.note(unit.id, "Owner_Income_Percentage", child_text("Owner_Income_Percentage"), "outside [0,1]; retained zero default");
         if (!stream.base_value || !stream.interval_seconds) {
             report_.missing(unit.id, "Income_Stream_Ability", name, "no Base_Income_Value or Base_Interval_In_Secs");
         }
@@ -101,6 +124,7 @@ void Loader::load_bonus_abilities(Object& object, UnitType& unit, const std::str
         bonus.target_source = child_text("Target_Stream_Source");
         bonus.interval_multiplier = number(child_text("Interval_Multiplier"));
         bonus.activation_style = child_text("Activation_Style");
+        bonus.initially_enabled = boolean(child_text("Initially_Enabled")).value_or(true);
         bonus.all_allied_sources = boolean(child_text("Affects_All_Allied_Sources")).value_or(false);
         bonus.reverse = boolean(child_text("Reverse_Application_Logic")).value_or(false);
         const auto category = number(child_text("Stacking_Category"));

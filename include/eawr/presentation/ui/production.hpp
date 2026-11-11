@@ -11,6 +11,7 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 // #530 (docs/behaviour/space-purchasing.md, PU-60 to PU-75): the local player's station production
@@ -22,6 +23,48 @@
 // the selection; the two build queues are the `tqueue` slots (upgrades 00 to 04, units 05 to 09);
 // the reinforcement pool is the pane `i_main_reinforce` with its `r_RRCC` slots (CommandBarComponents.xml).
 namespace eawr::presentation::ui {
+
+// Loss of reinforcement eligibility closes the pane and stops a pending drag.
+template <typename Close, typename CancelDrag>
+void apply_reinforcement_availability(bool allowed, Close close, CancelDrag cancel_drag) {
+    if (!allowed) { close(); cancel_drag(); }
+}
+
+struct ProductionHover final {
+    std::uint64_t identity{};
+    std::string type;
+    bool queue{};
+    bool operator==(const ProductionHover&) const = default;
+};
+
+// PU-73: polling borrows a retained value; only changed admission owns new text.
+class ProductionHoverCache final {
+public:
+    [[nodiscard]] const ProductionHover* get() const noexcept { return present_ ? &value_ : nullptr; }
+    [[nodiscard]] std::uint64_t publications() const noexcept { return publications_; }
+    void publish(const std::uint64_t identity, const std::string_view type, const bool queue) {
+        if (present_ && value_.identity == identity && value_.type == type && value_.queue == queue) return;
+        value_.type = type;
+        value_.identity = identity;
+        value_.queue = queue;
+        present_ = true;
+        ++publications_;
+    }
+    void clear() noexcept {
+        if (!present_) return;
+        present_ = false;
+        ++publications_;
+    }
+    template <typename Present>
+    void invalidate_unless(Present&& present) {
+        // No-hover publications do not visit the queue or pool at all.
+        if (present_ && !present(value_)) clear();
+    }
+private:
+    ProductionHover value_;
+    bool present_{};
+    std::uint64_t publications_{};
+};
 
 // PU-71: consume authoritative addition metadata, including arrivals consumed between frames.
 // No pool or snapshot history is visited, even when presentation skips simulation ticks.

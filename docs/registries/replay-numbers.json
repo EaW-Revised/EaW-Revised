@@ -142,6 +142,12 @@
     "constant": "replay_extension_controllers",
     "name": "cooperative controllers",
     "documented": true
+   },
+   {
+    "tag": 19,
+    "constant": "replay_extension_market_purchases",
+    "name": "market purchases",
+    "documented": true
    }
   ],
   "opcodes": [
@@ -347,6 +353,18 @@
     "value": 34,
     "constant": "opcode_script_invulnerable",
     "name": "script invulnerable",
+    "documented": true
+   },
+   {
+    "value": 35,
+    "constant": "opcode_land_garrison",
+    "name": "land garrison",
+    "documented": true
+   },
+   {
+    "value": 36,
+    "constant": "opcode_land_unload",
+    "name": "land unload",
     "documented": true
    }
   ]

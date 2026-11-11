@@ -6,12 +6,14 @@
 
 #include "render_profile_viewport.hpp"
 #include "viewer_path.hpp"
+#include "saved_games.hpp"
 
 #include "ui/dialog_builder.hpp"
 #include "ui/font_provider.hpp"
 #include "ui/input_routing.hpp"
 #include "ui/kit.hpp"
 #include "ui/message_box_view.hpp"
+#include "ui/load_game_view.hpp"
 #include "ui/theme_builder.hpp"
 
 #include "eawr/assets/assets.hpp"
@@ -148,6 +150,10 @@ struct EawrOptionsScreen::PageState final {
     model::DisplaySize selected_size;
     bool windowed_draft{};
     bool profile_touched{};
+    // The Advanced page's two honoured controls (#6560): untouched, they leave the stored value
+    // (possibly automatic) as it is.
+    bool particle_touched{};
+    bool heat_touched{};
     ScrollContainer* performance_scroll{};
     std::vector<std::string> saves; // the Save page's list, in list order
 };
@@ -334,7 +340,10 @@ void EawrOptionsScreen::on_viewport_resized() {
             if (auto* apply = Object::cast_to<BaseButton>(found->second)) apply->set_disabled(false);
         }
     }
-    if (had_confirmation) ask_quit();
+    if (had_confirmation) {
+        if (confirm_ == Confirm::overwrite) ask_overwrite(overwrite_name_);
+        else ask_quit();
+    }
 }
 
 void EawrOptionsScreen::clear_page() {
@@ -515,7 +524,7 @@ void EawrOptionsScreen::rebuild_page() {
     if (page_ == Page::performance || page_ == Page::tweaks) {
         // Project-owned page; reuse the loaded dialog's skin and button styles.
         data::Dialog performance = service;
-        performance.rect.height = page_ == Page::tweaks ? 250 : 202;
+        performance.rect.height = page_ == Page::tweaks ? 282 : 202;
         performance.controls.clear();
         const int width = performance.rect.width;
         const auto label = [&](const char* id, const char* caption, const data::RcRect rect) {
@@ -562,6 +571,9 @@ void EawrOptionsScreen::rebuild_page() {
             check.id_name = "IDC_ANIMATED_LOADING_BACKGROUND";
             check.text = "TEXT_EAWR_ANIMATED_LOADING_BACKGROUND"; check.rect.y = 150;
             performance.controls.push_back(check);
+            check.id_name = "IDC_FIT_RADAR_TO_GALAXY";
+            check.text = "TEXT_EAWR_FIT_RADAR_TO_GALAXY"; check.rect.y = 182;
+            performance.controls.push_back(check);
         }
 
         const auto button = [&](const char* id, const char* caption, const int column, const int row) {
@@ -579,7 +591,7 @@ void EawrOptionsScreen::rebuild_page() {
             control.id_name = id; control.id.reset();
             if (caption != nullptr) control.text = caption;
             const int button_width = (width - 36) / 2;
-            control.rect = {12 + column * (button_width + 12), (page_ == Page::tweaks ? 180 : 132) + row * 30, button_width, 24};
+            control.rect = {12 + column * (button_width + 12), (page_ == Page::tweaks ? 212 : 132) + row * 30, button_width, 24};
             performance.controls.push_back(std::move(control));
         };
         button("IDC_RESTORE_DEFAULT", "TEXT_EAWR_DEFAULTS", 0, 0);
@@ -876,10 +888,10 @@ void EawrOptionsScreen::wire_page() {
         }
         break;
     case Page::game_menu:
-        // MNU-19: retail enables Save and Load in a single-player skirmish. Save works for a battle that can
-        // be saved (#3989); Load stays disabled until loading a skirmish save is built.
+        // MNU-19: Save and Load are available when the battle supplies their callbacks.
         for (const char* id : {"IDC_SAVE_GAME", "IDC_LOAD_GAME"}) {
-            const bool works = std::string_view(id) == "IDC_SAVE_GAME" && options_.save_game && options_.save_names;
+            const bool works = std::string_view(id) == "IDC_SAVE_GAME"
+                ? bool(options_.save_game && options_.save_names) : bool(options_.load_game);
             if (has(id) && !works) disable(*state.controls[id], id, "");
         }
         break;
@@ -1028,6 +1040,7 @@ void EawrOptionsScreen::wire_page() {
             combo->select(draft_.selection_hotkeys ? 1 : 0);
             combo->set_tooltip_text(text("Select own mobile units without heroes. Bind keys under Controls."));
         }
+        if (has("IDC_FIT_RADAR_TO_GALAXY")) check("IDC_FIT_RADAR_TO_GALAXY")->set_pressed_no_signal(draft_.gameplay.fit_radar_to_galaxy);
         if (has("IDC_ANIMATED_LOADING_BACKGROUND")) check("IDC_ANIMATED_LOADING_BACKGROUND")->set_pressed_no_signal(draft_.gameplay.animated_loading_background);
         if (has("IDC_HOVER_OWNER_NAMES")) check("IDC_HOVER_OWNER_NAMES")->set_pressed_no_signal(model::hover_owner_names_enabled(draft_.gameplay, options_.multiplayer));
         if (has("IDC_REINFORCEMENT_AREAS_ONLY_WHILE_PLACING")) check("IDC_REINFORCEMENT_AREAS_ONLY_WHILE_PLACING")->set_pressed_no_signal(draft_.gameplay.reinforcement_areas_only_while_placing);
@@ -1050,19 +1063,34 @@ void EawrOptionsScreen::wire_page() {
                 control->set_min(0.0);
                 control->set_max(model::detail_level_maximum);
                 control->set_step(1.0);
-                const int value = video.detail[slot] == model::detail_automatic ? video.detail_level : video.detail[slot];
+                // The particle slider shows what a battle will draw: automatic is the top level (1.0).
+                const int automatic = slot == model::detail_slot_particle ? model::detail_level_maximum : video.detail_level;
+                const int value = video.detail[slot] == model::detail_automatic ? automatic : video.detail[slot];
                 control->set_value_no_signal(value);
+                if (slot == model::detail_slot_particle) {
+                    control->set_tooltip_text(text("Our scale, not retail's: 0 = 40%, 1 = 60%, 2 = 80%, 3 = 100% of the particles "
+                                                   "drawn. Takes effect when the next battle starts. A launch flag overrides it."));
+                }
             }
         }
         const std::array<std::pair<const char*, std::size_t>, 3> checks{{
             {"IDC_SOFT_SHADOWS", 4}, {"IDC_HEAT_DISTORTIONS", 5}, {"IDC_BLOOM", 6}}};
         for (const auto& [id, slot] : checks) {
             if (has(id)) {
-                check(id)->set_pressed_no_signal(video.detail[slot] == model::detail_automatic ? video.detail_level > 0
-                                                                                               : video.detail[slot] > 0);
+                // Heat distortions are on unless switched off: automatic keeps today's look.
+                check(id)->set_pressed_no_signal(slot == model::detail_slot_heat ? model::particle_heat_enabled(video)
+                    : video.detail[slot] == model::detail_automatic ? video.detail_level > 0 : video.detail[slot] > 0);
+                if (slot == model::detail_slot_heat) {
+                    check(id)->set_tooltip_text(text("Takes effect when the next battle starts. A launch flag overrides it."));
+                }
             }
         }
-        if (has("IDC_APPLY")) disable(*state.controls["IDC_APPLY"], "IDC_APPLY", "Detail levels are not built yet.");
+        // Apply works for the particle slider and heat distortions only; the other controls stay inert.
+        if (has("IDC_APPLY")) {
+            auto* apply = Object::cast_to<BaseButton>(state.controls["IDC_APPLY"]);
+            apply->set_disabled(true);
+            apply->set_tooltip_text(text("Nothing to apply yet."));
+        }
         break;
     }
     case Page::gameplay: {
@@ -1184,9 +1212,20 @@ void EawrOptionsScreen::wire_page() {
 
 // --- Signals -------------------------------------------------------------------------------
 
+void EawrOptionsScreen::update_advanced_dirty() {
+    dirty_ = draft_.video.detail[model::detail_slot_particle] != committed_.video.detail[model::detail_slot_particle]
+        || draft_.video.detail[model::detail_slot_heat] != committed_.video.detail[model::detail_slot_heat];
+    if (auto* apply = Object::cast_to<BaseButton>(state_->controls["IDC_APPLY"])) {
+        apply->set_disabled(!dirty_);
+        apply->set_tooltip_text(text(dirty_ ? "Particle detail and heat distortions take effect when the next battle starts."
+                                            : "Nothing to apply yet."));
+    }
+}
+
 void EawrOptionsScreen::update_tweaks_dirty() {
     dirty_ = draft_.selection_hotkeys != committed_.selection_hotkeys
         || draft_.selection_hotkeys_authored != committed_.selection_hotkeys_authored
+        || draft_.gameplay.fit_radar_to_galaxy != committed_.gameplay.fit_radar_to_galaxy
         || draft_.gameplay.animated_loading_background != committed_.gameplay.animated_loading_background
         || draft_.gameplay.hover_owner_names != committed_.gameplay.hover_owner_names
         || draft_.gameplay.reinforcement_areas_only_while_placing != committed_.gameplay.reinforcement_areas_only_while_placing;
@@ -1214,8 +1253,15 @@ void EawrOptionsScreen::on_toggled(const bool pressed, String id) {
         }
         return;
     }
-    if (page_ == Page::tweaks && (name == "IDC_HOVER_OWNER_NAMES" || name == "IDC_REINFORCEMENT_AREAS_ONLY_WHILE_PLACING" || name == "IDC_ANIMATED_LOADING_BACKGROUND")) {
+    if (page_ == Page::advanced_video && name == "IDC_HEAT_DISTORTIONS") {
+        state_->heat_touched = true;
+        draft_.video.detail[model::detail_slot_heat] = pressed ? 1 : 0;
+        update_advanced_dirty();
+        return;
+    }
+    if (page_ == Page::tweaks && (name == "IDC_HOVER_OWNER_NAMES" || name == "IDC_REINFORCEMENT_AREAS_ONLY_WHILE_PLACING" || name == "IDC_ANIMATED_LOADING_BACKGROUND" || name == "IDC_FIT_RADAR_TO_GALAXY")) {
         if (name == "IDC_HOVER_OWNER_NAMES") draft_.gameplay.hover_owner_names = pressed ? 1 : 0;
+        else if (name == "IDC_FIT_RADAR_TO_GALAXY") draft_.gameplay.fit_radar_to_galaxy = pressed;
         else if (name == "IDC_ANIMATED_LOADING_BACKGROUND") draft_.gameplay.animated_loading_background = pressed;
         else draft_.gameplay.reinforcement_areas_only_while_placing = pressed;
         update_tweaks_dirty();
@@ -1254,6 +1300,12 @@ void EawrOptionsScreen::on_value_changed(const double value, String id) {
         else if (name == "IDC_SLIDER_DIALOG_VOLUME") draft_.audio.speech_percent = percent;
         else draft_.audio.music_percent = percent;
         apply_preview();
+        return;
+    }
+    if (page_ == Page::advanced_video && name == "IDC_PARTICLE_DETAIL_SLIDER") {
+        state_->particle_touched = true;
+        draft_.video.detail[model::detail_slot_particle] = static_cast<int>(value + 0.5);
+        update_advanced_dirty();
         return;
     }
     if (page_ == Page::video && is_video_edit(name)) {
@@ -1433,11 +1485,23 @@ void EawrOptionsScreen::sync_draft_from_controls() {
         break;
     }
     case Page::tweaks:
+        if (const auto v = value("IDC_FIT_RADAR_TO_GALAXY")) draft_.gameplay.fit_radar_to_galaxy = *v > 0.5;
         if (const auto v = value("IDC_ANIMATED_LOADING_BACKGROUND")) draft_.gameplay.animated_loading_background = *v > 0.5;
         if (const auto v = value("IDC_REINFORCEMENT_AREAS_ONLY_WHILE_PLACING"))
             draft_.gameplay.reinforcement_areas_only_while_placing = *v > 0.5;
         if (const auto v = value("IDC_HOVER_OWNER_NAMES"); v && (*v > 0.5) != model::hover_owner_names_enabled(draft_.gameplay, options_.multiplayer))
             draft_.gameplay.hover_owner_names = *v > 0.5;
+        break;
+    case Page::advanced_video:
+        // Only the two honoured controls, and only once touched: an automatic value stays automatic.
+        if (state.particle_touched) {
+            if (const auto v = value("IDC_PARTICLE_DETAIL_SLIDER")) {
+                draft_.video.detail[model::detail_slot_particle] = static_cast<int>(*v + 0.5);
+            }
+        }
+        if (state.heat_touched) {
+            if (const auto v = value("IDC_HEAT_DISTORTIONS")) draft_.video.detail[model::detail_slot_heat] = *v > 0.5 ? 1 : 0;
+        }
         break;
     case Page::gameplay:
         if (const auto v = value("IDC_GAME_SPEED_SLIDER")) draft_.gameplay.tactical_speed = static_cast<int>(*v + 0.5);
@@ -1473,6 +1537,11 @@ void EawrOptionsScreen::commit_page(const bool leave) {
     switch (page_) {
     case Page::audio: committed_.audio = draft_.audio; break;
     case Page::video: committed_.video = draft_.video; break;
+    case Page::advanced_video:
+        // The other detail controls are refused, so only these two slots are committed (#6560).
+        committed_.video.detail[model::detail_slot_particle] = draft_.video.detail[model::detail_slot_particle];
+        committed_.video.detail[model::detail_slot_heat] = draft_.video.detail[model::detail_slot_heat];
+        break;
     case Page::performance:
         committed_.video.render_thread = draft_.video.render_thread;
         committed_.video.particle_threads = draft_.video.particle_threads;
@@ -1481,6 +1550,7 @@ void EawrOptionsScreen::commit_page(const bool leave) {
         break;
     case Page::tweaks:
         committed_.selection_hotkeys = draft_.selection_hotkeys; committed_.selection_hotkeys_authored = draft_.selection_hotkeys_authored;
+        committed_.gameplay.fit_radar_to_galaxy = draft_.gameplay.fit_radar_to_galaxy;
         committed_.gameplay.animated_loading_background = draft_.gameplay.animated_loading_background;
         committed_.gameplay.hover_owner_names = draft_.gameplay.hover_owner_names;
         committed_.gameplay.reinforcement_areas_only_while_placing = draft_.gameplay.reinforcement_areas_only_while_placing; break;
@@ -1536,6 +1606,7 @@ void EawrOptionsScreen::defaults_page() {
     case Page::tweaks:
         draft_.selection_hotkeys = draft_.selection_config.enabled;
         draft_.selection_hotkeys_authored = false;
+        draft_.gameplay.fit_radar_to_galaxy = defaults.gameplay.fit_radar_to_galaxy;
         draft_.gameplay.animated_loading_background = defaults.gameplay.animated_loading_background;
         draft_.gameplay.hover_owner_names = defaults.gameplay.hover_owner_names;
         draft_.gameplay.reinforcement_areas_only_while_placing = defaults.gameplay.reinforcement_areas_only_while_placing;
@@ -1582,9 +1653,14 @@ bool EawrOptionsScreen::confirm_open() const {
 // #3989: the Save page's Save. A name that is no valid save name does nothing (the field keeps it).
 void EawrOptionsScreen::save_named(const std::string& name, const bool overwrite) {
     if (!options_.save_game) return;
-    if (!overwrite && std::find(state_->saves.begin(), state_->saves.end(), name) != state_->saves.end()) {
-        ask_overwrite(name);
-        return;
+    if (!overwrite) {
+        const auto found = std::find_if(state_->saves.begin(), state_->saves.end(), [&](const std::string& existing) {
+            return text(existing).nocasecmp_to(text(name)) == 0;
+        });
+        if (found != state_->saves.end()) {
+            ask_overwrite(*found);
+            return;
+        }
     }
     if (options_.save_game(name, overwrite)) {
         close_screen();
@@ -1638,6 +1714,29 @@ void EawrOptionsScreen::ask_quit() {
     box->connect("result_chosen", callable_mp(this, &EawrOptionsScreen::on_confirm_result));
 }
 
+void EawrOptionsScreen::open_load_game() {
+    if (!options_.load_game || !resources_ || !resources_->theme_model) return;
+    LoadGameContext context;
+    context.boxes = MessageBoxContext{&*resources_->catalog, &*resources_->theme_model,
+        resources_->text ? &*resources_->text : nullptr, resources_->theme, get_viewport()->get_visible_rect().size};
+    context.saves = std::make_shared<viewer::DirectorySavedGameStore>(options_.load_directory);
+    context.launcher = options_.load_game;
+    auto* screen = memnew(EawrLoadGameScreen);
+    if (!screen->open(*this, context)) {
+        notes_.push_back("load screen: " + screen->failure());
+        memdelete(screen);
+        return;
+    }
+    set_process_input(false);
+    // The options menu normally sits above the load screen's layer; put it underneath
+    // while the child is open so the load controls receive pointer input.
+    set_layer(EawrLoadGameScreen::layer_index - 1);
+    load_screen_id_ = static_cast<int64_t>(screen->get_instance_id());
+    screen->connect("closed", callable_mp(this, &EawrOptionsScreen::on_load_closed));
+}
+
+void EawrOptionsScreen::on_load_closed() { load_screen_id_ = 0; set_layer(screen_layer); set_process_input(true); }
+
 void EawrOptionsScreen::on_confirm_result(const int64_t result) {
     // The box frees itself when a button is chosen (EawrMessageBox::choose), so the id is just forgotten here.
     confirm_id_ = 0;
@@ -1652,6 +1751,20 @@ void EawrOptionsScreen::on_confirm_result(const int64_t result) {
 
 std::optional<Vector2> EawrOptionsScreen::control_point(const std::string& name) const {
     if (!shown_) return std::nullopt;
+    if (load_screen_id_ && UtilityFunctions::is_instance_id_valid(load_screen_id_)) {
+        const auto* screen = Object::cast_to<EawrLoadGameScreen>(UtilityFunctions::instance_from_id(load_screen_id_));
+        if (!screen) return std::nullopt;
+        if (name == "load_first") {
+            const auto* list = Object::cast_to<ItemList>(screen->gadget("IDC_SAVE_GAME_LIST"));
+            if (!list || list->get_item_count() == 0) return std::nullopt;
+            return list->get_global_position() + list->get_item_rect(0).get_center();
+        }
+        if (name == "load_button") {
+            const auto* button = screen->gadget("IDC_LOAD_GAME_BUTTON");
+            if (button) return button->get_global_rect().get_center();
+        }
+        return std::nullopt;
+    }
     if (confirm_open()) {
         const auto* box = Object::cast_to<EawrMessageBox>(UtilityFunctions::instance_from_id(confirm_id_));
         if (box == nullptr || (name != "yes" && name != "no")) return std::nullopt;
@@ -1689,6 +1802,7 @@ void EawrOptionsScreen::handle_button(const std::string& id) {
         else if (id == "IDC_INGAME_OPTIONS") leave_to_hub();
         else if (id == "IDC_GAME_OPTIONS_QUIT") ask_quit();
         else if (id == "IDC_SAVE_GAME") open_page(Page::save_game);
+        else if (id == "IDC_LOAD_GAME") open_load_game();
         break;
     case Page::save_game:
         if (id == "IDC_SAVE_GAME_BUTTON") {
@@ -1730,7 +1844,12 @@ void EawrOptionsScreen::handle_button(const std::string& id) {
         else if (id == "IDC_RESTORE_DEFAULT") defaults_page();
         break;
     case Page::advanced_video:
-        if (id == "IDC_OK" || id == "IDC_CANCEL") cancel_page();
+        if (id == "IDC_OK") {
+            commit_page(false);
+            page_ = Page::video; // back to the Video page, as Cancel does
+            rebuild_page();
+        } else if (id == "IDC_APPLY") commit_page(false);
+        else if (id == "IDC_CANCEL") cancel_page();
         break;
     case Page::gameplay:
         if (id == "IDC_BUTTON_ACCEPT") commit_page(true);

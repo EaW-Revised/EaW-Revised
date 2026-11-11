@@ -28,7 +28,7 @@ class Node3D;
 class RID;
 }
 
-namespace eawr::presentation::shader_activation { struct Artifact; }
+namespace eawr::presentation::shader_activation { struct Artifact; struct Generation; }
 
 namespace eawr::presentation::godot_backend {
 
@@ -116,6 +116,19 @@ public:
     // texture resources are prepared at upload, outside frame submission.
     [[nodiscard]] core::Result<void> set_translated_parameters(sim::EntityId entity,
         std::span<const MaterialBinding> parameters);
+    using ShaderTextureResolver = std::function<std::optional<std::pair<std::string, assets::Texture>>(std::string_view)>;
+    // Installed at the loading boundary. Empty generation performs no route work.
+    void set_shader_generation(std::shared_ptr<const shader_activation::Generation> generation,
+        ShaderTextureResolver textures);
+    [[nodiscard]] bool admitted_shader(std::string_view shader) const;
+    [[nodiscard]] bool usable_shader(const assets::Submesh& surface);
+    // Loading-only native attempt, before a caller prepares legacy-only
+    // texture dependencies. False leaves the existing adapter path available.
+    [[nodiscard]] core::Result<bool> upload_shader_material(sim::AssetId asset, const assets::Model& model);
+    [[nodiscard]] bool shader_translation_enabled() const;
+    [[nodiscard]] bool translated_asset(sim::AssetId asset) const;
+    struct TranslationWork final { std::size_t uploaded{}, approximated{}, refused{}, missing_green{}; };
+    [[nodiscard]] TranslationWork translation_work() const;
 
     GodotRenderer(GodotRenderer&&) noexcept;
     GodotRenderer& operator=(GodotRenderer&&) noexcept;
@@ -259,11 +272,13 @@ public:
         SkinPoseWork* work = nullptr);
     // Main-thread publication; preserves request order and retains ordinary diff uploads.
     [[nodiscard]] core::Result<void> set_prepared_skin_pose(sim::EntityId entity_id,
-        sim::AssetId asset_id, const PreparedSkinPose& pose);
+        sim::AssetId asset_id, const PreparedSkinPose& pose, std::uint64_t shared_idle_group = 0);
     // Serial idle pose batch: each source span stays immutable until end.
     // End forgets source addresses; surface-owned immutable palettes survive.
     // Attribution is optional and never controls whether preparation is shared.
     void begin_skin_batch(bool enabled);
+    // Main-thread only, during an idle skin batch; group matches the later prepared bind.
+    void prepare_shared_idle_surface(std::uint64_t group, sim::EntityId entity_id, sim::AssetId asset_id);
     [[nodiscard]] SkinPoseWork end_skin_batch();
     // Ends the entity's stored pose; a live skinned instance returns to its
     // rest palette. A pose survives the entity's absence from a snapshot (a
@@ -389,6 +404,7 @@ public:
     [[nodiscard]] std::optional<std::array<float, 12>> bone_evidence(sim::EntityId entity, std::int32_t bone) const;
     // Hide a submitted instance without retiring its live skeleton/pose.
     void set_instance_visible(sim::EntityId entity, bool visible);
+    void flush_instance_changes();
     void set_camera(const FixedCamera& camera);
 
     // Scene lighting (P1-04). Without a call to set_lighting every legacy

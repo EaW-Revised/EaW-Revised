@@ -53,6 +53,8 @@ struct ProjectileDefenceRegistry {
 struct ProjectileDefenceAbilityInput {
     bool active_shield{}, active_jamming{};
     std::optional<math::Fixed> shield_radius{}, jamming_radius{};
+    bool jammer_registered{};
+    bool jammer_registration_explicit{};
 };
 
 // One live unit as the targeting phase sees it: copied before the phase, never written by it.
@@ -96,6 +98,8 @@ struct CombatUnit {
     // AB-66 (#561): a craft whose squadron's ION_CANNON_SHOT is on (`ion_held`) fires only its
     // override shot, only at `ion_target` (a unit or a squadron's team container) and its hardpoint,
     // and only while its own shot is still due (`ion_armed`).
+    TypeId lucky_holder_type{};
+    bool lucky_held{}; // WLK-02: shares target/hardpoint routing, not ion spending.
     bool ion_held{};
     bool ion_armed{};
     EntityId ion_target{};
@@ -153,6 +157,11 @@ struct CombatWorld {
     ProjectileDefenceRegistry projectile_defences;
     std::vector<EntityId> static_projectile_defences; // creation registrations, including inactive declared shields
 };
+
+// R-09 / LC-28: a scanner's priority for `target` through its resolved set (lower wins); a scanner without a
+// set scores every candidate 1.0, and a candidate the set excludes has none. Space and land share it.
+[[nodiscard]] std::optional<math::Fixed> target_priority(const CombatWorld& world, const CombatProfile& scanner,
+    const CombatUnit& target);
 
 // WHE-32/WPJ-17: derive this frame's recipient stamps and immutable source records.
 [[nodiscard]] core::Result<void> prepare_projectile_defences(CombatWorld& world,

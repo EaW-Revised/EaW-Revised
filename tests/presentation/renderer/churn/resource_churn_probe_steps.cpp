@@ -1,10 +1,137 @@
 #include "renderer_internal.hpp"
 #include "resource_churn_probe.hpp"
+#include "eawr/presentation/shader_material_activation.hpp"
+#include "eawr/presentation/hull_batching.hpp"
+#include <godot_cpp/classes/os.hpp>
 
 // This access is defined only in the linked Godot probe. It exercises the
 // production upload and Resource lifecycle without adding a runtime test API.
 namespace eawr::presentation::godot_backend::detail {
 struct ModelRecipeProbe final {
+    [[nodiscard]] static std::int64_t collapsed(const GodotRenderer& renderer) {
+        std::int64_t total{};
+        for (const auto& [id, group] : renderer.impl_->batch_groups_) {
+            static_cast<void>(id);
+            if (group.members > 1) total += static_cast<std::int64_t>(group.members) - 1;
+        }
+        return total;
+    }
+    [[nodiscard]] static std::vector<std::string> verify_hulls(GodotRenderer& renderer) {
+        std::vector<std::string> failures;
+        const auto check = [&](bool valid, const char* message) { if (!valid) failures.emplace_back(message); };
+        auto& impl = *renderer.impl_;
+        auto model = eawr_resource_churn_probe::plate(60.0F);
+        model.meshes[0].submeshes[0].shader = "Engine/Invented.fx";
+        const auto texture = eawr_resource_churn_probe::solid(255, 0, 0);
+        const auto material = eawr_resource_churn_probe::unshaded("1.0, 0.0, 0.0");
+        auto resident = std::make_shared<shader_material::Resident>();
+        resident->program.material = material;
+        auto generation = std::make_shared<shader_activation::Generation>();
+        shader_activation::EffectResult effect;
+        effect.input.effect = "data/art/shaders/engine/invented";
+        effect.variants.push_back({{}, shader_report::Route::translated, std::move(resident), {}});
+        generation->effects.push_back(std::move(effect));
+        renderer.set_shader_generation(generation, {});
+        check(impl.upload_resource(810, model, texture, material, {}, {}).has_value(), "hull fixture upload failed");
+        const auto both = eawr_resource_churn_probe::scene(1, {{1, 810, -100}, {2, 810, 100}});
+        const bool batching_before = hull_batching::enabled;
+        hull_batching::enabled = false;
+        for (int i = 0; i < 4; ++i) renderer.submit(both);
+        check(impl.batch_groups_.empty(), "flag off created a multimesh group");
+        hull_batching::enabled = true;
+        // Mark the existing instances after enabling: production normally enables before creation.
+        impl.batch_mark(1); impl.batch_mark(2);
+        for (int i = 0; i < 4; ++i) renderer.submit(both);
+        check(impl.batch_groups_.size() == 1 && impl.batch_registry_.member_total() == 2,
+              "two hulls must form one group");
+        std::array<float, 12> survivor{};
+        if (!impl.batch_groups_.empty()) {
+            const auto& group = impl.batch_groups_.begin()->second;
+            const auto slot = impl.instances_.at(2).batch_slot;
+            std::copy_n(group.transforms.begin() + slot * 12, 12, survivor.begin());
+            check(group.members == 2 && RenderingServer::get_singleton()->multimesh_get_visible_instances(group.multimesh) == 2,
+                  "group draws both members");
+        }
+        {
+            // The shadow policy is fixed when a piece is created: flipping the asset flag later must not
+            // change the group key, or batched and unbatched pieces would diverge.
+            const bool group_casts = impl.batch_groups_.begin()->second.casts;
+            renderer.set_casts_shadows(810, false);
+            for (int i = 0; i < 4; ++i) renderer.submit(both);
+            check(impl.batch_groups_.size() == 1 && impl.batch_registry_.member_total() == 2
+                      && impl.batch_groups_.begin()->second.casts == group_casts,
+                  "late set_casts_shadows must not change the group key of live pieces");
+            renderer.set_casts_shadows(810, true);
+            for (int i = 0; i < 4; ++i) renderer.submit(both);
+            check(impl.batch_groups_.size() == 1 && impl.batch_registry_.member_total() == 2,
+                  "restoring the asset caster flag keeps both pieces grouped");
+        }
+        {
+            // Fade (ship spawn): a piece with an opacity leaves at once; the group survives with the other
+            // member or drops, and both rejoin after the fade ends.
+            renderer.set_unit_opacity(1, 0.5F);
+            renderer.submit(both);
+            check(impl.instances_.at(1).batch_group == 0 && impl.batch_registry_.member_total() <= 1,
+                  "a fading hull must leave its group in the same submit");
+            renderer.set_unit_opacity(2, 0.5F);
+            renderer.submit(both);
+            check(impl.batch_registry_.member_total() == 0 && impl.batch_groups_.empty(),
+                  "a group whose members all fade must be dropped and freed");
+            renderer.set_unit_opacity(1, 1.0F);
+            renderer.set_unit_opacity(2, 1.0F);
+            for (int i = 0; i < 5; ++i) renderer.submit(both);
+            check(impl.batch_groups_.size() == 1 && impl.batch_registry_.member_total() == 2,
+                  "hulls regroup after the fade ends");
+        }
+        renderer.set_instance_visible(1, false);
+        const auto serial = impl.batch_serial_;
+        renderer.flush_instance_changes();
+        check(impl.batch_serial_ == serial, "visibility flush must not advance batch serial");
+        check(impl.batch_registry_.member_total() == 1 && !impl.batch_groups_.empty()
+                  && RenderingServer::get_singleton()->multimesh_get_visible_instances(
+                      impl.batch_groups_.begin()->second.multimesh) == 1,
+              "visibility flush updates visible instances");
+        renderer.set_instance_visible(1, true);
+        for (int i = 0; i < 4; ++i) renderer.submit(both);
+        renderer.submit(eawr_resource_churn_probe::scene(2, {{2, 810, 100}}));
+        check(impl.instances_.size() == 1 && impl.batch_registry_.member_total() == 1,
+              "destroyed hull must leave its group");
+        if (!impl.batch_groups_.empty()) {
+            const auto& group = impl.batch_groups_.begin()->second;
+            check(group.members == 1 && std::equal(survivor.begin(), survivor.end(), group.transforms.begin())
+                  && RenderingServer::get_singleton()->multimesh_get_visible_instances(group.multimesh) == 1,
+                  "surviving hull transform moves into slot zero and draws once");
+        }
+        renderer.set_instance_visible(2, false);
+        renderer.submit(eawr_resource_churn_probe::scene(3, {{2, 810, 100}}));
+        check(impl.batch_registry_.member_total() == 0, "hidden hull must leave at the next submit");
+        renderer.set_instance_visible(2, true);
+        renderer.submit(both);
+        for (int i = 0; i < 4; ++i) renderer.submit(both);
+        check(impl.batch_registry_.member_total() == 2, "visible hulls regroup before translation");
+        renderer.set_unit_colorization(2, {0.25F, 0.5F, 0.75F});
+        renderer.submit(both);
+        check(impl.instances_.at(2).batch_group == 0 && impl.batch_registry_.member_total() == 1,
+              "recolored hull leaves its old group in the same submit");
+        renderer.set_unit_colorization(1, {0.25F, 0.5F, 0.75F});
+        for (int i = 0; i < 4; ++i) renderer.submit(both);
+        check(impl.batch_registry_.member_total() == 2, "matching colors regroup");
+        const auto translated = impl.upload_translation(810, model, texture, {});
+        check(translated && translated.value(), "asset translation upload accepted");
+        renderer.submit(both);
+        check(impl.instances_.at(1).batch_group == 0 && impl.instances_.at(2).batch_group == 0,
+              "asset translation removes both members in the next submit");
+        impl.retire_translation(810);
+        for (int i = 0; i < 4; ++i) renderer.submit(both);
+        check(impl.batch_registry_.member_total() == 2, "retired asset translation allows regrouping");
+        const std::array parameters{MaterialBinding{"test_parameter", 1.0F}};
+        check(renderer.set_translated_parameters(2, parameters).has_value(), "translated parameters accepted");
+        for (int i = 0; i < 4; ++i) renderer.submit(both);
+        check(impl.instances_.at(2).batch_group == 0, "translated hull must never group");
+        // Leave batching in its production state so the churn and leak steps that follow run with it on.
+        hull_batching::enabled = batching_before;
+        return failures;
+    }
     [[nodiscard]] static std::vector<std::string> verify_textures(GodotRenderer& renderer, const std::string& capture_prefix) {
         std::vector<std::string> failures;
         const auto check = [&](const bool valid, const char* message) {
@@ -238,6 +365,10 @@ std::vector<presentation::animation::BonePose> moved_palette() {
 
 } // namespace
 
+std::int64_t EawrResourceChurnProbe::batch_collapsed() const {
+    return renderer_ ? presentation::godot_backend::detail::ModelRecipeProbe::collapsed(*renderer_) : 0;
+}
+
 void EawrResourceChurnProbe::build_steps() {
     const ProbeAssets probe_assets{solid(255, 0, 0), solid(0, 255, 0), solid(0, 0, 255, 32),
         unshaded("1.0, 0.0, 0.0"), unshaded("0.0, 1.0, 0.0"), unshaded("0.0, 0.0, 1.0")};
@@ -255,6 +386,15 @@ void EawrResourceChurnProbe::build_steps() {
         renderer_.reset();
     }, {}});
     if (model_recipes_only_) return;
+    steps_.push_back({"instanced-hull-lifecycle", [this] {
+        renderer_ = std::make_unique<GodotRenderer>(*host_);
+        const auto failures = presentation::godot_backend::detail::ModelRecipeProbe::verify_hulls(*renderer_);
+        for (const auto& failure : failures) check(false, failure);
+        renderer_.reset();
+        // Diagnostic control: EAWR_CHURN_NO_BATCHING=1 runs the remaining steps with batching off, as before the default flip.
+        if (OS::get_singleton()->get_environment("EAWR_CHURN_NO_BATCHING") == String("1")) presentation::hull_batching::enabled = false;
+    }, {}});
+
     build_baseline_steps(probe_assets);
     build_upload_steps(probe_assets);
     build_churn_steps();

@@ -4,7 +4,7 @@ eawr_add_test_case(
         "${PROJECT_SOURCE_DIR}/apps/viewer/src/galactic/galaxy_view.cpp"
         "${PROJECT_SOURCE_DIR}/apps/viewer/src/galactic/galaxy_snapshot_stub.cpp"
     INCLUDE_DIRS "${PROJECT_SOURCE_DIR}/apps/viewer/src"
-    LIBS eawr::sim_galactic
+    LIBS eawr::sim_galactic eawr::ui_model
     TESTS galactic_map_input_contracts
 )
 

@@ -67,6 +67,7 @@ struct CommandBonusProfile {
     math::Fixed reveal_delta{};
     std::vector<PlayerId> enabled_players; // WGT-49: explicit locks override authored default
     bool apply_to_self{}; // WHE-53: the debug build's creation flag defaults off
+    bool retreat_prevention{}; // WRP-02: bearer player's retreat gate
     friend bool operator==(const CommandBonusProfile&, const CommandBonusProfile&) = default;
 };
 struct IncomeModifier {
@@ -77,6 +78,9 @@ struct IncomeModifier {
     math::Fixed interval_percentage{};
     bool all_allies{};
     bool reverse{};
+    std::string name{};
+    bool initially_enabled{true};
+    bool automatic{true};
     friend bool operator==(const IncomeModifier&, const IncomeModifier&) = default;
 };
 
@@ -159,7 +163,10 @@ inline constexpr std::uint32_t always_on = 0xffffffffU;
 struct IncomeBonus {
     math::Fixed per_frame{};
     std::uint32_t hardpoint{always_on};
-    friend constexpr bool operator==(const IncomeBonus&, const IncomeBonus&) noexcept = default;
+    std::string name{};
+    bool initially_enabled{true};
+    bool automatic{true};
+    friend bool operator==(const IncomeBonus&, const IncomeBonus&) = default;
 };
 
 // A type whose live units pay an income stream (PU-02 to PU-05): the station's, and later a
@@ -173,6 +180,11 @@ struct IncomeProfile {
     bool full_amount_to_everyone{true};
     math::Fixed base_value{};       // WBP-44: authored value before modifiers
     math::Fixed interval_seconds{};
+    std::string name{};
+    bool initially_enabled{true};
+    bool automatic{true};
+    bool split_favors_owner{};
+    math::Fixed owner_income_percentage{};
     friend bool operator==(const IncomeProfile&, const IncomeProfile&) = default;
 };
 

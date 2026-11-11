@@ -309,18 +309,30 @@ void TacticalHud::set_beacon(const bool enabled, const bool targeting) {
         button->set_order_selected(targeting);
     }
 }
-void TacticalHud::set_movie_mode(const bool on) {
+void TacticalHud::set_movie_mode(const bool on, const bool immediate) {
     auto& state = *state_;
     state.movie = on && state.movie_height.has_value();
+    if (!on && immediate) state.movie_band_progress = 0.0F;
     if (state.mask) state.mask->set_visible(!state.overview && !state.movie);
     if (state.movie_bands) {
         // CanvasLayer supplies no parent Control rectangle for full-rect anchors.
         // Keep the band's parent at the current viewport size, including resizes.
         state.movie_bands->set_position(Vector2{});
         state.movie_bands->set_size(state.movie_bands->get_viewport()->get_visible_rect().size);
-        state.movie_bands->set_visible(state.movie);
+        state.movie_bands->set_visible(state.movie || state.movie_band_progress > 0.0F);
     }
     if (state.overlay) state.overlay->set_visible(!state.movie);
+    if (!on && immediate) advance_movie_bands(0.0);
+}
+void TacticalHud::advance_movie_bands(const double delta) {
+    auto& state = *state_;
+    if (!state.movie_bands || !state.movie_height) return;
+    const float step = static_cast<float>(std::max(delta, 0.0) / 0.5);
+    state.movie_band_progress = std::clamp(state.movie_band_progress + (state.movie ? step : -step), 0.0F, 1.0F);
+    const float height = *state.movie_height * state.movie_band_progress;
+    if (auto* top = Object::cast_to<Control>(state.movie_bands->get_child(0))) top->set_anchor(SIDE_BOTTOM, height, true);
+    if (auto* bottom = Object::cast_to<Control>(state.movie_bands->get_child(1))) bottom->set_anchor(SIDE_TOP, 1.0F - height, true);
+    state.movie_bands->set_visible(state.movie || state.movie_band_progress > 0.0F);
 }
 void TacticalHud::set_order_handler(std::function<void(std::string_view)> handler) {
     state_->order_handler = std::move(handler);
@@ -375,7 +387,7 @@ void TacticalHud::set_time_view(const TimeView& view) {
     state.time_view = view;
     state.time_view_set = true;
     const String network_help = "Any active human may pause or resume; these do not count against the speed budget (1 s double-press debounce). Shared speed: "
-        + String::num_int64(view.speed_step) + ". Use = / - to request a change (six per 45 seconds).";
+        + String::num_int64(view.speed_step) + ". Use = / - to request a change (two per 10 seconds).";
     if (state.pause_button != nullptr) {
         // TM-08: pausing starts an additive flash; it does not hold the selected state.
         state.pause_button->set_pressed_no_signal(false);
@@ -386,7 +398,11 @@ void TacticalHud::set_time_view(const TimeView& view) {
     if (state.fast_forward_button != nullptr) {
         state.fast_forward_button->set_pressed_no_signal(view.fast_forward);
         state.fast_forward_button->set_disabled(!view.fast_forward_enabled);
-        state.fast_forward_button->set_tooltip_text(view.multiplayer ? "Fast-forward is unavailable in multiplayer. " + network_help : String());
+        // #5355 (TP-MP06): in multiplayer the button requests the shared 2x and back; it is a request, not a promise.
+        state.fast_forward_button->set_tooltip_text(view.multiplayer
+            ? "Shared speed: any active human may set 2x or back to 1x (two speed changes per 10 seconds per player). "
+              "2x is a request: the slowest player's computer sets the real pace. " + network_help
+            : String());
         // TM-08: tinted grey (128) while disabled.
         const float tint = view.fast_forward_enabled ? 1.0F : 128.0F / 255.0F;
         state.fast_forward_button->set_self_modulate(Color(tint, tint, tint, 1.0F));

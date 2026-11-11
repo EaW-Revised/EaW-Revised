@@ -37,11 +37,19 @@ def body(text, opening):
 
 
 class SkirmishSaveMenuContracts(unittest.TestCase):
+    def test_failed_saved_battle_clears_front_end_origin(self):
+        host = body(read("apps/viewer/src/viewer_host_process.cpp"), "void ViewerHost::start_saved_battle() {")
+        failed = host.split("if (!map_mode_->ready(*skirmish_battle_host_)) {", 1)[1]
+        self.assertLess(failed.index("saved_battle_from_front_end_ = false;"), failed.index("front_end_->return_to_main_menu()"))
+
     def test_save_is_enabled_only_for_a_battle_that_can_be_saved(self):
         screen = read("apps/viewer/src/options_screen.cpp")
         self.assertIn('{EawrOptionsScreen::Page::save_game, "save", "IDD_SAVE_GAME_DIALOG"}', screen)
         wired = body(screen, "void EawrOptionsScreen::wire_page() {")
-        self.assertIn('std::string_view(id) == "IDC_SAVE_GAME" && options_.save_game && options_.save_names', wired)
+        self.assertIn('bool(options_.save_game && options_.save_names)', wired)
+        self.assertIn('bool(options_.load_game)', wired)
+        self.assertIn('set_layer(EawrLoadGameScreen::layer_index - 1)', body(screen, 'void EawrOptionsScreen::open_load_game()'))
+        self.assertIn('set_layer(screen_layer)', body(screen, 'void EawrOptionsScreen::on_load_closed()'))
         hud = read("apps/viewer/src/map_mode_hud.cpp")
         opened = body(hud, "bool MapMode::State::open_game_menu() {")
         self.assertIn("if (live_session->can_save()) {", opened)
@@ -54,7 +62,10 @@ class SkirmishSaveMenuContracts(unittest.TestCase):
     def test_an_existing_name_asks_before_it_is_replaced(self):
         screen = read("apps/viewer/src/options_screen.cpp")
         named = body(screen, "void EawrOptionsScreen::save_named(")
-        self.assertLess(named.index("ask_overwrite(name);"), named.index("options_.save_game(name, overwrite)"))
+        self.assertLess(named.index("ask_overwrite(*found);"), named.index("options_.save_game(name, overwrite)"))
+        self.assertIn("nocasecmp_to", named)
+        resized = body(screen, "void EawrOptionsScreen::on_viewport_resized() {")
+        self.assertIn("if (confirm_ == Confirm::overwrite) ask_overwrite(overwrite_name_);", resized)
         self.assertIn('"TEXT_SAVE_CONFIRM"', body(screen, "void EawrOptionsScreen::ask_overwrite("))
         confirmed = body(screen, "void EawrOptionsScreen::on_confirm_result(")
         self.assertLess(confirmed.index("Confirm::overwrite"), confirmed.index("quit_requested_ = true;"))
@@ -76,6 +87,72 @@ class SkirmishSaveMenuContracts(unittest.TestCase):
 
 @unittest.skipUnless(RUNTIME and GAME_ROOT, "requires the viewer GPU lane and installed game data")
 class SkirmishSaveMenuGpu(unittest.TestCase):
+    def test_front_end_load_continue_returns_to_main_menu(self):
+        with tempfile.TemporaryDirectory(prefix="skirmish-front-load-") as temporary:
+            output = pathlib.Path(temporary).resolve()
+            saves = output / "saves"
+            saves.mkdir()
+            shutil.copyfile(FIXTURE, saves / "Old Save.eawrsave")
+            gestures = ("f5:click:hud=begin", "f40:click:hud=options", "f60:click:hud=menu_save",
+                        "f80:click:hud=menu_save_first", "f100:click:hud=menu_save_button", "f120:click:hud=menu_yes")
+            args = ["--eawr-front-end-test-battle", "--eawr-live-step", "1", "--eawr-live-ticks", "6000",
+                    "--eawr-live-ai", "on", "--eawr-audio", "off", "--eawr-save-dir", str(saves)]
+            for gesture in gestures:
+                args += ["--eawr-live-input", gesture]
+            saved, _ = front.run_front_end(output, "make-save", args, engine=("--render-thread", "separate", "--quit-after", "800"), timeout=420)
+            self.assertIn("EAWR battle saved: Old Save at tick ", saved.stdout, saved.stdout[-6000:])
+            loaded, _ = front.run_front_end(output, "front-load", [
+                "--eawr-front-end-test-load-battle", "--eawr-save-dir", str(saves), "--eawr-audio", "off",
+                "--eawr-live-step", "3", "--eawr-live-ticks", "300",
+                "--eawr-live-order", "15:damage:1@1000000", "--eawr-live-order", "15:damage:2@1000000",
+                "--eawr-live-input", "f5:click:hud=begin", "--eawr-live-input", "225:key:ENTER",
+                "--eawr-live-input", "225:click:hud=quit"], engine=("--render-thread", "separate", "--quit-after", "20000"), timeout=420)
+            self.assertEqual(loaded.returncode, 0, loaded.stdout[-6000:])
+            self.assertIn("EAWR skirmish save loaded at tick ", loaded.stdout, loaded.stdout[-6000:])
+            self.assertIn("EAWR front end returned to the main menu", loaded.stdout, loaded.stdout[-6000:])
+            self.assertIn("EAWR front end battle returned: main_menu; setup visible false", loaded.stdout, loaded.stdout[-6000:])
+            # Change the header's mounted-content identity while preserving the payload checksum.
+            # This models a save copied from another data set and must be refused before a battle starts.
+            save_path = saves / "Old Save.eawrsave"
+            foreign = bytearray(save_path.read_bytes())
+            foreign[88] ^= 1
+            save_path.write_bytes(foreign)
+            refused, _ = front.run_front_end(output, "foreign-load", [
+                "--eawr-front-end-test-load-battle", "--eawr-save-dir", str(saves), "--eawr-audio", "off"],
+                engine=("--render-thread", "separate", "--quit-after", "800"), timeout=420)
+            self.assertIn("EAWR front end saved game restore refused:", refused.stdout, refused.stdout[-6000:])
+            self.assertNotIn("EAWR skirmish battle restored from", refused.stdout)
+            battle, _ = front.run_front_end(output, "foreign-in-game", [
+                "--eawr-front-end-test-battle", "--eawr-save-dir", str(saves), "--eawr-audio", "off",
+                "--eawr-live-step", "1", "--eawr-live-ticks", "6000", "--eawr-live-ai", "on",
+                "--eawr-live-input", "f5:click:hud=begin", "--eawr-live-input", "f40:click:hud=options",
+                "--eawr-live-input", "f60:click:hud=menu_load", "--eawr-live-input", "f80:click:hud=menu_load_first",
+                "--eawr-live-input", "f100:click:hud=menu_load_button"], engine=("--render-thread", "separate", "--quit-after", "800"), timeout=420)
+            self.assertIn("EAWR saved game load refused:", battle.stdout, battle.stdout[-6000:])
+            self.assertNotIn("EAWR skirmish battle restored from", battle.stdout)
+
+    def test_menu_load_restarts_the_saved_battle(self):
+        gestures = (
+            "f5:click:hud=begin", "f40:click:hud=options", "f60:click:hud=menu_save",
+            "f80:click:hud=menu_save_first", "f100:click:hud=menu_save_button", "f120:click:hud=menu_yes",
+            "f300:click:hud=options", "f320:click:hud=menu_load", "f340:click:hud=menu_load_first",
+            "f360:click:hud=menu_load_button")
+        with tempfile.TemporaryDirectory(prefix="skirmish-save-load-") as temporary:
+            output = pathlib.Path(temporary).resolve()
+            saves = output / "saves"
+            saves.mkdir()
+            shutil.copyfile(FIXTURE, saves / "Old Save.eawrsave")
+            arguments = ["--eawr-front-end-test-battle", "--eawr-live-step", "1", "--eawr-live-ticks", "6000",
+                         "--eawr-live-ai", "on", "--eawr-audio", "off", "--eawr-save-dir", str(saves)]
+            for gesture in gestures:
+                arguments += ["--eawr-live-input", gesture]
+            result, _ = front.run_front_end(output, "save-load", arguments, engine=("--render-thread", "separate", "--quit-after", "1800"), timeout=420)
+            log = result.stdout
+            self.assertEqual(result.returncode, 0, log[-6000:])
+            self.assertIn("EAWR battle saved: Old Save at tick ", log, log[-6000:])
+            self.assertIn("EAWR skirmish save loaded at tick ", log, log[-6000:])
+            self.assertIn("EAWR skirmish battle restored from ", log, log[-6000:])
+
     def test_menu_save_replaces_a_listed_save_with_this_battle(self):
         # Begin, open the menu with the HUD button, Save, pick the listed save, Save, Yes; later quit to the menu.
         gestures = (
@@ -94,7 +171,7 @@ class SkirmishSaveMenuGpu(unittest.TestCase):
                          "--eawr-save-dir", str(saves)]
             for gesture in gestures:
                 arguments += ["--eawr-live-input", gesture]
-            result, _ = front.run_front_end(output, "save-menu", arguments, engine=("--quit-after", "6000"), timeout=420)
+            result, _ = front.run_front_end(output, "save-menu", arguments, engine=("--render-thread", "separate", "--quit-after", "6000"), timeout=420)
             log = result.stdout
             keep = os.environ.get("EAWR_SKIRMISH_SAVE_MENU_EYECHECK")
             if keep:

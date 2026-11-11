@@ -1,5 +1,7 @@
 #include "encoding.hpp"
+#include "eawr/core/checkpoint_limits.hpp"
 #include "eawr/core/sha256.hpp"
+#include "eawr/sim/galactic/offer_pool.hpp"
 #include "../replay_internal.hpp"
 #include <algorithm>
 #include <limits>
@@ -51,7 +53,7 @@ void encode_row(std::vector<std::uint8_t>&, const ProductionPlayer&);
 bool decode_row(Reader&, ProductionPlayer&);
 void encode_row(std::vector<std::uint8_t>&, const PlanetProduction&);
 bool decode_row(Reader&, PlanetProduction&);
-bool decode_row(Reader&, ProductionSetup&);
+bool decode_production_setup(Reader&, ProductionSetup&, const OfferPool*);
 
 template <class T> void rows(std::vector<std::uint8_t>& bytes, const std::vector<T>& values) {
     put_u32(bytes, static_cast<std::uint32_t>(values.size()));
@@ -226,7 +228,7 @@ void encode_row(std::vector<std::uint8_t>& bytes, const PlanetProduction& v) {
     for (const auto& queue : v.queues) rows(bytes, queue);
     rows(bytes, v.objects);
 }
-bool decode_row(Reader& in, PlanetProduction& v) {
+bool decode_planet_inputs(Reader& in, PlanetProduction& v) {
     return in.read_u64(v.planet)
         && in.read_u32(v.target_owner)
         && in.read_u32(v.starbase_owner)
@@ -242,17 +244,46 @@ bool decode_row(Reader& in, PlanetProduction& v) {
         && in.read_i64(v.maximum_ground_forces)
         && decode_row(in, v.enabled)
         && decode_row(in, v.surface_accessible)
-        && decode_row(in, v.starbase_blocked)
+        && decode_row(in, v.starbase_blocked);
+}
+bool decode_row(Reader& in, PlanetProduction& v) {
+    return decode_planet_inputs(in, v)
         && rows(in, v.offers.mutable_rows())
         && rows(in, v.queues[0])
         && rows(in, v.queues[1])
         && rows(in, v.objects);
 }
+// The pooled planet list (wire marker 9): each planet carries the u32 index of its offer table in the checkpoint's
+// offer pool instead of the rows. Same count bound as the inline list; a missing pool or an index the pool lacks is malformed.
+bool decode_pooled_planets(Reader& in, std::vector<PlanetProduction>& planets, const OfferPool& pool) {
+    std::uint32_t count{};
+    // Every planet row occupies at least four bytes. Bound before allocation.
+    if (!in.read_u32(count) || count > galactic_max_objects || count > in.remaining() / 4) return false;
+    for (std::uint32_t i = 0; i < count; ++i) {
+        PlanetProduction planet; std::uint32_t index{};
+        if (!decode_planet_inputs(in, planet) || !in.read_u32(index)) return false;
+        const auto* table = pool.table(index);
+        if (!table) return false;
+        planet.offers = *table;
+        if (!rows(in, planet.queues[0]) || !rows(in, planet.queues[1]) || !rows(in, planet.objects)) return false;
+        planets.push_back(std::move(planet));
+    }
+    return true;
+}
 void encode_production_rows(std::vector<std::uint8_t>& bytes, const ProductionSetup& v,
-    const ProductionOfferDigests* digests, const ProductionOfferRows* offer_rows = nullptr) {
+    const ProductionOfferDigests* digests, const ProductionOfferRows* offer_rows = nullptr,
+    OfferPool* pool = nullptr) {
     put_u32(bytes, v.maximum_human_queue);
     rows(bytes, v.players);
-    if (!digests && offer_rows) {
+    if (pool) {
+        put_u32(bytes, static_cast<std::uint32_t>(v.planets.size()));
+        for (const auto& planet : v.planets) {
+            encode_planet_inputs(bytes, planet);
+            put_u32(bytes, pool->intern(planet.offers));
+            for (const auto& queue : planet.queues) rows(bytes, queue);
+            rows(bytes, planet.objects);
+        }
+    } else if (!digests && offer_rows) {
         // The same bytes as rows(bytes, v.planets), with each planet's immutable offer table taken from the caller's cache.
         put_u32(bytes, static_cast<std::uint32_t>(v.planets.size()));
         for (std::size_t i = 0; i < v.planets.size(); ++i) {
@@ -281,9 +312,10 @@ void encode_production_rows(std::vector<std::uint8_t>& bytes, const ProductionSe
         for (auto player : type.affiliated_players) put_u32(bytes, player);
     }
 }
-bool decode_row(Reader& in, ProductionSetup& v) {
+bool decode_production_setup(Reader& in, ProductionSetup& v, const OfferPool* pool) {
     std::uint32_t count{}; std::size_t affiliations{}; TypeId previous{};
-    if (!in.read_u32(v.maximum_human_queue) || !rows(in, v.players) || !rows(in, v.planets)
+    if (!in.read_u32(v.maximum_human_queue) || !rows(in, v.players)
+        || !(pool ? decode_pooled_planets(in, v.planets, *pool) : rows(in, v.planets))
         || !in.read_u32(count) || count > galactic_max_objects || count > in.remaining() / 22) return false;
     for (std::uint32_t i = 0; i < count; ++i) {
         TechnologyType type; std::uint32_t players{};
@@ -441,10 +473,12 @@ void encode_population(std::vector<std::uint8_t>& bytes, std::span<const Populat
 }
 
 static void encode_production_impl(std::vector<std::uint8_t>& bytes, const ProductionSetup& production,
-    const ProductionOfferDigests* digests, const ProductionOfferRows* offer_rows = nullptr) {
-    put_u8(bytes, digests ? 8 : 7); // distinct production hash domain; wire format remains 7
+    const ProductionOfferDigests* digests, const ProductionOfferRows* offer_rows = nullptr, OfferPool* pool = nullptr) {
+    // 8: the hash domain (offer tables digested). 7: the inline wire format. 9: the pooled wire format (offer tables
+    // replaced by indices into the checkpoint's offer pool); only a pool-carrying checkpoint writes or reads it.
+    put_u8(bytes, digests ? 8 : (pool ? 9 : 7));
     if (digests) encode_production_rows(bytes, production, digests);
-    else encode_production_rows(bytes, production, nullptr, offer_rows);
+    else encode_production_rows(bytes, production, nullptr, offer_rows, pool);
     put_u8(bytes, production.fleet_blockers ? 1 : 0);
     if (production.fleet_blockers) rows(bytes, *production.fleet_blockers);
     put_u8(bytes, production.nested_creation ? 1 : 0);
@@ -470,6 +504,55 @@ void encode_production(std::vector<std::uint8_t>& bytes, const ProductionSetup& 
 }
 void encode_production(std::vector<std::uint8_t>& bytes, const ProductionSetup& production, const ProductionOfferRows& offer_rows) {
     encode_production_impl(bytes, production, nullptr, &offer_rows);
+}
+void encode_production_pooled(std::vector<std::uint8_t>& bytes, const ProductionSetup& production, OfferPool& pool) {
+    encode_production_impl(bytes, production, nullptr, nullptr, &pool);
+}
+std::vector<std::uint8_t> encode_offer_pool(const std::vector<ProductionOffer>& offers,
+    const std::vector<std::vector<std::uint32_t>>& tables) {
+    std::vector<std::uint8_t> bytes;
+    put_u32(bytes, static_cast<std::uint32_t>(offers.size()));
+    for (const auto& offer : offers) encode_row(bytes, offer);
+    put_u32(bytes, static_cast<std::uint32_t>(tables.size()));
+    for (const auto& table : tables) {
+        put_u32(bytes, static_cast<std::uint32_t>(table.size()));
+        for (const auto index : table) put_u32(bytes, index);
+    }
+    return bytes;
+}
+bool decode_offer_pool(std::span<const std::uint8_t> bytes, std::vector<ProductionOffer>& offers,
+    std::vector<std::vector<std::uint32_t>>& tables) {
+    // The smallest encoded offer row is 123 bytes (every fixed field and two empty lists); 100 keeps the bound loose.
+    constexpr std::size_t min_row_bytes = 100;
+    Reader in(bytes); std::uint32_t count{};
+    if (!in.read_u32(count) || count > in.remaining() / min_row_bytes) return false;
+    offers.reserve(count);
+    for (std::uint32_t i = 0; i < count; ++i) {
+        ProductionOffer offer;
+        if (!decode_row(in, offer)) return false;
+        offers.push_back(std::move(offer));
+    }
+    std::uint32_t table_count{};
+    if (!in.read_u32(table_count) || table_count > in.remaining() / 4) return false;
+    std::size_t total{};
+    for (std::uint32_t t = 0; t < table_count; ++t) {
+        std::uint32_t length{};
+        if (!in.read_u32(length) || length > galactic_max_objects || length > in.remaining() / 4) return false;
+        // A restored table is materialized once, so the references bound the decoded size, not the file size.
+        total += length;
+        if (total > max_offer_pool_references) return false;
+        std::vector<std::uint32_t> table(length);
+        for (auto& index : table) if (!in.read_u32(index) || index >= offers.size()) return false;
+        tables.push_back(std::move(table));
+    }
+    return in.remaining() == 0;
+}
+std::uint64_t offer_row_hash(const ProductionOffer& offer, std::vector<std::uint8_t>& scratch) {
+    scratch.clear();
+    encode_row(scratch, offer);
+    std::uint64_t hash = 1469598103934665603ULL; // FNV-1a, 64 bit: a lookup key only; equal keys are confirmed by ==
+    for (const auto byte : scratch) { hash ^= byte; hash *= 1099511628211ULL; }
+    return hash;
 }
 ProductionOfferRows production_offer_rows(const ProductionSetup& production) {
     ProductionOfferRows result;
@@ -512,9 +595,11 @@ void encode_production_menu_inputs(std::vector<std::uint8_t>& bytes, const Produ
         rows(bytes, planet.objects);
     }
 }
-std::optional<ProductionSetup> decode_production(std::span<const std::uint8_t> bytes) {
+std::optional<ProductionSetup> decode_production(std::span<const std::uint8_t> bytes, const OfferPool* pool) {
     Reader reader(bytes); ProductionSetup result; std::uint8_t version{}; bool present{};
-    if (!reader.read_u8(version) || version != 7 || !decode_row(reader, result) || !decode_row(reader, present)) return std::nullopt;
+    // The marker decides the form (7 inline, 9 pooled); the caller's pool must match it.
+    if (!reader.read_u8(version) || (pool ? version != 9 : version != 7)
+        || !decode_production_setup(reader, result, pool) || !decode_row(reader, present)) return std::nullopt;
     if (present) {
         result.fleet_blockers.emplace();
         if (!rows(reader, *result.fleet_blockers)) return std::nullopt;
@@ -546,3 +631,81 @@ std::optional<ProductionSetup> decode_production(std::span<const std::uint8_t> b
     return result;
 }
 } // namespace eawr::sim::galactic::detail
+
+namespace eawr::sim::galactic {
+
+void OfferPool::ensure_index() {
+    if (indexed_) return;
+    std::vector<std::uint8_t> scratch;
+    row_lookup_.reserve(rows_.size());
+    for (std::uint32_t i = 0; i < rows_.size(); ++i) row_lookup_.emplace(detail::offer_row_hash(rows_[i], scratch), i);
+    table_lookup_.reserve(table_indices_.size());
+    for (std::uint32_t i = 0; i < table_indices_.size(); ++i) {
+        std::uint64_t hash = 1469598103934665603ULL;
+        for (const auto index : table_indices_[i]) { hash ^= index; hash *= 1099511628211ULL; }
+        table_lookup_.emplace(hash, i);
+    }
+    indexed_ = true;
+}
+
+std::uint32_t OfferPool::intern_row(const ProductionOffer& row, std::vector<std::uint8_t>& scratch) {
+    const auto hash = detail::offer_row_hash(row, scratch);
+    const auto [first, last] = row_lookup_.equal_range(hash);
+    for (auto at = first; at != last; ++at)
+        if (rows_[at->second] == row) return at->second;
+    const auto index = static_cast<std::uint32_t>(rows_.size());
+    rows_.push_back(row);
+    row_lookup_.emplace(hash, index);
+    return index;
+}
+
+std::uint32_t OfferPool::intern(const SharedRows<ProductionOffer>& table) {
+    // A table that is this pool's own storage (every table a restore took from it, and every table already interned)
+    // is found by identity: no row is encoded or hashed, so re-writing a restored session costs one lookup per planet.
+    const void* const storage = &table.rows();
+    if (const auto at = by_storage_.find(storage); at != by_storage_.end()) return at->second.second;
+    ensure_index();
+    std::vector<std::uint8_t> scratch;
+    std::vector<std::uint32_t> indices;
+    indices.reserve(table.size());
+    for (const auto& row : table.rows()) indices.push_back(intern_row(row, scratch));
+    std::uint64_t hash = 1469598103934665603ULL;
+    for (const auto index : indices) { hash ^= index; hash *= 1099511628211ULL; }
+    std::uint32_t found = static_cast<std::uint32_t>(table_indices_.size());
+    const auto [first, last] = table_lookup_.equal_range(hash);
+    for (auto at = first; at != last; ++at)
+        if (table_indices_[at->second] == indices) { found = at->second; break; }
+    if (found == table_indices_.size()) {
+        table_indices_.push_back(std::move(indices));
+        tables_.push_back(table);
+        table_lookup_.emplace(hash, found);
+    }
+    by_storage_.emplace(storage, std::make_pair(table, found));
+    return found;
+}
+
+const SharedRows<ProductionOffer>* OfferPool::table(const std::uint32_t index) const noexcept {
+    return index < tables_.size() ? &tables_[index] : nullptr;
+}
+
+std::vector<std::uint8_t> OfferPool::encode() const { return detail::encode_offer_pool(rows_, table_indices_); }
+
+std::optional<OfferPool> OfferPool::decode(const std::span<const std::uint8_t> bytes) {
+    OfferPool pool;
+    if (!detail::decode_offer_pool(bytes, pool.rows_, pool.table_indices_)) return std::nullopt;
+    pool.tables_.reserve(pool.table_indices_.size());
+    for (const auto& indices : pool.table_indices_) {
+        std::vector<ProductionOffer> rows;
+        rows.reserve(indices.size());
+        for (const auto index : indices) rows.push_back(pool.rows_[index]);
+        pool.tables_.emplace_back(std::move(rows));
+    }
+    // Seed the identity lookup with the pool's own tables: restored planets share exactly this storage.
+    pool.by_storage_.reserve(pool.tables_.size());
+    for (std::uint32_t i = 0; i < pool.tables_.size(); ++i)
+        pool.by_storage_.emplace(&pool.tables_[i].rows(), std::make_pair(pool.tables_[i], i));
+    pool.indexed_ = false;
+    return pool;
+}
+
+} // namespace eawr::sim::galactic

@@ -26,6 +26,12 @@ const SpawnerProfile* SquadronTable::find_spawner(const TypeId type_id, const Pl
     if (const auto found = campaign_spawners.find({type_id, owner}); found != campaign_spawners.end()) return &found->second;
     return find_by_type(spawners, type_id);
 }
+const SpawnerProfile* SquadronTable::find_spawner_at_tech(const TypeId type_id, const PlayerId owner,
+    const std::uint32_t tech) const noexcept {
+    const auto found = tech_spawners.find(type_id);
+    if (found != tech_spawners.end() && tech < found->second.size()) return &found->second[tech];
+    return find_spawner(type_id, owner);
+}
 
 core::Result<Fixed> formation_member_deceleration(const SquadronProfile& profile,
     const Fixed team_base_max_speed, const Fixed speed_factor) {
@@ -110,9 +116,17 @@ core::Result<void> validate_squadron_table(const SquadronTable& table) {
         if (spawner.delay_frames > 30U * 3600U) return invalid(label + ": the delay exceeds an hour");
     }
     if (!table.campaign_spawners.empty()) {
-        auto selected = table; selected.campaign_spawners.clear();
+        auto selected = table; selected.campaign_spawners.clear(); selected.tech_spawners.clear();
         for (const auto& [key, profile] : table.campaign_spawners) {
             if (key.second == 0 || key.first != profile.type_id) return invalid("invalid campaign spawner binding");
+            selected.spawners = {profile};
+            if (auto valid = validate_squadron_table(selected); !valid) return valid;
+        }
+    }
+    if (!table.tech_spawners.empty()) {
+        auto selected = table; selected.campaign_spawners.clear(); selected.tech_spawners.clear();
+        for (const auto& [type, tiers] : table.tech_spawners) for (const auto& profile : tiers) {
+            if (type != profile.type_id) return invalid("invalid tech spawner binding");
             selected.spawners = {profile};
             if (auto valid = validate_squadron_table(selected); !valid) return valid;
         }

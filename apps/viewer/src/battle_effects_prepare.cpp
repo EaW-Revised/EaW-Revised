@@ -212,6 +212,17 @@ void BattleEffects::prepare_effect_constants() {
 template <typename LookOf>
 void BattleEffects::prepare_unit_looks(const units::UnitTables& tables, const sim::tactical::CombatTable& combat, LookOf& look_of) {
     scene::VfsAssetCache model_cache(*filesystem_);
+    std::map<std::string, std::map<tactical::TypeId, std::string>> lucky_projectiles;
+    for (const auto& holder : tables.units) {
+        const auto& abilities = holder.kind == units::UnitKind::squadron ? holder.team_abilities : holder.abilities;
+        for (const auto& ability : abilities) {
+            if (tactical::ability_kind(ability.type) != tactical::AbilityKind::lucky_shot || ability.projectile_override.empty()) continue;
+            if (holder.kind != units::UnitKind::squadron) lucky_projectiles[holder.id].insert_or_assign(battle::type_id(holder.id), ability.projectile_override);
+            else for (const auto& member : holder.members)
+                if (member.craft_index < tables.units.size())
+                    lucky_projectiles[tables.units[member.craft_index].id].insert_or_assign(battle::type_id(holder.id), ability.projectile_override);
+        }
+    }
     std::map<std::string, std::string> ability_projectiles;
     for (const units::UnitType& squadron : tables.units) {
         if (squadron.kind != units::UnitKind::squadron) continue;
@@ -327,6 +338,17 @@ void BattleEffects::prepare_unit_looks(const units::UnitTables& tables, const si
             ProjectileLook look = look_of(type.weapon->projectile);
             look.step_length = step_of(tactical::object_weapon);
             looks.weapons.emplace(tactical::object_weapon, std::move(look));
+        }
+        if (profile) if (const auto lucky = lucky_projectiles.find(type.id); lucky != lucky_projectiles.end()) {
+            for (const auto& weapon : profile->weapons) {
+                for (const auto& [holder, projectile] : lucky->second) {
+                    const auto& shot = tactical::lucky_shot(weapon, holder);
+                    if (!shot) continue;
+                    auto look = look_of(projectile);
+                    look.step_length = static_cast<double>(to_float(shot->speed));
+                    looks.lucky_weapons[holder].emplace(weapon.hardpoint, std::move(look));
+                }
+            }
         }
         for (const units::Ability& ability : type.abilities) {
             if (tactical::ability_kind(ability.type) != tactical::AbilityKind::barrage
@@ -525,8 +547,10 @@ void BattleEffects::prewarm_effect_programs() {
     for (const auto& entry : weaken_particles_) warm(entry.second);
     for (const auto& entry : types_) {
         const auto& looks = entry.second;
-        for (const auto* weapons : {&looks.weapons, &looks.ability_weapons,
-                &looks.barrage_weapons, &looks.charged_weapons}) {
+        std::vector<const std::map<std::uint32_t, ProjectileLook>*> modes{&looks.weapons, &looks.ability_weapons,
+                &looks.barrage_weapons, &looks.charged_weapons};
+        for (const auto& [holder, weapons] : looks.lucky_weapons) modes.push_back(&weapons);
+        for (const auto* weapons : modes) {
             for (const auto& weapon : *weapons) {
                 const auto& look = weapon.second;
                 for (const auto* name : {&look.detonation, &look.lifetime_detonation, &look.ground_detonation,

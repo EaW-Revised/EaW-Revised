@@ -57,8 +57,14 @@ class MapModeStructureCases:
         source = mode_source("map_mode")
         animation = (ROOT / "src/presentation/animation/animation.cpp").read_text(encoding="utf-8")
         self.assertNotIn("mark_rigid_vertices_model_space", source + animation)
-        self.assertIn("clip.w * CLIP_SPACE_FAR", source)
-        self.assertIn("POSITION = vec4(clip.xy", source)
+        # The sky no longer carries a shader of its own: its vertices are baked
+        # onto the far sphere in land_look and the converted effect's vertex
+        # stage applies the shared clip-depth transform (CLIP_SPACE_FAR).
+        land_look = (ROOT / "apps/viewer/src/land_look.cpp").read_text(encoding="utf-8")
+        self.assertIn('ieq(submesh.shader, "Skydome.fx")', land_look)
+        shader_material = (ROOT / "src/presentation/shader_material.cpp").read_text(encoding="utf-8")
+        self.assertIn("POSITION.z = CLIP_SPACE_FAR < 0.0", shader_material)
+        self.assertNotIn("skydome_shader", source)
 
 
     def test_unsupported_selectors_fail_closed(self):

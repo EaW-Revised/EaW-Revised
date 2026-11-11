@@ -31,6 +31,20 @@ NEUTRAL = (100, 100, 100)
 
 
 class GalacticModeStructure(unittest.TestCase):
+    def test_command_icon_layers_keep_texture_size_and_tactical_default(self):
+        hud = (GALACTIC / "galactic_hud.cpp").read_text(encoding="utf-8")
+        button = (ROOT / "src/presentation/godot/ui/tactical_hud_internal.hpp").read_text(encoding="utf-8")
+        controls = hud[hud.index("void GalacticMode::State::update_command_bar_buttons("):
+                       hud.index("void GalacticMode::State::update_command_bar_choices(")]
+        self.assertIn("command_layer_rect(rect.size.x, rect.size.y,", controls)
+        self.assertIn("static_cast<float>(icon->get_width()), static_cast<float>(icon->get_height()), layer_scale", controls)
+        self.assertIn("backing.is_null() || icon->get_size() != backing->get_size()", controls)
+        self.assertIn("hud_button->set_cell_portrait_box", controls)
+        self.assertIn("hud_button->set_special_overlay_natural_scale(layer_scale)", controls)
+        self.assertIn("std::optional<float> special_overlay_scale_;", button)
+        self.assertIn("if (special_overlay_scale_)", button)
+        self.assertIn("texture->get_size() * *special_overlay_scale_", button)
+
     def test_the_mode_is_wired_into_the_host_and_its_own_source_list(self):
         host = source_text("apps/viewer/src/viewer_host.cpp")
         self.assertIn("GalacticMode::requested()", host)

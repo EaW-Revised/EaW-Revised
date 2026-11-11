@@ -299,7 +299,7 @@ void BattleInput::refresh_heroes(const LiveSessionView& live) {
     hero_next_.hostile.clear();
     if (latest && tables != nullptr) {
         ui::collect_heroes({latest->instances(), latest->players(), live.local_player(), live.snapshot_index().visible(),
-                            &hero_types_, live.durability()}, hero_policy_, hero_next_);
+                            &hero_types_, live.durability(), &live.squadron_of()}, hero_policy_, hero_next_);
     }
     if (hero_next_ == hero_roster_) return;
     std::swap(hero_roster_, hero_next_);
@@ -316,7 +316,7 @@ void BattleInput::hero_click(const sim::EntityId hero, const bool hostile, const
     // WHE-45/47/48: the shared, tested dispatcher owns input-time roster, hull,
     // ownership and visibility validation; these callbacks only apply admitted effects.
     ui::dispatch_hero_click({latest->instances(), latest->players(), live.local_player(), live.snapshot_index().visible(),
-                             &hero_types_, live.durability()}, hero_policy_, hero_next_, hero, hostile, right, double_click,
+                             &hero_types_, live.durability(), &live.squadron_of()}, hero_policy_, hero_next_, hero, hostile, right, double_click,
         [&live](const sim::EntityId represented) {
             const auto squadron = live.squadron_of().find(represented);
             return squadron == live.squadron_of().end() ? represented : squadron->second;

@@ -1,3 +1,4 @@
+#include "land_phase_internal.hpp"
 #include "eawr/sim/tactical/land_terrain.hpp"
 #include "eawr/core/sha256.hpp"
 
@@ -246,7 +247,7 @@ core::Result<void> LandOccupancy::commit(const std::vector<LandOccupation>& occu
         const auto id = occupations[order_[i]].object;
         if (id == 0 || (i && occupations[order_[i - 1]].object == id)) return failure();
     }
-    const auto prepared = executor.execute(tick_partition_count, [this, &occupations](const std::size_t partition) {
+    const auto prepared = land_partitions(executor, tick_partition_count, [this, &occupations](const std::size_t partition) {
         const auto range = partition_range(partition, occupations.size());
         for (auto i = range.begin; i < range.end; ++i) {
             const auto& source = occupations[order_[i]];
@@ -303,7 +304,7 @@ core::Result<void> LandOccupancy::commit(const std::vector<LandOccupation>& occu
     }
     changed_flags_.resize(touched_.size());
     changed_.reserve(touched_.size());
-    const auto executed = executor.execute(tick_partition_count, [this](const std::size_t partition) {
+    const auto executed = land_partitions(executor, tick_partition_count, [this](const std::size_t partition) {
         const auto base = terrain_->passability();
         const auto range = partition_range(partition, touched_.size());
         for (auto index = range.begin; index < range.end; ++index) {

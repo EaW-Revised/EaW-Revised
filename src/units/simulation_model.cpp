@@ -1,50 +1,143 @@
 #include "eawr/units/simulation_model.hpp"
+#include "eawr/units/domain_tags.hpp"
+#include "eawr/data/tag_trace.hpp"
 #include "eawr/data/xml.hpp"
 #include "eawr/vfs/vfs.hpp"
 
+#include "eawr/core/host_probe.hpp"
 #include "eawr/core/load_profile.hpp"
 #include "eawr/core/sha256.hpp"
+#include "eawr/scene/scene.hpp"
+#include "eawr/scene/model_prefetch.hpp"
 #include "unit_internal.hpp"
 
 #include <algorithm>
 #include <atomic>
-#include <chrono>
+#include <limits>
 #include <optional>
+#include <set>
 #include <span>
 #include <utility>
-
-#ifdef _WIN32
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
-#include <windows.h>
-#include <winioctl.h>
-#endif
 
 namespace eawr::units {
 namespace {
 
-using Clock = std::chrono::steady_clock;
-
-std::int64_t now_ns() {
-    return std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now().time_since_epoch()).count();
-}
+std::int64_t now_ns() { return core::host::monotonic_ns(); }
 
 // min(512 MiB, physical memory / 16): the most bytes of raw file plus decoded model that workers hold at once.
 std::uint64_t window_bytes() {
     std::uint64_t window = 512ULL << 20;
-#ifdef _WIN32
-    MEMORYSTATUSEX memory{};
-    memory.dwLength = sizeof(memory);
-    if (GlobalMemoryStatusEx(&memory) && memory.ullTotalPhys / 16 < window) window = memory.ullTotalPhys / 16;
-#endif
+    const std::uint64_t physical = core::host::physical_memory_bytes();
+    if (physical != 0 && physical / 16 < window) window = physical / 16;
     return window; // no floor: one file larger than the window still runs, alone
 }
 
 } // namespace
+
+struct SharedModelPreparation::State final {
+    explicit State(const vfs::Vfs& filesystem) : cache(filesystem) {}
+    scene::VfsAssetCache cache;
+    std::unique_ptr<scene::VfsAssetCache::ModelPreparationScope> window;
+    Stats stats;
+    using Identity = scene::VfsAssetCache::ModelIdentity;
+    std::map<Identity, assets::Model> projected;
+    std::map<Identity, std::string> digests;
+    std::map<Identity, std::string> first_request;
+    std::set<Identity> failed;
+    mutable std::map<std::string, Identity, std::less<>> identities;
+    const Identity& identity(const std::string_view path) const {
+        const auto found = identities.find(path);
+        if (found != identities.end()) return found->second;
+        return identities.emplace(std::string(path), cache.model_identity(path)).first->second;
+    }
+};
+
+SharedModelPreparation::SharedModelPreparation(const vfs::Vfs& filesystem, const data::Catalog& catalog,
+                                             const std::uint64_t budget_bytes)
+    : state_(std::make_unique<State>(filesystem)) {
+    // Body, attachment and obstacle geometry lookups use these tags, through detail::model_path. Scan effective values (rather
+    // than definition roots) so inherited values and catalog overrides are included, without loading any model bytes.
+    const data::tag_trace::Unrecorded quiet; // policy preflight does not consume catalog values
+    std::map<State::Identity, std::string> references;
+    for (const auto& definition : catalog.definitions()) {
+        if (!definition.namespace_winner || (definition.category != data::Category::game_object
+                && definition.category != data::Category::hardpoint)) continue;
+        detail::Report discard;
+        auto object = detail::resolve(catalog, definition.id, definition.category, definition.id, "model", discard);
+        if (!object) continue; // The ordered loader still reports this failure at its original boundary.
+        for (const auto tag : {domain_tag(sim::tactical::BattleDomain::space, DomainTag::model_name),
+                domain_tag(sim::tactical::BattleDomain::land, DomainTag::model_name),
+                std::string_view("Model_Name"), std::string_view("Model_To_Attach")}) {
+            const auto path = detail::model_path(object->text(tag));
+            if (path.empty()) continue;
+            const auto canonical = vfs::canonicalize(path);
+            if (!canonical) continue; // Invalid paths cannot alias another store identity.
+            const auto [at, inserted] = references.try_emplace(state_->identity(path), path);
+            if (!inserted && at->second != path) state_->stats.reference_aliases = true;
+        }
+    }
+    const auto before = state_->cache.model_stats();
+    state_->stats.populated_store = before.successful_entries != 0;
+    if (state_->stats.reference_aliases) state_->stats.fallback_reason = "authored model aliases require legacy retention";
+    else if (before.cache_budget_bytes != std::numeric_limits<std::uint64_t>::max())
+        state_->stats.fallback_reason = "an incoming finite model-cache policy requires legacy retention";
+    // Only the bounded path owns policy. Legacy loading leaves the store and viewer transitions exactly as on BASE.
+    state_->window = std::make_unique<scene::VfsAssetCache::ModelPreparationScope>(filesystem, budget_bytes,
+        state_->stats.fallback_reason.empty());
+    if (!state_->window->fallback_reason().empty()) state_->stats.fallback_reason = state_->window->fallback_reason();
+    state_->stats.bounded = state_->stats.fallback_reason.empty();
+    state_->stats.protected_initial_bytes = state_->window->initial_bytes();
+}
+
+SharedModelPreparation::~SharedModelPreparation() = default;
+
+const assets::Model* SharedModelPreparation::model(const std::string_view logical_path) {
+    ++state_->stats.requests;
+    // The mount maps each canonical logical path to exactly one winning layer/source. Do not canonicalize the loader's
+    // memo: distinct authored paths must keep their original input-report rows and missing-model diagnostics.
+    const auto& identity = state_->identity(logical_path);
+    const auto [at, inserted] = state_->first_request.try_emplace(identity, logical_path);
+    if (!inserted && at->second != logical_path) ++state_->stats.aliases;
+    // Keep existing projections after an overlapping battle ends the cache bound; do not re-decode them.
+    // Loader::frames asks once per path. Keep a projection for its whole lifetime, including failed bind-frame cases;
+    // full payloads have only the bounded LRU and decode-ahead owners after this call returns.
+    const auto cached = state_->projected.find(identity);
+    if (cached != state_->projected.end()) return &cached->second;
+    if (state_->failed.contains(identity)) return nullptr;
+    if (!state_->stats.bounded || !state_->window->active())
+        return state_->cache.model(logical_path, state_->window.get());
+    std::string digest;
+    auto full = state_->cache.shared_model(logical_path, digest, state_->window.get());
+    // An initial entry decoded during gameplay has no stored hash; preserve the legacy lazy hash read for it.
+    if (!digest.empty()) state_->digests.emplace(identity, std::move(digest));
+    if (!full) { state_->failed.insert(identity); return nullptr; }
+    auto projected = simulation_projection(*full.value());
+    state_->stats.projection_bytes += assets::payload_capacity(projected).total_bytes();
+    ++state_->stats.projections;
+    return &state_->projected.emplace(identity, std::move(projected)).first->second;
+}
+
+void SharedModelPreparation::hint(scene::ModelPrefetch& ahead, const std::string_view logical_path) const {
+    const auto& identity = state_->identity(logical_path);
+    // Existing projections/failures remain memoized after early end; new paths use ordinary full-cache prefetch.
+    if (state_->projected.contains(identity) || state_->failed.contains(identity)) return;
+    ahead.offer(logical_path);
+}
+
+std::string SharedModelPreparation::sha256(const std::string_view logical_path) {
+    const auto& identity = state_->identity(logical_path);
+    const auto found = state_->digests.find(identity);
+    return found != state_->digests.end() ? found->second : state_->cache.sha256(logical_path);
+}
+
+SharedModelPreparation::Stats SharedModelPreparation::stats() const {
+    auto result = state_->stats;
+    if (result.bounded && !state_->window->active()) {
+        result.bounded = false;
+        result.fallback_reason = "a battle load ended the bound: new paths use full models; existing projections remain";
+    }
+    return result;
+}
 
 assets::Model simulation_projection(const assets::Model& full) {
     assets::Model result;
@@ -76,6 +169,7 @@ std::vector<std::string> planned_model_paths(const LoadInput& input) {
     std::vector<std::string> paths;
     if (input.catalog == nullptr) return paths;
     detail::Report discard; // the loader reports what is wrong; the plan only reads
+    const data::tag_trace::Unrecorded quiet; // a plan is not a load: it must not mark tags used
     const auto add = [&](const std::string& id) {
         auto object = detail::resolve(*input.catalog, id, data::Category::game_object, id, "model", discard);
         if (!object) return;
@@ -102,25 +196,10 @@ wchar_t volume_letter(const std::wstring_view root_name) noexcept {
 }
 
 DiskKind volume_disk_kind(const std::wstring_view root_name) {
-#ifdef _WIN32
     const wchar_t letter = volume_letter(root_name);
     if (letter == 0) return DiskKind::unknown;
-    const std::wstring device = std::wstring(L"\\\\.\\") + letter + L':';
-    const HANDLE handle = CreateFileW(device.c_str(), 0, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr);
-    if (handle == INVALID_HANDLE_VALUE) return DiskKind::unknown;
-    STORAGE_PROPERTY_QUERY query{};
-    query.PropertyId = StorageDeviceSeekPenaltyProperty;
-    query.QueryType = PropertyStandardQuery;
-    DEVICE_SEEK_PENALTY_DESCRIPTOR descriptor{};
-    DWORD returned = 0;
-    const BOOL ok = DeviceIoControl(handle, IOCTL_STORAGE_QUERY_PROPERTY, &query, sizeof(query), &descriptor,
-        sizeof(descriptor), &returned, nullptr);
-    CloseHandle(handle);
-    return disk_kind_from_query(ok && returned >= sizeof(descriptor), descriptor.IncursSeekPenalty != FALSE);
-#else
-    (void)root_name;
-    return DiskKind::unknown;
-#endif
+    const auto seek_penalty = core::host::volume_seek_penalty(letter);
+    return disk_kind_from_query(seek_penalty.has_value(), seek_penalty.value_or(false));
 }
 
 DiskKind slowest_disk(const std::span<const DiskKind> kinds) noexcept {
@@ -155,12 +234,12 @@ void SimulationModelStore::decode(Slot& slot) {
         // decode_ms is read + parse, as in VfsAssetCache; the hash between them is timed on its own.
         std::optional<core::load_profile::ModelScope> decode_timer;
         std::optional<core::load_profile::Scope> model_scope;
-        decode_timer.emplace(logical_path, &core::load_profile::ModelCost::decode_ms);
+        decode_timer.emplace(logical_path, core::load_profile::ModelField::decode);
         model_scope.emplace(core::load_profile::Phase::model);
         std::optional<core::Result<std::vector<std::byte>>> opened;
         {
             core::load_profile::Scope read_scope(core::load_profile::Phase::model_read);
-            const core::load_profile::ModelScope read_timer(logical_path, &core::load_profile::ModelCost::read_ms);
+            const core::load_profile::ModelScope read_timer(logical_path, core::load_profile::ModelField::read);
             opened.emplace(filesystem_->open(logical_path));
         }
         if (!*opened) return std::nullopt;
@@ -171,15 +250,15 @@ void SimulationModelStore::decode(Slot& slot) {
         decode_timer.reset();
         {
             core::load_profile::Scope sha_scope(core::load_profile::Phase::model_sha256);
-            const core::load_profile::ModelScope sha_timer(logical_path, &core::load_profile::ModelCost::sha_ms);
+            const core::load_profile::ModelScope sha_timer(logical_path, core::load_profile::ModelField::sha);
             core::load_profile::count(core::load_profile::Counter::sha_bytes, bytes.size());
             slot.digest = core::sha256_hex(std::span<const std::uint8_t>(
                 reinterpret_cast<const std::uint8_t*>(bytes.data()), bytes.size()));
         }
-        decode_timer.emplace(logical_path, &core::load_profile::ModelCost::decode_ms);
+        decode_timer.emplace(logical_path, core::load_profile::ModelField::decode);
         model_scope.emplace(core::load_profile::Phase::model);
         core::load_profile::Scope parse_scope(core::load_profile::Phase::model_parse);
-        const core::load_profile::ModelScope parse_timer(logical_path, &core::load_profile::ModelCost::parse_ms);
+        const core::load_profile::ModelScope parse_timer(logical_path, core::load_profile::ModelField::parse);
         return assets::load_model(bytes, assets::source_from(record.value()));
     }();
     bool projected = false;
@@ -352,11 +431,12 @@ void SimulationModelStore::note_completion_locked(const std::uint64_t bytes) {
     window_read_bytes_ += bytes;
     constexpr std::uint64_t files_per_window = 48;
     if (window_files_ < files_per_window) return;
-    const double seconds = std::max(1e-6, static_cast<double>(now_ns() - window_start_ns_) / 1e9);
-    const double rate = static_cast<double>(window_read_bytes_) / seconds;
+    // Bytes per millisecond, in integers: a heuristic input, never a simulation value.
+    const auto elapsed_ns = static_cast<std::uint64_t>(std::max<std::int64_t>(1000, now_ns() - window_start_ns_));
+    const std::uint64_t rate = window_read_bytes_ * 1'000'000U / elapsed_ns;
     if (!frozen_) {
         const bool grew = last_limit_ != 0 && limit_ > last_limit_;
-        if (grew && rate < last_rate_ * 1.1) {
+        if (grew && rate * 10U < last_rate_ * 11U) {
             limit_ = last_limit_; // the extra readers did not clearly help (or hurt): go back and stay
             frozen_ = true;
         } else if (limit_ < max_limit_) {

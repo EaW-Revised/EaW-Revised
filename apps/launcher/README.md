@@ -188,7 +188,8 @@ is lower, owner decision: 4) get a folder of their own and a redirected `APPDATA
   (`player.network_name`, else `player.name`, else `Player`; cut so the whole name stays within 32 characters).
   Files that already exist are never overwritten; a missing primary file is replaced by a minimal one.
 - Shared with the first instance, by flags: saves (`--eawr-save-dir <primary user://>\saves`), the font cache
-  (`--eawr-font-cache <primary user://>\fonts`) and the mod profile (`--eawr-mod-profile`, full path under the
+  (`--eawr-font-cache <primary user://>\fonts`), the mod digest cache
+  (`--eawr-digest-cache <primary user://>\mods\cache\content`) and the mod profile (`--eawr-mod-profile`, full path under the
   first instance's `mods\profiles`; `launcher.json` and the profiles stay in the first instance's folder).
   Per instance: logs, replays, LAN desync dumps, the engine's shader cache.
 - The LAN game port of instance n is `47624 + 2*(n-1)` (47624, 47626, ...); EAWR.exe passes it as

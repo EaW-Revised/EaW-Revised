@@ -1,10 +1,12 @@
 #include "eawr/campaign/starting_forces.hpp"
 #include "eawr/campaign/load_notes.hpp"
+#include "eawr/core/text.hpp"
 
 #include "eawr/sim/galactic/production.hpp"
 
 #include <algorithm>
 #include <limits>
+#include <map>
 #include <set>
 
 namespace eawr::campaign {
@@ -51,8 +53,9 @@ bool omitted_composite(const StartingForceInputs& inputs, const gc::NestedCreati
 }
 } // namespace
 
-core::Result<gc::NestedCreationSetup> prepare_nested_creation(const StartingForceInputs& inputs,
-    core::LoadNoteBuffer* notes, std::set<gc::TypeId>* omitted) {
+template<class ResolveIdentity>
+static core::Result<gc::NestedCreationSetup> prepare_nested_creation_impl(const StartingForceInputs& inputs,
+    core::LoadNoteBuffer* notes, std::set<gc::TypeId>* omitted, ResolveIdentity resolve_identity) {
     gc::NestedCreationSetup result; result.fleet_type = inputs.fleet_type; result.squadron_type = inputs.squadron_type;
     std::size_t remaining = gc::galactic_max_objects;
     for (const auto& binding : inputs.bindings) {
@@ -63,12 +66,12 @@ core::Result<gc::NestedCreationSetup> prepare_nested_creation(const StartingForc
         row.combat_role = combat_role(*source); row.abilities = live->abilities;
         if (behaves(*source, "TRANSPORT")) row.role = gc::NestedCreationRole::transport;
         if (behaves(*source, "DUMMY_GROUND_COMPANY")) {
-            row.role = gc::NestedCreationRole::company; row.transport = identity(inputs, source->company_transport);
+            row.role = gc::NestedCreationRole::company; row.transport = resolve_identity(source->company_transport);
         } else if (behaves(*source, "DUMMY_SPACE_FIGHTER_SQUADRON")) row.role = gc::NestedCreationRole::squadron;
         const auto& members = row.role == gc::NestedCreationRole::company ? source->company_units : source->squadron_units;
         bool degraded = members.size() > remaining;
         for (const auto& name : members) {
-            const auto id = identity(inputs, name);
+            const auto id = resolve_identity(name);
             if (!id) { degraded = true; continue; }
             if (!remaining) break;
             row.members.push_back(id);
@@ -86,6 +89,31 @@ core::Result<gc::NestedCreationSetup> prepare_nested_creation(const StartingForc
     }
     for (const auto& row : inputs.relations) result.relations.push_back({row.player, row.other, row.enemy});
     return core::Result<gc::NestedCreationSetup>::success(std::move(result));
+}
+
+core::Result<gc::NestedCreationSetup> prepare_nested_creation(const StartingForceInputs& inputs,
+    core::LoadNoteBuffer* notes, std::set<gc::TypeId>* omitted) {
+    return prepare_nested_creation_impl(inputs, notes, omitted,
+        [&](std::string_view name) { return identity(inputs, name); });
+}
+
+core::Result<gc::NestedCreationSetup> prepare_initial_nested_creation(const StartingForceInputs& inputs,
+    core::LoadNoteBuffer* notes, std::set<gc::TypeId>* omitted) {
+    // find() selects the first ASCII-case-insensitive type; identity() then
+    // selects the first binding resolving to that exact type. Preserve both.
+    std::map<std::string, const units::GalacticType*> by_name;
+    for (const auto& type : inputs.types.types) by_name.try_emplace(core::to_lower(type.name), &type);
+    std::map<const units::GalacticType*, gc::TypeId> by_type;
+    for (const auto& binding : inputs.bindings) {
+        const auto found = by_name.find(core::to_lower(binding.original_type));
+        if (found != by_name.end()) by_type.try_emplace(found->second, binding.id);
+    }
+    return prepare_nested_creation_impl(inputs, notes, omitted, [&](std::string_view name) -> gc::TypeId {
+        const auto found = by_name.find(core::to_lower(name));
+        if (found == by_name.end()) return 0;
+        const auto bound = by_type.find(found->second);
+        return bound == by_type.end() ? 0 : bound->second;
+    });
 }
 
 core::Result<InitialCampaignRelations> prepare_initial_campaign_relations(

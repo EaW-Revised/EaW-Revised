@@ -68,7 +68,6 @@ std::string EawrLanLobby::campaign_display_name(const std::string& campaign) {
 
 void EawrLanLobby::configure_galactic_content() {
     Impl& impl = *impl_;
-    prime_mounted_mods(options_.game_root);
     if (!impl.galactic_backend) {
         const auto content = resources_->content;
         // Loaded off the UI thread, and only when a Campaign room is in sight (host options, a listed or joined campaign).
@@ -79,9 +78,8 @@ void EawrLanLobby::configure_galactic_content() {
     match_->configure_galactic(impl.galactic_backend);
 }
 
-bool EawrLanLobby::prefetch_galactic_content() {
+bool EawrLanLobby::prefetch_galactic_content(const bool needs_mod_digests) {
     Impl& impl = *impl_;
-    prime_mounted_mods(options_.game_root);
     if (!impl.galactic_backend && !(resources_ && resources_->content)) return false;
     if (!impl.galactic_backend) {
         const auto content = resources_->content;
@@ -90,17 +88,65 @@ bool EawrLanLobby::prefetch_galactic_content() {
         }));
     }
     GalacticLobbyBackend::prefetch_content(impl.galactic_backend);
-    return impl.galactic_backend->content_ready() && mounted_mods_ready();
+    // Startup requests the digests; this gate only checks their progress.
+    const bool content_ready = impl.galactic_backend->content_ready();
+    const auto gate = model::galactic_press_gate(content_ready,
+        needs_mod_digests ? model::GalacticPress::load_game : model::GalacticPress::host, [] { return mounted_mods_ready(); });
+    const bool digests_settled = gate != model::GalacticContentGate::checking_mod_files;
+    const auto now = std::chrono::steady_clock::now();
+    if (gate == model::GalacticContentGate::open) {
+        if (impl.content_wait_since) {
+            const auto waited = std::chrono::duration_cast<std::chrono::milliseconds>(now - *impl.content_wait_since).count();
+            const auto line = "EAWR lobby: campaign content gate open after " + std::to_string(waited) + " ms (mod digests "
+                + (needs_mod_digests ? "waited for" : "not needed") + ")";
+            UtilityFunctions::print(String::utf8(line.data(), static_cast<std::int64_t>(line.size())));
+            impl.content_wait_since.reset();
+        }
+        return true;
+    }
+    if (!impl.content_wait_since) {
+        impl.content_wait_since = now;
+        const auto progress = mounted_mods_progress();
+        const auto line = std::string("EAWR lobby: campaign content gate closed: ")
+            + (gate == model::GalacticContentGate::loading_content ? "campaign list still loading" : "mod content digests not settled")
+            + " (content_ready=" + (content_ready ? "yes" : "no") + " digests_settled=" + (digests_settled ? "yes" : "no")
+            + " needs_mod_digests=" + (needs_mod_digests ? "yes" : "no") + " mod files hashed " + std::to_string(progress.files_done)
+            + " of " + std::to_string(progress.files_total) + ")";
+        UtilityFunctions::print(String::utf8(line.data(), static_cast<std::int64_t>(line.size())));
+    }
+    return false;
 }
 
 // Host and Load Game both need the campaign list. While the load runs they show it and return; this finishes them.
+// A fresh host does not wait for the mod content digests, Load Game does (galactic_press_gate).
 void EawrLanLobby::finish_pending_galactic() {
     Impl& impl = *impl_;
-    if (!impl.host_pending && !impl.load_pending) return;
+    if (!impl.host_pending && !impl.load_pending) { impl.load_digest_wait.reset(); impl.pending_text.clear(); impl.content_wait_since.reset(); return; }
     // A prefetch thread that could not start is retried here; the buttons never wait on a load nobody runs.
-    if (!prefetch_galactic_content()) return;
-    const bool host = std::exchange(impl.host_pending, false);
-    const bool load = std::exchange(impl.load_pending, false);
+    const bool host_ready = !impl.host_pending || prefetch_galactic_content(false);
+    const bool load_ready = !impl.load_pending || prefetch_galactic_content(true);
+    if (impl.load_pending && !load_ready && impl.galactic_backend && impl.galactic_backend->content_ready() && !mounted_mods_ready()) {
+        if (!impl.load_digest_wait) impl.load_digest_wait = mods::ContentDigests::screen_wait_lease();
+    } else impl.load_digest_wait.reset();
+    if (impl.load_pending && !load_ready) {
+        // A big mod's first check reads every file: show how far it is, and redraw only when the line changes.
+        const auto progress = mounted_mods_progress();
+        const auto gate = model::galactic_press_gate(impl.galactic_backend && impl.galactic_backend->content_ready(),
+            model::GalacticPress::load_game, [] { return false; });
+        const auto wait_line = model::galactic_content_gate_text(gate, progress.files_done, progress.files_total);
+        if (wait_line != impl.pending_text) {
+            impl.pending_text = wait_line;
+            impl.checkpoint_problem = wait_line;
+            impl.checkpoint_signature.clear();
+        }
+    }
+    if (!host_ready && !load_ready) return;
+    const bool host = impl.host_pending && host_ready;
+    const bool load = impl.load_pending && load_ready;
+    if (!host && !load) return;
+    if (host) impl.host_pending = false;
+    if (load) impl.load_pending = false;
+    impl.pending_text.clear();
     if (load) { impl.checkpoint_problem.clear(); impl.checkpoint_signature.clear(); }
     if (host && page_ == Page::host_options) {
         if (auto* button = EAWR_CONTROL(EawrUiButton, "IDC_INTERNET_CREATE_GAME_BUTTON")) {
@@ -168,14 +214,46 @@ void EawrLanLobby::refresh_galactic_staging() {
 
 void EawrLanLobby::review_host_mods() {
     const auto view = match_->view();
-    if (!view.mod_review_pending || impl_->box || !mounted_mods_ready()) return;
+    if (impl_->box) { impl_->review_digest_wait.reset(); return; }
+    if (!view.mod_review_pending) {
+        impl_->review_digest_wait.reset();
+        if (!impl_->deferred_mod_review || !mounted_mods_ready()) return;
+        const auto local = mounted_mod_description();
+        const auto message = local ? viewer::mod_mismatch_message(*impl_->deferred_mod_review, *local) : std::string{};
+        impl_->deferred_mod_review.reset();
+        if (message.empty()) return;
+        model::MessageBoxRequest request;
+        request.caption = "Mods differ";
+        request.lines[0] = message; request.literal_lines[0] = true;
+        request.buttons.push_back({"TEXT_BUTTON_OK", 1, false});
+        Resources& resources = *resources_;
+        const MessageBoxContext context{&*resources.dialogs, &*resources.theme_model,
+            resources.text ? &*resources.text : nullptr, resources.theme, resources.theme_size};
+        auto* box = memnew(EawrMessageBox);
+        if (!box->open(*this, context, request)) { memdelete(box); return; }
+        box->set_scrollable_text(message);
+        impl_->box = box;
+        layout_page();
+        box->connect("result_chosen", callable_mp(this, &EawrLanLobby::on_box_result));
+        return;
+    }
     const auto host = mods::decode_description(view.host_mod_description);
     const auto local = mounted_mod_description();
-    auto message = host && local ? viewer::mod_mismatch_message(*host, *local)
+    const bool cheap_match = host && local && mods::matching_portable_trees(*host, *local);
+    if (!cheap_match && !mounted_mods_ready()) {
+        if (!impl_->review_digest_wait) impl_->review_digest_wait = mods::ContentDigests::screen_wait_lease();
+        return;
+    }
+    impl_->review_digest_wait.reset();
+    const auto settled = mounted_mod_description();
+    auto message = host && settled ? viewer::mod_mismatch_message(*host, *settled)
         : std::string("The host's mod list could not be checked. Both players need the same mods.");
-    if (message.empty() && host && local && viewer::mod_comparison_incomplete(*host, *local))
+    if (message.empty() && !cheap_match && host && settled && viewer::mod_comparison_incomplete(*host, *settled))
         message = "The mod lists could not be fully checked. Both players need the same mods.";
-    if (message.empty()) { match_->accept_mod_review(); return; }
+    if (message.empty()) {
+        if (cheap_match && !mounted_mods_ready()) impl_->deferred_mod_review = host;
+        match_->accept_mod_review(); return;
+    }
     message += "\nContinue joining?";
     model::MessageBoxRequest request;
     request.caption = "Mods differ";
@@ -331,7 +409,7 @@ void EawrLanLobby::refresh_galactic_roster(Impl& impl, PageState& state, Resourc
             + (row.team ? std::to_string(*row.team) : std::string("-")) + "," + (row.accepted ? "a" : "p") + (row.local ? "l" : "r");
     if (options) {
         signature += "#" + std::to_string(options->custom) + "," + std::to_string(options->credits) + "," + std::to_string(options->starting_tech)
-            + "," + std::to_string(options->maximum_tech) + "," + std::to_string(options->allow_heroes) + "," + std::to_string(options->auto_resolve) + "," + options->difficulty;
+            + "," + std::to_string(options->maximum_tech) + "," + std::to_string(options->allow_heroes) + "," + std::to_string(options->auto_resolve) + "," + std::to_string(options->vote_timeout) + "," + options->difficulty;
     }
     impl.rows = rows;
     impl.visible_rows = shown_rows;
@@ -387,8 +465,12 @@ void EawrLanLobby::refresh_galactic_roster(Impl& impl, PageState& state, Resourc
             if (shown) {
                 // A player's own row lists every faction a player may hold: picking one moves the seat to that row.
                 if (mine) {
-                    for (const auto& choice : viewer::galactic::faction_choices(*options, *resources.content->catalog,
-                            resources.text ? &*resources.text : nullptr))
+                    // A free playable faction is offered too (#6134); the host moves the rows when the seat takes it.
+                    const auto choices = campaign && room
+                        ? viewer::galactic::faction_choices(*options, *resources.content->catalog, resources.text ? &*resources.text : nullptr,
+                            *campaign, room->snapshot, match_->view().seat)
+                        : viewer::galactic::faction_choices(*options, *resources.content->catalog, resources.text ? &*resources.text : nullptr);
+                    for (const auto& choice : choices)
                         faction->add_item(text(choice.caption), static_cast<int>(choice.row));
                 } else {
                     faction->add_item(text(resources.text ? model::faction_display_name(*resources.content->catalog,
@@ -469,6 +551,7 @@ void EawrLanLobby::refresh_galactic_roster(Impl& impl, PageState& state, Resourc
             }
             lines.push_back(resolved(resources.text, "TEXT_ALLOW_HEROES") + ": " + (options->allow_heroes ? "On" : "Off"));
             lines.push_back(text("Auto-resolve: " + std::to_string(options->auto_resolve)));
+            lines.push_back(text("Battle vote timeout: " + std::to_string(options->vote_timeout) + " s"));
             for (const auto& line : lines) {
                 list->add_item(line, Ref<Texture2D>(), false);
                 list->set_item_disabled(list->get_item_count() - 1, true);
@@ -541,8 +624,13 @@ bool EawrLanLobby::galactic_item_selected(const int64_t index, const std::string
     }
     if (field == "IDC_PLAYER_FACTION" && local != room->snapshot.seats.end()) {
         const auto wanted = combo->get_item_id(static_cast<int>(index));
-        const auto player = wanted < 0 ? std::nullopt : viewer::galactic::faction_choice_player(
-            *impl.galactic_options, static_cast<std::size_t>(wanted));
+        const sim::galactic::MpLobbyCampaign* offered = nullptr;
+        if (impl.galactic_backend && impl.galactic_backend->content_ready())
+            for (const auto& candidate : impl.galactic_backend->campaigns())
+                if (candidate.name == impl.galactic_options->campaign) offered = &candidate;
+        const auto player = wanted < 0 ? std::nullopt
+            : offered ? viewer::galactic::faction_choice_player(*impl.galactic_options, static_cast<std::size_t>(wanted), *offered)
+                      : viewer::galactic::faction_choice_player(*impl.galactic_options, static_cast<std::size_t>(wanted));
         if (player && *player != local->selection.slot) {
             auto choice = local->selection;
             choice.slot = *player; // the lobby maps the faction and the side from the row

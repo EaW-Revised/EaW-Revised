@@ -258,6 +258,7 @@ enum class DiagnosticReason : std::uint16_t {
     cancelled,
     invalid_cached_result,
     reflection_failure,
+    invalid_shader, // public compiler INVALID_SHADER; deterministic for this request
 };
 enum class Severity : std::uint8_t { warning, error };
 struct DiagnosticLocation {

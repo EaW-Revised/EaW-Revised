@@ -1,0 +1,62 @@
+{
+  "schema_version": 1,
+  "note": "All target profiles; ordered mod layers exclude stock fallback authoring. Local root paths are supplied separately.",
+  "profiles": [
+    {
+      "id": "stock",
+      "layers_leaf_first": [
+        "stock"
+      ]
+    },
+    {
+      "id": "bfc",
+      "layers_leaf_first": [
+        "2712013423"
+      ]
+    },
+    {
+      "id": "remake-chain",
+      "layers_leaf_first": [
+        "3229239424",
+        "2794270450",
+        "1770851727"
+      ]
+    },
+    {
+      "id": "raw",
+      "layers_leaf_first": [
+        "1129810972"
+      ]
+    },
+    {
+      "id": "fotr",
+      "layers_leaf_first": [
+        "1976399102"
+      ]
+    },
+    {
+      "id": "aaw",
+      "layers_leaf_first": [
+        "2191440256"
+      ]
+    },
+    {
+      "id": "stargate",
+      "layers_leaf_first": [
+        "1145741406"
+      ]
+    },
+    {
+      "id": "aotr",
+      "layers_leaf_first": [
+        "3387971722"
+      ]
+    },
+    {
+      "id": "remake5",
+      "layers_leaf_first": [
+        "3689306867"
+      ]
+    }
+  ]
+}

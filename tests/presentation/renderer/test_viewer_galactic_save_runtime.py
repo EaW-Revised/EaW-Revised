@@ -6,6 +6,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import struct
 
 try:
     from . import test_viewer_planet_hud_runtime as support
@@ -89,9 +90,23 @@ func row(parent, name, double = false):
             return true
     return false
 func acknowledged(menu):
-    var panel = menu.find_child("IDD_DIALOG_BOX1", true, false)
-    return panel != null and panel.is_visible_in_tree()
+    var modal = menu.find_child("SaveModal", true, false)
+    if modal == null or not modal.is_visible_in_tree(): return false
+    var has_button = false
+    for control in modal.find_children("IDC_DIALOG_BOX_BUTTON_LEFT", "", true, false):
+        if control.is_visible_in_tree() and not control.disabled:
+            has_button = true
+    if not has_button: return false
+    # Replacing a queued-for-deletion checking dialog in the same frame can
+    # give its replacement an automatic Godot name. Inspect the visible
+    # caption rather than relying on the frame's resource name.
+    for caption in modal.find_children("IDC_CAPTION", "", true, false):
+        if caption.is_visible_in_tree():
+            var text = str(caption.get_meta("save_caption", ""))
+            return not (text.begins_with("Checking saved mods") or text.begins_with("Saving") or text.begins_with("Loading"))
+    return false
 func finish(error):
+    if error != "": root.get_texture().get_image().save_png(OUTPUT + "/driver-failure.png")
     var out = FileAccess.open(TRACE, FileAccess.WRITE)
     out.store_string(JSON.stringify({"error": error, "restored": restored, "phase": phase, "fonts": font_checks}))
     current_scene.propagate_notification(Node.NOTIFICATION_WM_CLOSE_REQUEST)
@@ -256,6 +271,9 @@ func _process(delta):
             if button(load_panel, "IDC_LOAD_GAME_BUTTON"): phase = 41
         41:
             if acknowledged(menu):
+                var caption = str(modal.find_child("IDC_CAPTION", true, false).get_meta("save_caption", ""))
+                if not caption.contains("EAWR-CKP-0101"):
+                    finish("corrupt save did not report a truncated checkpoint: " + caption); return false
                 root.get_texture().get_image().save_png(REFUSED)
                 finish("")
     return false
@@ -691,6 +709,255 @@ func _process(delta):
         self.assertTrue(any("auto" in row.lower() for row in trace["rows"]), trace["rows"])
         self.assertEqual(data["failure"], "")
         print("prebattle autosave rows:", trace["rows"], directory)
+
+
+@unittest.skipUnless(support.RUNTIME and support.GAME_ROOT and os.environ.get("EAWR_JOB_MOD_SAVE_KEY")
+                     and os.environ.get("EAWR_REMAKE_MOD_ROOT"),
+                     "requires installed mod profile supplied by the rig job")
+class GalacticModSaveRuntime(unittest.TestCase):
+    setUpClass = classmethod(GalacticSaveRuntime.setUpClass.__func__)
+    run_viewer = GalacticSaveRuntime.run_viewer
+
+    def test_mod_roundtrip_and_stock_confirmation(self):
+        directory = pathlib.Path(tempfile.mkdtemp(prefix="eawr-mod-save-"))
+        saves = directory / "saves"
+        saves.mkdir()
+        profile = directory / "profile.json"
+        key = os.environ["EAWR_JOB_MOD_SAVE_KEY"]
+        mod_root = pathlib.Path(os.environ["EAWR_REMAKE_MOD_ROOT"])
+        self.assertTrue(mod_root.is_dir(), "the selected host has the requested mod")
+        profile.write_text(json.dumps({"format": "eawr-mod-profile", "version": 1,
+            "id": "save-regression", "name": "Save regression", "layers": [{"key": key, "root": str(mod_root)}],
+            "order_source": "player"}), encoding="utf-8")
+        common = '''extends SceneTree
+var elapsed = 0.0
+var beat = 0.0
+var phase = 0
+var instance
+var no_returned = false
+var cancel_returned = false
+func _initialize():
+    instance = load(ProjectSettings.get_setting("application/run/main_scene")).instantiate()
+    root.add_child(instance)
+    current_scene = instance
+func key(code):
+    for pressed in [true, false]:
+        var event = InputEventKey.new()
+        event.keycode = code
+        event.pressed = pressed
+        Input.parse_input_event(event)
+func click(node, point = Vector2.ZERO):
+    if point == Vector2.ZERO: point = node.get_global_rect().get_center()
+    for pressed in [true, false]:
+        var event = InputEventMouseButton.new()
+        event.position = point
+        event.global_position = point
+        event.button_index = MOUSE_BUTTON_LEFT
+        event.pressed = pressed
+        Input.parse_input_event(event)
+func visible_node(parent, id):
+    if parent == null: return null
+    if parent.name == id and parent is Control and parent.is_visible_in_tree(): return parent
+    for child in parent.get_children():
+        var found = visible_node(child, id)
+        if found != null: return found
+    return null
+func button(parent, id):
+    var node = visible_node(parent, id)
+    if node == null or node.disabled: return false
+    click(node)
+    return true
+func select_saved(panel):
+    var list = visible_node(panel, "IDC_SAVE_GAME_LIST")
+    if list == null: return false
+    for i in list.item_count:
+        if list.get_item_text(i) == "Mod Roundtrip":
+            click(list, list.global_position + list.get_item_rect(i).get_center())
+            return true
+    return false
+func all_text(parent):
+    var result = ""
+    if parent == null: return result
+    if parent is Control and parent.is_visible_in_tree():
+        if parent.has_meta("save_caption"):
+            result += str(parent.get_meta("save_caption")) + "\\n"
+        elif parent.has_method("get_text"):
+            result += str(parent.get_text()) + "\\n"
+    for child in parent.get_children(): result += all_text(child)
+    return result
+func capture(name, after = Callable()):
+    # SceneTree._process must return false synchronously: yielding from it
+    # ends the loop. Capture and any following click after this frame draws.
+    var after_draw = func():
+        root.get_texture().get_image().save_png(OUTPUT + "/" + name + ".png")
+        if after.is_valid(): after.call()
+    RenderingServer.frame_post_draw.connect(after_draw, CONNECT_ONE_SHOT)
+func finish(error, result = ""):
+    if error != "": capture("driver-failure", func(): finish_now(error, result))
+    else: finish_now(error, result)
+func finish_now(error, result):
+    var file = FileAccess.open(OUTPUT + "/trace.json", FileAccess.WRITE)
+    file.store_string(JSON.stringify({"error": error, "phase": phase, "no_returned": no_returned, "cancel_returned": cancel_returned, "result": result}))
+    file.close()
+    current_scene.propagate_notification(Node.NOTIFICATION_WM_CLOSE_REQUEST)
+    quit(0 if error == "" else 2)
+'''
+        saving = common + '''func _process(delta):
+    elapsed += delta
+    beat += delta
+    if elapsed > 600: finish("mod roundtrip timed out at " + str(phase)); return false
+    if elapsed < 25.0 or beat < 0.15: return false
+    beat = 0
+    var menu = instance.find_child("GalacticSaveMenu", true, false)
+    var esc = visible_node(menu, "IDD_GAME_OPTIONS_DIALOG")
+    var save = visible_node(menu, "IDD_SAVE_GAME_DIALOG")
+    var load_panel = visible_node(menu, "IDD_LOAD_GAME_DIALOG")
+    match phase:
+        0:
+            key(KEY_ESCAPE); phase = 1
+        1:
+            if esc == null: key(KEY_ESCAPE)
+            elif button(esc, "IDC_SAVE_GAME"): phase = 2
+        2:
+            if save == null: return false
+            save.find_child("SaveName", true, false).text = "Mod Roundtrip"
+            if button(save, "IDC_SAVE_GAME_BUTTON"): phase = 3
+        3:
+            var text = all_text(menu)
+            if text.contains("Game Saved"):
+                phase = 31
+                capture("mod-saved", func():
+                    if button(menu, "IDC_DIALOG_BOX_BUTTON_LEFT"): phase = 4
+                    else: finish("save acknowledgement button disappeared"))
+            elif text.contains("EAWR-"): finish("mod save refused: " + text)
+        4:
+            if button(esc, "IDC_LOAD_GAME"): phase = 5
+        5:
+            if select_saved(load_panel): phase = 6
+        6:
+            if button(load_panel, "IDC_LOAD_GAME_BUTTON"): phase = 7
+        7:
+            if all_text(menu).contains("Load with your current mods?"): finish("equal mounted profile prompted"); return false
+            if menu != null and not menu.visible:
+                phase = 71
+                capture("mod-restored", func(): finish("", "loaded"))
+    return false
+'''
+        save_args = ["--eawr-galactic-save-dir", str(saves)]
+        campaign = os.environ.get("EAWR_JOB_MOD_SAVE_CAMPAIGN", "Sandbox_Equal_Footing_Underworld")
+        galaxy_args = ["--eawr-galactic", campaign, "--eawr-galactic-paused", "yes",
+                       "--eawr-galactic-ai", "off", "--eawr-audio", "off"]
+        mod_dir = directory / "mod"
+        mod_dir.mkdir()
+        result, report = self.run_viewer(mod_dir, saving.replace("OUTPUT", json.dumps(mod_dir.as_posix())),
+            galaxy_args + save_args + ["--eawr-mod-profile", str(profile)])
+        self.assertEqual(result.returncode, 0, report.get("failure") or result.stdout + result.stderr)
+        self.assertEqual(report["save_controls"]["loaded"], 1)
+        self.assertEqual(json.loads((mod_dir / "trace.json").read_text())["error"], "")
+        raw = (saves / "Mod Roundtrip.eawrsave").read_bytes()
+        position = 304
+        description = None
+        while position < len(raw):
+            section, version, flags, reserved, size = struct.unpack_from("<HHHHQ", raw, position)
+            position += 16
+            if section == 12: description = raw[position:position + size]
+            position += size
+        self.assertIsNotNone(description, "the live modded save includes its mod description")
+        self.assertIn(key.encode(), description, "the save records the mounted portable mod identity")
+
+        mismatch = common + '''var frontend = FRONTEND
+var cancelled_at = -1.0
+func _process(delta):
+    elapsed += delta
+    beat += delta
+    if elapsed > 600: finish("mismatch timed out at " + str(phase)); return false
+    var menu = instance.find_child("GalacticSaveMenu", true, false)
+    var panel = visible_node(instance, "IDD_LOAD_GAME_DIALOG")
+    var text = all_text(instance)
+    var right = visible_node(instance, "IDC_DIALOG_BOX_BUTTON_RIGHT")
+    # Poll this short transition every frame, before the metadata worker can
+    # replace the Cancel dialog with the mismatch prompt.
+    if phase == 21:
+        var cancel = visible_node(instance, "IDC_DIALOG_BOX_BUTTON_LEFT")
+        # Front-end custom labels expose no GDScript get_text. At this
+        # transition the one-button modal over the Load list is the check;
+        # progress dialogs have no button and mismatch dialogs have two.
+        if cancel != null and (text.contains("Checking saved mods") or (frontend and panel != null and right == null)):
+            phase = 211
+            capture("checking-cancel", func():
+                click(cancel); cancelled_at = elapsed; phase = 22)
+        elif text.contains("Load with your current mods?"):
+            finish("checking dialog disappeared before Cancel could be clicked")
+        return false
+    if phase == 22:
+        if panel != null and not text.contains("Checking saved mods") and elapsed - cancelled_at >= 3.0:
+            cancel_returned = true
+            capture("cancel-returned-to-list"); phase = 1
+        return false
+    if elapsed < 1.0 or beat < 0.15: return false
+    beat = 0
+    match phase:
+        0:
+            if frontend:
+                if button(instance, "IDC_LOAD_GAME_MAIN"): phase = 1
+            else:
+                key(KEY_ESCAPE); phase = 10
+        10:
+            var esc = visible_node(menu, "IDD_GAME_OPTIONS_DIALOG")
+            if esc == null: key(KEY_ESCAPE)
+            elif button(esc, "IDC_LOAD_GAME"): phase = 1
+        1:
+            if select_saved(panel): phase = 2
+        2:
+            if button(panel, "IDC_LOAD_GAME_BUTTON"): phase = 3 if cancel_returned else 21
+        5:
+            if button(panel, "IDC_LOAD_GAME_BUTTON"): phase = 6
+        3:
+            if text.contains("Load with your current mods?") and right != null:
+                phase = 31
+                capture("prompt-no", func():
+                    click(right); phase = 4)
+        4:
+            if panel != null and right == null:
+                no_returned = true
+                capture("returned-to-list"); phase = 41
+        41:
+            if select_saved(panel): phase = 5
+        6:
+            if text.contains("Load with your current mods?") and right != null:
+                phase = 61
+                capture("prompt-yes", func():
+                    if button(instance, "IDC_DIALOG_BOX_BUTTON_LEFT"): phase = 7
+                    else: finish("mismatch Yes button disappeared"))
+        7:
+            if (text.contains("EAWR-") or frontend) and right == null and visible_node(instance, "IDC_DIALOG_BOX_BUTTON_LEFT") != null:
+                phase = 71
+                capture("restore-refused", func(): finish("", "refused"))
+            elif frontend and panel == null and instance.find_child("GalacticScenes", true, false) != null:
+                phase = 71
+                capture("restore-accepted", func(): finish("", "loaded"))
+            elif not frontend and menu != null and not menu.visible:
+                phase = 71
+                capture("restore-accepted", func(): finish("", "loaded"))
+    return false
+'''
+        for frontend in (False, True):
+            run_dir = directory / ("front-end" if frontend else "in-campaign")
+            run_dir.mkdir()
+            driver = mismatch.replace("OUTPUT", json.dumps(run_dir.as_posix())).replace("FRONTEND", "true" if frontend else "false")
+            arguments = ["--eawr-front-end", "--eawr-audio", "off"] if frontend else galaxy_args
+            result, report = self.run_viewer(run_dir, driver, arguments + save_args)
+            self.assertEqual(result.returncode, 0, report.get("failure") or result.stdout + result.stderr)
+            trace = json.loads((run_dir / "trace.json").read_text())
+            self.assertEqual(trace["error"], "")
+            self.assertTrue(trace["cancel_returned"], "Cancel returns to the still-open list before restore")
+            self.assertTrue(trace["no_returned"], "No returns to the still-open list")
+            self.assertIn(trace["result"], ("loaded", "refused"), "Yes preserves actual restore admission")
+            if not frontend and trace["result"] == "refused":
+                self.assertEqual(report["save_controls"]["loaded"], 0, "refusal retains the running stock owner")
+            for name in ("checking-cancel", "cancel-returned-to-list", "prompt-no", "returned-to-list", "prompt-yes"):
+                self.assertTrue((run_dir / (name + ".png")).is_file())
+        print("mod save and stock mismatch captures:", directory)
 
 
 if __name__ == "__main__":

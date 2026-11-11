@@ -851,8 +851,8 @@ void register_methods(ScriptScheduler& scripts, const HostPtr& host, std::vector
     // neither an under-construction nor a completed child. It starts construction for the receiver's
     // owner with the local-debit and start-feedback flags false (WBP-09): no debit here. The mod's own
     // money adjustment (Give_Money after Build) and the TaskForce reservation (WBP-47/48) are the only
-    // charges, so a started build is never charged twice. A malformed call, an occupied or cooling pad
-    // and a start that cannot happen report an error and answer nil.
+    // charges. Checks use the completed view; duplicate same-barrier starts answer true and are dropped
+    // in ordered command resolution. A malformed call or an occupied or cooling pad reports an error and nil.
     object("Build", [host](BindingContext& context, const ValueList& arguments) -> core::Result<ValueList> {
         const auto refuse = [&](const std::string& message) -> core::Result<ValueList> {
             context.report(authoritative::codes::script_error, "GameObject.Build -- " + message);
@@ -881,8 +881,7 @@ void register_methods(ScriptScheduler& scripts, const HostPtr& host, std::vector
         if (profile == nullptr || !profile->build_pad) return refuse("the receiver has no build behavior");
         const auto state = world.pads().find(pad->id);
         if (state == world.pads().end()) return refuse("the receiver has no build-pad state");
-        if (state->second.under_construction != 0 || state->second.constructed != 0
-            || host->queued_pad_starts.contains(pad->id))
+        if (state->second.under_construction != 0 || state->second.constructed != 0)
             return refuse("the pad already holds, or has just been given, an under-construction or completed structure");
         const tactical::PlayerId owner = pad->owner;
         const auto* option = world.build_option(owner, pad->id, type->type_id);
@@ -890,7 +889,7 @@ void register_methods(ScriptScheduler& scripts, const HostPtr& host, std::vector
             // The wrapper's refusal is an answer, not an error.
             if (option == nullptr || !option->available || !world.construction_allowed(owner, pad->id)) return one(boolean(false));
         }
-        // True means the start will happen: the same acceptance the pad order meets in the simulation
+        // The completed-view acceptance matches the pad order's checks in the simulation
         // (menu entry and availability even for the unchecked form, under-construction behavior, the roster
         // gate, the cooldown, the owner's fog). Anything the order would reject is an error and nil here.
         if (option == nullptr || !option->available) return refuse("the type is not available on the owner's faction menu");
@@ -901,7 +900,6 @@ void register_methods(ScriptScheduler& scripts, const HostPtr& host, std::vector
         if (!host->ai(owner)) return refuse("GameObject.Build is hosted for AI-owned pads; the owner has no AI");
         context.issue_command(std::string(verb_pad_build), {number(LuaNumber(static_cast<std::int64_t>(owner))),
             arguments[0], handle(handle_type, type->type_id)});
-        host->queued_pad_starts.insert(pad->id);
         return one(boolean(true));
     });
     // SOS-16, WSD-10: a squadron craft's parent is its live team container; any
@@ -996,21 +994,14 @@ void register_methods(ScriptScheduler& scripts, const HostPtr& host, std::vector
         const auto player = std::get<Handle>(arguments[0].data).id;
         if (amount.value().raw() < 0) {
             // WGA-100: a negative amount is a debit with no affordability test, floored at zero credits.
-            // It runs as the AI's accounting debit (WBP-47/48 path), clamped to the balance left after the
-            // wallet changes queued earlier in this barrier (the simulation refuses a debit above the balance).
+            // Ordered command resolution clamps this request against earlier barrier wallet changes.
             if (host->in_object_turn) return fail("object turn dynamic-read tripwire: Give_Money");
-            auto& queued = host->queued_wallet[static_cast<tactical::PlayerId>(player)];
-            const auto balance = host->credits(static_cast<tactical::PlayerId>(player)).raw() + queued;
-            const auto debit = std::min(balance, -amount.value().raw());
-            if (debit <= 0) return none();
-            queued -= debit;
-            context.issue_command(std::string(verb_reservation_debit), {number(LuaNumber(static_cast<std::int64_t>(player))),
-                handle(handle_game_object, 0), number(numeric::from_fixed(math::Fixed::from_raw(debit)))});
+            context.issue_command(std::string(pending_debit), {number(LuaNumber(static_cast<std::int64_t>(player))),
+                handle(handle_game_object, 0), arguments[1]});
             return none();
         }
         if (amount.value().raw() == 0) return fail("Give_Money expects positive credits");
-        if (!host->in_object_turn) host->queued_wallet[static_cast<tactical::PlayerId>(player)] += amount.value().raw();
-        context.issue_command(std::string(verb_credit_grant), {number(LuaNumber(static_cast<std::int64_t>(player))),
+        context.issue_command(std::string(host->in_object_turn ? turn_grant : verb_credit_grant), {number(LuaNumber(static_cast<std::int64_t>(player))),
             handle(handle_game_object, 0), arguments[1]});
         return none();
     });

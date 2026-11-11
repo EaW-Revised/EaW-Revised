@@ -53,6 +53,7 @@ public:
         // #76: a second clip it switches to (a SPOILER_LOCK craft's UNDEPLOY beside its DEPLOY
         // clip, AB-31); LiveClipPose::alternate picks it.
         std::string alternate_clip{};
+        bool land_motion{};
         // #81: a death clone (counted apart from the session's units), with
         // or without a clip.
         bool death_clone{};
@@ -104,6 +105,10 @@ public:
         animation::ClipPosition position{};
         float blend_from{};
         bool alternate{}; // PlacedShip::alternate_clip (#76)
+        std::optional<std::size_t> land_type{};
+        std::optional<std::size_t> outgoing_land_type{};
+        animation::ClipPosition outgoing_position{};
+        float land_blend{};
     };
 
     struct LiveShipBox final {
@@ -169,6 +174,8 @@ public:
     [[nodiscard]] virtual std::size_t fog_model_pieces(sim::EntityId entity) const noexcept = 0;
     [[nodiscard]] virtual const std::vector<sim::RenderInstance>& instances() const noexcept = 0;
     [[nodiscard]] virtual const animation::Player* live_clip(std::size_t ship, bool alternate = false) const noexcept = 0;
+    [[nodiscard]] virtual const animation::Player* land_clip(std::size_t, std::size_t) const noexcept { return nullptr; }
+    [[nodiscard]] virtual std::optional<animation::ClipPosition> land_idle_position(std::size_t, std::uint64_t) const noexcept { return {}; }
     [[nodiscard]] virtual bool live_clip_terminal_hidden(std::size_t ship) const noexcept = 0;
     [[nodiscard]] virtual std::span<const sim::EntityId> live_hull_entities(std::size_t ship) const = 0;
     [[nodiscard]] virtual std::optional<LiveShipBox> live_ship_box(std::size_t ship) const = 0;

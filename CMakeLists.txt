@@ -1,8 +1,9 @@
 cmake_minimum_required(VERSION 3.25)
 
+include("${CMAKE_CURRENT_LIST_DIR}/cmake/EawrReleaseVersion.cmake")
 project(
     EmpireAtWarRevised
-    VERSION 0.3.2
+    VERSION ${EAWR_RELEASE_VERSION}
     DESCRIPTION "Engine-independent foundation for Empire at War Revised"
     LANGUAGES CXX
 )

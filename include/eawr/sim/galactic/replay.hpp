@@ -1,5 +1,6 @@
 #pragma once
 
+#include "eawr/core/checkpoint_limits.hpp"
 #include "eawr/core/result.hpp"
 #include "eawr/sim/galactic/commands.hpp"
 #include "eawr/sim/galactic/types.hpp"
@@ -16,9 +17,11 @@
 // with identical per-tick hashes.
 namespace eawr::sim::galactic {
 
-inline constexpr std::uint16_t galactic_replay_format_version = 12;
+class OfferPool;
+
+inline constexpr std::uint16_t galactic_replay_format_version = 14;
 inline constexpr std::uint32_t galactic_rules_version = 7;
-inline constexpr std::size_t galactic_replay_max_bytes = 256U * 1024U * 1024U;
+inline constexpr std::size_t galactic_replay_max_bytes = core::checkpoint_byte_limit;
 inline constexpr std::size_t galactic_replay_max_payload = 64U * 1024U;
 
 // Ordered engine effects share the replay journal, while ordinary player
@@ -34,7 +37,8 @@ enum class NativeEffectKind : std::uint16_t {
     income_block = 18, // coordinator-reserved: WGEP-163 source-scoped income blockers
     production_lock = 19, // coordinator-reserved: story production lock (#683)
     story_reward = 20, // coordinator-reserved: story spawn and credits (#683); its replayer is registered by the campaign owner
-    identity_reservation = 21 // coordinator-reserved: S9b entity/invasion ID frontiers (GFS-A22)
+    identity_reservation = 21, // coordinator-reserved: S9b entity/invasion ID frontiers (GFS-A22)
+    story_ai_usage = 22 // world-owned script actor facts
 };
 struct NativeEffect {
     std::uint64_t frontier{}, sequence{};
@@ -54,8 +58,11 @@ struct GalacticReplay {
 // The setup is valid, every command is a known payload for a listed seat in strictly increasing
 // canonical order below the final tick, and the final tick is within the galactic tick limit.
 [[nodiscard]] core::Result<void> validate_replay(const GalacticReplay& replay);
+// With an offer pool (the checkpoint's embedded recording) the setup's production offer tables are written as indices
+// into the pool and read back from it; the replay file format itself, with the tables inline, is the default.
+// Reading a pooled recording without its pool, or an inline one with a pool, is malformed.
 [[nodiscard]] core::Result<GalacticReplay> parse_replay(
-    std::span<const std::uint8_t> bytes, std::string_view logical_path = {});
-[[nodiscard]] core::Result<std::vector<std::uint8_t>> write_replay(const GalacticReplay& replay);
+    std::span<const std::uint8_t> bytes, std::string_view logical_path = {}, const OfferPool* pool = nullptr);
+[[nodiscard]] core::Result<std::vector<std::uint8_t>> write_replay(const GalacticReplay& replay, OfferPool* pool = nullptr);
 
 } // namespace eawr::sim::galactic

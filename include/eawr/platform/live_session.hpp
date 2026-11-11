@@ -1,6 +1,6 @@
 #pragma once
 
-#include "eawr/sim/tactical/land_debug_overlay.hpp"
+#include "eawr/platform/land_debug_overlay.hpp"
 
 #include "eawr/diagnostics/memory_capacity.hpp"
 
@@ -13,6 +13,7 @@
 #include "eawr/sim/tactical/durability.hpp"
 #include "eawr/sim/tactical/fog_cells.hpp"
 #include "eawr/sim/tactical/motion.hpp"
+#include "eawr/sim/tactical/land_movement.hpp"
 #include "eawr/sim/tactical/replay.hpp"
 #include "eawr/sim/tactical/snapshot.hpp"
 #include "eawr/sim/tactical/damage.hpp"
@@ -70,6 +71,22 @@ struct LiveFrame {
     std::shared_ptr<const sim::tactical::TacticalSnapshot> previous;
     std::shared_ptr<const sim::tactical::TacticalSnapshot> latest;
     std::chrono::steady_clock::time_point latest_published{};
+};
+
+// A read-only copy of land motion at one completed simulation tick.
+struct LiveLandMemberMotion {
+    sim::EntityId entity{};
+    sim::tactical::LandWalkState state{};
+    sim::math::Fixed speed{}, maximum_speed{}, turn_rate_limit{}, facing{}, transition_frame{};
+    sim::math::Vec2 position{}, path_target{};
+    bool has_path_target{};
+    bool turning{}, spread_out{}, stop_point{};
+    sim::math::Fixed heading_error{}, turn_fraction{};
+    bool has_motion_input{}, has_turn_fraction{};
+};
+struct LiveLandMotion {
+    std::uint64_t tick{};
+    std::vector<LiveLandMemberMotion> members;
 };
 
 // #558: what one completed tick cost the simulation thread, in wall-clock milliseconds. `phases`
@@ -382,6 +399,10 @@ public:
     [[nodiscard]] LiveFrame frame() const;
     // Immutable startup membership of land members and their commandable squad roots.
     [[nodiscard]] std::span<const std::pair<sim::EntityId, sim::EntityId>> land_roster() const noexcept;
+    [[nodiscard]] std::optional<LiveLandMotion> land_motion() const;
+    // Copies retained completed-tick motion in ascending order, strictly after tick.
+    [[nodiscard]] std::vector<LiveLandMotion> land_motion_after(std::uint64_t tick) const;
+    std::size_t land_motion_through(std::uint64_t after, std::uint64_t through, std::vector<LiveLandMotion>& output) const;
     // Read-only debug copy of the land movement state (squad paths, slot targets, states) for the viewer overlay. Takes the
     // session lock only if free; null when it is busy or the world is not land. Nothing flows back into the simulation.
     [[nodiscard]] std::shared_ptr<const sim::tactical::LandOverlayData> land_overlay() const;

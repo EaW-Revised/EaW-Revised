@@ -93,6 +93,31 @@ class LoadGameStructure(unittest.TestCase):
         ready = (ROOT / "apps/viewer/src/map_mode_ready.cpp").read_text(encoding="utf-8")
         self.assertIn('live_options.fixture = "replay"', ready)
 
+    def test_a_saved_game_load_waits_for_mod_digests_loudly_and_attract_stops_only_at_the_restore(self):
+        # 2026-11-10: a cold digest cache kept the "Checking saved mods" box up for over half an hour on a slow disk with
+        # nothing in the log, and the front end attract that runs behind every menu looked like the thing that had won.
+        # The attract is not racing the load: it stops in restore_saved, the launcher the screen calls only after the
+        # saved-mod check ends. The wait itself must be visible in the log.
+        view = (ROOT / "src/presentation/godot/ui/load_game_view.cpp").read_text(encoding="utf-8")
+        process = view.split("void EawrLoadGameScreen::_process(", 1)[1].split("void EawrLoadGameScreen::finish_launch()", 1)[0]
+        wait = process.split("if (context_.review_ready && !context_.review_ready())", 1)[1]
+        self.assertLess(wait.index("log_review_wait();"), wait.index("return;"))
+        self.assertLess(wait.index("return;"), wait.index("log_review_end(\"mod digests ready\")"))
+        self.assertLess(wait.index("log_review_end(\"mod digests ready\")"), wait.index("context_.review_save("))
+        # The launcher (and with it the attract's stop) runs only after the Loading box's frames, after the review.
+        self.assertLess(process.index("context_.review_save("), process.index("finish_launch();"))
+        self.assertLess(process.index("begin_launch(std::move(*admitted))"), process.index("finish_launch();"))
+        for line in ("EAWR saved game load waiting for the mounted mods' content digests: ",
+                     "EAWR saved game load ", "std::chrono::seconds(30)"):
+            self.assertIn(line, view)
+        self.assertIn('log_review_end("mod check cancelled")', view)
+        front = source_text("apps/viewer/src/front_end_mode.cpp")
+        self.assertIn("context.review_progress = ", front)
+        restore = front.split("std::string FrontEndMode::State::restore_saved(", 1)[1].split("\n}\n", 1)[0]
+        self.assertLess(restore.index('stop_attract("saved game restore")'), restore.index("options.saved_game_launcher("))
+        self.assertIn("EAWR front end saved game restore refused: ", restore)
+        self.assertIn("EAWR saved game load refused: ", view)
+
     def test_the_model_stays_engine_free(self):
         header = (ROOT / "include/eawr/presentation/ui/load_game.hpp").read_text(encoding="utf-8")
         self.assertNotIn("godot", header)

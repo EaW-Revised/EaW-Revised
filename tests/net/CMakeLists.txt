@@ -29,6 +29,11 @@ target_link_libraries(net_desync_session_tests PRIVATE eawr::net eawr::platform)
 eawr_target_project_warnings(net_desync_session_tests)
 add_test(NAME net_desync_session_contracts COMMAND net_desync_session_tests
     "${PROJECT_BINARY_DIR}/desync-session-artifacts")
+# Offload-only measurement: a throwaway marker enables this outside normal and nightly runs.
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/monitor_bench.enabled")
+    add_test(NAME net_desync_monitor_benchmark COMMAND net_desync_session_tests --monitor-benchmark)
+    set_tests_properties(net_desync_monitor_benchmark PROPERTIES LABELS "benchmark;batch-only" RUN_SERIAL TRUE TIMEOUT 28800)
+endif()
 add_executable(net_setup_tests setup_tests.cpp)
 target_link_libraries(net_setup_tests PRIVATE eawr::net eawr::platform)
 eawr_target_project_warnings(net_setup_tests)
@@ -42,13 +47,24 @@ add_executable(net_galactic_setup_tests galactic_setup_tests.cpp)
 target_link_libraries(net_galactic_setup_tests PRIVATE eawr::net eawr::platform eawr::campaign)
 eawr_target_project_warnings(net_galactic_setup_tests)
 add_test(NAME net_galactic_setup_contracts COMMAND net_galactic_setup_tests)
-# GCMP-07 (#4363): the lobby GC mode (gc1 options codec and versioning, campaign list, staging refusals, two-peer and nine-seat
+add_test(NAME net_galactic_large_checkpoint COMMAND net_galactic_setup_tests --large-checkpoint)
+add_test(NAME net_gns_checkpoint_timing COMMAND net_galactic_setup_tests --gns-checkpoint)
+add_test(NAME net_gns_checkpoint_slow_frame COMMAND net_galactic_setup_tests --gns-checkpoint-slow)
+set_tests_properties(net_gns_checkpoint_timing net_gns_checkpoint_slow_frame PROPERTIES
+    SKIP_RETURN_CODE 77 TIMEOUT 90 LABELS optional-gns)
+add_test(NAME net_checkpoint_worker_contracts COMMAND net_galactic_setup_tests --checkpoint-worker)
+set_tests_properties(net_checkpoint_worker_contracts PROPERTIES TIMEOUT 180)
+add_test(NAME net_gns_checkpoint_threaded COMMAND net_galactic_setup_tests --gns-checkpoint-threaded)
+set_tests_properties(net_gns_checkpoint_threaded PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 30 LABELS optional-gns)
+# GCMP-07 (#4363): the lobby GC mode (gc2 options codec and versioning, campaign list, staging refusals, two-peer and nine-seat
 # rooms through the real lobby core and the galactic offer; the skirmish options bytes pinned).
 add_executable(net_galactic_lobby_tests galactic_lobby_tests.cpp)
 target_include_directories(net_galactic_lobby_tests PRIVATE "${PROJECT_SOURCE_DIR}/apps/viewer/src/galactic")
 target_link_libraries(net_galactic_lobby_tests PRIVATE eawr::net eawr::platform eawr::campaign eawr::platform_net eawr::skirmish eawr::mods)
 eawr_target_project_warnings(net_galactic_lobby_tests)
 add_test(NAME net_galactic_lobby_contracts COMMAND net_galactic_lobby_tests)
+# #6503: the nine-seat launch waits on events, not a wall-clock budget; a real hang ends here.
+set_tests_properties(net_galactic_lobby_contracts PROPERTIES TIMEOUT 900)
 add_test(NAME net_galactic_lobby_stock_ai COMMAND net_galactic_lobby_tests --stock-ai)
 # The combined contract measured 776 s on the MSVC pool; allow twice that upper bound.
 set_tests_properties(net_galactic_lobby_stock_ai PROPERTIES
@@ -63,6 +79,12 @@ target_link_libraries(net_viewer_lan_tests PRIVATE eawr::platform_net eawr::net 
 eawr_target_project_warnings(net_viewer_lan_tests)
 add_test(NAME net_viewer_lan_contracts COMMAND net_viewer_lan_tests)
 add_test(NAME net_pending_input_contracts COMMAND net_viewer_lan_tests --pending-inputs)
+# The saved-battle load path builds the unit tables and the data identity once (installed data).
+add_executable(net_saved_battle_prepare_tests saved_battle_prepare_tests.cpp)
+target_include_directories(net_saved_battle_prepare_tests PRIVATE "${PROJECT_SOURCE_DIR}/apps/viewer/src")
+target_link_libraries(net_saved_battle_prepare_tests PRIVATE eawr::platform_net eawr::platform eawr::skirmish eawr::scene)
+eawr_target_project_warnings(net_saved_battle_prepare_tests)
+eawr_add_game_data_test(NAME net_saved_battle_prepare_installed_contracts COMMAND net_saved_battle_prepare_tests)
 add_executable(net_tcp_lockstep_tests tcp_lockstep_tests.cpp)
 target_link_libraries(net_tcp_lockstep_tests PRIVATE eawr::net eawr::platform)
 eawr_target_project_warnings(net_tcp_lockstep_tests)
@@ -308,5 +330,15 @@ target_link_libraries(net_galactic_ability_travel_tests PRIVATE eawr::net_galact
 eawr_target_project_warnings(net_galactic_ability_travel_tests)
 add_test(NAME net_galactic_ability_travel_contracts COMMAND net_galactic_ability_travel_tests)
 set_tests_properties(net_galactic_ability_travel_contracts PROPERTIES TIMEOUT 120)
+
+# These cases require the optional networking provider. The standard Windows
+# preset skips them; they run only where the provider is built.
+set_property(TEST
+    net_gns_dependency_smoke net_gns_introduced_paths net_gns_turn_permission
+    net_gns_turn_silent net_gns_turn_nonce net_gns_mesh_paths net_gns_lobby_retry
+    net_gns_mesh_twice net_gns_mesh_twice_late net_gns_mesh_gave_up gns_mesh_nine_process
+    net_gns_transport_contracts net_gns_turn_refusal_contracts
+    net_gns_setup_contracts net_gns_lockstep_contracts net_gns_desync_contracts
+    APPEND PROPERTY LABELS optional-gns)
 
 eawr_label_tests()

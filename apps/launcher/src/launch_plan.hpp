@@ -21,6 +21,7 @@ struct LaunchInputs {
     std::optional<bool> safe_render_thread;  // Explicit CLI override: true Safe, false Separate
     std::optional<fs::path> mod_profile; // selected by the manager loop
     std::optional<fs::path> save_dir;    // instance n >= 2: --eawr-save-dir (the primary's saves, shared)
+    std::optional<fs::path> digest_cache; // instance n >= 2: shared content digest cache
     std::optional<fs::path> font_cache;  // instance n >= 2: --eawr-font-cache (the primary's fonts, shared)
     std::optional<unsigned> lan_game_port; // instance n >= 2: --eawr-lan-game-port (47624 + 2*(n-1))
     std::optional<std::wstring> render_thread; // profile mode or saved fallback, before Godot user arguments

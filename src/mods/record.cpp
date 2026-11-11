@@ -164,6 +164,7 @@ std::string record_to_json(const ModRecord& record) {
     out += ", \"acf_size\": " + std::to_string(print.acf_size);
     out += ", \"tree\": " + json_quote(print.tree);
     out += ", \"tree_files\": " + std::to_string(print.tree_files);
+    out += ", \"portable_tree\": " + json_quote(print.portable_tree);
     out += ", \"tree_capped\": ";
     out += print.tree_capped ? "true" : "false";
     out += "}, \"content\": " + content_digest_to_json(record.content);
@@ -215,6 +216,7 @@ std::optional<ModRecord> record_from_json(const JsonValue& value) {
     }
     record.fingerprint.acf_manifest = *manifest;
     record.fingerprint.tree = *tree;
+    if (const auto* portable = print->string_member("portable_tree")) record.fingerprint.portable_tree = *portable;
     record.fingerprint.tree_capped = capped->boolean;
 
     // Additive member: a record written before it existed reads as "never asked".

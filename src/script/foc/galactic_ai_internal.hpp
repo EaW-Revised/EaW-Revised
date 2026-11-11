@@ -15,6 +15,8 @@ struct Manager::Impl {
     std::vector<PlanInput> plans;
     Capabilities capabilities;
     LifecycleState state;
+    AsyncSchedule schedule{synchronous_reference_schedule};
+    std::uint32_t virtual_tick{1}; // batch driver: the 1-based virtual tick before_service serves next
     std::string configuration_digest;
     core::RecordDigest records;
     void update_record(gc::PlayerId player = 0);
@@ -31,6 +33,7 @@ struct Manager::Impl {
         PolicySnapshotStats policy_stats;
         core::RecordDigest records;
         std::vector<ServiceTrace> traces;
+        bool faulted{}; // set by the player's own chain; resolved after the chains, lowest player first
     };
     std::map<gc::PlayerId, PlayerState> player_state;
     void reset_records();
@@ -48,5 +51,10 @@ struct Manager::Impl {
     [[nodiscard]] core::Result<bool> positive(const PlayerSelection&, std::string_view) const;
     [[nodiscard]] core::Result<void> initialize(PlayerLifecycle&);
     [[nodiscard]] core::Result<void> templates(PlayerLifecycle&);
+    // One virtual tick: every live player's due services in ascending player order, then the shared settle.
+    [[nodiscard]] core::Result<void> serve_tick(const Clocks&, const Admission&,
+        const std::shared_ptr<const WorldInput>&, authoritative::ScriptScheduler&);
+    [[nodiscard]] core::Result<void> serve_player(PlayerLifecycle&, const Clocks&, const Admission&,
+        const std::shared_ptr<const WorldInput>&, authoritative::ScriptScheduler&);
 };
 } // namespace eawr::script::foc::galactic_ai

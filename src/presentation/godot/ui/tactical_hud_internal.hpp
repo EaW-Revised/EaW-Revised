@@ -206,6 +206,11 @@ public:
         special_overlay_->set_anchors_preset(PRESET_TOP_LEFT);
         special_overlay_->set_position(box.position); special_overlay_->set_size(box.size);
     }
+    // Opt-in for controls whose state textures have independent native dimensions.
+    void set_special_overlay_natural_scale(float scale) {
+        special_overlay_scale_ = scale;
+        refresh_special_overlay();
+    }
     [[nodiscard]] Rect2 special_overlay_rect() const {
         return special_overlay_ ? special_overlay_->get_global_rect() : Rect2{};
     }
@@ -346,9 +351,17 @@ private:
         const bool selected = !is_disabled() && (order_selected_ || is_pressed());
         special_overlay_->set_texture(is_disabled() ? special_disabled_
             : selected ? special_selected_ : is_hovered() ? special_hover_ : Ref<Texture2D>());
+        if (special_overlay_scale_) {
+            const auto texture = special_overlay_->get_texture();
+            const Vector2 size = texture.is_valid() ? texture->get_size() * *special_overlay_scale_ : Vector2{};
+            special_overlay_->set_anchors_preset(PRESET_TOP_LEFT);
+            special_overlay_->set_position((get_size() - size) * 0.5F);
+            special_overlay_->set_size(size);
+        }
         special_overlay_->set_material(selected ? special_additive_
             : !is_disabled() && is_hovered() ? special_hover_additive_ : Ref<CanvasItemMaterial>());
     }
+    std::optional<float> special_overlay_scale_;
     TextureRect* special_overlay_{};
     Ref<CanvasItemMaterial> special_additive_;
     Ref<CanvasItemMaterial> special_hover_additive_;
@@ -468,6 +481,7 @@ struct TacticalHud::State final {
     std::function<void()> movie_handler;
     std::function<void()> options_handler;
     bool movie{};
+    float movie_band_progress{};
     // #459: the time panel's live buttons, and #453/#459's overlay.
     EawrHudButton* pause_button{};
     EawrHudButton* fast_forward_button{};
@@ -497,6 +511,7 @@ struct TacticalHud::State final {
     // #944: the battle hero tray.
     EawrHeroTray* heroes{};
     std::optional<std::pair<std::uint64_t, std::string>> world_hover;
+    std::optional<EawrProductionPanel::Hover> production_hover;
     std::string ability_hover_type;
     std::uint32_t ability_hover_kind{};
     std::size_t ability_hover_component{};

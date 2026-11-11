@@ -307,6 +307,21 @@ void shared_technology_writer() {
     config.production->technology_types = {{1001, 2, true, true, {1}}, {2000, 0, true, true, {1}},
         {2001, 4, true, true, {1}}, {2002, 0, true, true, {}}, {2003, 0, false, true, {1}},
         {2004, 0, true, false, {1}}};
+    {
+        auto live = take(galactic::GalacticSession::create(config));
+        std::vector<galactic::TypeId> seen;
+        live.set_technology_notice_handler([&](const auto& notice) {
+            if (notice.kind == galactic::GalacticSession::TechnologyNotice::Kind::assigned)
+                seen = live.snapshot()->production()->players[0].unlocked;
+            return eawr::core::Result<void>::success();
+        });
+        live.begin_production_lock_batch();
+        (void)take(live.apply_production_lock({1, 2000, 0, false}));
+        (void)take(live.apply_production_lock({1, 1001, 0, true}));
+        live.end_production_lock_batch();
+        expect(seen == std::vector<galactic::TypeId>{2000},
+            "a technology callback sees the preceding publication, not the in-progress unlock");
+    }
     for (const bool throws : {false, true}) {
         auto failed = take(campaign::GameSession::create(config));
         auto& failed_world = failed.galaxy(); std::size_t callbacks{};
@@ -399,6 +414,111 @@ void story_production_writers() {
     config.production->technology_types = {{1001, 2, true, true, {1}}, {2000, 0, true, true, {1}},
         {2001, 4, true, true, {1}}, {2002, 0, true, true, {}}, {2003, 0, false, true, {1}}, {2004, 0, true, false, {1}}};
     using Ids = std::vector<galactic::TypeId>;
+    {
+        auto input = setup();
+        input.fleet_control->types.push_back({1001, false, true, false});
+        for (auto& planet : input.production->planets) {
+            for (auto& offer : planet.offers.mutable_rows()) {
+                offer.domain = galactic::ProductionDomain::space;
+                offer.kind = galactic::ProductionKind::unit;
+            }
+        }
+        input.production->technology_types = {{1000, 2, false, false, {1}}, {1001, 2, false, false, {1}}};
+        input.production->players[0].locked = {1000, 1001};
+        galactic::ObserverSetup observer;
+        observer.human_observers = {1}; observer.solo_reference_human = 1; observer.reveal_delay_seconds = f(1);
+        observer.players = {{1, false, false, 0, 1, {}}};
+        observer.types = {{1000, false, false, false}};
+        for (const auto& planet : input.planets) {
+            galactic::ObserverPlanet facts;
+            facts.planet = planet.id; facts.allegiance = facts.target_owner = 1;
+            facts.current_owner = facts.current_controller = 1;
+            observer.planets.push_back(facts);
+            observer.records.push_back({1, planet.id, true, 0, 0, 0, {}});
+        }
+        input.observer = observer;
+        auto batched = take(galactic::GalacticSession::create(input));
+        auto sequential = take(galactic::GalacticSession::create(input));
+        const auto before = batched.production_offer_rebuild_count();
+        const std::vector<galactic::GalacticSession::ProductionLockWrite> writes = {
+            {1, 1000, 0, false}, {1, 1001, 0, false}, {1, 0, 1001, false}};
+        const auto before_batch = batched.snapshot();
+        batched.begin_production_lock_batch();
+        for (const auto& write : writes) {
+            (void)take(batched.apply_production_lock(write));
+            (void)take(sequential.apply_production_lock(write));
+        }
+        expect(batched.snapshot() == before_batch && batched.snapshot() == before_batch,
+            "snapshot reads do not publish pending filter writes");
+        expect(batched.production_offer_rebuild_count() == before, "filter writes do not rebuild intermediate offers");
+        batched.end_production_lock_batch();
+        expect(batched.production_offer_rebuild_count() == before + 1, "filter writes publish offers once");
+        const auto result = batched.snapshot();
+        expect(result == batched.snapshot(), "consecutive snapshot reads return the same publication");
+        expect(result->production()->players[0].locked == Ids{1001}, "filter leaves the selected type unlocked and locks the other");
+        expect(result->production_offers().size() == sequential.snapshot()->production_offers().size()
+            && std::equal(result->production_offers().begin(), result->production_offers().end(), sequential.snapshot()->production_offers().begin()),
+            "batched filter offers match the ordered individual rewards");
+        const auto selected = std::find_if(result->production_offers().begin(), result->production_offers().end(),
+            [](const auto& row) { return row.planet == 1 && row.type == 1000; });
+        const auto excluded = std::find_if(result->production_offers().begin(), result->production_offers().end(),
+            [](const auto& row) { return row.planet == 1 && row.type == 1001; });
+        expect(selected != result->production_offers().end() && selected->current
+            && excluded != result->production_offers().end() && !excluded->current,
+            "filter publishes the selected category instead of an empty set");
+        expect(batched.native_effects().size() == sequential.native_effects().size()
+            && std::equal(batched.native_effects().begin(), batched.native_effects().end(), sequential.native_effects().begin()),
+            "batch preserves each ordered journal effect");
+
+        // Exercise the session's story delivery as well as the writer: one click fires the ordered rewards.
+        std::string filter_baseline;
+        for (auto workers : eawr::platform::determinism_worker_counts()) {
+            namespace story = eawr::sim::galactic::story;
+            auto game_input = input;
+            game_input.production->players[0].locked = {1000}; // 1001 starts visible and must disappear on this click.
+            auto game = take(campaign::GameSession::create(game_input));
+            story::SubPlotDef plot; plot.name = "filter.xml"; plot.owner = 1;
+            for (const auto& name : {"A", "B", "C"}) {
+                story::EventDef event; event.name = name; event.type = "STORY_CLICK_GUI";
+                event.params[0] = {"filter"}; event.perpetual = true;
+                event.reward_type = event.name == "C" ? "LOCK_UNIT" : "BUILDABLE_UNIT";
+                plot.events.push_back(std::move(event));
+            }
+            take(game.install_story({}, {{1, "filter.xml"}}, {plot}));
+            game.set_story_rewards([](auto& world, const auto& record, const auto&)
+                -> eawr::core::Result<campaign::GameSession::StoryRewardOutcome> {
+                const galactic::GalacticSession::ProductionLockWrite write = record.event == "A"
+                    ? galactic::GalacticSession::ProductionLockWrite{1, 1000, 0, false}
+                    : record.event == "B" ? galactic::GalacticSession::ProductionLockWrite{1, 1001, 0, false}
+                                          : galactic::GalacticSession::ProductionLockWrite{1, 0, 1001, false};
+                const auto applied = world.apply_production_lock(write);
+                if (!applied) return eawr::core::Result<campaign::GameSession::StoryRewardOutcome>::failure(applied.error());
+                return eawr::core::Result<campaign::GameSession::StoryRewardOutcome>::success({true, {}});
+            });
+            const auto rebuilds = game.galaxy().production_offer_rebuild_count();
+            const auto initial = game.galaxy().snapshot();
+            expect(std::any_of(initial->production_offers().begin(), initial->production_offers().end(),
+                [](const auto& row) { return row.planet == 1 && row.type == 1001 && row.current; }),
+                "the prior filter's ship is initially listed");
+            const auto click_tick = game.completed_tick();
+            take(game.submit({{game.completed_tick(), {1}, 1}, galactic::GuiClick{"filter"}}));
+            eawr::platform::ThreadWorkerAdapter executor(workers);
+            (void)take(game.step(executor));
+            const auto actual = game.galaxy().snapshot();
+            expect(game.completed_tick() == click_tick + 1, "the click is processed in one tick");
+            expect(game.galaxy().production_offer_rebuild_count() == rebuilds + 1,
+                "one story filter click rebuilds production offers once");
+            expect(actual->production()->players[0].locked == Ids{1001}, "the story click retains the selected type");
+            expect(actual->production_offers().size() == result->production_offers().size()
+                && std::equal(actual->production_offers().begin(), actual->production_offers().end(), result->production_offers().begin()),
+                "the story click publishes the ordered filter result");
+            expect(std::none_of(actual->production_offers().begin(), actual->production_offers().end(),
+                [](const auto& row) { return row.planet == 1 && row.type == 1001 && row.current; }),
+                "the previous filter's ship is no longer listed in the click tick");
+            if (filter_baseline.empty()) filter_baseline = actual->sha256();
+            else expect(actual->sha256() == filter_baseline, "filter click state is equal on 1/2/4/8 workers");
+        }
+    }
     std::string baseline;
     for (auto workers : eawr::platform::determinism_worker_counts()) {
         eawr::platform::ThreadWorkerAdapter pool(workers);

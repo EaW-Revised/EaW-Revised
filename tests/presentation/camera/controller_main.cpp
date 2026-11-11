@@ -1,15 +1,22 @@
 #include "../../support/check.hpp"
 #include "eawr/presentation/camera/controller.hpp"
+#include "../../../apps/viewer/src/battlecam_chase.hpp"
+#include "../../../apps/viewer/src/battlecam_selection.hpp"
+#include "../../../apps/viewer/src/battlecam_shots.hpp"
+#include "../../../apps/viewer/src/battlecam_tec.hpp"
 
 #include <array>
+#include <bit>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <iostream>
 #include <limits>
 #include <numbers>
+#include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 namespace {
 namespace camera = eawr::presentation::camera;
@@ -731,6 +738,245 @@ void test_view_yaw_pan() {
 }
 
 int main() {
+    {
+        using namespace eawr::presentation::godot_backend;
+        struct PreviewUnit { std::uint64_t entity; bool own; };
+        const std::vector<PreviewUnit> units{{1, true}, {2, false}};
+        const std::vector<std::uint64_t> alive{1, 2}, seen{1, 2}, fogged{1}, dead{1}, unseen{};
+        expect(find_preview_subject(units, alive, seen, 2U, false) != units.end(), "visible enemy can be previewed");
+        expect(find_preview_subject(units, alive, fogged, 2U, false) == units.end(), "fogged enemy cannot be previewed");
+        expect(find_preview_subject(units, alive, unseen, 1U, false) != units.end(), "own unit bypasses sensor visibility");
+        expect(find_preview_subject(units, alive, fogged, 2U, true) != units.end(), "reveal allows displayed enemy");
+        expect(!preview_subject_lost(units, alive, seen, 2U, false), "visible enemy preview continues");
+        expect(preview_subject_lost(units, alive, fogged, 2U, false), "preview exits when enemy leaves vision");
+        expect(preview_subject_lost(units, dead, seen, 2U, false), "preview exits when subject dies");
+        expect(!preview_subject_lost(units, alive, fogged, 2U, true), "revealed enemy preview continues");
+        expect(preview_subject_lost(units, dead, seen, 2U, true), "reveal cannot preserve a dead subject");
+        expect(battlecam_advance(false, false, false, false) == BattlecamAdvance::exit,
+            "battle end exits the movie view");
+        expect(battlecam_advance(true, true, true, false) == BattlecamAdvance::hold,
+            "pause freezes even an expired movie shot");
+        expect(battlecam_advance(true, false, true, true) == BattlecamAdvance::update,
+            "a held movie key delays the next shot");
+        expect(battlecam_advance(true, false, true, false) == BattlecamAdvance::next,
+            "an expired unheld shot advances while playing");
+        bool camera_movie = true, fog_hidden = true, hud_hidden = true;
+        bool key = true, tab = true;
+        std::uint64_t subject = 42;
+        restore_battlecam([&] { camera_movie = false; }, [&] { fog_hidden = false; },
+            [&] { hud_hidden = false; }, subject, key, tab);
+        expect(!camera_movie && !fog_hidden && !hud_hidden && subject == 0 && !key && !tab,
+            "movie exit restores the camera, fog and HUD and clears held state");
+        using Bytes = std::vector<std::byte>;
+        const auto word = [](Bytes& out, std::uint32_t v) {
+            for (unsigned i = 0; i < 4; ++i) out.push_back(static_cast<std::byte>((v >> (8U*i)) & 255U));
+        };
+        const auto chunk = [&](std::uint32_t id, bool group, const Bytes& body) {
+            Bytes out; word(out, id); word(out, static_cast<std::uint32_t>(body.size()) | (group ? 0x80000000U : 0U));
+            out.insert(out.end(), body.begin(), body.end()); return out;
+        };
+        const auto position = [&](std::uint32_t frame, float x, std::uint32_t transition) {
+            Bytes fields{std::byte{0}, std::byte{4}}; word(fields, frame);
+            fields.insert(fields.end(), {std::byte{3}, std::byte{4}}); word(fields, transition);
+            fields.insert(fields.end(), {std::byte{10}, std::byte{12}});
+            word(fields, std::bit_cast<std::uint32_t>(x)); word(fields, 0); word(fields, 0);
+            return chunk(4, false, fields);
+        };
+        const auto scalar = [&](std::uint32_t frame, float value) {
+            Bytes fields{std::byte{0}, std::byte{4}}; word(fields, frame);
+            fields.insert(fields.end(), {std::byte{9}, std::byte{4}}); word(fields, std::bit_cast<std::uint32_t>(value));
+            return chunk(5, false, fields);
+        };
+        const auto join = [](Bytes& into, const Bytes& more) { into.insert(into.end(), more.begin(), more.end()); };
+        Bytes camera_keys; join(camera_keys, position(0, 0, 1)); join(camera_keys, position(30, 10, 2));
+        Bytes target_keys; join(target_keys, position(0, 2, 2)); join(target_keys, position(30, 4, 1));
+        Bytes fov_keys; join(fov_keys, scalar(0, 40)); join(fov_keys, scalar(30, 60));
+        Bytes file; join(file, chunk(0, true, camera_keys)); join(file, chunk(1, true, target_keys)); join(file, chunk(2, true, fov_keys));
+        const auto parsed = parse_battlecam_tec(file);
+        expect(parsed && parsed->duration == 30, "TEC key sections and duration decode");
+        if (parsed) {
+            close(tec_position(parsed->camera, 15)[0], 5, "TEC linear camera key interpolates");
+            close(tec_position(parsed->target, 15)[0], 2, "TEC cut holds its first target key");
+            expect(tec_fov(parsed->fov, 15).has_value(), "TEC FOV is available between keys");
+            if (const auto fov = tec_fov(parsed->fov, 15)) close(*fov, 50, "TEC FOV interpolates");
+        }
+        file.pop_back();
+        expect(!parse_battlecam_tec(file), "truncated TEC is refused");
+        close(tec_detail::ease(0.5F, 0.25F, 0.25F), 0.5F, "symmetric TEC easing reaches its midpoint");
+        close(tec_detail::ease(0.125F, 0.25F, 0.25F), 1.0F / 24.0F, "TEC easing integrates the initial acceleration");
+    }
+    {
+        using namespace eawr::presentation::godot_backend;
+        bool circle = false, flyby = false, belly = false, floating = false, bomber_chase = false, frigate = false;
+        for (std::uint32_t seed = 1; seed < 1024; ++seed) {
+            BattlecamRandom fighter_random{seed}, generic_random{seed}, bomber_random{seed};
+            const std::array<float, 3> extents{20, 30, 10};
+            expect(make_battlecam_shot(extents, {.fighter = true}, fighter_random).kind == BattlecamShotKind::chase,
+                "fighter dispatch chooses chase");
+            const auto shot = make_battlecam_shot(extents, {}, generic_random);
+            expect(shot.duration > 0.0F && std::isfinite(shot.at(shot.duration * 0.5F)[0]), "shot has a finite path");
+            circle = circle || shot.kind == BattlecamShotKind::circle;
+            flyby = flyby || shot.kind == BattlecamShotKind::flyby;
+            belly = belly || shot.kind == BattlecamShotKind::belly;
+            floating = floating || shot.kind == BattlecamShotKind::floating;
+            bomber_chase = bomber_chase || make_battlecam_shot(extents, {.bomber = true}, bomber_random).kind == BattlecamShotKind::chase;
+            BattlecamRandom frigate_random{seed};
+            const auto transfer = make_battlecam_shot(extents, {.frigate = true}, frigate_random, std::array<float, 3>{5, 10, 5});
+            if (transfer.kind == BattlecamShotKind::frigate) {
+                frigate = true;
+                expect(transfer.duration >= 6.0F && transfer.duration <= 8.0F, "frigate transfer lasts 180..240 frames");
+                close(transfer.end[1], -15.0F, "frigate endpoint scales to the target bounds");
+            }
+        }
+        expect(circle && flyby && belly && floating && bomber_chase, "category dispatch reaches its supported paths");
+        expect(frigate, "frigate dispatch reaches target transfer");
+        expect(frigate_target_eligible(0, 180, 10, 0), "opposing target ahead admits frigate transfer");
+        expect(!frigate_target_eligible(0, 0, 10, 0) && !frigate_target_eligible(0, 180, 0, 10),
+            "frigate transfer rejects parallel headings and targets off its forward cone");
+        for (const float radius : {10.0F, 100.0F}) {
+            close(preview_distance_clamp(0.0F, radius), 1.5F * radius, "preview permits closer zoom");
+            close(preview_distance_clamp(20.0F * radius, radius), 10.0F * radius, "preview clamps to 10R");
+            close(preview_start_distance(radius), 5.0F * radius, "preview starts farther out for each size");
+            expect(preview_distance_clamp(preview_start_distance(radius), radius) == preview_start_distance(radius),
+                "preview start is within zoom limits");
+        }
+        // #6569: the zoom range grows linearly up to a frigate-sized ship and with the square root beyond.
+        // Radii are model-bounds half diagonals of stock and mod ships (reference game data).
+        struct PreviewSize { const char* name; float radius; };
+        const PreviewSize classes[] = {{"fighter", 39.3F}, {"corvette", 94.8F}, {"frigate", 187.5F}, {"cruiser", 348.4F},
+                                        {"star destroyer", 492.8F}, {"super (Executor)", 2671.1F}, {"Pride of the Core", 4378.5F}};
+        float previous_start = 0.0F;
+        float previous_ratio = 1.0e9F;
+        for (const PreviewSize& ship : classes) {
+            const PreviewZoom zoom = preview_zoom(ship.radius);
+            const std::string label = std::string(" (") + ship.name + ")";
+            if (ship.radius <= preview_knee_radius) {
+                close(zoom.start, 5.0F * ship.radius, "ships up to a frigate keep the 5R start" + label);
+                close(zoom.min, 1.5F * ship.radius, "ships up to a frigate keep the 1.5R zoom-in limit" + label);
+                close(zoom.max, 10.0F * ship.radius, "ships up to a frigate keep the 10R zoom-out limit" + label);
+            } else {
+                expect(zoom.start < 5.0F * ship.radius && zoom.min < 1.5F * ship.radius && zoom.max < 10.0F * ship.radius,
+                    "a larger ship starts nearer and zooms in closer than the linear range" + label);
+            }
+            expect(zoom.min <= zoom.start && zoom.start <= zoom.max, "start sits inside the zoom range" + label);
+            expect(zoom.start >= previous_start, "a larger ship never starts nearer than a smaller one" + label);
+            expect(zoom.start / ship.radius <= previous_ratio + 1.0e-4F, "the start per radius never grows with size" + label);
+            previous_start = zoom.start;
+            previous_ratio = zoom.start / ship.radius;
+            close(preview_distance_clamp(zoom.start, ship.radius), zoom.start, "the start is within the zoom limits" + label, 1.0e-2F);
+        }
+        // The two large cases the owner reported: no longer starts at 21893 (Pride) / 13355 (Executor) units out.
+        close(preview_start_distance(4378.5F), 4679.0F, "Pride of the Core starts ~4.7 thousand units out", 5.0F);
+        expect(preview_zoom(4378.5F).min < 1500.0F, "Pride of the Core zooms in to under 1.5 thousand units");
+        close(preview_start_distance(2671.1F), 3655.0F, "Executor starts ~3.7 thousand units out", 5.0F);
+        // A map-extent cap: the start and the zoom-out limit never show the whole map, and the range stays ordered.
+        const PreviewZoom capped = preview_zoom(4378.5F, 12000.0F);
+        close(capped.start, 2400.0F, "start capped to 0.2 of the smaller map dimension");
+        close(capped.max, 4800.0F, "zoom-out limit capped to 0.4 of the smaller map dimension");
+        expect(capped.min <= capped.start, "the map cap never pushes the start inside the zoom-in limit");
+        // A map smaller than the ship's own zoom-in limit: the start rests on that limit.
+        const PreviewZoom small_map = preview_zoom(4378.5F, 6000.0F);
+        close(small_map.start, small_map.min, "a small map leaves the start on the zoom-in limit");
+        const PreviewZoom tiny = preview_zoom(4378.5F, 100.0F);
+        expect(tiny.min <= tiny.start && tiny.start <= tiny.max, "a tiny map still leaves an ordered zoom range");
+        close(preview_start_distance(39.3F, 6000.0F), 5.0F * 39.3F, "a fighter is not capped by a normal map");
+        // The wheel: a fixed 25 units for every ship up to a frigate at any distance (unchanged from before the
+        // change), proportional beyond.
+        for (const PreviewSize& ship : classes) {
+            const PreviewZoom zoom = preview_zoom(ship.radius);
+            const std::string label = std::string(" (") + ship.name + ")";
+            for (const float fraction : {0.0F, 0.25F, 0.5F, 0.75F, 1.0F}) {
+                const float distance = zoom.min + (zoom.max - zoom.min) * fraction;
+                const float step = preview_wheel_step(distance, ship.radius);
+                if (ship.radius <= preview_knee_radius) close(step, 25.0F, "up to a frigate every notch stays 25 units" + label);
+                else expect(step >= 25.0F && std::abs(step - std::max(25.0F, 0.05F * distance)) < 1.0e-3F,
+                    "a larger ship's notch is 5% of the distance (at least 25)" + label);
+            }
+            // The zoom limits hold for every class: no distance goes inside the zoom-in limit or beyond the zoom-out limit.
+            close(preview_distance_clamp(0.0F, ship.radius), zoom.min, "zooming in stops at the zoom-in limit" + label);
+            close(preview_distance_clamp(1.0e9F, ship.radius), zoom.max, "zooming out stops at the zoom-out limit" + label);
+            // One notch from the start moves it by the step and stays inside the limits.
+            const float notch_in = preview_distance_clamp(zoom.start - preview_wheel_step(zoom.start, ship.radius), ship.radius);
+            expect(notch_in >= zoom.min && notch_in <= zoom.start, "a notch in from the start stays inside the range" + label);
+        }
+        // Notches from the start to the zoom-in limit, before (fixed 25 units) and after this change.
+        {
+            const float old_start = 5.0F * 4378.5F;
+            const float old_min = 1.5F * 4378.5F;
+            const int before = static_cast<int>(std::ceil((old_start - old_min) / 25.0F));
+            expect(before > 600 && before < 620, "before, the Pride of the Core needed about 613 notches");
+            float distance = preview_start_distance(4378.5F);
+            int notches = 0;
+            while (distance > preview_zoom(4378.5F).min + 1.0e-3F && notches < 1000) {
+                distance = preview_distance_clamp(distance - preview_wheel_step(distance, 4378.5F), 4378.5F);
+                ++notches;
+            }
+            expect(notches <= 40, "Pride of the Core reaches its closest zoom in a few dozen wheel notches");
+        }
+        // A frigate-class ship still needs the same notch count as before from its start to its zoom-in limit.
+        {
+            float distance = preview_start_distance(187.5F);
+            int notches = 0;
+            while (distance > preview_zoom(187.5F).min + 1.0e-3F && notches < 1000) {
+                distance = preview_distance_clamp(distance - preview_wheel_step(distance, 187.5F), 187.5F);
+                ++notches;
+            }
+            expect(notches == static_cast<int>(std::ceil((5.0F * 187.5F - 1.5F * 187.5F) / 25.0F)),
+                "a frigate keeps its 25-unit notch count from start to the zoom-in limit");
+        }
+        const auto first = preview_offset(30.0F, 0.0F, 30.0F);
+        const auto next = preview_offset(30.0F, 45.0F, 30.0F);
+        close(first[2], 15.0F, "preview starts at 30 degrees elevation");
+        expect(first[0] != next[0] && first[1] != next[1], "preview advances its azimuth");
+        const auto hardpoint = hardpoint_camera_offset({1, 0, 0});
+        expect(hardpoint.has_value(), "horizontal hardpoint has a weapon frame");
+        if (hardpoint) close((*hardpoint)[2], 200.0F, "hardpoint camera sits 200 units along frame up");
+        expect(!hardpoint_camera_offset({0, 0, 1}), "vertical hardpoint without a defined zero-roll frame falls through");
+    }
+    {
+        using namespace eawr::presentation::godot_backend;
+        const std::array<float, 7> size_weight{1, 0, 0, 0, 0, 0, 0};
+        std::vector<BattlecamCandidate> candidates{
+            {1, 10, 2, {1, 0, 0, 0, 5, 0, 0}, false, 0},
+            {2, 20, 0, {4, 0, 0, 0, 5, 0, 0}, true, 0},
+            {3, 30, 0, {9, 0, 0, 0, 5, 0, 0}, false, 0}};
+        rank_battlecam_candidates(candidates, size_weight);
+        expect(candidates.front().entity == 3 && candidates.back().entity == 1, "saliency weights rank size");
+        BattlecamRandom opening{5};
+        expect(choose_battlecam_subject(candidates, size_weight, 0, true, opening) == 2, "opening prefers the selected subject");
+        BattlecamRandom repeat{5};
+        const auto picked = choose_battlecam_subject(candidates, size_weight, 3, false, repeat);
+        expect(picked != 3, "selection avoids the prior subject when another type is available");
+        const std::vector<BattlecamCandidate> shortcut_candidates{
+            {1, 10, 2, {}, false, 0}, {2, 10, 0, {}, false, 0}, {3, 30, 0, {}, false, 0}};
+        bool followed_target = false;
+        for (std::uint32_t seed = 0; seed < 32; ++seed) {
+            BattlecamRandom shortcut{seed};
+            followed_target = followed_target || choose_battlecam_subject(shortcut_candidates, size_weight, 1, false, shortcut) == 2;
+        }
+        expect(followed_target, "attack target shortcut can select a target of the same type");
+        BattlecamRandom empty{5};
+        expect(choose_battlecam_subject({}, size_weight, 0, true, empty) == 0, "empty selection refuses startup");
+    }
+    {
+        using namespace eawr::presentation::godot_backend;
+        BattlecamRandom first{12345U}, second{12345U}, scaled{12345U};
+        for (int i = 0; i < 32; ++i) {
+            const auto a = BattlecamChase::make(5.0F, first);
+            const auto b = BattlecamChase::make(5.0F, second);
+            const auto c = BattlecamChase::make(50.0F, scaled);
+            expect(a.start == b.start && a.end == b.end && a.duration == b.duration, "seeded chase is deterministic");
+            expect(a.duration >= 2.0F && a.duration <= 4.0F, "chase duration is within BCAM-10 bounds");
+            const auto end = a.at(a.duration);
+            expect(a.at(0.0F) == a.start, "chase starts at its first endpoint");
+            const auto mid = a.at(a.duration * 0.5F);
+            for (std::size_t axis = 0; axis < 3; ++axis) {
+                close(end[axis], a.end[axis], "chase reaches its final endpoint");
+                close(mid[axis], (a.start[axis] + a.end[axis]) * 0.5F, "chase interpolates linearly");
+                close(c.start[axis], a.start[axis] * 10.0F, "chase scales with model bounds");
+            }
+        }
+    }
     {
         const camera::TacticalFrame original{1280, 720, 45, 1, 10000, {0, 100, 200}, {0, 0, 0}, {0, 1, 0}};
         const std::array<float, 3> subject{100, 20, -40};

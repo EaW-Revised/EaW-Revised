@@ -12,7 +12,10 @@ namespace eawr::viewer::galactic {
 ProductionChoice production_choice_facts(const sim::galactic::ObservedProductionOffer& row) {
     ProductionChoice choice;
     choice.type_id = row.type; choice.current = row.current; choice.eventual = row.eventual;
-    choice.already_in_production = !row.current && row.already_in_production;
+    // WGUI-91/170: a queued type does not bypass the independent story-lock gate.
+    choice.already_in_production = !row.current && row.already_in_production
+        && row.admission != sim::galactic::ProductionAdmission::locked
+        && row.capability != sim::galactic::ProductionAdmission::locked;
     choice.build_disabled = row.admission != sim::galactic::ProductionAdmission::allowed;
     choice.space = row.domain == sim::galactic::ProductionDomain::space;
     choice.price = row.price; choice.base_price = row.base_price;
@@ -68,12 +71,9 @@ bool pause_press_admitted(const bool has_command_bar, const bool bar_clock_enabl
     if (has_command_bar) return bar_clock_enabled;
     return !gates.lan_match || clock_controls_open(gates);
 }
-bool fast_forward_controls_admitted(const bool clock_enabled, const std::size_t active_humans, const bool fixture) noexcept {
-    return clock_enabled && (fixture || active_humans <= 1);
-}
-std::optional<sim::math::Fixed> live_fast_forward_factor(const bool fixture, const bool live_game) noexcept {
+std::optional<sim::math::Fixed> live_fast_forward_factor(const bool fixture, const bool live_game, const bool multiplayer) noexcept {
     if (fixture || !live_game) return std::nullopt;
-    return sim::math::Fixed::from_raw(sim::galactic::fast_forward_factor_raw);
+    return sim::math::Fixed::from_raw(multiplayer ? sim::galactic::multiplayer_speed_max_raw : sim::galactic::fast_forward_factor_raw);
 }
 bool fast_forward_available(const bool controls_enabled, const bool paused, const bool has_factor) noexcept {
     return controls_enabled && !paused && has_factor;
@@ -185,6 +185,7 @@ void append_queue(std::vector<QueueComponent>& output,
             const auto& item = (*queue)[index];
             component.type = item.type;
             component.type_id = item.type_id; component.build_id = item.build_id;
+            component.price = item.price;
             component.index = static_cast<std::uint32_t>(index);
             component.icon = item.icon.empty() ? item.temporary_icon : item.icon;
             component.visible = true;
@@ -210,7 +211,7 @@ ProductionQueueItems production_queue_items(const sim::galactic::PlanetProductio
             // WGEP-44: retained remaining time survives payment stalls
             // and blocked producers; the clock alone is not progress.
             const int progress = production_percent(entry.full_seconds.raw(), entry.last_remaining.raw());
-            queue.push_back({name, icon, {}, progress, entry.type, entry.build_id});
+            queue.push_back({name, icon, {}, progress, entry.type, entry.build_id, entry.price.trunc_to_integer()});
         }
     }
     return result;
@@ -475,13 +476,18 @@ std::string income_overlay_text(double income) {
     return std::to_string(static_cast<std::int64_t>(std::round(income)));
 }
 
-PlayerHudView player_hud_view(const PlayerHudFacts& facts, std::string_view cycle_label) {
+PlayerHudView player_hud_view(const PlayerHudFacts& facts, std::string_view cycle_label,
+                            const std::string_view technology_label) {
     PlayerHudView result;
-    if (facts.fiscal_cycle) result.cycle = std::string(cycle_label) + " " + std::to_string(*facts.fiscal_cycle);
+    // GHUDL-19: the date adds its separator; the localized technology label owns its punctuation.
+    if (facts.fiscal_cycle) result.cycle = (cycle_label.empty() ? std::string{} : std::string(cycle_label) + ": ")
+        + std::to_string(*facts.fiscal_cycle);
     if (facts.next_income) result.next_income = credits(*facts.next_income);
     if (facts.population_with_production && facts.population_capacity)
         result.population = std::to_string(*facts.population_with_production) + " / " + std::to_string(*facts.population_capacity);
-    if (!facts.hide_tech && facts.displayed_tech) result.technology = std::to_string(*facts.displayed_tech);
+    if (!facts.hide_tech && facts.displayed_tech)
+        result.technology = (technology_label.empty() ? std::string{} : std::string(technology_label) + " ")
+            + std::to_string(*facts.displayed_tech);
     return result;
 }
 

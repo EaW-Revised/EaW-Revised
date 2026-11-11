@@ -1,5 +1,6 @@
 #include "lockstep_session_internal.hpp"
 #include "eawr/core/sha256.hpp"
+#include "eawr/sim/galactic/types.hpp"
 #include <algorithm>
 #include <limits>
 
@@ -8,7 +9,7 @@ using namespace lockstep_detail;
 
 namespace {
 core::Result<void> validate_batch(const SealedBatch& batch) {
-    if (batch.sender >= max_match_seats || batch.tick >= max_session_ticks || batch.sequence != batch.tick
+    if (batch.sender >= max_match_seats || batch.tick >= sim::galactic::galactic_max_ticks || batch.sequence != batch.tick
         || batch.commands.size() > max_batch_commands)
         return refused<void>(session_errors::malformed, "invalid sealed batch envelope");
     std::optional<sim::SeatCommandKey> previous;

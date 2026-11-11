@@ -32,6 +32,8 @@
 #include <utility>
 #include <vector>
 
+namespace eawr::battle { struct BattleStart; }
+
 namespace eawr::presentation::godot_backend {
 
 // `--eawr-populate` on a kind-2 (space) map (P1-11 #32). The static scene
@@ -88,6 +90,7 @@ public:
         // #80: TED records whose objects the live session owns; the session's
         // snapshot draws them (as placed ships), so the static map does not.
         std::vector<std::uint32_t> session_records;
+        const battle::BattleStart* battle_start{};
         // Re-plans the attached particle effects over scene() with the
         // current hardpoint states, starting and stopping their emitters
         // (#136). Called once at the end of compose and after each
@@ -162,6 +165,8 @@ public:
     // #81: the clip a live ship with PlacedShip::clip bound at compose; null
     // when it has none or it did not bind (the report says why).
     [[nodiscard]] const animation::Player* live_clip(std::size_t ship, bool alternate = false) const noexcept override;
+    [[nodiscard]] const animation::Player* land_clip(std::size_t ship, std::size_t type) const noexcept override;
+    [[nodiscard]] std::optional<animation::ClipPosition> land_idle_position(std::size_t ship, std::uint64_t tick) const noexcept override;
     // #81: poses those ships' skinned pieces at `position` of their clip,
     // blended from the bind pose by `blend_from` (0 is the clip's pose).
     // Bones the clip hides are collapsed to their origin. False (failure()
@@ -550,6 +555,9 @@ private:
     struct LiveClipInstance final { std::size_t ship{}; sim::EntityId entity{}; sim::AssetId asset{}; };
     std::vector<std::optional<std::size_t>> live_clips_;
     std::vector<std::optional<std::size_t>> live_alternate_clips_; // #76
+    std::vector<std::array<std::optional<std::size_t>, 119>> land_clips_;
+    std::vector<std::optional<IdlePlacement>> land_idle_;
+    std::map<std::pair<std::string, std::string>, std::size_t> land_clip_bindings_;
     std::vector<LiveClipInstance> live_clip_instances_;
     struct HeldClip {
         animation::ClipPosition position;

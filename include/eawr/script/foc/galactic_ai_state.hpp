@@ -1,5 +1,6 @@
 #pragma once
 
+#include "eawr/core/checkpoint_limits.hpp"
 #include "eawr/script/foc/galactic_ai.hpp"
 #include "eawr/core/record_digest.hpp"
 
@@ -7,9 +8,8 @@ namespace eawr::script::foc::galactic_ai {
 // WGA-56/139: persist owned state, never the derived execution route matrix.
 // Each component owns its domain/version and validation. The envelope preserves
 // exact Number/Fixed words supplied by those components in sorted key order.
-inline constexpr std::uint32_t native_state_version = 1;
 inline constexpr std::uint32_t native_sync_digest_version = 2;
-inline constexpr std::size_t native_state_max_bytes = 32U * 1024U * 1024U;
+inline constexpr std::size_t native_state_max_bytes = core::checkpoint_byte_limit;
 // Project archive quotas, independent of stock/mod authored values.
 inline constexpr std::size_t native_state_max_text_bytes = 1048576;
 inline constexpr std::size_t native_state_max_rows = 262144;

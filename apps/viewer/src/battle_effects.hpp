@@ -164,6 +164,7 @@ public:
     [[nodiscard]] core::Result<void> set_particle_detail(const particles::ParticleDetail detail) {
         return registry_->set_detail(detail);
     }
+    [[nodiscard]] particles::ParticleDetail particle_detail() const noexcept { return registry_->detail(); }
     void measure_preparation(bool enabled) noexcept { measure_preparation_ = enabled; projectile_prepare_ms_ = 0.0; }
     [[nodiscard]] double projectile_prepare_ms() const noexcept { return projectile_prepare_ms_; }
     // BP-68: perspective axis measurements are capture diagnostics, off in normal play.
@@ -261,6 +262,7 @@ private:
         // #862 (space-abilities AB-66): the weapon's ability shot, the squadron's
         // ION_CANNON_SHOT override projectile, by weapon slot key.
         std::map<std::uint32_t, ProjectileLook> ability_weapons;
+        std::map<sim::tactical::TypeId, std::map<std::uint32_t, ProjectileLook>> lucky_weapons;
         // WAD-38: BARRAGE retains its own override beside ordinary and ion shots.
         std::map<std::uint32_t, ProjectileLook> barrage_weapons;
         std::map<std::uint32_t, ProjectileLook> charged_weapons;

@@ -70,6 +70,7 @@ using battle::MatchOptions;
 }
 
 [[nodiscard]] core::Result<MatchOptions> read_match_defaults(const vfs::Vfs& filesystem);
+[[nodiscard]] core::Result<MatchOptions> read_match_defaults(const data::XmlNode& constants);
 
 // WSS-25: the staging's credits slider bounds, the GameConstants Min_Skirmish_Credits and
 // Max_Skirmish_Credits.
@@ -78,6 +79,7 @@ struct CreditsBounds final {
     std::int64_t maximum{};
 };
 [[nodiscard]] core::Result<CreditsBounds> read_credits_bounds(const vfs::Vfs& filesystem);
+[[nodiscard]] core::Result<CreditsBounds> read_credits_bounds(const data::XmlNode& constants);
 
 // MAT-08, MAT-09 (docs/behaviour/main-menu-attract.md): the start of a demo map. There is no
 // lobby: the forces are the map's own placed objects, each kept for the editor player its owner
@@ -161,6 +163,7 @@ using battle::LobbyColour;
 
 inline constexpr std::uint32_t multiplayer_colour_count = 9; // WSS-20.
 [[nodiscard]] core::Result<std::vector<LobbyColour>> read_lobby_colours(const vfs::Vfs& filesystem);
+[[nodiscard]] core::Result<std::vector<LobbyColour>> read_lobby_colours(const data::XmlNode& constants);
 
 } // namespace eawr::skirmish
 namespace eawr::script::foc { class AiDifficultyTable; }
@@ -182,6 +185,10 @@ struct StartInputs final {
     // fog grid's cell and regrow time (#495).
     sim::math::Fixed fog_cell_size{sim::math::Fixed::from_raw(std::int64_t{100} * sim::math::Fixed::scale)};
     sim::math::Fixed fog_regrow_seconds{sim::math::Fixed::from_raw(std::int64_t{6} * sim::math::Fixed::scale)};
+    // DesiredLandFOWCellSize and LandFOWRegrowTime from gameconstants.xml: the land fog grid's requested cell size and
+    // regrow time (LC-85). Zero until read: a land start without them is refused by land_fog_rules, never defaulted.
+    sim::math::Fixed land_fog_cell_size{};
+    sim::math::Fixed land_fog_regrow_seconds{};
     sim::tactical::VictoryCondition space_victory_condition{sim::tactical::VictoryCondition::enemy_starbase_destroyed};
     sim::tactical::VictoryCondition land_victory_condition{sim::tactical::VictoryCondition::none};
     MatchOptions match_defaults{};
@@ -210,7 +217,18 @@ struct StartInputs final {
 struct DataIdentity {
     std::string script_manifest_digest, ai_data_digest;
 };
+
+// One campaign Start, with a fixed mounted view, tables and lobby factions.
+// The first successful map supplies the common facts; failures retain the
+// ordinary reader's diagnostic order.
+struct CampaignStartInputsCache {
+    const assets::ObjectTypeCatalog* object_types{};
+    std::optional<StartInputs> common{};
+};
 [[nodiscard]] core::Result<DataIdentity> read_data_identity(const vfs::Vfs& filesystem);
+// Optional preparation receipts from the same byte reads; existing identities and reader/refusal order are unchanged.
+[[nodiscard]] core::Result<DataIdentity> read_data_identity(const vfs::Vfs& filesystem,
+    std::vector<units::InputFile>* consumed_inputs);
 
 // Reads the fixture's map (checking its SHA-256), its placements, the lobby
 // factions' starting forces and the lobby colours from a mounted FoC view.
@@ -233,6 +251,10 @@ struct DataIdentity {
     const data::Catalog& catalog,
     const units::UnitTables& tables,
     const DataIdentity& identity);
+
+[[nodiscard]] core::Result<StartInputs> read_start_inputs(
+    const Fixture& fixture, const vfs::Vfs& filesystem, const data::Catalog& catalog,
+    const units::UnitTables& tables, const DataIdentity& identity, CampaignStartInputsCache& cache);
 
 // `skipped_types` (skipped_type_ids): a start whose content skipped unit types (#4589) names them in the
 // "skipped-types" domain, so peers and replays with another skip set refuse each other; none adds nothing.

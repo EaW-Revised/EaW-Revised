@@ -18,6 +18,7 @@
 #include "eawr/sim/galactic/corruption_actions.hpp"
 #include "eawr/sim/galactic/income.hpp"
 #include "eawr/sim/tactical/admission.hpp"
+#include "../../apps/viewer/src/galactic/ability_drop.hpp"
 
 #include <exception>
 #include <utility>
@@ -419,12 +420,101 @@ void accepted_space_mission(const eawr::sim::PartitionExecutor& pool, std::vecto
         expect(session->return_state().heroes.size() == 1, "mission return leaves the consumed actor on its default return");
     }
 }
+void removal(const eawr::sim::PartitionExecutor& pool, std::vector<std::string>& hashes) {
+    for (unsigned variant = 0; variant < 14; ++variant) {
+        auto config = setup(); const auto target = config.planets[0].id, actor = buyer(config);
+        config.planets[0].owner = 2;
+        config.control->planets[0].ground_base.owner = config.control->planets[0].starbase.owner = 2;
+        config.production->planets[0].target_owner = 2;
+        config.economy_corruption->planets[0].corruption = gc::corruption_fixture::Type::black_market;
+        auto& profile = config.ability_host->profiles[0]; profile.corruption.reset();
+        profile.removal.emplace(); profile.removal->name = "MOD_REMOVE"; profile.removal->text_identity = "ModHero";
+        profile.removal->hero = true; profile.removal->cost_multiplier = variant == 1 ? f(2) : Fixed::from_ratio(1, 2).value();
+        profile.removal->seconds = variant == 2 ? f(2) : f(1);
+        profile.removal->causes_despawn = variant == 3;
+        profile.ground_activated = {gc::AbilityKind::remove_corruption};
+        config.ability_host->activated_removal_abilities = {"MOD_REMOVE"};
+        config.ability_host->corruption_planets[0].removal_base_cost = f(100);
+        if (variant == 4) profile.removal->initially_enabled = false;
+        if (variant == 5) profile.ground_activated.clear();
+        if (variant == 6) config.ability_host->corruption_planets[0].removal_base_cost = f(3000);
+        if (variant == 7) config.economy_corruption->planets[0].corruption = gc::corruption_fixture::Type::none;
+        if (variant == 8) config.ability_host->corruption_planets[0].removal_base_cost = f(-100);
+        if (variant == 10) {
+            config.planets[0].owner = 1;
+            config.control->planets[0].ground_base.owner = config.control->planets[0].starbase.owner = 1;
+            config.production->planets[0].target_owner = 1;
+        }
+        if (variant == 11) profile.removal->cost_multiplier = {};
+        if (variant == 12) config.ability_host->activated_removal_abilities.clear();
+        if (variant == 13) {
+            config.economy_corruption->planets[0].corruption = gc::corruption_fixture::Type::militia;
+            profile.removal->causes_despawn = true;
+        }
+        // The viewer reads observer-local service rows, not the raw host state.
+        ability_fixture::add_observer(config, 2, {1000, 3000});
+        auto game = take(eawr::campaign::GameSession::create(config));
+        unsigned land_notices{}, deploy_notices{};
+        game.set_story_notice_handler([&](const eawr::campaign::GameStoryNotice& notice) {
+            if (const auto* travel = std::get_if<gc::story::TravelNotice>(&notice.payload);
+                travel && (travel->kind == gc::story::Travel::land || travel->kind == gc::story::Travel::deploy_hero)) {
+                expect(notice.player == gc::story::Player{2} && notice.observer_planet == target && travel->fleet.owner == gc::story::Player{2}
+                    && travel->fleet.types == std::vector<std::string>{"ModHero"}
+                    && travel->fleet.heroes == std::vector<std::string>{"ModHero"} && travel->hero == "ModHero",
+                    "removal emits exact actor-owner land and hero-deployment notices through GameSession");
+                if (travel->kind == gc::story::Travel::land) ++land_notices;
+                else ++deploy_notices;
+            }
+            return eawr::core::Result<void>::success();
+        });
+        if (variant == 9) {
+            take(game.set_ability_lifecycle(actor, true, true, gc::AbilityKind::remove_corruption));
+            hashes.push_back(take(game.step(pool)).state_hash.get()); // publish the lifecycle change before preview
+        }
+        const auto preview = eawr::viewer::galactic::ability_drop_candidate(*game.galaxy().snapshot(), 2,
+            config.fleets[1].id, *config.ability_host);
+        expect(bool(preview) == (variant < 4 || variant == 6 || variant == 8 || variant == 11 || variant == 13),
+            "shared viewer slot admits authored enabled removal on a corrupted owned target independently of price");
+        order(game, 1, gc::DeployGroundAbility{actor, target});
+        hashes.push_back(take(game.step(pool)).state_hash.get());
+        const bool success = variant < 4 || variant == 8 || variant == 11 || variant == 12;
+        const auto price = variant == 1 ? f(200) : variant == 8 || variant == 11 ? Fixed{} : f(50);
+        expect(game.galaxy().snapshot()->player_economy()->players[1].credits == take(eawr::sim::math::subtract(f(1000), success ? price : Fixed{})),
+            "removal uses authored base times multiplier, clamps negative cost and never charges a refusal");
+        expect(land_notices == (success ? 1U : 0U) && deploy_notices == (success ? 1U : 0U)
+            && game.return_state().heroes.size() == (variant == 3 ? 1U : 0U),
+            "removal notifies and consumes only on successful activation with the authored flag");
+        const auto state = game.galaxy().ability_state()->transitions[0].transition;
+        expect(state.active() == success && (!success || (!state.increasing && state.decreasing
+            && state.end - state.start == (variant == 2 ? 60U : 30U))), "authored removal seconds control the transition deadline");
+        expect(std::count_if(game.galaxy().snapshot()->events().begin(), game.galaxy().snapshot()->events().end(),
+            [&](const auto& event) { return event.kind == gc::GalacticEventKind::corruption_removal_started
+                && event.subject == target && event.value == profile.type; }) == (success ? 1 : 0),
+            "successful removal publishes one typed source/target event even when the actor is consumed");
+        if (variant == 13) {
+            expect(game.galaxy().snapshot()->economy_corruption()->planets[0].corruption == gc::corruption_fixture::Type::militia
+                && game.galaxy().snapshot()->player_economy()->players[1].credits == f(1000)
+                && land_notices == 0U && deploy_notices == 0U && game.return_state().heroes.empty(),
+                "militia removal refuses before payment, story notifications or authored hero consumption");
+        }
+        const auto ids = cp::game_identities(config);
+        const auto saved = take(cp::save_game_checkpoint(game, ids));
+        auto fresh = take(cp::load_game_checkpoint(saved, ids, {}, pool));
+        expect(take(cp::save_game_checkpoint(fresh.session, ids)) == saved, "removal profile and lifecycle state restore byte for byte");
+        for (unsigned tick = 0; tick < 70; ++tick) {
+            hashes.push_back(take(game.step(pool)).state_hash.get());
+            expect(take(fresh.session.step(pool)).state_hash.get() == hashes.back(), "saved removal continuation equals uninterrupted state");
+        }
+        expect(!success || game.galaxy().snapshot()->economy_corruption()->planets[0].corruption == gc::corruption_fixture::Type::none,
+            "successful removal finishes through the existing corruption completion owner");
+    }
+}
 } // namespace
 int case_galactic_ability_corruption_tests() {
     ability_fixture::arm_watchdog();
     try {
         using Phase = void (*)(const eawr::sim::PartitionExecutor&, std::vector<std::string>&);
-        const Phase phases[] = {direct, ai_invocation, human_refusal, missions, stale_units, representative, unsuccessful_missions, accepted_space_mission, startup};
+        const Phase phases[] = {direct, ai_invocation, human_refusal, missions, stale_units, representative, unsuccessful_missions, accepted_space_mission, startup, removal};
         std::vector<std::string> baseline;
         for (std::size_t count : {1U, 2U, 4U, 8U}) {
             eawr::platform::ThreadWorkerAdapter workers(count); std::vector<std::string> hashes;

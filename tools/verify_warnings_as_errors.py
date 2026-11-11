@@ -15,6 +15,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--preset", required=True)
+    parser.add_argument("--toolchain", type=Path, help="configure a cross build with this toolchain")
     parser.add_argument("--config", default="Release")
     args = parser.parse_args()
 
@@ -26,8 +27,12 @@ def main() -> int:
     if binary.exists():
         shutil.rmtree(binary)
 
-    configure = subprocess.run(
-        [
+    configure_command = (
+        ["cmake", "-S", str(root), "-B", str(binary), "-G", "Ninja",
+         "-DCMAKE_BUILD_TYPE=Release", "-DCMAKE_TRY_COMPILE_CONFIGURATION=Release",
+         "-DEAWR_WARNINGS_AS_ERRORS=ON", "--toolchain", str(args.toolchain.resolve()),
+         "-DEAWR_INJECT_PROJECT_WARNING=ON", "-DBUILD_TESTING=OFF"]
+        if args.toolchain else [
             "cmake",
             "--preset",
             args.preset,
@@ -35,7 +40,9 @@ def main() -> int:
             str(binary),
             "-DEAWR_INJECT_PROJECT_WARNING=ON",
             "-DBUILD_TESTING=OFF",
-        ],
+        ])
+    configure = subprocess.run(
+        configure_command,
         cwd=root,
         text=True,
     )

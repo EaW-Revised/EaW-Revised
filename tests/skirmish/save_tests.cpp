@@ -679,21 +679,29 @@ int save_fixture(const std::string& replay_path, const std::string& save_path, c
     viewer::SkirmishSaveHints hints;
     hints.camera = viewer::SkirmishSaveCamera{{12.5F, -3.0F, 400.25F}, 0.75F, 45.0F};
     hints.label = "Kuat";
+    hints.scoring = "saved scoring";
     const auto hint_bytes = viewer::encode_skirmish_save_hints(hints);
     expect(viewer::decode_skirmish_save_hints(hint_bytes) == hints, "the skirmish save hints round-trip");
+    auto legacy_hints = hints;
+    legacy_hints.scoring.clear();
+    auto legacy = viewer::encode_skirmish_save_hints(legacy_hints);
+    legacy.resize(legacy.size() - 4U);
+    legacy[7] = 1;
+    expect(viewer::decode_skirmish_save_hints(legacy) == legacy_hints, "version 1 hints remain readable");
     expect(viewer::decode_skirmish_save_hints(viewer::encode_skirmish_save_hints({})) == viewer::SkirmishSaveHints{},
         "hints without a camera round-trip");
     auto damaged = hint_bytes;
     damaged.pop_back();
     expect(!viewer::decode_skirmish_save_hints(damaged), "truncated hints decode to nothing");
     auto foreign = hint_bytes;
-    foreign[7] = 2;
+    foreign[7] = 3;
     expect(!viewer::decode_skirmish_save_hints(foreign), "hints of another version decode to nothing");
 
     const auto directory = std::filesystem::temp_directory_path() / "eawr-skirmish-save-files";
     std::error_code ignored;
     std::filesystem::remove_all(directory, ignored);
     const auto written = eawr::platform::write_battle_save(directory, "Battle 1", committed, hint_bytes, false);
+    expect(!eawr::platform::skirmish_save_setup(Bytes{1, 2, 3}), "invalid skirmish setup bytes are refused");
     expect(static_cast<bool>(written), "a battle save is written" + (written ? std::string() : ": " + written.error().message));
     expect(!eawr::platform::write_battle_save(directory, "Battle 1", committed, hint_bytes, false),
         "an existing save is not overwritten without consent");

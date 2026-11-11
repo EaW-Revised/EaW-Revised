@@ -30,6 +30,11 @@ struct LiveSessionView::PendingSave final {
     std::optional<std::pair<std::uint64_t, core::Result<std::vector<std::uint8_t>>>> taken;
 };
 
+core::Result<std::string> LiveSessionView::save_scoring() {
+    if (!scoring_) return core::Result<std::string>::success({});
+    return scoring_->save();
+}
+
 bool LiveSessionView::can_save() const noexcept {
     return session_ != nullptr && setup_.has_value() && !setup_->campaign && ai_scripts_ != nullptr
         && !options_.lan && !options_.borrowed_feed && !replay_ && !land_content_ && !observer_multiplayer()
@@ -78,6 +83,15 @@ bool LiveSessionView::service_save() {
                     return platform::write_battle_save(pending->directory, pending->name, bytes, pending->hints,
                                                        pending->overwrite);
                 });
+        } else if (!session_ || session_->failure() || finished_) {
+            const auto failure = session_ ? session_->failure() : std::nullopt;
+            save_status_.last_name = pending_save_->name;
+            save_status_.last_problem = failure ? failure->message : "The battle stopped before the save could be taken.";
+            pending_save_.reset();
+            save_status_.running = false;
+            ++save_status_.failed;
+            godot::UtilityFunctions::print("EAWR battle save failed: ", godot::String::utf8(save_status_.last_problem.c_str()));
+            return true;
         }
     }
     if (!save_write_.valid() || save_write_.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return false;

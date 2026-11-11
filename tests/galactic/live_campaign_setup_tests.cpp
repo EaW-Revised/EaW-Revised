@@ -45,8 +45,25 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <utility>
 #include <vector>
+
+namespace eawr::campaign {
+core::Result<void> test_reference_validate_live_campaign_seats(const data::galactic::GalacticData&,
+    std::span<const CampaignPlayerBinding>, std::span<const sim::galactic::Seat>);
+}
+// Compile the same load-only providers with the pre-memo offer body for full-output comparison.
+// The renamed entry points are test-only and do not alter the production library.
+#define EAWR_TEST_LEGACY_OFFER 1
+#define resolve_structure_requirements test_reference_resolve_structure_requirements
+#define validate_live_campaign_seats test_reference_validate_live_campaign_seats
+#define prepare_live_campaign_services test_reference_prepare_live_campaign_services
+#include "../../src/campaign/live_setup.cpp"
+#undef prepare_live_campaign_services
+#undef validate_live_campaign_seats
+#undef resolve_structure_requirements
+#undef EAWR_TEST_LEGACY_OFFER
 
 namespace {
 namespace cp = eawr::campaign;
@@ -1166,6 +1183,93 @@ void installed(bool domains_only = false, bool slots_only = false, std::string_v
     expect(lifecycle_checked && lifecycle_steps > 0, "installed company lifecycle exercised a real separation, landing or launch");
     std::cout << "company lifecycle steps=" << lifecycle_steps << '\n';
 }
+// Co-op host restore (rig run 2026-11-08): a co-op save made after the AI has played did not restore through the lobby
+// host path (PreparedLiveCampaign::from_plan with native AI installed and the exact checkpoint bytes): the room refused
+// "native restore failed: [EAWR-GCAI-RUNTIME-0001] galactic AI stock provider absent: actual typed actor/current
+// representation". The existing co-op restore case above installs no native AI and saves at tick zero.
+// `workers` > 0 steps the live game on that many worker threads, as the viewer's live session does (0: inline). `earlier` lists
+// more ticks (below `ticks`) at which the same running game is also saved and restored, so one run answers "from which tick on".
+void installed_coop_native_ai_restore(const std::string& name, std::uint64_t ticks, const bool coop = true,
+                                      const std::size_t workers = 0, std::vector<std::uint64_t> earlier = {}) {
+    const auto root = game_root();
+    if (!root) { eawr::testing::skip_installed("SKIPPED: co-op native AI restore requires EAWR_EAW_GAME_ROOT\n", 0, std::cout); return; }
+    std::vector<eawr::vfs::MountSpec> mounts;
+    for (const auto& [id, folder] : {std::pair{"expansion", "corruption"}, std::pair{"base", "GameData"}}) {
+        auto mount = eawr::vfs::resolve_manifest_mount(id, std::filesystem::path(*root) / folder / "Data");
+        if (!mount) throw std::runtime_error(eawr::core::format_diagnostic(mount.error()));
+        mounts.push_back(std::move(mount).value().mount);
+    }
+    const auto filesystem_owner = std::make_shared<const eawr::vfs::Vfs>(eawr::vfs::Vfs::mount(mounts).value());
+    const auto& filesystem = *filesystem_owner;
+    const auto catalog = eawr::data::load_catalog(filesystem, eawr::data::Profile::foc).value();
+    const auto data = eawr::data::galactic::load_galactic_data(filesystem, catalog.catalog).value();
+    const auto types = eawr::units::galactic_type_table(catalog.catalog);
+    const auto* source = data.campaign(name);
+    if (!source) throw std::runtime_error("campaign " + name + " is not installed");
+    cp::CampaignSetupOptions options; options.seed = 42;
+    for (const auto& faction : data.factions) {
+        const auto id = static_cast<gc::PlayerId>(options.players.size() + 1);
+        options.players.push_back({{id, id, 0}, faction.name, true});
+        const bool local = faction.name == source->starting_active_player;
+        if (local) options.solo_reference_human = id;
+        if (!faction.is_neutral.value_or(false)) options.seats.push_back({gc::SeatId{id}, id,
+            local ? gc::SeatKind::human : gc::SeatKind::ai, id - 1, true, local ? id : 0});
+    }
+    std::vector<std::string> originals;
+    for (const auto& type : types.types) originals.push_back(type.name);
+    std::sort(originals.begin(), originals.end());
+    for (const auto& original : originals) options.types.push_back({options.types.size() + 1, original});
+    // The lobby's shape: the entry played as co-op, two humans on the one human faction, the other factions AI.
+    // `coop` false keeps the ordinary single-player shape (one human), to tell a co-op-only failure from any AI save.
+    if (coop) {
+        options.mode = cp::CampaignSetupMode::multiplayer;
+        // The lobby follows the entry (derive_local): a multiplayer entry keeps its multiplayer rules, a single-player one co-op rules.
+        options.rules_flavour = source->is_multiplayer.value_or(false) ? cp::CampaignRulesFlavour::multiplayer : cp::CampaignRulesFlavour::single_player;
+        auto teammate = *std::find_if(options.seats.begin(), options.seats.end(),
+            [](const auto& seat) { return seat.kind == gc::SeatKind::human; });
+        teammate.seat_id = {999}; teammate.lobby_slot = static_cast<std::uint32_t>(options.seats.size());
+        options.seats.push_back(teammate);
+    }
+    auto plan = cp::plan_live_campaign_setup(filesystem, data, types, name, options, "Normal_Default");
+    if (!plan) throw std::runtime_error(name + ": " + eawr::core::format_diagnostic(plan.error()));
+    auto fresh = eawr::platform::PreparedLiveCampaign::from_plan(filesystem_owner, catalog.catalog, data, types,
+        plan.value(), "Normal_Default");
+    if (!fresh) throw std::runtime_error(name + ": " + eawr::core::format_diagnostic(fresh.error()));
+    expect(fresh.value()->native_ai_installed() && !fresh.value()->native_ai_players().empty(),
+        "the co-op campaign installs native AI like the lobby host does");
+    auto& game = eawr::platform::AgreedCampaignAccess::session(*fresh.value());
+    const eawr::sim::InlineExecutor inline_executor;
+    std::optional<eawr::platform::ThreadWorkerAdapter> worker_executor;
+    if (workers) worker_executor.emplace(workers);
+    const eawr::sim::PartitionExecutor& executor = worker_executor
+        ? static_cast<const eawr::sim::PartitionExecutor&>(*worker_executor) : static_cast<const eawr::sim::PartitionExecutor&>(inline_executor);
+    earlier.push_back(ticks);
+    std::sort(earlier.begin(), earlier.end());
+    earlier.erase(std::unique(earlier.begin(), earlier.end()), earlier.end());
+    for (const auto target : earlier) {
+        while (game.completed_tick() < target) {
+            auto step = game.step(executor);
+            if (!step) throw std::runtime_error(name + " tick " + std::to_string(game.completed_tick()) + ": " + eawr::core::format_diagnostic(step.error()));
+        }
+        const auto identities = eawr::checkpoint::game_identities(game.galaxy().setup());
+        const auto saved = eawr::checkpoint::save_game_checkpoint(game, identities);
+        if (!saved) throw std::runtime_error(name + " save: " + eawr::core::format_diagnostic(saved.error()));
+        // What GalacticLobbyBackend's restore_session does for the host (and the guest): native AI on, the saved bytes exact.
+        auto restored = eawr::platform::PreparedLiveCampaign::from_plan(filesystem_owner, catalog.catalog, data, types,
+            plan.value(), "Normal_Default", true, {300, 1, 3, 3, 300, 1}, false, saved.value());
+        expect(restored.has_value(), name + ": a co-op save made after " + std::to_string(target)
+            + " ticks restores with native AI installed" + (restored ? std::string{}
+                : " (" + eawr::core::format_diagnostic(restored.error()) + ")"));
+        if (restored) {
+            const auto& copy = eawr::platform::AgreedCampaignAccess::session(*restored.value());
+            expect(copy.completed_tick() == game.completed_tick() && copy.state_sha256() == game.state_sha256(),
+                "the restored co-op session has the saved tick and state hash");
+            expect(restored.value()->native_ai_installed(), "the restored co-op session keeps its native AI");
+        }
+        std::cout << "native AI restore campaign=" << name << " shape=" << (coop ? "coop" : "single-player") << " workers=" << workers
+            << " ticks=" << target << (restored ? " restored" : " REFUSED") << '\n';
+    }
+}
 void installed_origin_starbases() {
     const auto root = game_root();
     if (!root) { eawr::testing::skip_installed("SKIPPED: Origin starbases require EAWR_EAW_GAME_ROOT\n", 0, std::cout); return; }
@@ -1225,6 +1329,29 @@ void installed_origin_starbases() {
             types, request->campaign, options, "Normal_Default");
         if (!result) throw std::runtime_error(std::string(name) + ": " + eawr::core::format_diagnostic(result.error()));
         auto prepared = std::move(result).value();
+        // Exercise the same installed campaign through both startup schedules.
+        // This compares the complete campaign state, not only the setup layout.
+        // A live tag trace keeps startup on the serial path, which gives the reference schedule.
+        std::optional<eawr::data::tag_trace::Recording> recording; recording.emplace();
+        auto serial = eawr::platform::PreparedLiveCampaign::create(fs, catalog.catalog, data,
+            types, request->campaign, options, "Normal_Default");
+        (void)recording->finish(); recording.reset();
+        if (!serial) throw std::runtime_error(eawr::core::format_diagnostic(serial.error()));
+        expect(eawr::platform::AgreedCampaignAccess::session(*prepared).state_sha256()
+                == eawr::platform::AgreedCampaignAccess::session(*serial.value()).state_sha256(),
+            "serial and overlapped campaign startup have identical game-state hashes");
+        const auto overlap_notes = eawr::platform::AgreedCampaignAccess::load_notes(*prepared);
+        const auto serial_notes = eawr::platform::AgreedCampaignAccess::load_notes(*serial.value());
+        expect(overlap_notes.size() == serial_notes.size(), "serial and overlapped load-note counts agree");
+        for (std::size_t i = 0; i < std::min(overlap_notes.size(), serial_notes.size()); ++i) {
+            const auto& a = overlap_notes[i]; const auto& b = serial_notes[i];
+            expect(a.code == b.code && a.file == b.file && a.line == b.line && a.object == b.object
+                    && a.tag == b.tag && a.authored_value == b.authored_value && a.message == b.message
+                    && a.classification == b.classification && a.layer == b.layer && a.action == b.action
+                    && a.effective_value == b.effective_value && a.retail == b.retail && a.phase == b.phase
+                    && a.diagnostic_code == b.diagnostic_code,
+                "serial and overlapped load notes retain their order and contents");
+        }
         const auto& plan = prepared->plan(); const auto& setup = prepared->layout();
         for (const auto& planet : setup.control->planets) if (!planet.landed.empty())
             mixed_surface_seen |= std::any_of(planet.landed.begin(), planet.landed.end(),
@@ -2128,6 +2255,110 @@ void installed_retail_production_numbers() {
         if (!services) throw std::runtime_error("retail numbers family=" + std::to_string(family) + " value=" + value + ": " + services.error().message);
         auto campaign = cp::CampaignRoot::create(plan, services.value());
         if (!campaign) throw std::runtime_error("retail numbers family=" + std::to_string(family) + " value=" + value + ": " + campaign.error().message);
+        if (family == 4 && value == "1" && !omit_benefits) {
+            // Compare the complete setup and trace with the pre-memo offer implementation.
+            const auto reference_load = [&](bool legacy) {
+                eawr::data::tag_trace::Recording recording;
+                auto providers = legacy
+                    ? cp::test_reference_prepare_live_campaign_services(fs, loaded.catalog, data, types, plan, "Normal_Default")
+                    : cp::prepare_live_campaign_services(fs, loaded.catalog, data, types, plan, "Normal_Default");
+                if (!providers) throw std::runtime_error("reference providers: " + providers.error().message);
+                auto root_result = cp::CampaignRoot::create(plan, providers.value());
+                if (!root_result) throw std::runtime_error("reference root: " + root_result.error().message);
+                const auto notes_json = eawr::core::load_notes_json(providers.value().load_notes());
+                const auto diagnostics = providers.value().load_diagnostics;
+                auto trace = recording.finish();
+                auto setup = root_result.value().game()->galaxy().setup();
+                std::vector<std::string> refusals;
+                if (setup.production->planets.size() < 2) throw std::runtime_error("reference refusal fixture needs multiple planets");
+                for (unsigned broken = 0; broken != 3; ++broken) {
+                    auto altered = setup;
+                    if (broken == 0) altered.control->state.front().target_player = std::numeric_limits<gc::PlayerId>::max();
+                    else if (broken == 1) altered.production->planets.front().planet = std::numeric_limits<gc::PlanetId>::max();
+                    else altered.production->planets.back().planet = std::numeric_limits<gc::PlanetId>::max();
+                    auto result = providers.value().stock_production(plan, altered);
+                    refusals.push_back(result ? "unexpected success" : result.error().code + ":" + result.error().message);
+                }
+                return std::tuple{std::move(setup), notes_json, diagnostics, std::move(trace), std::move(refusals)};
+            };
+            const auto [reference_setup, reference_notes, reference_diagnostics, reference_trace, reference_refusals] = reference_load(true);
+            const auto [memo_setup, memo_notes, memo_diagnostics, memo_trace, memo_refusals] = reference_load(false);
+            expect(reference_setup.production == memo_setup.production, "legacy and memo production setups are identical");
+            expect(reference_setup.income == memo_setup.income, "legacy and memo income setups are identical");
+            expect(reference_setup.ability_host == memo_setup.ability_host, "legacy and memo ability setups are identical");
+            expect(reference_notes == memo_notes, "legacy and memo load notes are identical");
+            expect(reference_diagnostics.size() == memo_diagnostics.size()
+                && std::equal(reference_diagnostics.begin(), reference_diagnostics.end(), memo_diagnostics.begin(),
+                    [](const auto& a, const auto& b) {
+                        return std::tie(a.code, a.severity, a.message, a.logical_path, a.line, a.column, a.source_id)
+                            == std::tie(b.code, b.severity, b.message, b.logical_path, b.line, b.column, b.source_id);
+                    }), "legacy and memo load diagnostics are identical");
+            expect(reference_trace == memo_trace, "legacy and memo XML tag traces are identical");
+            expect(reference_refusals == memo_refusals && reference_refusals.size() == 3
+                && reference_refusals[0].find("production owner is unbound") != std::string::npos
+                && reference_refusals[1].find("unbound production planet") != std::string::npos
+                && reference_refusals[2].find("unbound production planet") != std::string::npos,
+                "legacy and memo refuse unbound owner and planet at the same offer");
+            auto unbound_corruption = data;
+            for (auto& faction : unbound_corruption.factions) faction.benefits_from_corruption.reset();
+            const auto corruption_refusal = [&](bool legacy) {
+                auto providers = legacy
+                    ? cp::test_reference_prepare_live_campaign_services(fs, loaded.catalog, unbound_corruption, types, plan, "Normal_Default")
+                    : cp::prepare_live_campaign_services(fs, loaded.catalog, unbound_corruption, types, plan, "Normal_Default");
+                if (!providers) return providers.error().code + ":" + providers.error().message;
+                auto result = providers.value().stock_production(plan, reference_setup);
+                return result ? std::string("success") : result.error().code + ":" + result.error().message;
+            };
+            const auto legacy_corruption_refusal = corruption_refusal(true);
+            // Service preparation assigns the retail false default before either offer
+            // callback runs, so omitted eligibility cannot reach its unbound refusal.
+            expect(legacy_corruption_refusal == "success"
+                && legacy_corruption_refusal == corruption_refusal(false),
+                "legacy and memo accept omitted corruption eligibility via the same default");
+            if (!reference_setup.production || reference_setup.production->planets.empty()
+                    || reference_setup.production->planets.front().offers.empty())
+                throw std::runtime_error("reference refusal fixture requires a production offer");
+            const auto target_id = reference_setup.production->planets.front().offers.front().type;
+            const auto* target = plan.original_type(target_id);
+            if (!target) throw std::runtime_error("reference refusal fixture requires an original type");
+            for (const auto* tag : {"Cinematic_Object_Only", "Build_Can_Be_Unlocked_By_Slicer"}) {
+                // A nonempty scalar is always accepted by the retail bool parser. An empty
+                // node with a child reaches the reader but has no valid scalar value.
+                const std::vector<eawr::data::ValueOverride> overrides{
+                    {target->name, tag, {""}}, {target->name, std::string(tag) + "/FixtureChild", {"x"}}};
+                auto altered_catalog = eawr::data::with_overrides(loaded.catalog, overrides);
+                if (!altered_catalog) throw std::runtime_error("reference refusal catalog override failed");
+                const auto refusal = [&](bool legacy) {
+                    auto providers = legacy
+                        ? cp::test_reference_prepare_live_campaign_services(fs, altered_catalog.value(), data, types, plan, "Normal_Default")
+                        : cp::prepare_live_campaign_services(fs, altered_catalog.value(), data, types, plan, "Normal_Default");
+                    if (!providers) return providers.error().code + ":" + providers.error().message;
+                    auto result = cp::CampaignRoot::create(plan, providers.value());
+                    return result ? std::string("unexpected success") : result.error().code + ":" + result.error().message;
+                };
+                const auto old_failure = refusal(true);
+                const auto new_failure = refusal(false);
+                expect(old_failure == new_failure && old_failure != "unexpected success",
+                    "legacy and memo refuse the same malformed cinematic or slicer flag");
+            }
+            // Reusing the same prepared services must not retain a previous callback's memo.
+            const auto& setup = campaign.value().game()->galaxy().setup();
+            auto production_first = services.value().stock_production(plan, setup);
+            auto income_first = services.value().income(plan, setup);
+            auto ability_first = services.value().ability_host(plan, setup);
+            const auto notes = eawr::core::load_notes_json(services.value().load_notes());
+            auto production_again = services.value().stock_production(plan, setup);
+            auto income_again = services.value().income(plan, setup);
+            auto ability_again = services.value().ability_host(plan, setup);
+            expect(production_first && production_again && production_first.value() == production_again.value(),
+                "repeated stock production callbacks retain every offer and placement field");
+            expect(income_first && income_again && income_first.value() == income_again.value(),
+                "repeated income callbacks retain unrounded prices and times");
+            expect(ability_first && ability_again && ability_first.value() == ability_again.value(),
+                "repeated ability callbacks retain every authored profile");
+            expect(notes == eawr::core::load_notes_json(services.value().load_notes()),
+                "repeated setup callbacks preserve published load notes");
+        }
         if (omit_benefits) {
             for (const auto& binding : plan.player_bindings()) {
                 const auto* faction = data.faction(binding.faction);
@@ -2388,6 +2619,121 @@ void installed_slicer_style_is_forced(const std::vector<eawr::vfs::MountSpec>& m
     }
     expect(checked, "the overlaid slicer reached the ability host");
 }
+template<class Profile> void check_removal_authoring(const Profile& profile, unsigned variant) {
+    if constexpr (requires { profile.removal; }) {
+        expect(bool(profile.removal), "named remove-corruption ability binds from stock XML");
+        if (!profile.removal) return;
+        const auto& ability = *profile.removal;
+        const auto one = eawr::sim::math::Fixed::from_integer(1).value();
+        expect(ability.name == (variant == 4 ? "MOD_FIRST" : variant == 3 ? "MOTHMA_REMOVE_CORRUPTION" : "AKBAR_REMOVE_CORRUPTION"), "removal retains authored routing identity");
+        expect(ability.initially_enabled == (variant != 1) && ability.causes_despawn == (variant != 0 && variant != 4),
+            "authored enabled and consumption flags reach the live removal profile");
+        expect(ability.cost_multiplier == (variant == 4 ? eawr::sim::math::Fixed::from_integer(3).value()
+                : variant == 1 ? eawr::sim::math::Fixed::from_ratio(1, 4).value() : one)
+            && ability.seconds == (variant == 4 ? eawr::sim::math::Fixed::from_integer(4).value() : variant == 1 ? eawr::sim::math::Fixed::from_ratio(1, 2).value()
+                : eawr::sim::math::Fixed::from_integer(10).value()), "removal numeric authoring and validation defaults reach the consumer");
+        expect(ability.activation_sfx == (variant == 4 ? "Mod_First_Cue" : variant == 0 ? "" : "Mod_Removal_Cue"), "authored activation event is retained exactly");
+    } else expect(false, "main lacks the named remove-corruption binding");
+    const bool ground = std::find(profile.ground_activated.begin(), profile.ground_activated.end(), static_cast<gc::AbilityKind>(9))
+        != profile.ground_activated.end();
+    expect(ground == (variant != 1), "removal activation style controls ground-deployment membership");
+}
+void installed_removal_authoring() {
+    const auto checked = []<class T>(eawr::core::Result<T> result, std::string_view stage) {
+        if (!result) throw std::runtime_error(std::string(stage) + ": " + eawr::core::format_diagnostic(result.error()));
+        return std::move(result).value();
+    };
+    const auto root = game_root();
+    if (!root) { eawr::testing::skip_installed("SKIPPED: removal authoring requires EAWR_EAW_GAME_ROOT\n", 0, std::cout); return; }
+    std::vector<eawr::vfs::MountSpec> mounts;
+    for (const auto& [id, folder] : {std::pair{"expansion", "corruption"}, std::pair{"base", "GameData"}})
+        mounts.push_back(checked(eawr::vfs::resolve_manifest_mount(id, std::filesystem::path(*root) / folder / "Data"), "resolve removal game mount").mount);
+    const auto base = checked(eawr::vfs::Vfs::mount(mounts), "mount removal base");
+    const auto bytes = checked(base.open("data/xml/namedherounits.xml"), "open removal stock XML");
+    const std::string original(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+    const std::string opening = "<Remove_Corruption_Ability Name=\"Akbar_Remove_Corruption\">";
+    const auto begin = original.find(opening), end = original.find("</Remove_Corruption_Ability>", begin);
+    if (begin == std::string::npos || end == std::string::npos) throw std::runtime_error("stock removal fixture ability missing");
+    for (unsigned variant = 0; variant < 9; ++variant) {
+        auto xml = original;
+        std::string body = variant == 1 ? "<Activation_Style>User_Input</Activation_Style>" : "<Activation_Style>Ground_Activated</Activation_Style>";
+        if (variant) body += std::string("<Initially_Enabled>") + (variant == 1 ? "No" : "Yes")
+            + "</Initially_Enabled><Causes_Despawn>Yes</Causes_Despawn><Corruption_Removal_Cost_Multiplier>"
+            + (variant == 1 ? "0.25" : "-1") + "</Corruption_Removal_Cost_Multiplier><Corruption_Removal_Time_In_Secs>"
+            + (variant == 1 ? "0.5" : "0") + "</Corruption_Removal_Time_In_Secs><SFXEvent_Activate>Mod_Removal_Cue</SFXEvent_Activate>";
+        xml.replace(begin + opening.size(), end - begin - opening.size(), body);
+        if (variant == 3 || variant == 4) {
+            xml.replace(begin, opening.size(), variant == 3
+                ? "<Remove_Corruption_Ability Name=\"Mothma_Remove_Corruption\">"
+                : "<Remove_Corruption_Ability Name=\"Mod_Second_Unlisted\">");
+            xml.insert(begin, "<Remove_Corruption_Ability Name=\"Mod_First\">"
+                "<Activation_Style>Ground_Activated</Activation_Style>"
+                "<Corruption_Removal_Cost_Multiplier>3</Corruption_Removal_Cost_Multiplier>"
+                "<Corruption_Removal_Time_In_Secs>4</Corruption_Removal_Time_In_Secs>"
+                "<SFXEvent_Activate>Mod_First_Cue</SFXEvent_Activate></Remove_Corruption_Ability>");
+        }
+        const auto directory = std::filesystem::current_path() / ("removal-authoring-"
+            + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+        struct Cleanup { std::filesystem::path path; ~Cleanup() { eawr::testing::remove_temp_directory(path); } } cleanup{directory};
+        std::filesystem::create_directories(directory / "xml");
+        { std::ofstream out(directory / "xml" / "namedherounits.xml", std::ios::binary); out << xml; if (!out) throw std::runtime_error("removal overlay write failed"); }
+        auto layered = mounts; layered.insert(layered.begin(), {"removal-authoring", directory, "data", {}});
+        const auto fs = checked(eawr::vfs::Vfs::mount(layered), "mount removal overlay");
+        const auto loaded = checked(eawr::data::load_catalog(fs, eawr::data::Profile::foc), "load removal catalog");
+        auto data = checked(eawr::data::galactic::load_galactic_data(fs, loaded.catalog), "load removal campaign data");
+        const auto types = eawr::units::galactic_type_table(loaded.catalog);
+        const auto source = std::find_if(data.campaigns.begin(), data.campaigns.end(),
+            [](const auto& row) { return row.name == "Sandbox_Equal_Footing_Rebel"; });
+        if (source == data.campaigns.end()) throw std::runtime_error("removal fixture campaign missing");
+        const auto site = std::find_if(source->starting_forces.begin(), source->starting_forces.end(),
+            [](const auto& row) { return row.faction == "Rebel"; });
+        if (site == source->starting_forces.end()) throw std::runtime_error("removal fixture Rebel site missing");
+        // Reach the hero through its authored company, as retail starting rosters do.
+        // The contained HeroUnit itself has no strategic placement behaviour.
+        const auto location = site->location;
+        source->starting_forces.push_back({"Rebel", location, "Commander_Akbar_Team"});
+        cp::CampaignSetupOptions options; options.seed = 42;
+        for (const auto& faction : data.factions) {
+            const auto id = static_cast<gc::PlayerId>(options.players.size() + 1);
+            options.players.push_back({{id, id, 0}, faction.name, true});
+            const bool human = faction.name == "Rebel";
+            if (human) options.solo_reference_human = id;
+            if (!faction.is_neutral.value_or(false)) options.seats.push_back({gc::SeatId{id}, id,
+                human ? gc::SeatKind::human : gc::SeatKind::ai, id, true, human ? id : 0});
+        }
+        std::vector<std::string> names;
+        for (const auto& type : types.types) names.push_back(type.name);
+        std::sort(names.begin(), names.end());
+        for (const auto& name : names) options.types.push_back({options.types.size() + 1, name});
+        const auto plan = checked(cp::plan_live_campaign_setup(fs, data, types, "Sandbox_Equal_Footing_Rebel", options, "Normal_Default"), "plan removal campaign variant " + std::to_string(variant));
+        auto removal_catalog = loaded.catalog;
+        if (variant >= 5) {
+            std::vector<eawr::data::ValueOverride> base_costs;
+            for (const auto& location_row : plan.locations()) if (location_row.planet) {
+                std::vector<std::string> values;
+                if (variant != 5) values.push_back(variant == 6 ? "" : variant == 7 ? "37.5" : "0");
+                base_costs.push_back({location_row.original_type, "Planet_Corruption_Removal_Base_Cost", std::move(values)});
+            }
+            removal_catalog = checked(eawr::data::with_overrides(loaded.catalog, base_costs), "override removal planet costs");
+        }
+        auto services = checked(cp::prepare_live_campaign_services(fs, removal_catalog, data, types, plan, "Normal_Default"), "prepare removal services variant " + std::to_string(variant));
+        auto campaign = checked(cp::CampaignRoot::create(plan, services), "create removal campaign variant " + std::to_string(variant));
+        const auto& host = *campaign.game()->galaxy().setup().ability_host;
+        if (variant >= 5) {
+            const auto expected_cost = variant <= 6 ? eawr::sim::math::Fixed::from_integer(2000).value()
+                : variant == 7 ? eawr::sim::math::Fixed::from_ratio(75, 2).value() : eawr::sim::math::Fixed{};
+            expect(!host.corruption_planets.empty() && std::all_of(host.corruption_planets.begin(), host.corruption_planets.end(),
+                [&](const auto& row) { return row.removal_base_cost == expected_cost; }),
+                "planet removal base cost uses retail2000 on omission/empty and retains fractional/zero authored overrides");
+        }
+        const auto name = std::find(names.begin(), names.end(), "Commander_Akbar");
+        expect(name != names.end(), "stock removal bearer type is registered");
+        const auto id = static_cast<gc::TypeId>(name - names.begin()) + 1;
+        const auto profile = std::find_if(host.profiles.begin(), host.profiles.end(), [&](const auto& row) { return row.type == id; });
+        expect(profile != host.profiles.end(), "stock removal bearer has a live ability profile");
+        if (profile != host.profiles.end()) check_removal_authoring(*profile, variant);
+    }
+}
 // Owner 11-05 (#5507): the offer list a Rebel slicer gets on an Underworld planet at tech 2 and 3, from the
 // installed data through the host's own candidate function (the one prepare_theft iterates). The count is what
 // the viewer's twelve buttons must hold (WGCH-188).
@@ -2449,6 +2795,15 @@ void installed_steal_offers() {
             for (const auto& profile : setup.ability_host->profiles) if (profile.theft)
                 expect(std::find(profile.ground_activated.begin(), profile.ground_activated.end(), gc::AbilityKind::technology_theft)
                     != profile.ground_activated.end(), "WGCH-187: the stock slicer authors no style and is ground-activated");
+            // #6120: the stock neutralize abilities author no style either, so Boba Fett and the other bounty hunters are
+            // ground-activated and a human's drop on a planet slot reaches the host.
+            bool neutralizers = false;
+            for (const auto& profile : setup.ability_host->profiles) if (profile.neutralize) {
+                neutralizers = true;
+                expect(std::find(profile.ground_activated.begin(), profile.ground_activated.end(), gc::AbilityKind::hero_neutralization)
+                    != profile.ground_activated.end(), "WGCH-187: the stock neutralize abilities author no style and are ground-activated");
+            }
+            expect(neutralizers, "the stock setup carries neutralizing heroes");
             const auto underworld = ids.at("Underworld");
             bool allied = false;
             if (setup.control) for (const auto& relation : setup.control->relations)
@@ -2486,10 +2841,26 @@ int main(int argc, const char* const argv[]) {
         else if (argc == 2 && std::string_view(argv[1]) == "--unresolved-location") { unresolved_location(); omitted_route_control(); }
         else if (argc == 2 && std::string_view(argv[1]) == "--retail-production-numbers") installed_retail_production_numbers();
         else if (argc == 2 && std::string_view(argv[1]) == "--origin-starbases") installed_origin_starbases();
+        else if (argc == 2 && std::string_view(argv[1]) == "--native-ai-restore-matrix") {
+            // Where does the restore start to refuse, and does the single-player shape refuse too?
+            installed_coop_native_ai_restore("Sandbox_Equal_Footing_Underworld", 300, true);
+            installed_coop_native_ai_restore("Sandbox_Equal_Footing_Underworld", 1500, true);
+            installed_coop_native_ai_restore("Sandbox_Equal_Footing_Underworld", 1500, false);
+            installed_coop_native_ai_restore("Sandbox_Equal_Footing_Underworld", 4100, false);
+        }
+        else if (argc == 2 && std::string_view(argv[1]) == "--coop-native-ai-restore-live") {
+            // The shape of the #6388 rig save: Empire, two humans, three AI factions, stepped on worker threads, saved at tick 5582.
+            installed_coop_native_ai_restore("Sandbox_Equal_Footing_Empire", 5582, true, 4, {2000, 3500, 4600});
+        }
+        else if (argc == 2 && std::string_view(argv[1]) == "--coop-native-ai-restore") {
+            installed_coop_native_ai_restore("Sandbox_Equal_Footing_Underworld", 4100);
+            installed_coop_native_ai_restore("Sandbox_Equal_Footing_Empire", 4100);
+        }
         else if (argc == 2 && std::string_view(argv[1]) == "--starting-tech") installed_starting_levels();
         else if (argc == 2 && std::string_view(argv[1]) == "--accepted-starting-tech") installed_starting_levels(true);
         else if (argc == 2 && std::string_view(argv[1]) == "--unscouted-intel") installed_unscouted_intel();
         else if (argc == 2 && std::string_view(argv[1]) == "--steal-offers") installed_steal_offers();
+        else if (argc == 2 && std::string_view(argv[1]) == "--removal-authoring") installed_removal_authoring();
         else installed(argc == 2 && std::string_view(argv[1]) == "--production-domains",
             argc == 2 && std::string_view(argv[1]) == "--structure-slots");
     } catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }

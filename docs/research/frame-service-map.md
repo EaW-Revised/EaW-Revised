@@ -202,3 +202,12 @@ pause and detach. This is a presentation producer dependency, not a new logical
 simulation service order or a claim about a specific native outer-frame caller.
 The programme retains the complete native producer/pause schedule question
 under the particle walk's U02.
+
+## Land pad dynamic-contact removal
+
+FD-82 and FSC-90 in the [frame schedule](../behaviour/frame-service-schedule.md)
+separate immediate deletion-pending removal from new contact discovery from later
+retained-contact cleanup at final object lifetime and contact service. The traced
+moving-versus-stopped check resolves an incomplete pair; observable route and
+clearance timing remains a retail-capture question. This boundary does not establish
+static occupancy removal for a non-obstacle footprint.

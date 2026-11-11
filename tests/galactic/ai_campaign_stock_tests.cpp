@@ -7,6 +7,7 @@
 #include "eawr/platform/agreed_campaign.hpp"
 #include "eawr/vfs/vfs.hpp"
 #include "eawr/core/sha256.hpp"
+#include "eawr/sim/galactic/offer_pool.hpp"
 #include "eawr/campaign/live_setup.hpp"
 #include "eawr/platform/sim_workers.hpp"
 #include "../../src/campaign/galactic_ai_runtime.hpp"
@@ -276,7 +277,7 @@ void installed_world_phase_births(const cp::CampaignSetupPlan& plan, const cp::C
         using Change = galactic::GalacticSession::NativeActorChange;
         std::vector<Change> initial;
         for (const auto& actor : world.snapshot()->actor_records())
-            initial.push_back({Change::Kind::created, actor.id, actor.generated_source, actor.dead, actor.delete_pending, {}});
+            initial.push_back({Change::Kind::created, actor.id, actor.generated_source, actor.dead, actor.delete_pending, {}, {}, {}});
         must(cp::apply_galactic_ai_actor_changes(actions.qualified_freestore(), initial,
             [&](auto actor) { return reader(*world.snapshot(), actor); }, *configured));
         const auto offers = must(ga::initial_freestore_offers(*world.snapshot(), actions.qualified_freestore()));
@@ -471,8 +472,10 @@ int installed(bool release, const std::filesystem::path& directory, bool benchma
     std::sort(originals.begin(), originals.end());
     for (const auto& name : originals) options.types.push_back({options.types.size() + 1, name});
     const auto plan = must(cp::plan_live_campaign_setup(files, data, types, campaign, options, "Normal_Default"));
+    // EAWR_GCAI_TEST_SCHEDULE=reference selects the synchronous reference schedule (the async parity comparison arm).
     const auto setup = must(cp::prepare_stock_galactic_ai_runtime(files, loaded.catalog, data, types, plan, selected,
-        std::make_shared<eawr::platform::ThreadWorkerAdapter>(probe_workers), false, 4096, 4096));
+        std::make_shared<eawr::platform::ThreadWorkerAdapter>(probe_workers), false, 4096, 4096, {},
+        eawr::script::foc::galactic_ai::retail_service_periods, galactic_campaign_gate::test_schedule()));
     const auto human_facts = std::find_if(setup->perception.players.begin(), setup->perception.players.end(),
         [human](const auto& row) { return row.player == human; });
     expect(human_facts != setup->perception.players.end() && human_facts->human && !human_facts->ai
@@ -561,9 +564,38 @@ int installed(bool release, const std::filesystem::path& directory, bool benchma
                 galactic_learning_gate::probe(directory / "learning.json"), human_encounter_only, hash_baseline,
                 !benchmark && !human_encounter_only && !hash_baseline);
             report.write(std::cout);
+            // W1 floors A (owner, 11-07) for digest_mature (the benchmark run) against the stored base: main e536b8302, async, seed 42.
+            // That base stops at galactic frame 9900 on #6337; a run that stops elsewhere has no base yet (refresh it when #6337 or a
+            // reviewed upstream change moves the stop). Floors: builds 10 % (min 2); expansions, attacks, defences and battles within 2;
+            // movements 10 %; maximum tech exact; first tech-3 frame within 300.
+            bool floors = true;
+            if (benchmark) {
+                struct FloorBase { eawr::sim::galactic::PlayerId id; std::uint64_t started, completed, expansions, attacks, defences, movements;
+                    std::int64_t tech; std::uint64_t tech3; };
+                constexpr std::array<FloorBase, 2> floor_base{{{1, 40, 31, 6, 12, 7, 640, 1, 0}, {2, 39, 21, 4, 7, 12, 765, 3, 5164}}};
+                constexpr std::uint64_t base_frames = 9900, base_battles = 19;
+                const auto within = [](std::uint64_t value, std::uint64_t base, std::uint64_t floor_value) {
+                    return (value > base ? value - base : base - value) <= floor_value;
+                };
+                const auto share = [](std::uint64_t base) { return std::max<std::uint64_t>(2, base / 10); };
+                floors = report.galactic_frames == base_frames && within(report.battles, base_battles, 2);
+                for (const auto& base : floor_base) {
+                    const auto at = report.players.find(base.id);
+                    const bool held = at != report.players.end() && within(at->second.builds_started, base.started, share(base.started))
+                        && within(at->second.builds_completed, base.completed, share(base.completed))
+                        && within(at->second.expansions, base.expansions, 2) && within(at->second.attacks, base.attacks, 2)
+                        && within(at->second.defences, base.defences, 2)
+                        && within(at->second.movements, base.movements, std::max<std::uint64_t>(1, base.movements / 10))
+                        && at->second.maximum_tech == base.tech
+                        && (base.tech3 ? within(at->second.first_tech3_frame, base.tech3, 300) : at->second.first_tech3_frame == 0);
+                    floors = floors && held;
+                }
+                std::cout << "GCAI-ASYNC-FLOORS digest_mature frames=" << report.galactic_frames << " base_frames=" << base_frames
+                    << " pass=" << (floors ? "true" : "false") << std::endl;
+            }
             if (hash_baseline) return report.mature_samples == 512 && report.failure.empty() && !failures ? 0 : 2;
             if (human_encounter_only) return report.stop_reason == "unattended_human_encounter_advanced" && report.failure.empty() ? 0 : 2;
-            return (benchmark ? report.passed : report.correctness) && !failures ? 0 : 2;
+            return (benchmark ? report.passed && floors : report.correctness) && !failures ? 0 : 2;
         } catch (const std::exception& error) {
             std::ofstream refused(directory / "result.json", std::ios::trunc);
             refused << "{\"release_gate_passed\":false,\"run_started\":" << (initialized ? "true" : "false") << ",\"failure\":";
@@ -790,7 +822,12 @@ int live_production(const std::filesystem::path& directory, std::uint64_t frames
                 ck::detail::Reader context(recorded->bytes);
                 const auto prefix = ck::detail::read_session_prefix(context);
                 if (context.failed()) throw std::runtime_error("profile equality needs a valid session prefix");
-                const auto replay = must(galactic::parse_replay(prefix.replay));
+                // The recording and the owner reference their production offer tables in the checkpoint's offer pool.
+                const auto* pool_section = saved.find(ck::SectionId::offer_pool);
+                if (!pool_section) throw std::runtime_error("profile equality needs the offer pool");
+                auto offer_pool = galactic::OfferPool::decode(pool_section->bytes);
+                if (!offer_pool) throw std::runtime_error("profile equality needs a valid offer pool");
+                const auto replay = must(galactic::parse_replay(prefix.replay, {}, &*offer_pool));
                 // The campaign owner leads with its format version and the galactic owner; only the galactic part is read.
                 // The recording's window follows the history already dropped by earlier saves, so it is staged on that base.
                 ck::detail::Reader campaign_owner(owner->bytes);
@@ -799,7 +836,7 @@ int live_production(const std::filesystem::path& directory, std::uint64_t frames
                 if (campaign_owner.failed()) throw std::runtime_error("profile equality needs a valid campaign owner");
                 auto imported = must(galactic::GalacticSession::create(replay.setup));
                 must(imported.stage_native_replay(replay.native_effects, replay.final_tick_count, prefix.base.native_dropped));
-                must(imported.load_checkpoint_state(galactic_owner));
+                must(imported.load_checkpoint_state(galactic_owner, &*offer_pool));
                 boundary_galaxy_sha = imported.state_sha256();
             }
             return *ai.state;
@@ -1000,6 +1037,70 @@ std::string workshop_mod_folder(const std::string& id) {
         if (std::filesystem::is_directory(base / id, unreadable) && !unreadable) return (base / id).string();
     }
     return {};
+}
+// The installed layered campaign must save in solo and co-op and restore its direct owner.
+int remake_save_probe(std::uint64_t ticks) {
+    const auto leaf = environment_or("EAWR_REMAKE_MOD_ROOT", "");
+    if (leaf.empty()) { std::cout << "SKIPPED: Remake mod host required\n"; return 77; }
+    const auto workshop = std::filesystem::path(leaf).parent_path();
+    const auto chain = (workshop / "3229239424").string() + ";" + (workshop / "2794270450").string() + ";" + leaf;
+    bool failed = false;
+    for (const bool coop : {false, true}) {
+        InstalledLive fixture(chain, "GC_Mini_Web_Way_Rebel");
+        if (coop) {
+            fixture.setup.mode = cp::CampaignSetupMode::multiplayer;
+            fixture.setup.rules_flavour = cp::CampaignRulesFlavour::single_player;
+            fixture.setup.solo_reference_human.reset();
+            auto teammate = *std::find_if(fixture.setup.seats.begin(), fixture.setup.seats.end(),
+                [](const auto& seat) { return seat.kind == galactic::SeatKind::human; });
+            teammate.seat_id = {999}; teammate.lobby_slot = static_cast<std::uint32_t>(fixture.setup.seats.size());
+            fixture.setup.seats.push_back(teammate);
+        }
+        auto prepared = fixture.prepare(false);
+        auto& game = eawr::platform::AgreedCampaignAccess::session(*prepared);
+        const eawr::platform::ThreadWorkerAdapter executor(1);
+        for (std::uint64_t tick = 0; tick <= ticks; ++tick) {
+            if (tick == 0 || tick == ticks) {
+                std::cout << "SAVE-PROBE mode=" << (coop ? "coop" : "solo") << " tick=" << tick << std::endl;
+                auto state = game.save_checkpoint_state();
+                if (!state) { std::cout << "OWNER ERROR " << state.error().message << std::endl; failed = true; }
+                else std::cout << "OWNER bytes=" << state.value().size() << std::endl;
+                const auto save_begin = std::chrono::steady_clock::now();
+                auto saved = ck::save_game_checkpoint(game, ck::game_identities(game.galaxy().setup()));
+                const auto save_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - save_begin).count();
+                if (!saved) { std::cout << "SAVE ERROR " << saved.error().message << std::endl; failed = true; }
+                else {
+                    // The size per section, so the native AI section and the one offer pool are visible in the log.
+                    if (const auto container = ck::parse_checkpoint(saved.value()))
+                        for (const auto& section : container.value().sections)
+                            std::cout << "CHECKPOINT-SECTION " << section.id << " " << ck::section_name(section.id) << " " << section.bytes.size() << std::endl;
+                    std::cout << "SAVE bytes=" << saved.value().size() << " capture_ms=" << save_ms << std::endl;
+                    // Each planet's offer table is stored once (the offer pool), so the layered campaign's save stays well
+                    // below the ~225 MB it took when the setup, production state and owner barrier each carried every table.
+                    expect(saved.value().size() < 80U * 1024U * 1024U, "the layered campaign's checkpoint stores its offer tables once");
+                    if (coop && tick == ticks) {
+                        const auto expected = game.state_sha256();
+                        auto plan = prepared->plan();
+                        auto second_plan = prepared->plan();
+                        prepared.reset();
+                        // Restore alone, twice in the same run, so a before/after comparison is not one noisy sample.
+                        const auto restore_once = [&](auto restore_plan, const char* label) {
+                            const auto restore_begin = std::chrono::steady_clock::now();
+                            auto restored = must(eawr::platform::PreparedLiveCampaign::from_plan(fixture.files, fixture.loaded.catalog,
+                                fixture.data, fixture.types, std::move(restore_plan), "Normal_Default", false, {}, false, saved.value()));
+                            std::cout << "RESTORE " << label << " ms=" << std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - restore_begin).count() << std::endl;
+                            expect(eawr::platform::AgreedCampaignAccess::session(*restored).state_sha256() == expected,
+                                "large co-op checkpoint restores the saved game state");
+                        };
+                        restore_once(std::move(plan), "first");
+                        restore_once(std::move(second_plan), "second");
+                    }
+                }
+            }
+            if (tick < ticks) must(game.step(executor));
+        }
+    }
+    return failed || failures ? 1 : 0;
 }
 // Process CPU time (user + kernel, all threads) in ms, for CPU% of the logical processors next to ms/tick.
 double process_cpu_ms() {
@@ -1263,6 +1364,7 @@ int quality_run(int argc, char** argv) {
 } // namespace
 int main(int argc, char** argv) {
     try {
+        if (argc > 1 && std::string_view(argv[1]) == "--remake-save-probe") return remake_save_probe(argc > 2 ? std::stoull(argv[2]) : 3000);
         if (argc > 1 && std::string_view(argv[1]) == "--human-encounter")
             return installed(true, argc > 2 ? argv[2] : "out/galactic-human-encounter", true, 0, 1, true);
         if (argc > 1 && std::string_view(argv[1]) == "--coop-victory-r1") return coop_victory_r1(argc > 2 ? std::stoull(argv[2]) : 600);

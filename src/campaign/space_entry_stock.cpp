@@ -10,6 +10,8 @@
 #include "eawr/data/retail_values.hpp"
 #include "eawr/data/tag_trace.hpp"
 #include "eawr/scene/scene.hpp"
+#include "eawr/scene/model_prefetch.hpp"
+#include "eawr/units/simulation_model.hpp"
 #include "eawr/skirmish/ai.hpp"
 #include "eawr/sim/tactical/session.hpp"
 #include "../script/foc/ai_data.hpp"
@@ -19,9 +21,38 @@
 #include <limits>
 #include <mutex>
 #include <set>
+#include <stdexcept>
 #include <tuple>
 
 namespace eawr::campaign {
+std::vector<core::ContentLayerIdentity> prepared_content_layers(std::span<const std::string> ordered_layers,
+    std::span<const core::ContentInputReceipt> inputs) {
+    std::map<std::string, std::map<std::string, std::string>> grouped;
+    for (const auto& input : inputs) {
+        auto path = vfs::canonicalize(input.logical_path);
+        if (!path || std::find(ordered_layers.begin(), ordered_layers.end(), input.layer_id) == ordered_layers.end()
+            || input.sha256.size() != 64 || !std::all_of(input.sha256.begin(), input.sha256.end(), [](char c) {
+                return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
+            })) throw std::runtime_error("prepared input receipt is unavailable: " + input.logical_path);
+        const auto [at, inserted] = grouped[input.layer_id].emplace(path.value(), input.sha256);
+        if (!inserted && at->second != input.sha256)
+            throw std::runtime_error("content changed between preparation reads: " + path.value());
+    }
+    std::vector<core::ContentLayerIdentity> result;
+    for (const auto& layer : ordered_layers) {
+        std::vector<std::uint8_t> bytes;
+        const auto word = [&](std::uint64_t value) {
+            for (unsigned i = 0; i < 8; ++i) bytes.push_back(static_cast<std::uint8_t>(value >> (i * 8U)));
+        };
+        const auto field = [&](std::string_view value) { word(value.size()); bytes.insert(bytes.end(), value.begin(), value.end()); };
+        field("eawr-prepared-content-layer-v1"); word(grouped[layer].size());
+        for (const auto& [path, digest] : grouped[layer]) { field(path); field(digest); }
+        // This local source key is diagnostic metadata only; the wire strips installation prefixes before display.
+        result.push_back({layer, core::sha256(bytes)});
+    }
+    return result;
+}
+
 bool stock_name_skippable(const core::Diagnostic& error) {
     return error.code == data::diagnostic_codes::variant_missing_base;
 }
@@ -310,6 +341,9 @@ core::Result<platform::PreparedCampaignBattle> load_standalone_space_replay(
 }
 
 struct StockSpaceEntry::Impl {
+    mutable std::once_flag prepared_once;
+    mutable core::PreparedContentIdentity prepared_digest{};
+    std::vector<core::ContentInputReceipt> prepared_models;
     struct MapContent {
         std::shared_ptr<const units::UnitTables> tables;
         skirmish::StartInputs inputs;
@@ -348,6 +382,66 @@ struct StockSpaceEntry::Impl {
         return at == types.end() ? nullptr : &*at;
     }
 };
+const core::PreparedContentIdentity& StockSpaceEntry::prepared_identity(const vfs::Vfs& filesystem) const {
+    std::call_once(impl_->prepared_once, [&] {
+        // These maps and tables remain outside the galaxy until a conflict opens. Commit their actual consumed
+        // inputs now, rather than treating tick-zero galaxy equality as proof of future child-content equality.
+        std::vector<std::uint8_t> prepared;
+        const auto word = [&](std::uint64_t value) {
+            for (unsigned i = 0; i < 8; ++i) prepared.push_back(static_cast<std::uint8_t>(value >> (i * 8U)));
+        };
+        const auto field = [&](std::string_view value) {
+            word(value.size()); prepared.insert(prepared.end(), value.begin(), value.end());
+        };
+        field("eawr-gc-space-provider-v1");
+        auto receipts = impl_->prepared_models;
+        const auto receipt = [&](std::string_view path, std::string digest) {
+            auto source = filesystem.stat(path);
+            if (!source) throw std::runtime_error("prepared source is unavailable: " + std::string(path));
+            receipts.push_back({source.value().canonical_path, source.value().layer_id, std::move(digest)});
+        };
+        const auto* pinned = impl_->maps.empty() ? nullptr : impl_->maps.begin()->second.tables.get();
+        word(pinned != nullptr);
+        if (pinned) {
+            const auto tables_digest = units::content_identity(*pinned);
+            prepared.insert(prepared.end(), tables_digest.begin(), tables_digest.end());
+            word(pinned->inputs.size());
+            for (const auto& input : pinned->inputs) {
+                field(input.logical_path); field(input.sha256);
+                if (!input.sha256.empty()) receipts.push_back({input.logical_path, input.layer_id, input.sha256});
+            }
+        }
+        word(impl_->maps.size());
+        for (const auto& [path, map] : impl_->maps) {
+            field(path); field(map.inputs.map_sha256); field(map.refusal ? map.refusal->code : std::string_view{});
+            receipt(path, map.inputs.map_sha256);
+        }
+        word(impl_->planet_maps.size());
+        for (const auto& [planet, path] : impl_->planet_maps) { word(planet); field(path); }
+        word(impl_->missing_caps.size()); for (const auto player : impl_->missing_caps) word(player);
+        word(impl_->skips.names.size()); for (const auto& name : impl_->skips.names) field(name);
+        word(impl_->type_refusals.size()); for (const auto& [name, refusal] : impl_->type_refusals) { field(name); field(refusal.code); }
+        field(impl_->multiplayer_difficulty);
+        const auto sources = [&](const auto& files) {
+            word(files.size());
+            for (const auto& [path, contents] : files) {
+                const auto digest = core::sha256_hex(std::span(reinterpret_cast<const std::uint8_t*>(contents.data()), contents.size()));
+                field(path); field(digest); receipt(path, digest);
+            }
+        };
+        sources(impl_->ai_xml); sources(impl_->ai_modules);
+        word(impl_->ai_module_refusals.size());
+        for (const auto& [path, refusal] : impl_->ai_module_refusals) { field(path); field(refusal.code); }
+        const auto remembered = filesystem.remember_content_inputs(receipts);
+        if (!remembered) throw std::runtime_error(remembered.error().message);
+        impl_->prepared_digest.layers = prepared_content_layers(filesystem.layer_ids(), receipts);
+        word(impl_->prepared_digest.layers.size());
+        for (const auto& layer : impl_->prepared_digest.layers)
+            prepared.insert(prepared.end(), layer.digest.begin(), layer.digest.end());
+        impl_->prepared_digest.digest = core::sha256(prepared);
+    });
+    return impl_->prepared_digest;
+}
 void StockSpaceEntry::memory_inventory(diagnostics::GcMemory& m) const {
     m.row("shared.space_entry.metadata", impl_->galactic.types, impl_->types, impl_->sides, impl_->relations, impl_->ai_xml, impl_->ai_modules);
     for (const auto& [name, map] : impl_->maps) {
@@ -512,7 +606,9 @@ core::Result<std::shared_ptr<const StockSpaceEntry>> prepare_stock_space_entry(c
     std::set<std::string> obstacles;
     const auto object_types = assets::object_type_catalog(catalog);
     for (const auto& path : maps) {
+        std::optional<core::gc_load::Scope> map_decode(std::in_place, "prep.space_entry.map_decode");
         auto decoded = assets::load_map(filesystem, path, object_types);
+        map_decode.reset();
         if (!decoded) return Result::failure(decoded.error());
         if (decoded.value().kind != assets::MapKind::space)
             return fail<std::shared_ptr<const StockSpaceEntry>>("authored space map has the wrong layer");
@@ -532,10 +628,87 @@ core::Result<std::shared_ptr<const StockSpaceEntry>> prepare_stock_space_entry(c
     }
     scene::VfsAssetCache cache(filesystem);
     units::LoadInput load; load.campaign_scene = true; load.catalog = &catalog; load.filesystem = &filesystem;
-    load.model = cache.access().model; load.types.assign(load_types.begin(), load_types.end());
+    load.types.assign(load_types.begin(), load_types.end());
     load.obstacles.assign(obstacles.begin(), obstacles.end());
     impl->replay_source.types = load.types; impl->replay_source.obstacles = load.obstacles;
+    const bool trace_model_paths = core::gc_load::trace.active();
+    const auto model_loads_before = trace_model_paths ? cache.model_stats().unique_loads : 0;
+    std::set<std::string> requested_model_paths, failed_model_paths, late_model_hints, reader_model_paths;
+    std::mutex reader_model_paths_mutex;
+    // Loader::Frames needs table inputs for its full lifetime, but render payloads need only survive in the same
+    // bounded suffix retained after preparation today. Aliased references retain the original full-sharing policy.
+    // Keep the scope around the table load only: projections and any full pins are gone before map/AI preparation.
+    std::optional<units::SharedModelPreparation> preparation_models;
+    try {
+        preparation_models.emplace(filesystem, catalog, scene::default_model_cache_budget_bytes);
+    } catch (const std::logic_error& refusal) {
+        if (trace_model_paths) core::gc_load::trace.mark("unit_model_lifetime.refused=" + std::string(refusal.what()));
+        return fail<std::shared_ptr<const StockSpaceEntry>>("model preparation refused: " + std::string(refusal.what()));
+    }
+    if (!preparation_models->stats().bounded) {
+        core::LoadNote note;
+        note.code = "campaign_model_cache_fallback";
+        note.message = "model preparation uses legacy full retention: " + preparation_models->stats().fallback_reason;
+        note.effective_value = "legacy full retention";
+        impl->skips.notes.push_back(std::move(note));
+    }
+    // Preserve BASE's empty model input digests; projections do not change the prepared input report.
+    load.model = [&](const std::string_view path) {
+        if (trace_model_paths) requested_model_paths.emplace(path);
+        const auto* model = preparation_models->model(path);
+        if (trace_model_paths && model == nullptr) failed_model_paths.emplace(path);
+        return model;
+    };
+    if (plan.mode() == CampaignSetupMode::multiplayer) load.digest = [&](std::string_view path) {
+        const auto source = filesystem.stat(path);
+        if (!source) throw std::runtime_error("prepared model source is unavailable: " + std::string(path));
+        impl->prepared_models.push_back({source.value().canonical_path, source.value().layer_id, preparation_models->sha256(path)});
+        // This extra commitment belongs to the prepared owner; keep the legacy table/replay input digest empty.
+        return std::string{};
+    };
+    // Decode independent model files ahead of the ordered unit-table consumer. The store admits
+    // results only on the consumer's request, preserving its diagnostics and cache order.
+    scene::ModelPrefetchOptions model_options;
+    model_options.fixed_readers = 2;
+    model_options.window_bytes = 256ULL << 20U;
+    if (trace_model_paths) model_options.decode_hook = [&](const std::string_view path) {
+        std::lock_guard lock(reader_model_paths_mutex);
+        reader_model_paths.emplace(path);
+    };
+    scene::ModelPrefetch model_prefetch(filesystem, model_options);
+    load.model_hint = [&](const std::string& path) {
+        if (trace_model_paths && requested_model_paths.contains(path)) late_model_hints.insert(path);
+        preparation_models->hint(model_prefetch, path);
+    };
+    load.model_taken = [&](const std::string& path) { model_prefetch.taken(path); };
+    load.model_skipped = [&](const std::string& path) { model_prefetch.skipped(path); };
+    std::optional<core::gc_load::Scope> unit_tables(std::in_place, "prep.space_entry.unit_tables_and_models");
     auto tables = units::load_unit_tables(load);
+    model_prefetch.finish();
+    const auto lifetime_stats = preparation_models->stats();
+    preparation_models.reset();
+    unit_tables.reset();
+    if (core::gc_load::trace.active()) {
+        const auto stats = model_prefetch.stats();
+        core::gc_load::trace.mark("unit_model_parallel.peak_estimated_bytes=" + std::to_string(stats.held_bytes_peak)
+            + ".readers_peak=" + std::to_string(stats.readers_peak));
+        core::gc_load::trace.mark("unit_model_lifetime.bounded=" + std::to_string(lifetime_stats.bounded)
+            + ".reference_aliases=" + std::to_string(lifetime_stats.reference_aliases)
+            + ".populated_store=" + std::to_string(lifetime_stats.populated_store)
+            + ".protected_initial_bytes=" + std::to_string(lifetime_stats.protected_initial_bytes)
+            + ".requests=" + std::to_string(lifetime_stats.requests)
+            + ".aliases=" + std::to_string(lifetime_stats.aliases)
+            + ".decodes=" + std::to_string(cache.model_stats().unique_loads - model_loads_before)
+            + ".projection_bytes=" + std::to_string(lifetime_stats.projection_bytes)
+            + ".fallback_reason=" + lifetime_stats.fallback_reason);
+        // Readers are joined: classify speculative-only paths separately from a hint arriving after consumption.
+        // Alongside the actual shared-store decode counter this identifies surplus work without changing admission.
+        for (const auto& path : reader_model_paths) {
+            if (!requested_model_paths.contains(path)) core::gc_load::trace.mark("unit_model_unused_reader=" + path);
+            if (late_model_hints.contains(path)) core::gc_load::trace.mark("unit_model_late_reader=" + path);
+            if (failed_model_paths.contains(path)) core::gc_load::trace.mark("unit_model_failed_reader=" + path);
+        }
+    }
     if (!tables) return Result::failure(tables.error());
     tables.value().campaign_multiplayer = plan.rules_flavour() == CampaignRulesFlavour::multiplayer;
     // Raw campaign metadata is frozen once. Only each battle's reachable subset
@@ -596,6 +769,8 @@ core::Result<std::shared_ptr<const StockSpaceEntry>> prepare_stock_space_entry(c
         impl->ai_modules.emplace(path, std::string(reinterpret_cast<const char*>(bytes.value().data()), bytes.value().size()));
     }
     std::optional<skirmish::DataIdentity> data_identity;
+    skirmish::CampaignStartInputsCache start_inputs_cache;
+    start_inputs_cache.object_types = &object_types;
     for (const auto& path : maps) {
         // Hash the immutable mounted closure at the first original identity-read
         // point, preserving refusal order and avoiding work for an empty map set.
@@ -608,7 +783,9 @@ core::Result<std::shared_ptr<const StockSpaceEntry>> prepare_stock_space_entry(c
         // capacity/team eligibility. Decode the actual map, then read its scene facts.
         skirmish::Fixture fixture; fixture.map = path;
         for (const auto& side : impl->sides) fixture.slots.push_back({side.player, side.faction, 0, side.human, {}});
-        auto inputs = skirmish::read_start_inputs(fixture, filesystem, catalog, *pinned, *data_identity);
+        std::optional<core::gc_load::Scope> start_inputs(std::in_place, "prep.space_entry.map_start_inputs");
+        auto inputs = skirmish::read_start_inputs(fixture, filesystem, catalog, *pinned, *data_identity, start_inputs_cache);
+        start_inputs.reset();
         if (!inputs) return Result::failure(inputs.error());
         const auto diagnostic = diagnose({}, inputs.value().placements);
         impl->maps.emplace(path, StockSpaceEntry::Impl::MapContent{pinned, std::move(inputs).value(),
@@ -619,6 +796,7 @@ core::Result<std::shared_ptr<const StockSpaceEntry>> prepare_stock_space_entry(c
         core::gc_load::trace.span("prep.space_entry.reachable_tables.total", reachable_origin, reachable_origin + reachable_time);
         core::gc_load::trace.mark("prep.space_entry.reachable_tables.calls=" + std::to_string(reachable_calls));
     }
+
     return Result::success(std::shared_ptr<const StockSpaceEntry>(new StockSpaceEntry(std::move(impl))));
 }
 
@@ -684,13 +862,7 @@ core::Result<ResolvedConflictEntry> StockSpaceEntry::resolve(const ConflictRecor
     units::UnitTables source_tables; source_tables.constants = input.map.tables->constants;
     for (const auto& type : input.types) if (std::any_of(record.forces.begin(), record.forces.end(), [&](const auto& force) { return force.type == type.galactic; }))
         if (const auto* source = input.map.tables->find(type.tactical)) {
-            auto rated = *source;
-            if (rated.kind == units::UnitKind::squadron && rated.team_hull) {
-                // WGT-119 / WSQ-60: the container's own health, not its craft sum.
-                rated.hull = rated.team_hull; rated.shield_points = rated.team_shield_points;
-                rated.shielded = rated.team_shield_points && *rated.team_shield_points > Fixed{};
-            }
-            source_tables.units.push_back(std::move(rated));
+            source_tables.units.push_back(campaign::flagship_rating_source(*source));
         }
     for (const auto& note : input.map.tables->hardpoint_health_defaults)
         if (source_tables.find(note.object)) source_tables.hardpoint_health_defaults.push_back(note);
@@ -702,6 +874,11 @@ core::Result<ResolvedConflictEntry> StockSpaceEntry::resolve(const ConflictRecor
             auto rating = sim::math::add(profile->max_hull, profile->max_shields);
             if (!rating) return core::Result<ResolvedConflictEntry>::failure(rating.error());
             type.source_flagship_rating = rating.value();
+        } else if (const auto* rated = source_tables.find(type.tactical)) {
+            // Authored non-positive hull: no durability row, the shields alone rate (#6076). Without shields the rating
+            // stays unset, so the entry reports the type once as having no durability profile.
+            if (const auto shields = campaign::flagship_shield_rating(*rated); shields > Fixed{})
+                type.source_flagship_rating = shields;
         }
         if (!table->deployed_space_type.empty() && type.unique_space_unit.empty() && !type.attach_to_flagship) {
             type.purchase_type = battle::type_id(type.tactical);
@@ -930,6 +1107,17 @@ core::Result<ResolvedConflictEntry> StockSpaceEntry::resolve(const ConflictRecor
     }
     auto decorated = apply_space_rules(entry.value(), input.map, rules);
     if (!decorated) return core::Result<ResolvedConflictEntry>::failure(decorated.error());
+    if (const auto* market = snapshot.economy_corruption()) {
+        tt::MarketAbilityPolicy policy;
+        for (const auto& item : market->items) policy.items.push_back({item.id, item.ability_names});
+        for (const auto& player : market->players) {
+            tt::MarketAbilityOwner owner;
+            owner.player = player.player;
+            owner.purchased.assign(player.unlocks.begin(), player.unlocks.end());
+            policy.owners.push_back(std::move(owner));
+        }
+        entry.value().conflict.tactical.campaign->market_abilities = std::move(policy);
+    }
     // WGT-21: unique passenger ships count population, though their temporary
     // force role intentionally has no persistent fleet-parent validation.
     auto& registered = entry.value().conflict.tactical.campaign->population_registered;

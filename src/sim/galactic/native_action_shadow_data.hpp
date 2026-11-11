@@ -91,6 +91,9 @@ struct GalacticSession::NativeActionShadow::Data {
     EntityId first_id{}, next_id{}, range_end{};
     std::uint64_t first_invasion{1}, invasion_range_end{};
     bool independent_player{}, system_hold{};
+    // Async lane barrier: players may take turns in any order, over and over, because nothing of it is committed
+    // as layers; its requests leave through the intent sink and are readmitted in (virtual tick, player) order.
+    bool free_players{};
     std::size_t live_objects{}, max_requests{};
     bool can_create{};
     std::map<PlayerId, math::Fixed> accounts;

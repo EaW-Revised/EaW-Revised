@@ -1,4 +1,5 @@
 #include "unit_internal.hpp"
+#include "eawr/assets/assets.hpp"
 #include "eawr/core/load_profile.hpp"
 #include "eawr/core/text.hpp"
 
@@ -219,6 +220,17 @@ constexpr std::string_view combat_scalars[] = {
     "FormationMinimumSideError",          // #599
     "FormationMaximumSideError",          // #599
 };
+
+// LMF-02..LMF-05: the game constants a land group move reads (docs/behaviour/walks/land-pathing.md). Land tables only, and
+// optional: a table without them keeps one destination per squad.
+constexpr std::string_view land_formation_scalars[] = {
+    "Max_Formation_Area", "VehicleFormationRecruitmentDistance", "InfantryFormationRecruitmentDistance",
+    "BetweenFormationSpacing", "Destination_Collision_Query_Extension",
+};
+
+// LC-102: the factor an occupant's weapon ranges grow by while it is inside a garrison structure. Land tables only; an
+// unauthored constant leaves occupants at their ordinary range.
+constexpr std::string_view land_garrison_scalars[] = {"Garrisoned_Max_Attack_Distance_Multiplier"};
 
 // The scalar constants FoC's database map reads as integers (engine-tags game-constants rows typed signed or
 // unsigned integer): the C `atoi` of the text with no range or sign check (#4992).
@@ -744,6 +756,42 @@ void load_constants(const vfs::Vfs& filesystem, const std::set<std::string>& dam
         }
         tables.constants.scalars.push_back(std::move(constant));
     }
+    if (tables.domain == sim::tactical::BattleDomain::land) {
+        // WLAN-03/06: retain authored presentation constants separately from simulation identity.
+        for (const auto tag : {"WalkAnimationCutoff", "MoveBlendTime", "CrouchMoveBlendTime",
+                 "TeamMoveBlendTime", "TeamCrouchMoveBlendTime", "InfantryTurnBlendTime",
+                 "IdleWalkBlendTime", "CrouchIdleWalkBlendTime"}) {
+            const auto* node = last_child(root, tag);
+            if (node == nullptr) continue;
+            NamedConstant constant{std::string(tag), std::nullopt, trim(node->raw_text)};
+            constant.value = number(constant.text);
+            if (!constant.value) {
+                report.missing("GameConstants", constant.tag, constant.text, "not a decimal");
+                continue;
+            }
+            tables.land_animation_constants.push_back(std::move(constant));
+        }
+        for (const auto tag : land_formation_scalars) {
+            const auto* node = last_child(root, tag);
+            if (node == nullptr) continue;
+            NamedConstant constant{std::string(tag), std::nullopt, trim(node->raw_text)};
+            if (const auto flag = canonical_boolean(constant.text)) constant.value = Fixed::from_raw(*flag ? Fixed::scale : 0);
+            else constant.value = number(constant.text);
+            if (!constant.value) { report.missing("GameConstants", constant.tag, constant.text, "not a decimal or boolean"); continue; }
+            tables.constants.scalars.push_back(std::move(constant));
+        }
+        for (const auto tag : land_garrison_scalars) {
+            const auto* node = last_child(root, tag);
+            if (node == nullptr) continue;
+            NamedConstant constant{std::string(tag), std::nullopt, trim(node->raw_text)};
+            constant.value = number(constant.text);
+            if (!constant.value || constant.value->raw() < 0) {
+                report.missing("GameConstants", constant.tag, constant.text, "not a non-negative decimal");
+                continue;
+            }
+            tables.constants.scalars.push_back(std::move(constant));
+        }
+    }
     std::set<std::pair<std::string, std::string>> present;
     for (const auto& child : root.children) {
         // WGCH-65: preserve category mappings separately for each tactical mode.
@@ -785,6 +833,15 @@ void load_constants(const vfs::Vfs& filesystem, const std::set<std::string>& dam
             }
         }
     }
+}
+
+Fixed clip_frames_per_second(const assets::Animation& clip) {
+    const auto raw = scene::fixed_from_binary32(clip.frames_per_second).value().raw();
+    const auto whole = raw / Fixed::scale;
+    const auto remainder = raw % Fixed::scale;
+    const auto scaled_remainder = remainder * 1000;
+    const auto rounded = (scaled_remainder + (remainder < 0 ? -Fixed::scale / 2 : Fixed::scale / 2)) / Fixed::scale;
+    return Fixed::from_ratio(whole * 1000 + rounded, 1000).value();
 }
 
 // The model's collision bounds in the bind pose (the debug build's object-space bounds
@@ -895,7 +952,7 @@ core::Result<CollisionBounds> prepare_galactic_collision_bounds(const assets::Mo
 
 core::Result<std::vector<sim::math::Mat3x4>> bind_frames(const assets::Model& model) {
     core::load_profile::Scope frames_scope(core::load_profile::Phase::bind_frames);
-    const core::load_profile::ModelScope frames_timer(model.source.logical_path, &core::load_profile::ModelCost::bind_ms);
+    const core::load_profile::ModelScope frames_timer(model.source.logical_path, core::load_profile::ModelField::bind);
     const auto failure = [&](std::string message) {
         core::Diagnostic diagnostic;
         diagnostic.code = std::string(diagnostic_codes::bone_frame);

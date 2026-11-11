@@ -394,7 +394,7 @@ void test_space_healing() {
     tactical::AbilityTable abilities;
     tactical::UnitAbilityProfile owner; owner.type_id = 99;
     tactical::SpecialAbilityProfile heal; heal.name = "Repair"; heal.kind = tactical::SpecialAbilityKind::force_healing;
-    heal.style = tactical::SpecialActivationStyle::space_automatic; heal.initially_enabled = true;
+    heal.style = tactical::SpecialActivationStyle::skirmish_automatic; heal.initially_enabled = true;
     heal.heal_range = units(550); heal.heal_percent = decimal("0.1"); heal.heal_interval_frames = 60;
     heal.single_target_heal = true; heal.filter.applicable_categories = 1;
     owner.special.push_back(heal); abilities.profiles.push_back(owner);
@@ -496,7 +496,9 @@ void test_passive_damage_aura() {
         tactical::AbilityTable abilities; abilities.passive_damage_type = 0;
         tactical::UnitAbilityProfile owner; owner.type_id = 99;
         tactical::SpecialAbilityProfile aura; aura.name = "Passive_Damage"; aura.kind = tactical::SpecialAbilityKind::force_healing;
-        aura.style = tactical::SpecialActivationStyle::space_automatic; aura.initially_enabled = true;
+        aura.style = single_target ? tactical::SpecialActivationStyle::skirmish_automatic
+                                  : tactical::SpecialActivationStyle::space_automatic;
+        aura.initially_enabled = true;
         aura.heal_range = units(300); aura.heal_amount = units(-30); aura.heal_interval_frames = 15;
         aura.single_target_heal = single_target; aura.filter.applicable_categories = 1;
         owner.special.push_back(aura); abilities.profiles.push_back(owner);

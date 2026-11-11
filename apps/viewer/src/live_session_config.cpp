@@ -311,7 +311,8 @@ namespace {
         const bool menu = hud == "options" || hud == "b_option_t" || hud == "menu_options" || hud == "menu_back"
             || hud == "menu_quit" || hud == "menu_resume" || hud == "menu_yes" || hud == "menu_no"
             // #3989: the menu's Save, the Save page's first listed save and its Save button.
-            || hud == "menu_save" || hud == "menu_save_first" || hud == "menu_save_button";
+            || hud == "menu_save" || hud == "menu_save_first" || hud == "menu_save_button"
+            || hud == "menu_load" || hud == "menu_load_first" || hud == "menu_load_button";
         const auto gift_seat = hud.starts_with("gift_to_") ? parse_u64(hud.substr(8)) : std::nullopt;
         const bool gift = hud == "gift" || (gift_seat && *gift_seat != 0
             && *gift_seat <= std::numeric_limits<std::uint32_t>::max());
@@ -563,7 +564,7 @@ bool LiveSessionView::parse_argument(const std::string_view name, const std::opt
                     "<tick>:mdrag:<dx>,<dy> or <tick>:mclick:centre, each with optional +ctrl, "
                     "or <tick>:wheel:<in|out>, or <tick>:<click|rclick|hover|press|release>:hud=<pause|fast_forward|resume|quit|"
                     "b_reinforcement|r_close|r_RRCC|tqueueNN|attack|attack_move|move|waypoint|stop|guard|gift|gift_to_N|special_weapon|retreat|options|menu_options|menu_back|menu_quit|menu_resume|menu_yes|menu_no|menu_save|menu_save_first|"
-                    "menu_save_button>; "
+                    "menu_save_button|menu_load|menu_load_first|menu_load_button>; "
                     "f<frame> in place of <tick> fires on that frame after the warm-up";
         } else {
             options.inputs.push_back(std::move(*input));
@@ -650,11 +651,16 @@ bool LiveSessionView::parse_argument(const std::string_view name, const std::opt
     } else if (name == "--eawr-live-particle-detail" || name == "--eawr-live-particle-lod") {
         const auto detail = parse_double(text);
         if (!detail || *detail < 0 || *detail > 1) error = std::string(name) + " expects a value from 0 to 1";
-        else if (name == "--eawr-live-particle-detail") options.particle_detail.global = static_cast<float>(*detail);
-        else options.particle_detail.local = static_cast<float>(*detail);
+        else if (name == "--eawr-live-particle-detail") {
+            options.particle_detail.global = static_cast<float>(*detail);
+            options.particle_global_given = true;
+        } else options.particle_detail.local = static_cast<float>(*detail);
     } else if (name == "--eawr-live-particle-heat") {
         if (text != "on" && text != "off") error = "--eawr-live-particle-heat expects on or off";
-        else options.particle_detail.heat = text == "on";
+        else {
+            options.particle_detail.heat = text == "on";
+            options.particle_heat_given = true;
+        }
     } else if (name == "--eawr-live-particle-workers") {
         const auto workers = parse_u64(text);
         if (!workers || *workers == 0 || *workers > 64) error = "--eawr-live-particle-workers expects 1 to 64";

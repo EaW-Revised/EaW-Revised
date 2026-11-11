@@ -88,6 +88,10 @@ void installed_loop(bool purchase_only) {
         Fixed::from_integer(1).value(), Fixed::from_integer(1).value(), {}});
     for (auto& planet : data.planets) {
         if (planet.name == "Shola") planet.galactic_position = eawr::data::galactic::Position{};
+        // The stock Empire story spawns its heroes (Boba Fett, Veers, Tarkin, ...) at the home planet during the first
+        // 1200 ticks, and each one takes population. Give the home planet authored room for them so the purchase probe
+        // still has spare population for the company it buys.
+        if (purchase_only && planet.name == "Shola") planet.additional_population_capacity = planet.additional_population_capacity.value_or(0) + 16;
         if (planet.name == "Kamino") planet.galactic_position = eawr::data::galactic::Position{Fixed::from_integer(12).value(), {}, {}};
         if (planet.name == "Geonosis") planet.galactic_position = eawr::data::galactic::Position{Fixed::from_integer(24).value(), {}, {}};
     }

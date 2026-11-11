@@ -57,6 +57,7 @@ std::vector<std::wstring> godot_arguments(const LaunchInputs& inputs) {
     if (inputs.depth_prepass_off) args.insert(args.end(), {L"--eawr-depth-prepass", L"off"});
     if (inputs.mod_profile) args.insert(args.end(), {L"--eawr-mod-profile", inputs.mod_profile->wstring()});
     if (inputs.save_dir) args.insert(args.end(), {L"--eawr-save-dir", inputs.save_dir->wstring()});
+    if (inputs.digest_cache) args.insert(args.end(), {L"--eawr-digest-cache", inputs.digest_cache->wstring()});
     if (inputs.font_cache) args.insert(args.end(), {L"--eawr-font-cache", inputs.font_cache->wstring()});
     if (inputs.lan_game_port) args.insert(args.end(), {L"--eawr-lan-game-port", std::to_wstring(*inputs.lan_game_port)});
     args.insert(args.end(), inputs.extra.begin(), inputs.extra.end());

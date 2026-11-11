@@ -69,6 +69,13 @@ gc::PreparedAbility prepare(eawr::campaign::GameSession& game, const gc::Galacti
     return gc::prepared_ability(game.galaxy().ability_state()->preparations.at(0), 0);
 }
 Fixed credits(const eawr::campaign::GameSession& game) { return game.galaxy().snapshot()->player_economy()->players[1].credits; }
+// #6120: the reason of the refusal the last step produced, none when it produced no refusal.
+gc::GalacticRejectReason refusal(const eawr::campaign::GameSession& game) {
+    const auto snapshot = game.galaxy().snapshot();
+    for (const auto& event : snapshot->events())
+        if (event.kind == gc::GalacticEventKind::command_rejected) return event.reason;
+    return gc::GalacticRejectReason::none;
+}
 bool present(const eawr::campaign::GameSession& game, eawr::sim::EntityId id) {
     const auto records = game.galaxy().snapshot()->actor_records();
     return std::any_of(records.begin(), records.end(), [&](const auto& row) { return row.id == id; });
@@ -143,11 +150,64 @@ void cases(const eawr::sim::PartitionExecutor& pool, std::vector<std::string>& h
         order(game, 2, gc::ExecutePreparedAbility{prepared}); hashes.push_back(take(game.step(pool)).state_hash.get());
         expect(credits(game) == f(10) && present(game, victim(config)), "insufficient credits refuse before any mutation");
     }
+    {   // #6120: the human's drop on a planet slot (DeployGroundAbility) prepares the menu only while the profile lists
+        // neutralization as ground-activated (WGCH-187); an unlisted profile is refused and the seat is told so.
+        auto config = setup(); config.ability_host->profiles[0].ground_activated = {gc::AbilityKind::hero_neutralization};
+        auto game = take(eawr::campaign::GameSession::create(config));
+        order(game, 1, gc::DeployGroundAbility{neutralizer(config), config.planets[0].id});
+        hashes.push_back(take(game.step(pool)).state_hash.get());
+        expect(game.galaxy().ability_state()->preparations.size() == 1, "a human's drop prepares the neutralization menu");
+        auto unlisted = setup(); unlisted.ability_host->profiles[0].ground_activated.clear();
+        auto refused = take(eawr::campaign::GameSession::create(unlisted));
+        order(refused, 1, gc::DeployGroundAbility{neutralizer(unlisted), unlisted.planets[0].id});
+        hashes.push_back(take(refused.step(pool)).state_hash.get());
+        expect(refused.galaxy().ability_state()->preparations.empty(), "an unlisted profile prepares nothing on a drop");
+        expect(refusal(refused) == gc::GalacticRejectReason::unknown_value, "the unlisted drop is still refused for the seat");
+    }
+    {   // An AI seat's landing or arrival never prepares neutralization: it has no chooser for the menu.
+        auto config = setup(); config.ability_host->profiles[0].ground_activated = {gc::AbilityKind::hero_neutralization};
+        for (auto& row : config.economy_corruption->players) if (row.player == 2) row.human = false;
+        auto game = take(eawr::campaign::GameSession::create(config));
+        order(game, 1, gc::DeployGroundAbility{neutralizer(config), config.planets[0].id});
+        hashes.push_back(take(game.step(pool)).state_hash.get());
+        expect(game.galaxy().ability_state()->preparations.empty(), "an AI seat's drop never prepares neutralization");
+    }
+    {   // #6120: a human's hero landing from a transport is not a drop. With no hero to neutralize it says nothing (a stale
+        // refusal would show on the next plain move of that hero); with one, the menu is prepared as before.
+        const auto landing = [&](bool hostile_present) {
+            auto config = setup(hostile_present);
+            const auto parent = neutralizer(config), target = config.planets[0].id;
+            constexpr eawr::sim::EntityId hero = 50000;
+            config.fleets[1].members[0].type = 2000;
+            config.census->objects[1].original_type = config.census->objects[1].current_type = 2000;
+            config.census->objects.push_back(ability_fixture::census_actor(hero, 1000, 2, target, parent));
+            config.census->types.push_back({2000, {}, 0});
+            config.fleet_control->types.push_back({2000, true, true, false});
+            config.control->types.push_back({2000, 0, false, false});
+            auto& movement = ability_fixture::add_movement(config);
+            movement.types[1].transport = true;
+            movement.contents = {{parent, {{hero, 1000}}}};
+            config.ability_host->profiles[0].ground_activated = {gc::AbilityKind::hero_neutralization};
+            auto world = take(gc::GalacticSession::create(config));
+            const auto landed = take(world.land_native_transports(2, config.fleets[1].id));
+            expect(landed.admitted, "the hostile landing is admitted");
+            hashes.push_back(world.state_sha256());
+            const auto snapshot = world.snapshot();
+            const bool refused = std::any_of(snapshot->events().begin(), snapshot->events().end(),
+                [](const auto& event) { return event.kind == gc::GalacticEventKind::command_rejected; });
+            return std::make_pair(world.ability_state()->preparations.size(), refused);
+        };
+        const auto empty = landing(false);
+        expect(empty.first == 0 && !empty.second, "a landing with no hero to neutralize prepares nothing and refuses nothing");
+        const auto hostile = landing(true);
+        expect(hostile.first == 1 && !hostile.second, "a landing next to a hostile hero prepares the menu");
+    }
     {   // No hostile hero at the planet: no menu (WGCH-20).
         const auto config = setup(false); auto game = take(eawr::campaign::GameSession::create(config));
         order(game, 1, gc::PrepareGalacticAbility{neutralizer(config), config.planets[0].id, gc::AbilityKind::hero_neutralization});
         hashes.push_back(take(game.step(pool)).state_hash.get());
         expect(game.galaxy().ability_state()->preparations.empty(), "no hostile hero means no neutralization menu");
+        expect(refusal(game) == gc::GalacticRejectReason::neutralize_no_hero, "an empty planet refuses as no hero to neutralize");
     }
     {   // An allied hero is never a target.
         auto config = setup();
@@ -157,6 +217,30 @@ void cases(const eawr::sim::PartitionExecutor& pool, std::vector<std::string>& h
         order(game, 1, gc::PrepareGalacticAbility{neutralizer(config), config.planets[0].id, gc::AbilityKind::hero_neutralization});
         hashes.push_back(take(game.step(pool)).state_hash.get());
         expect(game.galaxy().ability_state()->preparations.empty(), "an ally of the neutralizer is not offered");
+        expect(refusal(game) == gc::GalacticRejectReason::neutralize_allied_hero, "an ally's hero refuses as allied, not as an empty planet");
+    }
+    {   // A hostile hero without a neutralization price is told apart from an empty planet and from an ally.
+        auto config = setup(); config.ability_host->neutralization_targets.clear();
+        auto game = take(eawr::campaign::GameSession::create(config));
+        order(game, 1, gc::PrepareGalacticAbility{neutralizer(config), config.planets[0].id, gc::AbilityKind::hero_neutralization});
+        hashes.push_back(take(game.step(pool)).state_hash.get());
+        expect(game.galaxy().ability_state()->preparations.empty(), "a hero with no neutralization price is not offered");
+        expect(refusal(game) == gc::GalacticRejectReason::neutralize_not_targetable, "an unpriced hero refuses as not targetable");
+    }
+    {   // An ability the faction has not activated refuses as unavailable.
+        auto config = setup(); config.ability_host->activated_neutralize_abilities.clear();
+        auto game = take(eawr::campaign::GameSession::create(config));
+        order(game, 1, gc::PrepareGalacticAbility{neutralizer(config), config.planets[0].id, gc::AbilityKind::hero_neutralization});
+        hashes.push_back(take(game.step(pool)).state_hash.get());
+        expect(game.galaxy().ability_state()->preparations.empty(), "a deactivated ability prepares nothing");
+        expect(refusal(game) == gc::GalacticRejectReason::neutralize_unavailable, "a deactivated ability refuses as unavailable");
+    }
+    {   // Execution refusals are plain too: a price the player cannot pay says so.
+        auto config = setup(); config.player_economy->players[1].credits = f(10);
+        auto game = take(eawr::campaign::GameSession::create(config));
+        const auto prepared = prepare(game, config, pool, hashes);
+        order(game, 2, gc::ExecutePreparedAbility{prepared}); hashes.push_back(take(game.step(pool)).state_hash.get());
+        expect(refusal(game) == gc::GalacticRejectReason::insufficient_credits, "an unaffordable price refuses as insufficient credits");
     }
 }
 } // namespace

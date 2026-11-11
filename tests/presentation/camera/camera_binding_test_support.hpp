@@ -91,5 +91,9 @@ void test_orbit_pitch_bindings();
 void test_orbit_cancellation();
 void test_mouse_units_follow_the_screen();
 void test_click_reset();
+void test_pointer_hold();
+void test_pointer_hold_object();
+void test_middle_drag_ignores_other_modifiers();
+void test_galaxy_drag_hold_step();
 
 } // namespace eawr_camera_binding_test

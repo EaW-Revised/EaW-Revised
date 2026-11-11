@@ -40,6 +40,9 @@ inline constexpr int detail_level_default = 2;
 // The advanced page's eleven detail values; -1 follows the basic level (ST-V4).
 inline constexpr std::size_t detail_slot_count = 11;
 inline constexpr int detail_automatic = -1;
+// The advanced page's heat-distortion check and particle detail slider (#6560).
+inline constexpr std::size_t detail_slot_heat = 5;
+inline constexpr std::size_t detail_slot_particle = 7;
 // The network port FoC treats as "use the default" (ST-N1).
 inline constexpr int default_network_port = 1234;
 // A window or mode size outside this is not a size (the viewer's own window-size bound).
@@ -86,6 +89,38 @@ struct VideoSettings final {
     friend bool operator==(const VideoSettings&, const VideoSettings&) = default;
 };
 
+// #6560: the particle detail slider's levels 0..3 as the global draw quality. This is the
+// project's own scale, not a retail mapping (no retail capture backs it). Automatic keeps
+// the full look (1.0), whatever the basic detail level is.
+inline constexpr std::array<float, 4> particle_detail_levels{0.4F, 0.6F, 0.8F, 1.0F};
+
+[[nodiscard]] constexpr float particle_global_detail(const VideoSettings& video) noexcept {
+    const int level = video.detail[detail_slot_particle];
+    if (level == detail_automatic) return particle_detail_levels.back();
+    return particle_detail_levels[static_cast<std::size_t>(
+        level < 0 ? 0 : (level > detail_level_maximum ? detail_level_maximum : level))];
+}
+
+// Heat distortions: automatic keeps them on (today's look); a stored value is on when above zero.
+[[nodiscard]] constexpr bool particle_heat_enabled(const VideoSettings& video) noexcept {
+    const int value = video.detail[detail_slot_heat];
+    return value == detail_automatic || value > 0;
+}
+
+// What a battle's particle presentation takes at its start. A launch argument that was given
+// wins over the saved setting; without one the saved setting decides.
+struct ParticleSettingValues final {
+    float global{1.0F};
+    bool heat{true};
+};
+
+[[nodiscard]] constexpr ParticleSettingValues resolve_particle_values(
+    const VideoSettings& video, const std::optional<float> launch_global,
+    const std::optional<bool> launch_heat) noexcept {
+    return {launch_global.value_or(particle_global_detail(video)),
+            launch_heat.value_or(particle_heat_enabled(video))};
+}
+
 // A launch or profile count wins; zero leaves the automatic rule in charge.
 [[nodiscard]] constexpr std::optional<std::size_t> resolve_thread_override(
     const std::optional<std::size_t> chosen, const int saved) noexcept {
@@ -94,13 +129,23 @@ struct VideoSettings final {
 }
 
 // ST-P2: presentation pacing only. The live simulation keeps its elapsed-time tick clock.
-[[nodiscard]] constexpr int frame_rate_cap(const VideoSettings& video, const int refresh_rate,
+// `refresh_rate` is the display's rate as reported (59.94, 119.88, 143.98 ...), not a whole number: the limiter
+// derived from it is rounded UP, never down. A derived limiter below the real refresh makes the engine's sleep and
+// the vsync wait beat against each other (one repeated refresh about every 1.1 s at 119 on a 119.88 Hz mode).
+// An explicit cap clearly below the refresh is the player's choice and stays. With vsync on there is always a
+// limiter when the cap is Off or at the refresh (the AMD frame-cap rule), also when the refresh is unknown (60).
+[[nodiscard]] constexpr int frame_rate_cap(const VideoSettings& video, const double refresh_rate,
                                          const bool menu, const bool focused) noexcept {
-    const int refresh = refresh_rate >= 30 ? refresh_rate : 60;
-    int cap = video.frame_rate_limit < 0 ? refresh : video.frame_rate_limit;
+    const bool known = refresh_rate >= 30.0 && refresh_rate <= 1000.0;
+    const double refresh = known ? refresh_rate : 60.0;
+    int ceiling = static_cast<int>(refresh);
+    if (static_cast<double>(ceiling) < refresh) ++ceiling;
+    int cap = video.frame_rate_limit < 0 ? ceiling : video.frame_rate_limit;
     if (cap > 0 && cap < 30) cap = 30;
+    // With vsync on, Off rounds up to the refresh (60 when it is unknown), and so does a cap at (or within 3% of) a
+    // known refresh; a cap clearly below it stays the player's cap.
+    if (video.vsync && (cap == 0 || (known && static_cast<double>(cap) >= 0.97 * refresh))) cap = ceiling;
     const auto lower = [&](const int limit) { if (cap == 0 || limit < cap) cap = limit; };
-    if (video.vsync) lower(refresh);
     if (menu) lower(60);
     if (!focused) lower(30);
     return cap;
@@ -114,6 +159,7 @@ struct GameplaySettings final {
     bool delay_tooltips{false};
     bool reinforcement_areas_only_while_placing{true}; // PD-01: presentation only.
     bool animated_loading_background{false};
+    bool fit_radar_to_galaxy{false}; // WGUI-177: optional galactic radar expansion.
     int hover_owner_names{-1}; // #5130: -1 follows mode (MP on, solo off), 0 off, 1 on.
     bool right_button_scroll{false};
     bool both_buttons_rotate{false};

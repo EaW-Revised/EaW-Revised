@@ -143,8 +143,9 @@ class LanPanelGpu(unittest.TestCase):
                     for button in ("pause", "fast_forward"):
                         control = data["hud"]["time_panel"][button]
                         if button == "fast_forward":
+                            # #5355 (TP-MP06): the shared 2x request; disabled while gameplay is held.
                             self.assertTrue(control["disabled"])
-                            self.assertIn("unavailable in multiplayer", control["tooltip"])
+                            self.assertIn("2x is a request", control["tooltip"])
                         self.assertIn("Any active human", control["tooltip"])
                         self.assertIn("Shared speed: 2", control["tooltip"])
 
@@ -177,6 +178,65 @@ class LanPanelGpu(unittest.TestCase):
                     self.assertEqual(banner["text"], "Paused by Leia")
                     self.assertFalse(data["hud"]["time_panel"]["pause"]["disabled"])
                     self.assertTrue(data["hud"]["time_panel"]["fast_forward"]["disabled"])
+
+    def test_two_viewer_shared_speed(self):
+        """#5355 (TP-MP06): two real viewers on one machine. The host's fast-forward button sets the shared 2x, the
+        joiner's sets it back to 1x; both peers change speed at the same session ticks. A real-time battle has no
+        tick captures, so the button light and the notice are a separate visual check (#6280)."""
+        import json
+        import socket
+        import time
+        with tempfile.TemporaryDirectory(prefix="lan-speed-") as temporary:
+            output = Path(os.environ.get("EAWR_LAN_EYECHECK", temporary)).resolve() / "shared-speed"
+            output.mkdir(parents=True, exist_ok=True)
+            with socket.socket() as reserve:
+                reserve.bind(("127.0.0.1", 0))
+                port = reserve.getsockname()[1]
+            clicks = {"host": "300", "join": "900"}
+            processes, logs = [], []
+            try:
+                for side in ("host", "join"):
+                    log = (output / (side + ".log")).open("w", encoding="utf-8")
+                    logs.append(log)
+                    command = [os.environ["EAWR_GODOT_EXECUTABLE"], "--resolution", "1280x720", "--max-fps", "30",
+                        "--path", str(ROOT / "apps/viewer/project"), "--", "--eawr-skirmish-setup",
+                        "--eawr-lan-smoke", "--eawr-game-root", os.environ["EAWR_EAW_GAME_ROOT"],
+                        "--eawr-report", str(output / (side + ".json")),
+                        "--eawr-capture", str(output / (side + ".png")),
+                        "--eawr-live-workers", "2", "--eawr-audio", "off",
+                        "--eawr-lighting", "sh", "--eawr-environment", "map", "--eawr-shadows", "on",
+                        "--eawr-live-input", clicks[side] + ":click:hud=fast_forward",
+                        "--eawr-live-lan-quit-tick", "1200" if side == "host" else "0"]
+                    command += ["--eawr-lan-host", str(port)] if side == "host" else ["--eawr-lan-join", "127.0.0.1:" + str(port)]
+                    processes.append(subprocess.Popen(command, cwd=ROOT, stdout=log, stderr=subprocess.STDOUT))
+                    if side == "host":
+                        ready = time.monotonic() + 180
+                        while not (output / "host.png").exists():
+                            self.assertIsNone(processes[0].poll(), "host exited before its setup capture")
+                            self.assertLess(time.monotonic(), ready, "host setup/listener readiness deadline")
+                            time.sleep(0.1)
+                for process in processes: process.wait(timeout=900)
+            finally:
+                for process in processes:
+                    if process.poll() is None: process.kill(); process.wait(timeout=30)
+                for log in logs: log.close()
+            tracks, evidence = [], {}
+            for index, side in enumerate(("host", "join")):
+                log = (output / (side + ".log")).read_text(encoding="utf-8")
+                self.assertEqual(processes[index].returncode, 0, log[-10000:])
+                data = json.loads((output / (side + ".json")).read_text(encoding="utf-8"))
+                live = data["live_session"]
+                self.assertTrue(live["multiplayer"])
+                speed = [(row["tick"], row["ticks_per_second"]) for row in live["time"]["track"] if row["cause"] == "speed"]
+                tracks.append(speed)
+                control = data["hud"]["time_panel"]["fast_forward"]
+                self.assertIn("2x is a request", control["tooltip"])
+                self.assertEqual(control["presses"], 1, "each seat's one press reaches the button handler once")
+                evidence[side] = {"speed_track": speed, "fast_forward_at_end": control,
+                                  "speed_notice_at_end": data.get("speed_notice")}
+            self.assertEqual(tracks[0], tracks[1], "both peers change the shared speed at the same ticks")
+            self.assertEqual([rate for _, rate in tracks[0]][-2:], [60, 30], "the host's 2x, then the joiner's 1x")
+            (output / "shared-speed-evidence.json").write_text(json.dumps(evidence, indent=2) + "\n", encoding="utf-8")
 
     def test_two_viewer_loopback_with_ai(self):
         import csv

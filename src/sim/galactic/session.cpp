@@ -8,6 +8,7 @@
 #include "session_diagnostic.hpp"
 #include "checkpoint_fields_internal.hpp"
 #include "checkpoint_commands_internal.hpp"
+#include "restore_validation_internal.hpp"
 #include "eawr/sim/galactic/victory.hpp"
 #include "eawr/sim/galactic/economy_corruption.hpp"
 #include "eawr/sim/galactic/ability_host.hpp"
@@ -69,11 +70,12 @@ void GalacticSession::add_runtime_load_notes(std::span<const core::LoadNote> not
     impl_->merge_load_notes(buffer);
 }
 
-core::Result<std::vector<std::uint8_t>> GalacticSession::save_checkpoint_state() const {
+core::Result<std::vector<std::uint8_t>> GalacticSession::save_checkpoint_state(OfferPool* const pool) const {
     using namespace checkpoint_detail;
     try {
         if (impl_->failed || impl_->native_applying) throw Invalid("owner is not at a healthy save barrier");
         Writer out;
+        out.offers = pool;
         out(impl_->sorted_planets(), impl_->sorted_routes(), impl_->sorted_fleets());
         checkpoint_owner(out, *impl_);
         // The applied journal is history: the recording section carries it, so the owner keeps only its length (#4058).
@@ -86,17 +88,82 @@ core::Result<std::vector<std::uint8_t>> GalacticSession::save_checkpoint_state()
     }
 }
 
-core::Result<void> GalacticSession::load_checkpoint_state(std::span<const std::uint8_t> bytes) {
+core::Result<void> GalacticSession::load_checkpoint_state(std::span<const std::uint8_t> bytes, OfferPool* const pool) {
     using namespace checkpoint_detail;
     try {
         if (impl_->completed_tick || impl_->failed) throw Invalid("direct restore requires a fresh private owner");
-        Reader in(bytes);
+        Reader in(bytes, pool);
         std::vector<Planet> planets; std::vector<Route> routes; std::vector<Fleet> fleets;
         in(planets, routes, fleets);
         // The recording the session was built from staged the applied journal; direct restore adopts it as applied.
         auto journal = std::move(impl_->native_replay);
         impl_->native_replay.clear();
         checkpoint_owner(in, *impl_);
+        const auto player_rows_match = [&](const auto& rows) {
+            if (rows.size() != impl_->setup.players.size()) return false;
+            for (std::size_t i = 0; i < rows.size(); ++i)
+                if (rows[i].player != impl_->setup.players[i].player_id) return false;
+            return true;
+        };
+        const auto planet_rows_match = [&](const auto& rows) {
+            if (rows.size() != impl_->setup.planets.size()) return false;
+            for (std::size_t i = 0; i < rows.size(); ++i)
+                if (rows[i].planet != impl_->setup.planets[i].id) return false;
+            return true;
+        };
+        if (impl_->production.has_value() != impl_->setup.production.has_value()
+            || impl_->income.has_value() != impl_->setup.income.has_value()
+            || impl_->economy_corruption.has_value() != impl_->setup.economy_corruption.has_value()
+            || impl_->observer.has_value() != impl_->setup.observer.has_value())
+            throw Invalid("restored service tables differ from setup");
+        if (impl_->production && (!player_rows_match(impl_->production->players)
+            || !planet_rows_match(impl_->production->planets)))
+            throw Invalid("restored production tables differ from setup");
+        if (!impl_->production && !impl_->active_producers.empty())
+            throw Invalid("restored production index has no service");
+        if (impl_->production) {
+            const auto& production = *impl_->production;
+            for (const auto index : impl_->active_producers)
+                if (index >= production.planets.size()) throw Invalid("restored production index is out of range");
+            for (const auto& planet : production.planets) {
+                if (!std::is_sorted(planet.offers.begin(), planet.offers.end(),
+                    [](const auto& a, const auto& b) { return a.type < b.type; }))
+                    throw Invalid("restored production offers are unordered");
+                for (const auto& queue : planet.queues) for (const auto& entry : queue) {
+                    const auto found = std::lower_bound(planet.offers.begin(), planet.offers.end(), entry.type,
+                        [](const auto& offer, auto type) { return offer.type < type; });
+                    if (found == planet.offers.end() || found->type != entry.type)
+                        throw Invalid("restored production queue names an absent offer");
+                }
+            }
+        }
+        if (impl_->income && !planet_rows_match(impl_->income->inputs.planets))
+            throw Invalid("restored income table differs from setup");
+        if (impl_->economy_corruption && (!player_rows_match(impl_->economy_corruption->players)
+            || !planet_rows_match(impl_->economy_corruption->planets)))
+            throw Invalid("restored corruption tables differ from setup");
+        // The rest of the live-state invariants, after the identity and shape checks above they rely on.
+        if (impl_->production)
+            if (const auto problem = restore_detail::production_problem(impl_->setup, *impl_->production)) throw Invalid(*problem);
+        if (impl_->income)
+            if (const auto problem = restore_detail::income_problem(impl_->setup, *impl_->income, impl_->income_blocker_next_expiry))
+                throw Invalid(*problem);
+        if (impl_->economy_corruption)
+            if (const auto problem = restore_detail::corruption_problem(impl_->setup, *impl_->economy_corruption)) throw Invalid(*problem);
+        if (impl_->observer) {
+            const auto& o = *impl_->observer;
+            if (o.players.size() != impl_->setup.players.size() || o.planets.empty()
+                || o.planets.size() != impl_->setup.planets.size()
+                || o.records.size() != o.players.size() * o.planets.size())
+                throw Invalid("restored observer table shape differs from setup");
+            if (!player_rows_match(o.players) || !planet_rows_match(o.planets))
+                throw Invalid("restored observer roster differs from setup");
+            for (std::size_t i = 0; i < o.records.size(); ++i)
+                if (o.records[i].player != o.players[i / o.planets.size()].player
+                    || o.records[i].planet != o.planets[i % o.planets.size()].planet)
+                    throw Invalid("restored observer records differ from roster");
+            if (const auto problem = restore_detail::observer_problem(impl_->setup, o)) throw Invalid(*problem);
+        }
         if (impl_->history_archive.size() != impl_->setup.players.size()) throw Invalid("History archive player roster differs");
         for (const auto& player : impl_->setup.players) {
             const auto at = impl_->history_archive.find(player.player_id);
@@ -146,12 +213,15 @@ core::Result<void> GalacticSession::load_checkpoint_state(std::span<const std::u
         impl_->production_offer_hashes.reset(); impl_->production_offer_rows.reset(); impl_->view_publications.clear();
         impl_->published_economy_input_generation.reset();
         impl_->income_forecast_cache.reset(); impl_->gathered_income_inputs.reset();
+        impl_->income_inputs_stored = 0; impl_->reduction_sources_key.reset(); impl_->reduction_sources_cache.clear();
         impl_->movement_access_generation = std::numeric_limits<std::uint64_t>::max();
         impl_->control_stealth_inputs.clear(); impl_->control_stealth_generation = 0;
         impl_->dirty.fill(true); impl_->cached_hash_present = false;
         impl_->invalidate_observer_projection();
         impl_->snapshot = impl_->make_snapshot(std::move(events));
-        auto canonical = save_checkpoint_state();
+        // Re-encoding through the same pool finds each table where it was saved; an equal table under another index
+        // (a pool that is not canonical) re-encodes differently and is refused here.
+        auto canonical = save_checkpoint_state(pool);
         if (!canonical || !std::equal(bytes.begin(), bytes.end(), canonical.value().begin(), canonical.value().end()))
             throw Invalid("noncanonical owner barrier");
         return core::Result<void>::success();
@@ -195,13 +265,17 @@ void GalacticSession::Impl::execute(const GameCommand& command, const std::uint6
             row.active = controller != controllers.end() && controller->kind == FactionControl::ai;
         }
         events.push_back(event);
-        // TM-04: fast forward is single-human; a rejoin that makes the session multi-human ends it here, in order.
-        if (active && clock.strategic_speed.raw() == fast_forward_factor_raw
-            && std::count_if(seats.begin(), seats.end(), [](const Seat& row) { return row.active && row.kind == SeatKind::human; }) > 1) {
-            clock.strategic_speed = math::Fixed::from_raw(math::Fixed::scale);
-            event.kind = GalacticEventKind::speed_changed; event.subject = 0U; event.value = static_cast<std::uint64_t>(clock.strategic_speed.raw());
-            events.push_back(event);
-        }
+        // TM-04/#5355: a rejoin that makes the session multi-human lowers a faster strategic or tactical speed to the
+        // shared multiplayer maximum (2x) here, in order (strategic first, as subject 0, then tactical, subject 1).
+        if (active && std::count_if(seats.begin(), seats.end(), [](const Seat& row) { return row.active && row.kind == SeatKind::human; }) > 1)
+            for (const bool tactical : {false, true}) {
+                auto& setting = tactical ? clock.tactical_speed : clock.strategic_speed;
+                if (setting.raw() <= multiplayer_speed_max_raw) continue;
+                setting = math::Fixed::from_raw(multiplayer_speed_max_raw);
+                event.kind = GalacticEventKind::speed_changed; event.subject = tactical ? 1U : 0U;
+                event.value = static_cast<std::uint64_t>(setting.raw());
+                events.push_back(event);
+            }
         session_dirty(); return;
     }
     if (const auto* role = std::get_if<AssignBattleTeamRole>(&command.payload)) {
@@ -230,7 +304,7 @@ void GalacticSession::Impl::execute(const GameCommand& command, const std::uint6
     }
     if (const auto* deployment = std::get_if<DeployGroundAbility>(&command.payload)) {
         const auto before = events.size();
-        dispatch_ground_ability(deployment->actor, deployment->planet, command.key.seat, command.key.sequence, tick, events);
+        dispatch_ground_ability(deployment->actor, deployment->planet, command.key.seat, command.key.sequence, tick, events, true);
         // The subject names the supplied object, so the issuing seat can say which drop was refused.
         if (events.size() == before) { event.kind = GalacticEventKind::command_rejected; event.reason = GalacticRejectReason::unknown_value; event.subject = deployment->actor; events.push_back(event); }
         return;
@@ -297,9 +371,9 @@ void GalacticSession::Impl::execute(const GameCommand& command, const std::uint6
         return;
     }
     if (const auto* speed = std::get_if<SetSpeed>(&command.payload)) {
-        // TM-04: fast forward is a single-human feature; with several active human seats the
-        // strategic fast-forward factor is refused here, not only hidden by the HUD.
-        if (!speed->tactical && speed->factor.raw() == fast_forward_factor_raw
+        // TM-04/#5355: with several active human seats the shared strategic and battle-child speeds go up to 2x
+        // (MP-06's setting 4); 4x fast forward and anything above 2x is refused here, not only hidden by the HUD.
+        if (speed->factor.raw() > multiplayer_speed_max_raw
             && std::count_if(seats.begin(), seats.end(), [](const Seat& row) { return row.active && row.kind == SeatKind::human; }) > 1)
             return reject(GalacticRejectReason::not_authorized);
         event.subject = speed->tactical ? 1U : 0U;
@@ -445,13 +519,37 @@ core::Result<void> GalacticSession::reserve_native_identity_frontier(EntityId ex
 }
 core::Result<void> GalacticSession::reserve_native_frontiers(EntityId expected, EntityId next,
     std::uint64_t expected_invasion, std::uint64_t next_invasion) {
+    return reserve_native_frontiers_inner(expected, next, expected_invasion, next_invasion, false);
+}
+core::Result<void> GalacticSession::reserve_native_frontiers_rewindable(EntityId expected, EntityId next,
+    std::uint64_t expected_invasion, std::uint64_t next_invasion) {
+    return reserve_native_frontiers_inner(expected, next, expected_invasion, next_invasion, true);
+}
+core::Result<void> GalacticSession::reserve_native_frontiers_inner(EntityId expected, EntityId next,
+    std::uint64_t expected_invasion, std::uint64_t next_invasion, bool allow_rewind) {
     auto& impl = *impl_;
-    if (impl.failed || native_shadow() || expected != impl.next_id || next < expected
+    // Async AI: one down step (a rewind into the lane range) is allowed, then the counter may only come back up to the
+    // value it left, which closes the rewind. The sim never allocates in between (a readmission is one serial call).
+    const bool rewind = allow_rewind && next < expected && next && !impl.native_rewound_next && !impl.native_rewound_invasion && next_invasion == expected_invasion;
+    const bool restore = impl.native_rewound_next && next == impl.native_rewound_next && next > expected;
+    const bool rewind_invasion = allow_rewind && next == expected && next_invasion < expected_invasion && next_invasion
+        && !impl.native_rewound_next && !impl.native_rewound_invasion;
+    const bool restore_invasion = impl.native_rewound_invasion && next_invasion == impl.native_rewound_invasion
+        && next_invasion > expected_invasion;
+    if (impl.failed || native_shadow() || expected != impl.next_id || (next < expected && !rewind)
         || next == std::numeric_limits<EntityId>::max() || !expected_invasion
-        || expected_invasion != impl.next_native_invasion || next_invasion < expected_invasion
-        || next_invasion == std::numeric_limits<std::uint64_t>::max())
+        || expected_invasion != impl.next_native_invasion || (next_invasion < expected_invasion && !rewind_invasion)
+        || next_invasion == std::numeric_limits<std::uint64_t>::max()
+        || (impl.native_rewound_next && !restore && next > impl.native_rewound_next)
+        || (impl.native_rewound_invasion && !restore_invasion && next_invasion > impl.native_rewound_invasion))
         return fail<void>(diagnostic_codes::invalid_setup, "native identity reservation requires its current ordered frontiers");
-    if (next == expected && next_invasion == expected_invasion) return core::Result<void>::success();
+    // A readmitted span that ends exactly at the value the counter was rewound from closes the rewind without moving it;
+    // the no-op reservation is journaled all the same so a replay clears the flag at the same point.
+    const bool closes_rewind = impl.native_rewound_next && next == impl.native_rewound_next && next == expected;
+    const bool closes_rewind_invasion = impl.native_rewound_invasion && next_invasion == impl.native_rewound_invasion
+        && next_invasion == expected_invasion;
+    if (next == expected && next_invasion == expected_invasion && !closes_rewind && !closes_rewind_invasion)
+        return core::Result<void>::success();
     std::vector<std::uint8_t> payload;
     detail::put_u64(payload, expected); detail::put_u64(payload, next);
     detail::put_u64(payload, expected_invasion); detail::put_u64(payload, next_invasion);
@@ -460,6 +558,9 @@ core::Result<void> GalacticSession::reserve_native_frontiers(EntityId expected, 
     if (next != expected) impl.dirty[static_cast<std::size_t>(StateSection::session)] = true;
     if (next_invasion != expected_invasion) impl.dirty[static_cast<std::size_t>(StateSection::native_invasions)] = true;
     impl.next_id = next; impl.next_native_invasion = next_invasion;
+    if (rewind) impl.native_rewound_next = expected; else if (restore || closes_rewind) impl.native_rewound_next = 0;
+    if (rewind_invasion) impl.native_rewound_invasion = expected_invasion;
+    else if (restore_invasion || closes_rewind_invasion) impl.native_rewound_invasion = 0;
     return core::Result<void>::success();
 }
 
@@ -468,7 +569,7 @@ core::Result<void> GalacticSession::append_native_effect(NativeEffectKind kind, 
     auto& impl = *impl_;
     if (impl.native_applying) return core::Result<void>::success();
     if (auto* shadow = native_shadow()) return stage_native_effect(*shadow, kind, std::move(payload), phase);
-    if (impl.failed || impl.native_replaying || kind < NativeEffectKind::fleet || kind > NativeEffectKind::identity_reservation
+    if (impl.failed || impl.native_replaying || kind < NativeEffectKind::fleet || kind > NativeEffectKind::story_ai_usage
         || phase > NativeEffectPhase::world_service || payload.size() > galactic_replay_max_payload
         || impl.native_dropped + impl.native_effects.size() + impl.executed_dropped + impl.executed.size() + impl.pending.size() >= galactic_max_commands
         || impl.native_sequence == std::numeric_limits<std::uint64_t>::max()) {
@@ -558,7 +659,12 @@ core::Result<void> GalacticSession::replay_native_barrier(const PartitionExecuto
                 for (unsigned i = 0; i < 8; ++i) value |= std::uint64_t{effect.payload[offset + i]} << (i * 8);
                 return value;
             };
-            return reserve_native_frontiers(read(0), read(8), read(16), read(24));
+            // A rewind into ids already in use cannot come from a live run: refuse the replay instead of reusing them.
+            if (read(8) < read(0) && native_lane_identity_in_use(read(8)))
+                return fail<void>(diagnostic_codes::invalid_setup, "native identity rewind reaches an identity in use");
+            if (read(24) < read(16) && impl.native_invasions.contains(read(24)))
+                return fail<void>(diagnostic_codes::invalid_setup, "native invasion rewind reaches a handle in use");
+            return reserve_native_frontiers_rewindable(read(0), read(8), read(16), read(24));
         }();
         if (!applied) { impl.failed = true; return applied; }
         impl.native_effects.push_back(effect); impl.native_sequence = effect.sequence + 1; ++impl.native_replay_cursor;
@@ -1236,6 +1342,9 @@ void GalacticSession::set_conflict_tail_handler(ConflictTailHandler handler, con
     impl_->conflict_tail_outer_timer = outer_timer;
 }
 
+core::Result<void> GalacticSession::notify_credit(const CreditNotification& notice) {
+    return impl_->credit_notification_handler ? impl_->credit_notification_handler(notice) : core::Result<void>::success();
+}
 void GalacticSession::set_credit_notification_handler(CreditNotificationHandler handler) {
     impl_->credit_notification_handler = std::move(handler);
 }
@@ -1374,7 +1483,10 @@ GalacticReplay GalacticSession::record() const {
     for (auto& effect : replay.native_effects) effect.sequence -= impl_->native_dropped;
     return replay;
 }
-std::shared_ptr<const GalacticSnapshot> GalacticSession::snapshot() const noexcept { if (const auto* shadow = native_shadow()) return shadow->snapshot(); return impl_->snapshot; }
+std::shared_ptr<const GalacticSnapshot> GalacticSession::snapshot() const noexcept {
+    if (const auto* shadow = native_shadow()) return shadow->snapshot();
+    return impl_->snapshot;
+}
 std::shared_ptr<const GalacticSnapshot> GalacticSession::view_snapshot(ObserverViewContext view) const {
     if (!view.player || !impl_->observer || !std::binary_search(impl_->observer->human_observers.begin(), impl_->observer->human_observers.end(), view.player)) return {};
     if (view.player == impl_->observer->solo_reference_human) {

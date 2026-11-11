@@ -4,6 +4,7 @@
 #include "battle_content.hpp"
 #include "map_mode.hpp"
 #include "map_mode_internal.hpp"
+#include "perf_movers.hpp"
 #include "eawr/presentation/camera/overview.hpp"
 #include "eawr/presentation/live/projectiles.hpp"
 #include "render_profile_viewport.hpp"
@@ -17,11 +18,20 @@
 
 #include <godot_cpp/classes/project_settings.hpp>
 #include <godot_cpp/classes/engine.hpp>
+#include <godot_cpp/classes/window.hpp>
+#include <godot_cpp/classes/viewport_texture.hpp>
+#include <godot_cpp/classes/scene_tree.hpp>
+#include <godot_cpp/classes/image.hpp>
 
 #include <algorithm>
 #include <cctype>
 #include <cmath>
 #include <cstdlib>
+#include <iomanip>
+#include <limits>
+#include <map>
+#include <set>
+#include <vector>
 
 namespace eawr::presentation::godot_backend {
 namespace {
@@ -115,6 +125,8 @@ void MapMode::State::record_frame_trace(double delta, const core::tick_profile::
         trace_frame.clock_target_rate = clock.target_rate;
         trace_frame.clock_valid = clock.valid;
         trace_frame.clock_running = clock.running;
+        trace_frame.clock_frame_us = clock.frame_us;
+        trace_frame.clock_newest_published_us = clock.newest_published_us;
         trace_frame.presented_tick = static_cast<std::uint64_t>(std::max(0.0, state.live_session->presented_tick()));
         trace_frame.units = state.live_session->visible_units().size();
         if (const auto trace_snapshot = state.live_session->snapshot_at(trace_frame.presented_tick)) {
@@ -160,6 +172,8 @@ void MapMode::State::record_frame_trace(double delta, const core::tick_profile::
         trace_frame.bookkeeping_ms = state.live_session->bookkeeping_ms();
         trace_frame.slots_grown = state.live_session->frame_slots_grown();
         trace_frame.slot_growth_ms = state.live_session->slot_growth_ms();
+        trace_frame.launch_preload_fallbacks = state.live_session->preload_fallbacks();
+        trace_frame.launch_read_bytes = state.live_session->frame_launch_read_bytes();
         trace_frame.hud_ms = state.hud_ms;
         trace_frame.audio_ms = state.audio_ms;
         if (state.battle_audio) {
@@ -236,45 +250,219 @@ void MapMode::State::record_frame_trace(double delta, const core::tick_profile::
             if (found == trace_frame.ui_accessor_lock_phases.end()) trace_frame.ui_accessor_lock_phases.emplace_back(phase.name, phase.ms);
             else found->second += phase.ms;
         }
+        if (PerfTrace::movers() > 0) {
+            // Report path only: reads poses and snapshots, writes <trace>.movers.csv. Positions are SOURCE (sim) coordinates;
+            // the camera is RENDER space (source (x, y) maps to render (x, -y) in the focus call): a projection must convert.
+            thread_local std::vector<sim::EntityId> mover_ids;
+            thread_local std::set<sim::EntityId> squadron_ids;
+            thread_local std::uint64_t last_live_frame = std::numeric_limits<std::uint64_t>::max();
+            thread_local const void* last_session = nullptr;
+            thread_local long long last_written_tick = -1;
+            // Unit type names, looked up once per type (empty names are looked up again until the type table is indexed).
+            thread_local std::map<sim::tactical::TypeId, std::string> type_names;
+            // Entity ids and types restart per session: forget the followed set, the tick step and the name cache when the live
+            // session changes.
+            if (last_session != static_cast<const void*>(&*state.live_session)) {
+                last_session = static_cast<const void*>(&*state.live_session);
+                mover_ids.clear();
+                squadron_ids.clear();
+                type_names.clear();
+                last_written_tick = -1;
+                last_live_frame = std::numeric_limits<std::uint64_t>::max();
+            }
+            const auto& frame = state.live_session->battle_frame();
+            const std::uint64_t shown = state.live_session->live_frames();
+            // Rows only for frames on which the live step ran: a completed battle would repeat its last positions.
+            if (frame.previous && frame.latest && shown != last_live_frame) {
+                last_live_frame = shown;
+                const auto camera = state.space ? state.space->live_camera_frame() : std::nullopt;
+                // Snapshot instances are ascending by entity id (snapshot.hpp), so one binary search per lookup.
+                const auto find = [](const auto& snapshot, sim::EntityId entity) -> const sim::tactical::TacticalInstance* {
+                    const auto instances = snapshot.instances();
+                    const auto it = std::lower_bound(instances.begin(), instances.end(), entity,
+                        [](const sim::tactical::TacticalInstance& instance, sim::EntityId id) { return instance.entity_id < id; });
+                    return it != instances.end() && it->entity_id == entity ? &*it : nullptr;
+                };
+                // Followed only while drawn this frame and present in both snapshots (docked or dead members are not).
+                const auto& unit_frames = state.live_session->unit_frames();
+                const auto eligible = [&](sim::EntityId entity) {
+                    return unit_frames.contains(entity) && find(*frame.previous, entity) && find(*frame.latest, entity);
+                };
+                const std::size_t want = PerfTrace::movers();
+                auto chosen = perf_movers::select<sim::EntityId>(mover_ids, {}, {}, want, eligible);
+                if (perf_movers::should_refill(chosen.size(), want, shown)) {
+                    std::vector<sim::EntityId> preferred, others;
+                    squadron_ids.clear();
+                    for (const auto& [squadron, members] : state.live_session->squadron_members()) {
+                        static_cast<void>(squadron);
+                        preferred.insert(preferred.end(), members.begin(), members.end());
+                        squadron_ids.insert(members.begin(), members.end());
+                    }
+                    others.reserve(unit_frames.size());
+                    for (const auto& [entity, unit] : unit_frames) {
+                        static_cast<void>(unit);
+                        others.push_back(entity);
+                    }
+                    chosen = perf_movers::select<sim::EntityId>(chosen, preferred, others, want, eligible);
+                }
+                mover_ids = std::move(chosen);
+                const auto fixed = [](const sim::tactical::TacticalInstance& instance, std::size_t axis) {
+                    return static_cast<double>(instance.fixed_transform.rows[axis][3].raw()) / static_cast<double>(sim::math::Fixed::scale);
+                };
+                // The local player's bit in visible_to (the k-th snapshot player), and the arrival frames flown (-1: none).
+                // No bit (the local player is not a snapshot player, e.g. an observer) writes -1 in the visible columns.
+                const auto local_bit = [&](const auto& snapshot) -> std::optional<std::uint64_t> {
+                    const auto players = snapshot.players();
+                    const auto it = std::find_if(players.begin(), players.end(),
+                        [&](const auto& player) { return player.player_id == state.live_session->local_player(); });
+                    if (it == players.end()) return std::nullopt;
+                    return std::uint64_t{1} << static_cast<unsigned>(it - players.begin());
+                };
+                const auto bit_previous = local_bit(*frame.previous), bit_latest = local_bit(*frame.latest);
+                const auto visible = [](const sim::tactical::TacticalInstance& instance, const std::optional<std::uint64_t>& bit) {
+                    return bit ? ((instance.visible_to & *bit) != 0U ? 1 : 0) : -1;
+                };
+                const auto arrival = [](const sim::tactical::TacticalInstance& instance) {
+                    return instance.arrival ? static_cast<long long>(*instance.arrival) : -1LL;
+                };
+                const auto to_unit = [](const sim::math::Fixed value) {
+                    return static_cast<double>(value.raw()) / static_cast<double>(sim::math::Fixed::scale);
+                };
+                // Per-frame camera diagnostics, repeated on every row of the frame. The camera columns above are the camera the
+                // frame is drawn with: state.space->live_camera_frame() is read here, after the view's process step set it on the
+                // renderer (the battlecam pose and the follow focus are applied before that step; the follow focus set at the
+                // end of this frame takes effect next frame). camera_input_src is what that pose was aimed at.
+                perf_movers::FrameDiagnostics diag;
+                const auto viewport = PerfTrace::viewport_size();
+                diag.viewport_w = viewport.first;
+                diag.viewport_h = viewport.second;
+                const bool movie = state.space && state.space->live_camera_movie();
+                const auto follow = state.live_session->options().follow;
+                const bool following = !movie && follow && !state.followed_projectile;
+                diag.mode = movie ? (state.movie_preview ? perf_movers::CameraMode::c_key_preview : perf_movers::CameraMode::battlecam)
+                    : following ? perf_movers::CameraMode::follow : perf_movers::CameraMode::free;
+                diag.shot_id = state.perf_camera.shot_id;
+                diag.shot_type = movie ? state.perf_camera.shot_type : following ? std::string("follow") : std::string();
+                diag.shot_elapsed_s = movie ? state.movie_elapsed : 0.0;
+                diag.shot_cut = state.perf_camera.shot_cut;
+                state.perf_camera.shot_cut = false;
+                diag.paused = state.live_session->time().paused();
+                const long long latest_tick = static_cast<long long>(frame.latest->completed_tick());
+                diag.tick_step = last_written_tick < 0 ? 0 : latest_tick - last_written_tick;
+                last_written_tick = latest_tick;
+                const sim::EntityId subject = movie ? state.movie_subject : following ? *follow : sim::EntityId{};
+                if (subject != 0) {
+                    diag.subject_entity = subject;
+                    diag.camera_input_src = state.perf_camera.input;
+                    const auto pose = unit_frames.find(subject);
+                    if (pose != unit_frames.end()) {
+                        diag.subject_type_name = state.live_session->unit_type_name(pose->second.type);
+                        diag.pivot_src = perf_movers::Vec3d{pose->second.position[0], pose->second.position[1], pose->second.position[2]};
+                        // The model box middle (not the pivot): the unit's visual centre, for the offset between the two.
+                        const auto& visible = state.live_session->visible_units();
+                        const auto unit = std::find_if(visible.begin(), visible.end(),
+                            [&](const auto& candidate) { return candidate.entity == subject; });
+                        std::optional<BattleScene::LiveShipBox> box;
+                        if (unit != visible.end() && state.space_population) box = state.space_population->live_ship_box(unit->ship);
+                        if (box) {
+                            perf_movers::Mat3d rotation{};
+                            for (std::size_t row = 0; row < 3; ++row)
+                                for (std::size_t col = 0; col < 3; ++col) rotation[row][col] = to_unit(box->model_to_world.rows[row][col]);
+                            diag.centre_src = perf_movers::bounds_centre_source(*diag.pivot_src, rotation,
+                                {box->low[0], box->low[1], box->low[2]}, {box->high[0], box->high[1], box->high[2]});
+                        }
+                    }
+                }
+                const auto type_name = [&](const sim::tactical::TypeId type) -> const std::string& {
+                    auto found = type_names.find(type);
+                    if (found == type_names.end() || found->second.empty())
+                        found = type_names.insert_or_assign(type, state.live_session->unit_type_name(type)).first;
+                    return found->second;
+                };
+                auto& out = state.perf_trace->movers_output();
+                out << std::fixed << std::setprecision(6);
+                for (const auto entity : mover_ids) {
+                    const auto pose = unit_frames.find(entity);
+                    const auto* before = find(*frame.previous, entity);
+                    const auto* after = find(*frame.latest, entity);
+                    if (pose == unit_frames.end() || !before || !after) continue;
+                    out << state.perf_trace->frames() << ',' << std::setprecision(1) << trace_frame.clock_frame_us << std::setprecision(6)
+                        << ',' << entity << ',' << after->type_id << ',' << after->owner << ',' << (squadron_ids.contains(entity) ? 1 : 0)
+                        << ',' << frame.previous->completed_tick() << ',' << frame.latest->completed_tick() << ',' << frame.alpha
+                        << ',' << arrival(*before) << ',' << arrival(*after)
+                        << ',' << visible(*before, bit_previous) << ',' << visible(*after, bit_latest)
+                        << ',' << pose->second.position[0] << ',' << pose->second.position[1] << ',' << pose->second.position[2];
+                    for (std::size_t axis = 0; axis < 3; ++axis) out << ',' << fixed(*before, axis);
+                    for (std::size_t axis = 0; axis < 3; ++axis) out << ',' << fixed(*after, axis);
+                    if (camera) {
+                        out << ",1";
+                        for (std::size_t axis = 0; axis < 3; ++axis) out << ',' << camera->eye[axis];
+                        for (std::size_t axis = 0; axis < 3; ++axis) out << ',' << camera->target[axis];
+                        for (std::size_t axis = 0; axis < 3; ++axis) out << ',' << camera->up[axis];
+                        out << ',' << camera->vertical_fov_degrees;
+                    } else {
+                        out << ",0,nan,nan,nan,nan,nan,nan,nan,nan,nan,nan";
+                    }
+                    // The unit type's content name and the previous/latest per-sim-frame craft velocity (SOURCE; nan when the unit
+                    // has none), then the frame's camera diagnostics (perf_movers::frame_columns).
+                    out << ',' << type_name(after->type_id);
+                    for (const auto* instance : {before, after}) {
+                        for (std::size_t axis = 0; axis < 3; ++axis) {
+                            if (!instance->craft_velocity_per_frame) { out << ",nan"; continue; }
+                            const auto& v = *instance->craft_velocity_per_frame;
+                            out << ',' << to_unit(axis == 0 ? v.x : axis == 1 ? v.y : v.z);
+                        }
+                    }
+                    out << ',';
+                    diag.write(out);
+                    out << '\n';
+                }
+            }
+        }
+        // --eawr-perf-screenshot-frames: this trace frame is drawn after this point; its picture is read back at the start of
+        // the next frame (write_perf_screenshot).
+        if (state.perf_trace->screenshot_wanted(state.perf_trace->frames())) state.perf_screenshot_pending = state.perf_trace->frames();
         state.perf_trace->frame(trace_frame);
     }
 }
 
-void MapMode::State::update_attract_camera(double delta, const std::optional<int>& finished) {
-    State& state = *this;
-    if (!finished && state.attract_motion && state.live_session) {
-        // The attract's camera follows the fight: presentation only, read from the session's
-        // snapshot; the battle itself is never touched.
-        state.attract_ships.clear();
-        const double presented = state.live_session->presented_tick();
-        const auto attract_snapshot = state.live_session->snapshot_at(static_cast<std::uint64_t>(std::max(0.0, presented)));
-        if (attract_snapshot) {
-            const auto scale = static_cast<double>(sim::math::Fixed::scale);
-            for (const sim::tactical::TacticalInstance& instance : attract_snapshot->instances()) {
-                if (!instance.durability) continue;
-                const auto& rows = instance.fixed_transform.rows;
-                state.attract_ships.push_back({static_cast<float>(static_cast<double>(rows[0][3].raw()) / scale),
-                                               static_cast<float>(static_cast<double>(rows[2][3].raw()) / scale),
-                                               -static_cast<float>(static_cast<double>(rows[1][3].raw()) / scale)});
-            }
-        }
-        const AttractCameraPose pose = state.attract_motion->update(
-            delta, AttractBattleView{state.attract_ships, state.live_session->time().paused()});
-        if (state.attract_motion->valid()) {
-            if (state.attract_camera_updates++ == 0) state.attract_first_eye = pose.eye;
-            state.space->set_attract_pose(pose.eye, pose.target);
-        }
-    }
+void MapMode::State::write_perf_screenshot() {
+    if (!perf_trace || !perf_screenshot_pending) return;
+    const std::uint64_t frame_number = *perf_screenshot_pending;
+    perf_screenshot_pending.reset();
+    // At the start of the next frame the root viewport texture holds the frame that was drawn after the request.
+    auto* tree = Object::cast_to<SceneTree>(Engine::get_singleton()->get_main_loop());
+    if (tree == nullptr || tree->get_root() == nullptr) return;
+    const Ref<Image> image = tree->get_root()->get_texture()->get_image();
+    if (image.is_valid()) image->save_png(String::utf8(perf_trace->screenshot_path(frame_number).c_str()));
 }
 
-void MapMode::State::update_follow_camera(const std::optional<int>& finished) {
+void MapMode::State::update_attract_camera(double, const std::optional<int>&) {
+    // BCAM-17: keep the saved static attract pose until a moving view is established.
+}
+
+bool MapMode::State::finalize_camera() {
     State& state = *this;
+    if (!state.space || !state.live_session
+        || state.live_session->phase() != LiveSessionView::Phase::running) return false;
+    // The battlecam, or the follow focus, now reads the pose this frame's live step composed (#6448 J1).
+    if (state.space->live_camera_movie()) return state.apply_movie_pose();
+    return state.update_follow_camera(std::nullopt);
+}
+
+bool MapMode::State::update_follow_camera(const std::optional<int>& finished) {
+    State& state = *this;
+    bool moved = false;
     // #447 --eawr-live-follow: the next frame looks at the unit where this one drew it.
     if (!finished && state.live_session && state.live_session->options().follow
         && !state.followed_projectile) {
         if (const auto unit = state.live_session->unit_frame(*state.live_session->options().follow)) {
             state.space->live_camera_focus(static_cast<float>(unit->position[0]),
                                            static_cast<float>(unit->position[1]));
+            // Trace only: the camera drawn next frame is aimed at this frame's presented position, unless a battlecam shot or the
+            // C-key preview drives the camera (advance_movie owns camera_input_src then).
+            if (PerfTrace::movers() > 0 && !state.space->live_camera_movie()) state.perf_camera.input = unit->position;
+            moved = true;
         }
     }
     // #660 capture-only: BP-61 supplies the same interpolation the missile model uses.
@@ -305,11 +493,13 @@ void MapMode::State::update_follow_camera(const std::optional<int>& finished) {
                     if (const auto pose = live::interpolate_projectile(previous, *latest, follow_frame.alpha)) {
                         state.space->live_camera_focus(static_cast<float>(pose->position[0]),
                                                        static_cast<float>(pose->position[1]));
+                        moved = true;
                     }
                 }
             }
         }
     }
+    return moved;
 }
 
 bool MapMode::State::advance_map_camera(double delta) {
@@ -705,6 +895,21 @@ std::optional<int> MapMode::process(const double delta) {
         const auto* display = DisplayServer::get_singleton();
         const bool allowed = map_pointer_feed_allowed({focus, state.options.attract.has_value(), ready, movie},
             display && display->window_is_focused(), state.menu_open, state.pointer_blocked);
+        // #5990: FoC keeps the pointer where a middle-button drag started. While
+        // the adapter holds it, warp back each frame and take no edge sample. Any
+        // reason the feed is not allowed (focus, minimize, menu, modal) ends the hold.
+        const bool holding = (state.space && state.space->camera_pointer_hold().has_value())
+            || (state.map_camera && state.map_camera->pointer_hold().has_value());
+        const auto hold_step = viewer::camera_input::hold_step(holding, allowed);
+        if (hold_step == viewer::camera_input::HoldStep::release) {
+            if (state.space) state.space->camera_pointer_left();
+            if (state.map_camera) state.map_camera->pointer_left();
+        } else if (hold_step == viewer::camera_input::HoldStep::warp) {
+            std::optional<std::array<float, 2>> anchor;
+            if (state.space) anchor = state.space->camera_take_pointer_hold_warp();
+            else if (state.map_camera) anchor = state.map_camera->take_pointer_hold_warp();
+            if (anchor) state.pointer_host->get_viewport()->warp_mouse(Vector2((*anchor)[0], (*anchor)[1]));
+        }
         const auto point = allowed ? polled_pointer(*state.pointer_host) : Vector2();
         route_pointer_sample(allowed, point.x, point.y, [&state](const float x, const float y) {
             if (state.space) state.space->camera_sample_pointer(x, y);
@@ -728,6 +933,7 @@ std::optional<int> MapMode::process(const double delta) {
     std::optional<core::tick_profile::Capture> ui_capture;
     if (state.perf_trace) ui_capture.emplace(ui_recording);
     if (state.perf_trace) state.perf_trace->begin_frame();
+    state.write_perf_screenshot();
     state.hud_ms = 0.0;
     core::load_profile::Scope first_frame_scope(core::load_profile::Phase::session);
     // BLD-12: the loading screen's Begin button, pressed since the last frame.
@@ -737,8 +943,17 @@ std::optional<int> MapMode::process(const double delta) {
     }
     state.sync_net_perf(delta);
     state.sync_perf_overlay();
+    state.advance_movie(delta);
+    if (state.hud) state.hud->advance_movie_bands(delta);
     if (state.space) {
+        if (!state.finalize_camera_installed) {
+            state.finalize_camera_installed = state.space->set_live_finalize_camera(
+                [&state] { return state.finalize_camera(); });
+        }
         const std::optional<int> finished = state.space->process(delta);
+        if (state.space->live_camera_movie()
+            && (finished || (state.live_session && state.live_session->phase() != LiveSessionView::Phase::running)))
+            state.set_movie_mode(false, true);
         if (state.hud && state.hud->command_bar_movie_active() && state.battle_audio && state.live_session)
             state.hud->service_command_bar_movie(state.battle_audio->contains_speech(state.hud->command_bar_movie_speech()),
                 state.live_session->time().paused());
@@ -898,10 +1113,49 @@ void MapMode::input(const Ref<InputEvent>& event) {
         state.land_overlay->set_shown(!state.land_overlay->shown());
         return;
     }
+    if (state.space) {
+        const auto raw = map_camera_event(event);
+        if (raw && state.space->preview_key(*raw)) {
+            if (!raw->echo) {
+                if (raw->pressed) state.preview_key_down = true;
+                else if (state.preview_key_down) { state.preview_key_down = false; state.enter_unit_preview(); }
+            }
+            return;
+        }
+        if (raw && state.space->battlecam_key(*raw)) {
+            if (!raw->echo) {
+                if (raw->pressed) state.movie_key_down = true;
+                else if (state.movie_key_down) { state.movie_key_down = false; state.set_movie_mode(true); }
+            }
+            return;
+        }
+    }
     if (state.space && state.space->live_camera_movie()) {
         if (const auto* key = Object::cast_to<InputEventKey>(event.ptr()); key && key->is_pressed() && !key->is_echo()) {
             const auto code = key->get_physical_keycode() != KEY_NONE ? key->get_physical_keycode() : key->get_keycode();
             if (code == KEY_ESCAPE) state.set_movie_mode(false);
+        }
+        if (const auto* key = Object::cast_to<InputEventKey>(event.ptr()); key && !key->is_echo()) {
+            const auto code = key->get_physical_keycode() != KEY_NONE ? key->get_physical_keycode() : key->get_keycode();
+            if (code == KEY_TAB) state.movie_tab_down = key->is_pressed();
+        }
+        if (const auto* motion = Object::cast_to<InputEventMouseMotion>(event.ptr())) {
+            const auto size = state.pointer_host && state.pointer_host->get_viewport()
+                ? state.pointer_host->get_viewport()->get_visible_rect().size : Vector2();
+            const auto movement = motion->get_relative();
+            if (state.movie_preview) {
+                // BCAM-19: pointer sensitivity is provisional pending direct measurement.
+                state.preview_azimuth += movement.x * 0.25F;
+                state.preview_elevation = std::clamp(state.preview_elevation - movement.y * 0.25F, -89.0F, 89.0F);
+            } else if (size.x > 0.0F && size.y > 0.0F && (std::abs(movement.x) >= size.x / 20.0F || std::abs(movement.y) >= size.y / 20.0F))
+                state.set_movie_mode(false);
+        } else if (const auto* button = Object::cast_to<InputEventMouseButton>(event.ptr())) {
+            if (state.movie_preview && button->is_pressed()) {
+                const auto code = button->get_button_index();
+                const float step = preview_wheel_step(state.preview_distance, state.preview_radius);
+                const float change = code == MOUSE_BUTTON_WHEEL_UP ? -step : code == MOUSE_BUTTON_WHEEL_DOWN ? step : 0.0F;
+                state.preview_distance = preview_distance_clamp(state.preview_distance + change, state.preview_radius, state.preview_extent);
+            } else if (!state.movie_preview) state.set_movie_mode(false);
         }
         return; // HCB-11b: Escape is consumed; it never opens a menu or issues an order.
     }
@@ -988,7 +1242,8 @@ MapMode::AttractStatus MapMode::attract_status() {
     status.battle_input = state.battle != nullptr;
     status.camera_updates = state.attract_camera_updates;
     status.camera_first_eye = state.attract_first_eye;
-    if (state.attract_motion) status.camera_eye = state.attract_motion->pose().eye;
+    if (state.attract_motion) status.camera_eye = state.attract_camera_updates
+        ? state.attract_last_eye : state.attract_motion->pose().eye;
     if (state.battle_audio) {
         const BattleAudio::AttractSilence silence = state.battle_audio->attract_silenced();
         status.speech_refused = silence.refused;
@@ -1056,11 +1311,11 @@ void MapMode::focus(const bool focused) {
     state_->map_camera->set_focus(focused);
 }
 
-bool MapMode::pointer_confine_allowed() const {
+bool MapMode::pointer_confine_allowed(const bool allow_movie) const {
     const State& state = *state_;
     return state.options.interactive && !state.options.attract && !state.menu_open && !state.pointer_blocked && !state.completed
         && !(state.live_session && state.live_session->phase() == LiveSessionView::Phase::ready)
-        && !(state.space && state.space->live_camera_movie());
+        && (allow_movie || !(state.space && state.space->live_camera_movie()));
 }
 
 void MapMode::set_pointer_blocked(const bool blocked) { state_->pointer_blocked = blocked; }

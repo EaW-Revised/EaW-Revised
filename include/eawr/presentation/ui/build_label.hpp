@@ -23,7 +23,7 @@ namespace eawr::presentation::ui {
     return std::to_string(major) + "." + std::to_string(minor) + "." + std::to_string(patch) + " " + kind;
 }
 
-// "EAWR Viewer (viewer: release; engine: Godot 4.7.2 editor, debug-enabled, eawr fad06b579) (DEBUG)"
+// "EAWR Viewer (viewer: release; engine: Godot 4.7.2 editor, debug-enabled, eawr 5b733a90f) (DEBUG)"
 // `signature` is EngineSignature::display (engine_signature.hpp). A debug-enabled engine keeps the engine's own
 // " (DEBUG)" suffix: setting the title through the DisplayServer drops it, so it is written back here.
 [[nodiscard]] inline std::string window_title(const std::string& application_name, const std::string& viewer_build,

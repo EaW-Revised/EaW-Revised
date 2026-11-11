@@ -2,10 +2,12 @@
 #include "battle_source_draw.hpp"
 #include "live_session_internal.hpp"
 #include "skirmish_prepare.hpp"
+#include "viewer_path.hpp"
 #include "menu_timeline.hpp"
 #include "eawr/scene/model_prefetch.hpp"
 #include "eawr/units/simulation_model.hpp"
 #include "eawr/core/load_profile.hpp"
+#include "eawr/platform/saved_games.hpp"
 #include "eawr/platform/live_ai.hpp"
 #include "eawr/presentation/ui/production.hpp"
 #include "eawr/presentation/live/live_units.hpp"
@@ -13,6 +15,8 @@
 #include <system_error>
 #include <algorithm>
 #include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <iostream>
 #include <sstream>
 #include <utility>
@@ -122,13 +126,37 @@ std::vector<BattleSource::Stage> BattleSourceState::local_stages(const vfs::Vfs&
     // (`selected`) start alone, which is never offloaded.
     stages.push_back([this, &filesystem, &catalog, kind, attract, local, channel](std::string& failure) -> bool {
         auto& fixture = local->fixture;
-        if (kind == LocalStartKind::selected) {
+        // A saved battle the host's queue step already prepared for this very content and save (exact key): take its
+        // recorded fixture, tables, inputs and start instead of building them all again.
+        const auto& handed = options_.saved_preparation;
+        if (kind == LocalStartKind::selected && handed && !handed->consumed && !options_.load_path.empty()
+            && handed->filesystem == &filesystem && handed->catalog == &catalog
+            && handed->save_path == ViewerPath::utf8(options_.load_path)) {
+            handed->consumed = true;
+            fixture = std::move(handed->fixture);
+            local->prepared.emplace(std::move(handed->prepared));
+        } else if (kind == LocalStartKind::selected) {
             auto selected = skirmish::fixture_from_options(options_.skirmish, filesystem, catalog);
             if (!selected) {
                 failure = "live skirmish options: " + core::format_diagnostic(selected.error());
                 return false;
             }
             fixture = std::move(selected).value();
+            if (!options_.load_path.empty()) {
+                std::ifstream input(options_.load_path, std::ios::binary);
+                if (!input) { failure = "The battle save could not be read."; return false; }
+                const std::vector<std::uint8_t> bytes((std::istreambuf_iterator<char>(input)), {});
+                auto saved_setup = platform::skirmish_save_setup(bytes);
+                if (!saved_setup) { failure = core::format_diagnostic(saved_setup.error()); return false; }
+                std::string reason;
+                auto tables = load_start_tables(filesystem, catalog, reason, fixture.map);
+                if (!tables) { failure = reason; return false; }
+                auto inputs = skirmish::read_start_inputs(fixture, filesystem, catalog, *tables);
+                if (!inputs) { failure = core::format_diagnostic(inputs.error()); return false; }
+                auto recorded = skirmish::replay_fixture(fixture, inputs.value(), saved_setup.value(), false);
+                if (!recorded) { failure = core::format_diagnostic(recorded.error()); return false; }
+                fixture = std::move(recorded).value();
+            }
         } else if (attract) {
             // MAT-08, MAT-09: the demo map's own forces; no lobby, no victory condition.
             skirmish::PlacedForces forces;
@@ -141,7 +169,7 @@ std::vector<BattleSource::Stage> BattleSourceState::local_stages(const vfs::Vfs&
             }
             fixture = std::move(selected).value();
         }
-        if (kind == LocalStartKind::selected) {
+        if (kind == LocalStartKind::selected && !local->prepared) {
             auto result = prepare_skirmish(fixture, filesystem, catalog);
             if (!result) { failure = result.error().message; return false; }
             local->prepared.emplace(std::move(result).value());

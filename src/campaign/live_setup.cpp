@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <limits>
 #include <map>
+#include <optional>
 #include <set>
 #include <span>
 #include <sstream>
@@ -150,59 +151,115 @@ bool human(const gc::GalacticSetup& setup, gc::PlayerId id) {
     return std::any_of(setup.seats.begin(), setup.seats.end(),
         [&](const auto& seat) { return seat.active && seat.player == id && seat.kind == gc::SeatKind::human; });
 }
+// Only a single setup callback owns this memo. Cache immutable catalog chains and lookups
+// on first use, so malformed input is still observed at the same offer as before.
+struct OfferMemo {
+    std::map<const units::GalacticType*, std::vector<const data::Definition*>> type_layers;
+    std::map<std::string, std::vector<const data::Definition*>> faction_layers;
+    std::map<gc::PlanetId, const data::galactic::Planet*> planets;
+    std::map<gc::PlayerId, const CampaignPlayerBinding*> players;
+    std::map<const FleetTypeBinding*, const units::GalacticType*> types;
+    std::map<const FleetTypeBinding*, gc::ProductionOffer> admissions;
+    std::map<const units::GalacticType*, units::GalacticType> adjusted_types;
+    std::map<std::pair<std::string, std::string>, Fixed> corruption_factors;
+    std::optional<bool> tutorial;
+    const units::GalacticType* type(const Prepared& p, const FleetTypeBinding& binding) {
+#if defined(EAWR_TEST_LEGACY_OFFER)
+        return p.starting.types.find(binding.original_type);
+#else
+        const auto [it, inserted] = types.try_emplace(&binding, nullptr);
+        if (inserted) it->second = p.starting.types.find(binding.original_type);
+        return it->second;
+#endif
+    }
+    const std::vector<const data::Definition*>& original(const Prepared& p, const units::GalacticType& type) {
+        const auto [it, inserted] = type_layers.try_emplace(&type);
+        if (inserted) it->second = layers(p.catalog, type.name, data::Category::game_object);
+        return it->second;
+    }
+    const std::vector<const data::Definition*>& faction(const Prepared& p, const std::string& name) {
+        const auto [it, inserted] = faction_layers.try_emplace(name);
+        if (inserted) it->second = layers(p.catalog, name, data::Category::faction);
+        return it->second;
+    }
+    const data::galactic::Planet* planet(const Prepared& p, const CampaignSetupPlan& plan, gc::PlanetId id) {
+        const auto [it, inserted] = planets.try_emplace(id, nullptr);
+        if (inserted) it->second = planet_source(p, plan, id);
+        return it->second;
+    }
+    const CampaignPlayerBinding* player(const CampaignSetupPlan& plan, gc::PlayerId id) {
+        const auto [it, inserted] = players.try_emplace(id, nullptr);
+        if (inserted) it->second = player_source(plan, id);
+        return it->second;
+    }
+    const units::GalacticType& adjusted(const Prepared& p, const units::GalacticType& type) {
+        const auto [it, inserted] = adjusted_types.try_emplace(&type, type);
+        if (inserted) it->second.build_time_seconds = gc::production_product(
+            type.build_time_seconds.value_or(Fixed{}), p.production_speed);
+        return it->second;
+    }
+};
+#if defined(EAWR_TEST_LEGACY_OFFER)
+#include "../../tests/galactic/offer_reference.inc"
+#else
 core::Result<gc::ProductionOffer> offer(const Prepared& p, const CampaignSetupPlan& plan,
     const gc::GalacticSetup& setup, const gc::PlanetProduction& location,
-    const FleetTypeBinding& binding, const units::GalacticType& type, Fixed* unrounded_price = nullptr) {
-    gc::ProductionOffer admission; admission.type = binding.id;
-    const bool company = behaves(type, "DUMMY_GROUND_COMPANY");
-    const bool squadron = behaves(type, "DUMMY_SPACE_FIGHTER_SQUADRON");
-    const bool station = behaves(type, "DUMMY_STAR_BASE");
-    const bool ground_structure = behaves(type, "DUMMY_GROUND_STRUCTURE");
-    const bool orbital_structure = behaves(type, "DUMMY_ORBITAL_STRUCTURE");
-    const bool ground_base = behaves(type, "DUMMY_GROUND_BASE");
-    const bool ordinary_ship = behaves(type, "DUMMY_STARSHIP");
-    admission.domain = units::built_on_ground(type) ? gc::ProductionDomain::ground : gc::ProductionDomain::space;
-    admission.kind = type.build_advances_tech_level.value_or(0) > 0 ? gc::ProductionKind::technology : station ? gc::ProductionKind::starbase : ground_structure || orbital_structure
-        ? gc::ProductionKind::structure : gc::ProductionKind::unit;
-    admission.direct_build_allowed = station || ground_structure || orbital_structure || ordinary_ship || company || squadron;
-    if (ground_base) admission.direct_build_allowed = false;
-    if (admission.kind == gc::ProductionKind::technology) {
-        admission.direct_build_allowed = true; admission.target_tech = *type.build_advances_tech_level;
-    }
-    const auto* owner = player_source(plan, location.target_owner);
+    const FleetTypeBinding& binding, const units::GalacticType& type, OfferMemo& memo, Fixed* unrounded_price = nullptr) {
+    const auto* owner = memo.player(plan, location.target_owner);
     if (!owner) return refuse<gc::ProductionOffer>("production owner is unbound");
-    admission.affiliated = contains(type.affiliation, owner->faction);
-    const auto original = layers(p.catalog, type.name, data::Category::game_object);
-    if (const auto* node = data::retail::single(original, "Cinematic_Object_Only")) {
-        data::tag_trace::used(node); const auto flag = data::retail::boolean(node->raw_text);
-        if (!flag) return refuse<gc::ProductionOffer>("invalid cinematic flag");
-        admission.cinematic = *flag;
-    } // WGS-90: fresh false.
-    if (const auto* node = data::retail::single(original, "Build_Can_Be_Unlocked_By_Slicer")) {
-        data::tag_trace::used(node); const auto flag = data::retail::boolean(node->raw_text);
-        if (!flag) return refuse<gc::ProductionOffer>("invalid slicer flag");
-        admission.slicer_unlockable = *flag;
-    }
-    const auto* limit = data::retail::single(original, "Build_Max_Instances_Per_Planet");
-    admission.planet_limit = limit ? data::retail::integer_constant(limit->raw_text) : -1; // LSA-06
-    for (const auto& name : type.required_orbiting_units) {
-        const auto id = p.identity(name);
-        if (!id) {
-            // CGS-07: a name that resolves to no object is a null reference; the eligibility check skips it.
-            p.note("campaign_unresolved_prerequisite", type.name + ": Required_Orbiting_Units names " + p.unresolved(name)
-                + "; the entry is ignored (CGS-07)");
-            continue;
+    const bool station = behaves(type, "DUMMY_STAR_BASE");
+    auto cached = memo.admissions.find(&binding);
+    if (cached == memo.admissions.end()) {
+        gc::ProductionOffer admission; admission.type = binding.id;
+        const bool company = behaves(type, "DUMMY_GROUND_COMPANY");
+        const bool squadron = behaves(type, "DUMMY_SPACE_FIGHTER_SQUADRON");
+        const bool ground_structure = behaves(type, "DUMMY_GROUND_STRUCTURE");
+        const bool orbital_structure = behaves(type, "DUMMY_ORBITAL_STRUCTURE");
+        const bool ground_base = behaves(type, "DUMMY_GROUND_BASE");
+        const bool ordinary_ship = behaves(type, "DUMMY_STARSHIP");
+        admission.domain = units::built_on_ground(type) ? gc::ProductionDomain::ground : gc::ProductionDomain::space;
+        admission.kind = type.build_advances_tech_level.value_or(0) > 0 ? gc::ProductionKind::technology : station ? gc::ProductionKind::starbase : ground_structure || orbital_structure
+            ? gc::ProductionKind::structure : gc::ProductionKind::unit;
+        admission.direct_build_allowed = station || ground_structure || orbital_structure || ordinary_ship || company || squadron;
+        if (ground_base) admission.direct_build_allowed = false;
+        if (admission.kind == gc::ProductionKind::technology) {
+            admission.direct_build_allowed = true; admission.target_tech = *type.build_advances_tech_level;
         }
-        admission.required_orbiting_units.push_back(id);
+        const auto& original = memo.original(p, type);
+        if (const auto* node = data::retail::single(original, "Cinematic_Object_Only")) {
+            data::tag_trace::used(node); const auto flag = data::retail::boolean(node->raw_text);
+            if (!flag) return refuse<gc::ProductionOffer>("invalid cinematic flag");
+            admission.cinematic = *flag;
+        } // WGS-90: fresh false.
+        if (const auto* node = data::retail::single(original, "Build_Can_Be_Unlocked_By_Slicer")) {
+            data::tag_trace::used(node); const auto flag = data::retail::boolean(node->raw_text);
+            if (!flag) return refuse<gc::ProductionOffer>("invalid slicer flag");
+            admission.slicer_unlockable = *flag;
+        }
+        const auto* limit = data::retail::single(original, "Build_Max_Instances_Per_Planet");
+        admission.planet_limit = limit ? data::retail::integer_constant(limit->raw_text) : -1; // LSA-06
+        for (const auto& name : type.required_orbiting_units) {
+            const auto id = p.identity(name);
+            if (!id) {
+                // CGS-07: a name that resolves to no object is a null reference; the eligibility check skips it.
+                p.note("campaign_unresolved_prerequisite", type.name + ": Required_Orbiting_Units names " + p.unresolved(name)
+                    + "; the entry is ignored (CGS-07)");
+                continue;
+            }
+            admission.required_orbiting_units.push_back(id);
+        }
+        auto structures = resolve_structure_requirements(type.required_special_structures,
+            [&](const std::string_view name) { return p.identity(name); });
+        if (!structures) return core::Result<gc::ProductionOffer>::failure(structures.error());
+        for (const auto& name : structures.value().ignored)
+            p.note("campaign_unresolved_prerequisite", type.name + ": Required_Special_Structures names " + p.unresolved(name)
+                + "; the null entry follows the positional eligibility rule (CGS-07, RGC-09)");
+        admission.required_structures = std::move(structures.value().groups);
+        cached = memo.admissions.emplace(&binding, std::move(admission)).first;
     }
-    auto structures = resolve_structure_requirements(type.required_special_structures,
-        [&](const std::string_view name) { return p.identity(name); });
-    if (!structures) return core::Result<gc::ProductionOffer>::failure(structures.error());
-    for (const auto& name : structures.value().ignored)
-        p.note("campaign_unresolved_prerequisite", type.name + ": Required_Special_Structures names " + p.unresolved(name)
-            + "; the null entry follows the positional eligibility rule (CGS-07, RGC-09)");
-    admission.required_structures = std::move(structures.value().groups);
-    const auto* source = planet_source(p, plan, location.planet);
+    auto admission = cached->second;
+    admission.affiliated = contains(type.affiliation, owner->faction);
+    const auto* source = memo.planet(p, plan, location.planet);
     if (!source) return refuse<gc::ProductionOffer>("unbound production planet");
     if (!type.required_planets.empty() && !contains(type.required_planets, source->name)) admission.direct_build_allowed = false;
     // WGEP-158..160: an authored positive cost never admits alone. Ground construction also needs a nonzero
@@ -218,15 +275,23 @@ core::Result<gc::ProductionOffer> offer(const Prepared& p, const CampaignSetupPl
     ProductionPreparation quantities;
     quantities.price_multiplier = quantities.time_multiplier = quantities.tech_purchase_multiplier = one;
     quantities.corruption_price_multiplier = quantities.corruption_time_multiplier = one;
-    const auto faction = layers(p.catalog, owner->faction, data::Category::faction);
+    const auto& faction = memo.faction(p, owner->faction);
     const auto corruption_factor = [&](std::string_view tag) -> core::Result<Fixed> {
+        const auto cache_key = std::pair{owner->faction, std::string(tag)};
+        if (const auto at = memo.corruption_factors.find(cache_key); at != memo.corruption_factors.end())
+            return core::Result<Fixed>::success(at->second);
         const auto* node = data::retail::single(faction, tag);
-        if (!node) return core::Result<Fixed>::success(one); // WGS-94: empty fresh vector getter fallback.
-        data::tag_trace::used(node); const auto entries = words(node->raw_text);
-        if (entries.empty()) return core::Result<Fixed>::success(one);
-        const auto value = data::retail::float_value(entries.front());
-        if (!value) return refuse<Fixed>("invalid corruption factor");
-        return core::Result<Fixed>::success(value->value); // Fresh uncorrupted planet, WGEP-29/32.
+        auto factor = one; // WGS-94: empty fresh vector getter fallback.
+        if (node) {
+            data::tag_trace::used(node); const auto entries = words(node->raw_text);
+            if (!entries.empty()) {
+                const auto value = data::retail::float_value(entries.front());
+                if (!value) return refuse<Fixed>("invalid corruption factor");
+                factor = value->value;
+            }
+        }
+        memo.corruption_factors.emplace(cache_key, factor);
+        return core::Result<Fixed>::success(factor); // Fresh uncorrupted planet, WGEP-29/32.
     };
     const auto* faction_data = p.data.faction(owner->faction);
     if (!faction_data || !faction_data->benefits_from_corruption) return refuse<gc::ProductionOffer>("unbound corruption eligibility");
@@ -250,19 +315,20 @@ core::Result<gc::ProductionOffer> offer(const Prepared& p, const CampaignSetupPl
                 [&](const auto& object) { return object.type == id && object.kind == gc::ProductionKind::structure; }));
         quantities.factory_count = std::max<std::int64_t>(1, count);
     }
-    const auto* campaign = p.data.campaign(plan.campaign_name());
-    quantities.tutorial = campaign && campaign->tutorial.value_or(false);
-    auto adjusted = type;
-    Fixed time;
+    if (!memo.tutorial) {
+        const auto* campaign = p.data.campaign(plan.campaign_name());
+        memo.tutorial = campaign && campaign->tutorial.value_or(false);
+    }
+    quantities.tutorial = *memo.tutorial;
     // WGEP-92: consume constructor defaults without mutating original facts.
-    time = gc::production_product(adjusted.build_time_seconds.value_or(Fixed{}), p.production_speed);
-    adjusted.build_time_seconds = time;
+    const auto& adjusted = memo.adjusted(p, type);
     if (unrounded_price) {
         *unrounded_price = gc::production_product(adjusted.build_cost_credits.value_or(Fixed{}),
             *quantities.corruption_price_multiplier);
     }
     return prepare_production_offer(adjusted, std::move(admission), quantities, &p.load_buffer);
 }
+#endif
 core::Result<bool> fleet_skips(const Prepared& p, const gc::GalacticSetup& setup, const gc::Fleet& fleet) {
     if (!setup.movement) return refuse<bool>("missing movement contents");
     std::vector<gc::FleetMember> pending(fleet.members.rbegin(), fleet.members.rend());
@@ -324,6 +390,7 @@ core::Result<gc::ProductionSetup> complete_production(const Prepared& p, const C
         for (const auto& name : type.company_units) direct_members.insert(p.identity(name));
         for (const auto& name : type.squadron_units) direct_members.insert(p.identity(name));
     }
+    OfferMemo memo;
     for (std::size_t i = 0; i < production.planets.size(); ++i) {
         auto& location = production.planets[i]; const auto& control = setup.control->planets[i]; const auto& state = setup.control->state[i];
         location.target_owner = state.target_player; location.starbase_owner = control.starbase.owner;
@@ -332,10 +399,10 @@ core::Result<gc::ProductionSetup> complete_production(const Prepared& p, const C
         location.landed_transports = static_cast<std::int64_t>(control.landed.size());
         const auto marked = location.offers; location.offers.clear();
         for (const auto& binding : p.starting.bindings) {
-            const auto* type = p.starting.types.find(binding.original_type);
+            const auto* type = memo.type(p, binding);
             if (!type) return refuse<gc::ProductionSetup>("missing production original type");
             if (type->build_cost_credits.value_or(Fixed{}).raw() <= 0 && !type->build_requires_initial_placement.value_or(false)) continue;
-            auto built = offer(p, plan, setup, location, binding, *type);
+            auto built = offer(p, plan, setup, location, binding, *type, memo);
             if (!built) return core::Result<gc::ProductionSetup>::failure(built.error());
             auto value = std::move(built).value();
             if (direct_members.contains(binding.id) || behaves(*type, "TRANSPORT")) value.direct_build_allowed = false; // WGEP-20.
@@ -529,13 +596,14 @@ core::Result<CampaignPlacementContext> prepare_context(const vfs::Vfs& filesyste
     auto ground = prepare_ground_capability_types(p.starting.types, p.starting.bindings);
     if (!ground) return core::Result<CampaignPlacementContext>::failure(ground.error());
     context.control.ground_capability_types = std::move(ground).value();
+    OfferMemo memo;
     for (auto& planet : context.production.planets) {
         planet.maximum_ground_forces = context.control.max_ground_forces;
         for (const auto& binding : p.starting.bindings) {
-            const auto* type = p.starting.types.find(binding.original_type);
+            const auto* type = memo.type(p, binding);
             if (!type) return refuse<CampaignPlacementContext>("missing original offer type");
             if (!type->build_requires_initial_placement.value_or(false)) continue;
-            auto prepared = offer(p, plan, plan.galaxy(), planet, binding, *type);
+            auto prepared = offer(p, plan, plan.galaxy(), planet, binding, *type, memo);
             if (!prepared) return core::Result<CampaignPlacementContext>::failure(prepared.error());
             planet.offers.push_back(std::move(prepared).value());
         }
@@ -817,6 +885,10 @@ void install_live_ability_services(CampaignSetupServices& services,
             data::tag_trace::used(&node);
             for (const auto& name : words(node.raw_text)) result.activated_spy_abilities.push_back(key(name));
         }
+        for (const auto& node : owned->constants.root.children) if (key(node.name) == "ACTIVATED_REMOVE_CORRUPTION_ABILITY_NAMES") {
+            data::tag_trace::used(&node);
+            for (const auto& name : words(node.raw_text)) result.activated_removal_abilities.push_back(key(name));
+        }
         // WGCH-109/110/139: authored hack constants. An unresolved required type never matches (no fallback).
         const auto constant = [&](std::string_view name) -> const data::XmlNode* {
             const auto found = std::find_if(owned->constants.root.children.begin(), owned->constants.root.children.end(),
@@ -842,8 +914,20 @@ void install_live_ability_services(CampaignSetupServices& services,
         // WGCH-27/28/97 and WGCH-20..22/52: authored per-type sabotage prices and neutralization cost/permissions.
         // An omitted permission flag is unverified and stays false (the least visible choice).
         std::set<gc::TypeId> neutralization_types;
+#if !defined(EAWR_TEST_LEGACY_OFFER)
+        std::map<std::string, std::vector<const data::Definition*>> originals;
+        const auto original_for = [&](const std::string& name) -> const std::vector<const data::Definition*>& {
+            const auto [it, inserted] = originals.try_emplace(name);
+            if (inserted) it->second = layers(owned->catalog, name, data::Category::game_object);
+            return it->second;
+        };
+#endif
         for (const auto& binding : input.type_bindings()) {
+#if defined(EAWR_TEST_LEGACY_OFFER)
             const auto original = layers(owned->catalog, binding.original_type, data::Category::game_object);
+#else
+            const auto& original = original_for(binding.original_type);
+#endif
             auto sabotage_cost = number(data::retail::single(original, "Sabotage_Cost_Credits"), Fixed{});
             if (!sabotage_cost || sabotage_cost.value().raw() < 0) return refuse<gc::GalacticAbilitySetup>("invalid sabotage cost");
             if (sabotage_cost.value().raw() > 0) result.sabotage_costs.push_back({binding.id, sabotage_cost.value()});
@@ -893,15 +977,20 @@ void install_live_ability_services(CampaignSetupServices& services,
         for (const auto& binding : input.type_bindings()) {
             if (!setup.census || std::none_of(setup.census->types.begin(), setup.census->types.end(),
                 [&](const auto& row) { return row.type == binding.id; })) continue;
+#if defined(EAWR_TEST_LEGACY_OFFER)
             const auto original = layers(owned->catalog, binding.original_type, data::Category::game_object);
+#else
+            const auto& original = original_for(binding.original_type);
+#endif
             bool market = false; std::optional<bool> market_enabled{true}; // WGCH-170/WGS-88 common enabled default
             const data::XmlNode* slicer = nullptr;
             const data::XmlNode* market_ability = nullptr;
-            std::vector<const data::XmlNode*> corruptors, hackers, destroyers, saboteurs, neutralizers;
+            std::vector<const data::XmlNode*> corruptors, removers, hackers, destroyers, saboteurs, neutralizers;
             for (const auto* block : data::retail::list(original, "Abilities", data::retail::ListRule::replace_in_variant))
                 for (const auto& ability : block->children) {
                     if (key(ability.name) == "SLICER_ABILITY") slicer = &ability;
                     if (key(ability.name) == "CORRUPT_PLANET_ABILITY") corruptors.push_back(&ability);
+                    if (key(ability.name) == "REMOVE_CORRUPTION_ABILITY") removers.push_back(&ability);
                     if (key(ability.name) == "HACK_SUPER_WEAPON_ABILITY") hackers.push_back(&ability);
                     if (key(ability.name) == "PLANET_DESTRUCTION_ABILITY") destroyers.push_back(&ability);
                     if (key(ability.name) == "GALACTIC_SABOTAGE_ABILITY") saboteurs.push_back(&ability);
@@ -917,6 +1006,18 @@ void install_live_ability_services(CampaignSetupServices& services,
                 for (const auto* ability : corruptors) for (const auto& attr : ability->attributes)
                     if (key(attr.name) == "NAME" && key(attr.value) == name) { corruptor = ability; corruption_name = name; break; }
                 if (corruptor) break;
+            }
+            const data::XmlNode* remover = nullptr; std::string removal_name;
+            // The activated-name list gates the preview, not generic ground deployment.
+            if (!removers.empty()) {
+                remover = removers.front();
+                for (const auto& attr : remover->attributes) if (key(attr.name) == "NAME") removal_name = key(attr.value);
+            }
+            for (const auto& name : result.activated_removal_abilities) {
+                const data::XmlNode* listed = nullptr;
+                for (const auto* ability : removers) for (const auto& attr : ability->attributes)
+                    if (key(attr.name) == "NAME" && key(attr.value) == name) { listed = ability; break; }
+                if (listed) { remover = listed; removal_name = name; break; }
             }
             const data::XmlNode* hacker = nullptr; std::string hack_name;
             for (const auto& name : result.activated_hack_abilities) {
@@ -964,20 +1065,22 @@ void install_live_ability_services(CampaignSetupServices& services,
             }
             // A neutralization victim needs its hero respawn facts even without any activated ability of its own.
             const bool victim = neutralization_types.contains(binding.id);
-            if (!market && !slicer && !corruptor && !hacker && !destroyer && !saboteur && !neutralizer && !spy && !victim && automatic.empty()
+            if (!market && !slicer && !corruptor && !remover && !hacker && !destroyer && !saboteur && !neutralizer && !spy && !victim && automatic.empty()
                 && !(original_metadata && original_metadata->named_hero.value_or(false))) continue;
             gc::GalacticAbilityProfile profile; profile.type = binding.id; profile.has_market = market;
             for (const auto& [ability, kind] : {
                 std::pair{market_ability, gc::AbilityKind::black_market}, std::pair{slicer, gc::AbilityKind::technology_theft},
-                std::pair{corruptor, gc::AbilityKind::corruption}, std::pair{hacker, gc::AbilityKind::superweapon_hack},
+                std::pair{corruptor, gc::AbilityKind::corruption}, std::pair{remover, gc::AbilityKind::remove_corruption},
+                std::pair{hacker, gc::AbilityKind::superweapon_hack},
                 std::pair{destroyer, gc::AbilityKind::planet_destruction}, std::pair{saboteur, gc::AbilityKind::structure_sabotage},
                 std::pair{neutralizer, gc::AbilityKind::hero_neutralization}}) {
                 if (!ability) continue;
                 // WGCH-187: theft is always ground-activated: an omitted style keeps its class default and any other
-                // authored style is forced back. The black-market and neutralize classes share that default and stay
-                // unlisted here until their AI landing behaviour is settled (named seam, see the walk).
+                // authored style is forced back. Neutralization shares that default and an authored style stands, so it
+                // is listed unless the data names another style (#6120; the host never prepares it for an AI seat).
+                // The black-market class stays unlisted until its AI landing behaviour is settled (named seam, see the walk).
                 const bool theft = kind == gc::AbilityKind::technology_theft;
-                bool ground = theft;
+                bool ground = theft || kind == gc::AbilityKind::hero_neutralization;
                 for (const auto& value : ability->children) if (key(value.name) == "ACTIVATION_STYLE") {
                     data::tag_trace::used(&value);
                     const auto style = words(value.raw_text);
@@ -994,7 +1097,41 @@ void install_live_ability_services(CampaignSetupServices& services,
                 profile.ground_activated.push_back(gc::AbilityKind::system_spy);
             }
             profile.auto_spies = std::move(automatic);
-            profile.lifecycle_only = !market && !slicer && !corruptor && !hacker && !destroyer && !saboteur && !neutralizer && !spy;
+            profile.lifecycle_only = !market && !slicer && !corruptor && !remover && !hacker && !destroyer && !saboteur && !neutralizer && !spy;
+            if (remover) {
+                data::tag_trace::used_attribute(*remover, "Name");
+                auto& removal = profile.removal.emplace(); removal.name = removal_name;
+                removal.text_identity = binding.original_type;
+                removal.hero = (original_metadata && original_metadata->named_hero.value_or(false))
+                    || (original_type && key(original_type->object_class) == "GENERICHEROUNIT");
+                bool automatic_style = false;
+                for (const auto& value : remover->children) {
+                    const auto tag = key(value.name);
+                    if (data::retail::is_placeholder(value.raw_text)) continue;
+                    if (tag == "ACTIVATION_STYLE") {
+                        const auto tokens = words(value.raw_text);
+                        const auto style = tokens.size() == 1 ? key(tokens.front()) : std::string{};
+                        for (const auto style_name : {"GLOBAL_AUTOMATIC", "COMBAT_AUTOMATIC", "GALACTIC_AUTOMATIC",
+                                "SPACE_AUTOMATIC", "GROUND_AUTOMATIC", "SKIRMISH_AUTOMATIC"})
+                            if (style == style_name) automatic_style = true;
+                    } else if (tag == "INITIALLY_ENABLED" || tag == "CAUSES_DESPAWN") {
+                        data::tag_trace::used(&value); const auto flag = data::retail::boolean(value.raw_text);
+                        if (!flag) return refuse<gc::GalacticAbilitySetup>("invalid removal ability flag");
+                        if (tag == "INITIALLY_ENABLED") removal.initially_enabled = *flag;
+                        else removal.causes_despawn = *flag;
+                    } else if (tag == "CORRUPTION_REMOVAL_COST_MULTIPLIER" || tag == "CORRUPTION_REMOVAL_TIME_IN_SECS") {
+                        const auto parsed = number(&value);
+                        if (!parsed) return refuse<gc::GalacticAbilitySetup>("invalid removal ability number");
+                        if (tag == "CORRUPTION_REMOVAL_COST_MULTIPLIER")
+                            removal.cost_multiplier = parsed.value() < Fixed{} ? Fixed::from_integer(1).value() : parsed.value();
+                        else removal.seconds = parsed.value() <= Fixed{} ? Fixed::from_integer(10).value() : parsed.value();
+                    } else if (tag == "SFXEVENT_ACTIVATE") {
+                        data::tag_trace::used(&value); const auto names = words(value.raw_text);
+                        if (names.size() == 1) removal.activation_sfx = names.front();
+                    }
+                }
+                if (automatic_style) removal.causes_despawn = false;
+            }
             if (saboteur) {
                 profile.sabotage = gc::SabotageAbilityProfile{sabotage_name, true, Fixed::from_integer(2).value()}; // WGCH-28: stock factor two
                 for (const auto& value : saboteur->children) {
@@ -1227,8 +1364,8 @@ void install_live_ability_services(CampaignSetupServices& services,
             const auto* source = planet_source(*owned, input, planet.id);
             if (!source || !source->planet_destroyed_credit_value) continue;
             if (source->planet_destroyed_credit_value->raw() < 0) {
-                const auto originals = layers(owned->catalog, source->name, data::Category::game_object);
-                campaign_load_note(&owned->load_buffer, "EAWR-LOAD-1232", data::retail::single(originals, "Planet_Destroyed_Credit_Value"),
+                const auto destroyed_originals = layers(owned->catalog, source->name, data::Category::game_object);
+                campaign_load_note(&owned->load_buffer, "EAWR-LOAD-1232", data::retail::single(destroyed_originals, "Planet_Destroyed_Credit_Value"),
                     source->name, "Planet_Destroyed_Credit_Value", "ordinary income", "WGCH-176: invalid value unknown; retain ordinary income");
                 continue;
             }
@@ -1312,12 +1449,24 @@ void install_live_income_service(CampaignSetupServices& services,
         }
         for (const auto& object : setup.census->objects) if (profiles.contains(object.original_type))
             result.sources.push_back({object.id, object.original_type, object.planet, object.owner, object.id == object.planet, true});
+        OfferMemo memo;
+#if !defined(EAWR_TEST_LEGACY_OFFER)
+        std::map<gc::TypeId, const FleetTypeBinding*> offer_bindings;
+        for (const auto& binding : owned->starting.bindings) offer_bindings.try_emplace(binding.id, &binding);
+#endif
         for (const auto& planet : setup.production->planets) for (const auto& value : planet.offers) {
-            const auto binding = std::find_if(owned->starting.bindings.begin(), owned->starting.bindings.end(),
-                [&](const auto& b) { return b.id == value.type; });
-            if (binding == owned->starting.bindings.end()) return refuse<gc::IncomeSetup>("unbound income offer");
-            const auto* type = owned->starting.types.find(binding->original_type); Fixed price;
-            auto basis = offer(*owned, input, setup, planet, *binding, *type, &price);
+#if defined(EAWR_TEST_LEGACY_OFFER)
+            const auto found = std::find_if(owned->starting.bindings.begin(), owned->starting.bindings.end(),
+                [&](const auto& binding) { return binding.id == value.type; });
+            if (found == owned->starting.bindings.end()) return refuse<gc::IncomeSetup>("unbound income offer");
+            const auto* binding = &*found;
+#else
+            const auto found = offer_bindings.find(value.type);
+            if (found == offer_bindings.end()) return refuse<gc::IncomeSetup>("unbound income offer");
+            const auto* binding = found->second;
+#endif
+            const auto* type = memo.type(*owned, *binding); Fixed price;
+            auto basis = offer(*owned, input, setup, planet, *binding, *type, memo, &price);
             if (!basis) return core::Result<gc::IncomeSetup>::failure(basis.error());
             result.offers.push_back({planet.planet, value.type, price, basis.value().seconds});
         }

@@ -333,6 +333,7 @@ public:
         }
         const auto zero = world().snapshot();
         history_.push_front(zero);
+        if (auto motion = capture_land_motion()) land_motion_history_.push_front(std::move(*motion));
         if (auto fog = capture_fog()) fog_history_.push_front(std::move(fog));
         frame_ = {zero, zero, Clock::now()};
         interval_ = tick_interval(options_.target_rate);
@@ -457,6 +458,61 @@ public:
     }
 
     std::span<const std::pair<sim::EntityId, sim::EntityId>> land_roster() const noexcept { return land_roster_; }
+
+    // Caller holds session_mutex_ or is constructing before the thread starts.
+    std::optional<LiveLandMotion> capture_land_motion() const {
+        const auto* movement = world().land_movement();
+        if (!movement) return {};
+        LiveLandMotion result;
+        result.tick = world().completed_tick();
+        result.members.reserve(movement->members().size());
+        for (std::size_t member_index = 0; member_index < movement->members().size(); ++member_index) {
+            const auto& member = movement->members()[member_index];
+            const auto& input = movement->member_motion_inputs()[member_index];
+            const bool turning = member.squad < movement->squads().size() && movement->squads()[member.squad].turning;
+            sim::math::Vec2 target{};
+            bool has_target = false;
+            if (member.squad < movement->squads().size()) {
+                const auto& squad = movement->squads()[member.squad];
+                for (auto index = squad.next_node; index < squad.path.nodes.size(); ++index) {
+                    if (squad.path.nodes[index] == member.position) continue;
+                    target = squad.path.nodes[index]; has_target = true; break;
+                }
+            }
+            // The simulation does not yet publish spread-out or a stop-point producer (U-LR13-02).
+            result.members.push_back({member.object, member.state, member.speed, member.profile.maximum_speed,
+                member.profile.turn_rate, member.facing, member.transition_frame, member.position, target,
+                has_target, turning, false, false, input.heading_error, input.turn_fraction, input.valid, input.turn_fraction_valid});
+        }
+        return result;
+    }
+
+    std::optional<LiveLandMotion> land_motion() const {
+        const std::lock_guard lock(mutex_);
+        if (land_motion_history_.empty()) return {};
+        return land_motion_history_.front();
+    }
+
+    std::vector<LiveLandMotion> land_motion_after(const std::uint64_t tick) const {
+        const std::lock_guard lock(mutex_);
+        std::vector<LiveLandMotion> result;
+        for (auto it = land_motion_history_.rbegin(); it != land_motion_history_.rend(); ++it)
+            if (it->tick > tick) result.push_back(*it);
+        return result;
+    }
+
+    std::size_t land_motion_through(const std::uint64_t after, const std::uint64_t through,
+        std::vector<LiveLandMotion>& output) const {
+        const std::lock_guard lock(mutex_);
+        std::size_t count = 0;
+        for (auto it = land_motion_history_.rbegin(); it != land_motion_history_.rend(); ++it) {
+            if (it->tick <= after) continue;
+            if (it->tick > through) break;
+            if (count == output.size()) output.emplace_back();
+            output[count++] = *it;
+        }
+        return count;
+    }
 
     // Debug overlay (read-only): null when the lock is busy (the caller keeps its last copy) or the world is not land.
     std::shared_ptr<const tactical::LandOverlayData> land_overlay() const {
@@ -800,6 +856,7 @@ private:
             ? static_cast<const sim::PartitionExecutor&>(measured) : executor;
         std::vector<core::Diagnostic> script_refusals;
         std::shared_ptr<const LiveFog> fog;
+        std::optional<LiveLandMotion> motion_copy;
         double step_ms = 0.0;
         double fog_ms = 0.0;
         double session_lock_ms = 0.0;
@@ -859,10 +916,7 @@ private:
                     }, [&] { const auto controls = world().departure_controls();
                         return std::vector<tactical::DepartureControl>{controls.begin(), controls.end()}; },
                     [&]() -> core::Result<std::vector<std::uint8_t>> {
-                        auto replay = scripted_ ? scripted_->record() : session_->record();
-                        const auto completed = world().completed_tick();
-                        std::erase_if(replay.commands, [completed](const auto& command) { return command.key.tick + 1 != completed; });
-                        std::erase_if(replay.object_turns, [completed](const auto& command) { return command.tick + 1 != completed; });
+                        auto replay = world().record_last_tick();
                         if (replay.commands.empty() && replay.object_turns.empty()) return core::Result<std::vector<std::uint8_t>>::success({});
                         return tactical::write_replay(replay);
                     }, [this](std::uint32_t rate) { set_target_rate(rate); }};
@@ -885,13 +939,14 @@ private:
                 auto stepped = core::Result<tactical::TacticalTick>::success(std::move(*driver_tick));
                 if (!scripted_) hashes_.push_back(stepped.value().state_hash);
                 fog = capture_fog();
+                motion_copy = capture_land_motion();
                 step_ms = std::chrono::duration<double, std::milli>(Clock::now() - started).count();
                 return stepped;
             }
             auto stepped = local_step();
             const auto stepped_at = Clock::now();
             if (stepped && !scripted_) hashes_.push_back(std::move(stepped.value().state_hash));
-            if (stepped) fog = capture_fog();
+            if (stepped) { fog = capture_fog(); motion_copy = capture_land_motion(); }
             const auto finished = Clock::now();
             step_ms = std::chrono::duration<double, std::milli>(stepped_at - started).count();
             fog_ms = std::chrono::duration<double, std::milli>(finished - stepped_at).count();
@@ -918,6 +973,12 @@ private:
                 }
                 history_.push_front(tick.value().snapshot);
                 if (history_.size() > options_.history) history_.pop_back();
+                if (motion_copy) {
+                    if (!land_motion_history_.empty() && motion_copy->tick <= land_motion_history_.front().tick)
+                        land_motion_history_.clear();
+                    land_motion_history_.push_front(std::move(*motion_copy));
+                    if (land_motion_history_.size() > std::max<std::size_t>(options_.history, 256)) land_motion_history_.pop_back();
+                }
                 if (fog) {
                     fog_history_.push_front(std::move(fog));
                     if (fog_history_.size() > options_.history) fog_history_.pop_back();
@@ -1117,6 +1178,7 @@ private:
     std::unique_lock<std::mutex>* active_driver_lock_{};
     std::vector<tactical::PlayerCommand> driver_input_;
     std::vector<std::pair<sim::EntityId, sim::EntityId>> land_roster_;
+    std::deque<LiveLandMotion> land_motion_history_;
     std::optional<tactical::TacticalSession> session_;
     std::unique_ptr<script::authoritative::ScriptedTacticalSession> scripted_;
     // Scripted mode: the commands for the next step, submitted by it; the scripts' report.
@@ -1390,6 +1452,9 @@ bool LiveSession::wait_for(const std::uint64_t tick, const std::chrono::millisec
 LiveFrame LiveSession::frame() const { return impl_->frame(); }
 std::shared_ptr<const sim::tactical::LandOverlayData> LiveSession::land_overlay() const { return impl_->land_overlay(); }
 std::span<const std::pair<sim::EntityId, sim::EntityId>> LiveSession::land_roster() const noexcept { return impl_->land_roster(); }
+std::optional<LiveLandMotion> LiveSession::land_motion() const { return impl_->land_motion(); }
+std::vector<LiveLandMotion> LiveSession::land_motion_after(const std::uint64_t tick) const { return impl_->land_motion_after(tick); }
+std::size_t LiveSession::land_motion_through(const std::uint64_t after, const std::uint64_t through, std::vector<LiveLandMotion>& output) const { return impl_->land_motion_through(after, through, output); }
 std::optional<bool> LiveSession::reinforcement_point(const tactical::PlayerId player, const tactical::TypeId type,
     const sim::math::Vec3& point, const std::optional<sim::math::Fixed> facing_yaw) const {
     return impl_->reinforcement_point(player, type, point, facing_yaw);

@@ -24,7 +24,7 @@ struct KindName {
     std::string_view name;
 };
 
-constexpr std::array<KindName, 30> kind_names{{
+constexpr std::array<KindName, 32> kind_names{{
     {AbilityKind::defend, "DEFEND"},
     {AbilityKind::turbo, "TURBO"},
     {AbilityKind::power_to_weapons, "POWER_TO_WEAPONS"},
@@ -55,6 +55,8 @@ constexpr std::array<KindName, 30> kind_names{{
     {AbilityKind::blast, "BLAST"},
     {AbilityKind::rocket_attack, "ROCKET_ATTACK"},
     {AbilityKind::super_laser, "SUPER_LASER"},
+    {AbilityKind::deploy_squad, "DEPLOY_SQUAD"},
+    {AbilityKind::lucky_shot, "LUCKY_SHOT"},
 }};
 
 [[nodiscard]] bool iequals(const std::string_view left, const std::string_view right) noexcept {
@@ -129,7 +131,7 @@ AbilityKind ability_kind(const std::string_view name) noexcept {
 }
 
 SpecialAbilityKind special_ability_kind(const std::string_view name) noexcept {
-    constexpr std::array<std::pair<std::string_view, SpecialAbilityKind>, 17> names{{
+    constexpr std::array<std::pair<std::string_view, SpecialAbilityKind>, 19> names{{
         {"Combat_Bonus_Ability", SpecialAbilityKind::combat_bonus},
         {"Reduce_Production_Price_Ability", SpecialAbilityKind::production_price},
         {"Concentrate_Fire_Attack_Ability", SpecialAbilityKind::concentrate_fire},
@@ -147,18 +149,23 @@ SpecialAbilityKind special_ability_kind(const std::string_view name) noexcept {
         {"Force_Healing_Ability", SpecialAbilityKind::force_healing},
         {"Enable_Radar_Ability", SpecialAbilityKind::enable_radar},
         {"Super_Laser_Ability", SpecialAbilityKind::super_laser},
+        {"Lucky_Shot_Attack_Ability", SpecialAbilityKind::lucky_shot},
+        {"Ion_Cannon_Shot_Attack_Ability", SpecialAbilityKind::ion_cannon_shot},
     }};
     for (const auto& [spelling, kind] : names) if (iequals(name, spelling)) return kind;
     return SpecialAbilityKind::none;
 }
 SpecialActivationStyle special_activation_style(const std::string_view name) noexcept {
-    constexpr std::array<std::pair<std::string_view, SpecialActivationStyle>, 6> names{{
+    constexpr std::array<std::pair<std::string_view, SpecialActivationStyle>, 9> names{{
         {"Space_Automatic", SpecialActivationStyle::space_automatic},
         {"Ground_Automatic", SpecialActivationStyle::ground_automatic},
         {"Ground_Activated", SpecialActivationStyle::ground_activated},
         {"Galactic_Automatic", SpecialActivationStyle::galactic_automatic},
         {"User_Input", SpecialActivationStyle::user_input},
         {"Skirmish_Automatic", SpecialActivationStyle::skirmish_automatic},
+        {"Global_Automatic", SpecialActivationStyle::global_automatic},
+        {"Combat_Automatic", SpecialActivationStyle::combat_automatic},
+        {"Special_Attack", SpecialActivationStyle::special_attack},
     }};
     for (const auto& [spelling, style] : names) if (iequals(name, spelling)) return style;
     return SpecialActivationStyle::unspecified;
@@ -170,7 +177,8 @@ std::uint32_t special_service_interval(const SpecialAbilityKind kind) noexcept {
         || kind == SpecialAbilityKind::tractor_beam || kind == SpecialAbilityKind::sensor_jamming
         || kind == SpecialAbilityKind::blast || kind == SpecialAbilityKind::stealth
         || kind == SpecialAbilityKind::laser_defense || kind == SpecialAbilityKind::leech_shields
-        || kind == SpecialAbilityKind::force_healing || kind == SpecialAbilityKind::super_laser ? 1U : 0U; // WST-04, WLS-02, WSH-06
+        || kind == SpecialAbilityKind::force_healing || kind == SpecialAbilityKind::super_laser
+        || kind == SpecialAbilityKind::ion_cannon_shot ? 1U : 0U; // WST-04, WLS-02, WSH-06, AB-70
 }
 bool special_type_matches(const SpecialAbilityFilter& filter, const TypeId type, const std::uint64_t categories) noexcept {
     // WHE-14: explicit inclusion precedes both category admission and exclusions.
@@ -197,8 +205,10 @@ std::string lock_name(const std::string_view name) {
 
 bool set_named_ability_lock(NamedAbilityLocks& locks, const PlayerId owner, const UnitAbilityProfile& profile,
     const std::string_view name, const bool locked) {
-    if (name.empty() || std::none_of(profile.special.begin(), profile.special.end(),
-        [&](const auto& special) { return iequals(special.name, name); })) return false;
+    if (name.empty() || (std::none_of(profile.special.begin(), profile.special.end(),
+        [&](const auto& special) { return iequals(special.name, name); })
+        && std::none_of(profile.income_defaults.begin(), profile.income_defaults.end(),
+            [&](const auto& entry) { return iequals(entry.first, name); }))) return false;
     const auto key = std::tuple{owner, profile.type_id, lock_name(name)};
     const auto found = locks.find(key);
     if (found != locks.end() && found->second == locked) return false;
@@ -208,8 +218,33 @@ bool set_named_ability_lock(NamedAbilityLocks& locks, const PlayerId owner, cons
 
 bool named_ability_enabled(const NamedAbilityLocks& locks, const PlayerId owner, const TypeId type,
     const SpecialAbilityProfile& special) {
-    const auto found = locks.find(std::tuple{owner, type, lock_name(special.name)});
-    return found == locks.end() ? special.initially_enabled.value_or(true) : !found->second;
+    return named_ability_enabled(locks, owner, type, lock_name(special.name), special.initially_enabled.value_or(true));
+}
+
+bool named_ability_enabled(const NamedAbilityLocks& locks, const PlayerId owner, const TypeId type,
+    const std::string_view name, const bool initially_enabled) {
+    const auto found = locks.find(std::tuple{owner, type, name});
+    return found == locks.end() ? initially_enabled : !found->second;
+}
+
+bool automatic_ability_style(const std::string_view style, const BattleDomain domain, const bool multiplayer) {
+    // PU-08: both income handlers default to Combat_Automatic. Explicit/event styles
+    // remain dormant until their trigger dispatch is implemented (legacy #6266).
+    return style.empty() || iequals(style, "Global_Automatic") || iequals(style, "Combat_Automatic")
+        || (iequals(style, "Space_Automatic") && domain == BattleDomain::space)
+        || (iequals(style, "Ground_Automatic") && domain == BattleDomain::land)
+        || (iequals(style, "Skirmish_Automatic") && multiplayer);
+}
+bool automatic_ability_style(const SpecialActivationStyle style, const BattleDomain domain, const bool multiplayer) {
+    // WSH-10: share the automatic mode admission with income; unspecified healing never auto-starts.
+    switch (style) {
+    case SpecialActivationStyle::space_automatic: return automatic_ability_style("Space_Automatic", domain, multiplayer);
+    case SpecialActivationStyle::ground_automatic: return automatic_ability_style("Ground_Automatic", domain, multiplayer);
+    case SpecialActivationStyle::global_automatic: return automatic_ability_style("Global_Automatic", domain, multiplayer);
+    case SpecialActivationStyle::combat_automatic: return automatic_ability_style("Combat_Automatic", domain, multiplayer);
+    case SpecialActivationStyle::skirmish_automatic: return automatic_ability_style("Skirmish_Automatic", domain, multiplayer);
+    default: return false;
+    }
 }
 std::size_t activate_special_abilities(const std::span<const SpecialAbilityProfile> profiles, SpecialAbilityState& state,
     const SpecialActivationStyle style, const SpecialActivationContext& context, const bool first_only, SpecialAbilityHandler& handler) {
@@ -288,6 +323,18 @@ void append_special_abilities(std::vector<std::uint8_t>& bytes, const SpecialAbi
         sim::detail::append_u64(bytes, slot.targets.size());
         for (const auto target : slot.targets) sim::detail::append_u64(bytes, target);
     }
+    if (std::any_of(state.slots.begin(), state.slots.end(), [](const auto& slot) {
+        return slot.jammer_initialized || slot.jammer_registered || slot.jammer_unregistered
+            || slot.jammer_disabled_registration;
+    })) {
+        sim::detail::append_u32(bytes, 0x4d414a53U);
+        for (const auto& slot : state.slots) {
+            sim::detail::append_u32(bytes, (slot.jammer_initialized ? 1U : 0U) | (slot.jammer_active ? 2U : 0U)
+                | (slot.jammer_unregistered ? 4U : 0U) | (slot.jammer_registered ? 8U : 0U)
+                | (slot.jammer_disabled_registration ? 16U : 0U));
+            sim::detail::append_u32(bytes, slot.jammer_remaining);
+        }
+    }
 }
 
 const UnitAbilityProfile* AbilityTable::find(const TypeId type_id) const noexcept {
@@ -319,7 +366,8 @@ core::Result<void> validate_ability_profile(const UnitAbilityProfile& profile) {
             && (!positive || value.raw() > 0);
     };
     const auto type = " (type " + std::to_string(profile.type_id) + ")";
-    if (profile.abilities.empty() && profile.special.empty() && !profile.force_sensitive) {
+    if (profile.abilities.empty() && profile.special.empty() && !profile.force_sensitive && profile.income_defaults.empty()
+        && profile.default_member_abilities.empty()) {
         return invalid("a type has an ability, a nested handler or is force sensitive" + type);
     }
     if (profile.stealth_detection_frames > max_ability_frames) return invalid("stealth detection hold exceeds one hour" + type);
@@ -330,8 +378,8 @@ core::Result<void> validate_ability_profile(const UnitAbilityProfile& profile) {
                 && (ids.empty() || ids.front() != 0);
         };
         if (special.name.empty() || special.kind == SpecialAbilityKind::none
-            || static_cast<unsigned>(special.kind) > static_cast<unsigned>(SpecialAbilityKind::super_laser)
-            || static_cast<unsigned>(special.style) > static_cast<unsigned>(SpecialActivationStyle::skirmish_automatic)
+            || static_cast<unsigned>(special.kind) > static_cast<unsigned>(SpecialAbilityKind::ion_cannon_shot)
+            || static_cast<unsigned>(special.style) > static_cast<unsigned>(SpecialActivationStyle::special_attack)
             || special.service_interval > max_ability_frames
             || !sorted_unique(special.filter.applicable_types) || !sorted_unique(special.filter.excluded_types))
             return invalid("invalid nested handler" + type);
@@ -388,7 +436,8 @@ core::Result<void> validate_ability_profile(const UnitAbilityProfile& profile) {
                 || handler->defence_look_frames > max_ability_frames || handler->defence_beam_frames > max_ability_frames)
                 return invalid("invalid laser defence handler, radius, duration or categories" + type);
         } else if (ability.recharge_at_activation && ability.kind != AbilityKind::corrupt_systems
-            && ability.kind != AbilityKind::leech_shields && ability.kind != AbilityKind::blast) {
+            && ability.kind != AbilityKind::leech_shields && ability.kind != AbilityKind::blast
+            && ability.kind != AbilityKind::deploy_squad) {
             return invalid("this ability cannot recharge from activation" + type);
         }
         if (ability.kind == AbilityKind::blast) {
@@ -490,7 +539,8 @@ core::Result<void> validate_ability_profile(const UnitAbilityProfile& profile) {
             }
         }
         // AB-60, WAB-70: ION_CANNON_SHOT and BUZZ_DROIDS are team abilities, without a time limit.
-        const bool team_kind = ability.kind == AbilityKind::ion_cannon_shot || ability.kind == AbilityKind::buzz_droids;
+        const bool team_kind = ability.kind == AbilityKind::ion_cannon_shot || ability.kind == AbilityKind::buzz_droids
+            || ability.kind == AbilityKind::lucky_shot;
         if ((ability.team && !team_kind) || (team_kind && ability.expiration_frames != 0)) {
             return invalid("only ION_CANNON_SHOT and BUZZ_DROIDS are team abilities, without a time limit" + type);
         }
@@ -522,11 +572,13 @@ core::Result<void> validate_ability_profile(const UnitAbilityProfile& profile) {
             return invalid("expiration and recharge frames are at most " + std::to_string(max_ability_frames) + type);
         }
         const auto& m = ability.modifiers;
+        // WLK-03: only the shot-specific cause-damage input bypasses the ordinary mode cap.
         // AB-22/AB-23: an interval multiplier of 0 is accepted (the interval then floors at one frame); negative is not.
         if (!bounded(m.weapon_delay, true) || !bounded(m.shield_regen, false) || !bounded(m.shield_regen_interval, false)
             || m.shield_regen_interval.raw() < 0 || !bounded(m.energy_regen, false) || !bounded(m.energy_regen_interval, false)
             || m.energy_regen_interval.raw() < 0 || !bounded(m.speed, false) || m.speed.raw() < 0
-            || !bounded(m.scatter_radius, true) || !bounded(m.cause_damage, false) || !bounded(m.take_damage, false)
+            || !bounded(m.scatter_radius, true)
+            || (ability.kind != AbilityKind::lucky_shot && !bounded(m.cause_damage, false)) || !bounded(m.take_damage, false)
             || !bounded(m.fire_rate, false) || m.cause_damage.raw() < 0 || m.take_damage.raw() < 0) {
             return invalid("a multiplier is out of bounds" + type);
         }
@@ -553,6 +605,9 @@ core::Result<void> validate_abilities(const AbilityTable& table) {
     for (std::size_t index = 1; index < table.humans.size(); ++index) {
         if (table.humans[index - 1] >= table.humans[index]) return invalid("humans must strictly increase");
     }
+    if (!std::is_sorted(table.market_team_members.begin(), table.market_team_members.end(), [](const auto& a, const auto& b) {
+            return std::tie(a.type, a.kind) < std::tie(b.type, b.kind);
+        })) return invalid("market team member identities must be ordered");
     for (std::size_t index = 0; index < table.combat_ratings.size(); ++index) {
         if ((index != 0 && table.combat_ratings[index - 1].first >= table.combat_ratings[index].first)
             || table.combat_ratings[index].second.raw() < 0
@@ -600,7 +655,9 @@ std::optional<math::Fixed> ability_attack_distance(const UnitAbilityProfile& pro
 
 bool ability_movement_disabled(const UnitAbilityProfile& profile, const AbilityState& state) noexcept {
     for (std::size_t index = 0; index < state.slots.size() && index < profile.abilities.size(); ++index) {
-        if (state.slots[index].active && profile.abilities[index].disable_movement) return true;
+        if (state.slots[index].active && (profile.abilities[index].disable_movement
+            || (profile.abilities[index].kind == AbilityKind::self_destruct
+                && profile.abilities[index].stop_when_activated))) return true;
     }
     return false;
 }
@@ -619,12 +676,53 @@ bool ability_hardpoints_online(const AbilityProfile& profile, const AbilityGate&
     });
 }
 
+bool market_ability_available(const MarketAbilityPolicy* policy, const PlayerId owner, const bool required,
+    const std::string_view name) noexcept {
+    if (!policy || !required) return true;
+    const auto same = [](const std::string_view a, const std::string_view b) {
+        return a.size() == b.size() && std::equal(a.begin(), a.end(), b.begin(), [](const char x, const char y) {
+            return core::ascii_upper(static_cast<unsigned char>(x)) == core::ascii_upper(static_cast<unsigned char>(y));
+        });
+    };
+    for (const auto& item : policy->items) {
+        if (std::none_of(item.abilities.begin(), item.abilities.end(), [&](const auto& entry) { return same(name, entry); })) continue;
+        const auto player = std::find_if(policy->owners.begin(), policy->owners.end(), [&](const auto& entry) { return entry.player == owner; });
+        return player != policy->owners.end() && std::find(player->purchased.begin(), player->purchased.end(), item.item) != player->purchased.end();
+    }
+    return true;
+}
+
 bool ability_ready(const AbilityProfile& profile, const AbilitySlot& slot, const AbilityGate& gate,
     const std::uint64_t tick) noexcept {
+    if (gate.market) {
+        const auto member_slot = gate.market_team_member ? ability_slot(*gate.market_team_member, profile.kind) : std::nullopt;
+        const auto& market_ability = member_slot ? gate.market_team_member->abilities[*member_slot] : profile;
+        const auto* authored = gate.market_member_abilities;
+        const auto authored_end = authored ? authored + gate.market_member_ability_count : authored;
+        if (authored) {
+            const auto target = std::pair{gate.market_member_type, profile.kind};
+            authored = std::upper_bound(authored, authored_end, target, [](const auto& key, const auto& item) {
+                return key < std::pair{item.type, item.kind};
+            });
+            if (authored != gate.market_member_abilities) --authored;
+            if (authored == authored_end || authored->type != target.first || authored->kind != target.second)
+                authored = authored_end;
+        }
+        const bool has_authored = authored && authored != authored_end;
+        if (!market_ability_available(gate.market, gate.market_owner,
+                has_authored ? authored->required : market_ability.market_purchase_required,
+                has_authored ? authored->name : market_ability.gui_activated_ability_name)) return false;
+        if (!market_ability_available(gate.market, gate.market_owner, profile.nested_market_purchase_required, profile.nested_market_name)) return false;
+        if (gate.market_profile) for (const auto& special : gate.market_profile->special) {
+            if (special.name == profile.gui_activated_ability_name
+                && !market_ability_available(gate.market, gate.market_owner, special.market_purchase_required, special.name)) return false;
+        }
+    }
+    if (profile.kind == AbilityKind::deploy_squad && !gate.deploy_squad_ready) return false;
     if (gate.in_nebula || gate.corrupted) return false; // WHZ-25, WHE-65
     if (!ability_hardpoints_online(profile, gate)) return false; // WHD-01
     // AB-13: a recharging ability is not ready; an active one is (switching it on again does nothing).
-    if (!slot.active && tick < slot.ready_tick) return false;
+    if (slot.lucky_spent || (!slot.active && tick < slot.ready_tick)) return false;
     // AB-14: DEFEND needs a shield that is online and outside its depletion effect.
     if (profile.kind == AbilityKind::defend) {
         return gate.shielded && gate.shields_online && !gate.shield_depleted && !gate.ion_stunned && !gate.in_ion_storm;
@@ -682,7 +780,8 @@ AbilitySwitch expire_abilities(const UnitAbilityProfile& profile, AbilityState& 
 Fixed ability_multiplier(const UnitAbilityProfile& profile, const AbilityState& state, const AbilityModifier modifier) noexcept {
     auto value = Fixed::from_raw(one_raw);
     for (std::size_t index = 0; index < state.slots.size() && index < profile.abilities.size(); ++index) {
-        if (!state.slots[index].active) continue;
+        // WLK-03: the Lucky multiplier belongs to its first matching impact only.
+        if (!state.slots[index].active || profile.abilities[index].kind == AbilityKind::lucky_shot) continue;
         const auto factor = modifier_of(profile.abilities[index].modifiers, modifier);
         value = value.raw() == one_raw ? factor : product(value, factor);
     }
@@ -806,7 +905,7 @@ void append_abilities(std::vector<std::uint8_t>& bytes, const AbilityState& stat
     for (const auto& slot : state.slots) {
         // Bit 2 (#561): the slot holds a target, whose ID and hardpoint follow the ticks.
         const bool aimed = slot.target != invalid_entity_id;
-        sim::detail::append_u32(bytes, (slot.active ? 1U : 0U) | (slot.autofire ? 2U : 0U) | (aimed ? 4U : 0U));
+        sim::detail::append_u32(bytes, (slot.active ? 1U : 0U) | (slot.autofire ? 2U : 0U) | (aimed ? 4U : 0U) | (slot.lucky_spent ? 8U : 0U) | (slot.lucky_autofire_set ? 16U : 0U));
         sim::detail::append_u64(bytes, slot.started_tick);
         sim::detail::append_u64(bytes, slot.expires_tick);
         sim::detail::append_u64(bytes, slot.ready_tick);

@@ -7,6 +7,7 @@
 #include "shutdown_trace.hpp"
 #include "frame_timer.hpp"
 #include "campaign_warm_arrivals.hpp"
+#include "restored_roster_warm.hpp"
 #include "reserve_warm_plan.hpp"
 #include "eawr/presentation/godot/device_budget.hpp"
 
@@ -109,20 +110,27 @@ void LiveSessionView::prepare_launch_slots(const vfs::Vfs& filesystem, const dat
     arrival_slots_.plan = std::move(*selected);
     launch_demand_valid_ = false; // plan.rows changes only in this function (assign, erase_if/push_back, plan.add)
     const bool campaign = !options_.land && setup_ && setup_->campaign;
-    if (campaign && motion()) {
+    if (!options_.land && motion()) {
         // The sim's selected owner-tech profiles include hangars on carriers
         // still in reserve. start.launches alone names only the initial force.
         std::map<tactical::TypeId, const units::UnitType*> names;
         for (const auto& type : tables_->units) names.emplace(battle::type_id(type.id), &type);
         std::vector<CampaignWarmType> types;
         for (const auto& player : start_->players) for (const auto& type : tables_->units) {
-            const auto* profile = motion()->squadrons.find_spawner(battle::type_id(type.id), player.player.player_id);
+            const auto buyer = std::find_if(economy_.players.begin(), economy_.players.end(),
+                [&](const auto& row) { return row.player == player.player.player_id; });
+            const auto* profile = !campaign && buyer != economy_.players.end()
+                ? motion()->squadrons.find_spawner_at_tech(battle::type_id(type.id), player.player.player_id, buyer->start_tech)
+                : motion()->squadrons.find_spawner(battle::type_id(type.id), player.player.player_id);
             if (!profile) continue;
             CampaignWarmType warm{player.player.player_id, type.id, {}};
             for (const auto& entry : profile->entries) {
                 if (entry.starting <= 0) continue;
                 const auto named = names.find(entry.squadron);
-                if (named == names.end()) { arrival_slots_.warm_complete = false; continue; }
+                if (named == names.end()) {
+                    warm.complete = false;
+                    continue;
+                }
                 const auto count = static_cast<std::size_t>(entry.starting);
                 if (named->second->members.empty()) warm.hangar.emplace_back(named->second->id, count);
                 for (const auto& member : named->second->members) warm.hangar.emplace_back(member.craft, count);
@@ -141,13 +149,16 @@ void LiveSessionView::prepare_launch_slots(const vfs::Vfs& filesystem, const dat
             seed(owner, object.type_id, 0);
             for (const auto& member : object.members) self(self, owner, member);
         };
-        for (const auto& reserve : setup_->campaign->reserves) {
+        if (campaign) for (const auto& reserve : setup_->campaign->reserves) {
             if (reserve.restricted) continue;
             seed(reserve.owner, reserve.type, 0);
             for (const auto& object : reserve.contained) carried(carried, reserve.owner, object);
         }
         auto expanded = campaign_warm_arrivals(seeds, types);
         arrival_slots_.warm_complete = arrival_slots_.warm_complete && expanded.complete;
+        if (!expanded.complete) for (const auto& root : seeds)
+            note_preload_fallback(root.owner, root.type, expanded.cyclic ? "cyclic_roster"
+                : expanded.overflow ? "overflow" : "unknown_roster");
         std::erase_if(arrival_slots_.plan.rows, [](const auto& row) { return row.source == battle::ArrivalSource::launch; });
         for (auto& row : expanded.plan.rows) arrival_slots_.plan.rows.push_back(std::move(row));
     }
@@ -230,13 +241,19 @@ void LiveSessionView::prepare_launch_slots(const vfs::Vfs& filesystem, const dat
         if (demand.source != battle::ArrivalSource::launch) continue;
         const auto spawner = std::find_if(start_->units.begin(), start_->units.end(),
             [&](const auto& unit) { return unit.state.entity_id == demand.anchor; });
-        if (!campaign && spawner == start_->units.end()) continue;
-        if (campaign && !campaign_recipes.emplace(demand.owner, demand.type).second) continue;
+
+        // Preserve skirmish's established warm prefix when the device probe is
+        // unavailable. Admission fills the remainder without shrinking that pool.
+        const bool recipe_only = campaign;
+        if (recipe_only && !campaign_recipes.emplace(demand.owner, demand.type).second) continue;
         const auto owner = std::find_if(start_->players.begin(), start_->players.end(),
             [&](const auto& player) { return player.player.player_id == demand.owner; });
-        auto anchor = spawner != start_->units.end() ? *spawner : anchors.at(demand.owner);
+        // A plan row can name an owner that is not a lobby player (a restored battle, a mod roster): no anchor, no slots.
+        const auto fallback_anchor = anchors.find(demand.owner);
+        if (spawner == start_->units.end() && fallback_anchor == anchors.end()) continue;
+        auto anchor = spawner != start_->units.end() ? *spawner : fallback_anchor->second;
         anchor.state.owner = demand.owner;
-        const auto count = campaign ? std::size_t{1} : std::min(demand.simultaneous_maximum, warm_launches);
+        const auto count = recipe_only ? std::size_t{1} : std::min(demand.simultaneous_maximum, warm_launches);
         for (std::size_t index = 0; index < count; ++index)
             add_launch_slot(filesystem, catalog, demand.type, anchor,
                 owner != start_->players.end() ? owner->colour : std::optional<battle::LobbyColour>{}, 0, false,
@@ -392,94 +409,224 @@ void LiveSessionView::prepare_launch_slots(const vfs::Vfs& filesystem, const dat
     }
 }
 
+void LiveSessionView::note_preload_fallback(const tactical::PlayerId owner, const std::string& type,
+    const std::string_view reason) {
+    arrival_slots_.warm_complete = false;
+    if (!arrival_slots_.warm_fallbacks.emplace(std::pair{owner, type}, reason).second) return;
+    const auto message = "EAWR hangar preload fallback: reason=" + std::string(reason)
+        + " owner=" + std::to_string(owner) + " roster=" + type;
+    godot::UtilityFunctions::printerr(godot::String(message.c_str()));
+}
+
 bool LiveSessionView::warm_campaign_slots(BattleScene& population, GodotRenderer& renderer) {
-    if (options_.land || !(setup_ && setup_->campaign) || !arrival_slots_.filesystem || !arrival_slots_.catalog) return true;
+    if (options_.land || !start_ || !arrival_slots_.filesystem || !arrival_slots_.catalog) return true;
     FrameTimer load_timer(&arrival_slots_.warm_ms);
     using Key = std::pair<tactical::PlayerId, std::string>;
-    std::map<Key, ReserveWarmCost> indexed;
-    // Placement previews also carry the hidden-art flag launch_slot, but are
-    // private ghosts. Only the LaunchSlot roster supplies reusable warm capacity.
-    for (const auto& slot : launch_slots_) {
-        const Key key{slot.station_owner, placed_ships_[slot.ship].object_id};
-        auto [found, inserted] = indexed.try_emplace(key);
-        auto& cost = found->second;
-        ++cost.existing;
-        if (!inserted) continue;
-        cost.owner = key.first;
-        cost.type = key.second;
-        cost.instance_bytes = population.live_copy_bytes(renderer, slot.ship);
-        if (slot.clone && cost.instance_bytes) {
-            const auto clone = population.live_copy_bytes(renderer, launch_clones_[*slot.clone].ship);
-            if (!clone || *clone > std::numeric_limits<std::uint64_t>::max() - *cost.instance_bytes)
-                cost.instance_bytes.reset();
-            else *cost.instance_bytes += *clone;
+    try {
+        // Other loading owners may already have appended model pools. Adopt
+        // their placements before deriving any new hull/clone indices.
+        const auto composed = population.placed_units();
+        if (composed.size() > placed_ships_.size()) {
+            const auto added = composed.subspan(placed_ships_.size());
+            placed_ships_.insert(placed_ships_.end(), added.begin(), added.end());
         }
-    }
-    std::vector<ReserveWarmCost> costs;
-    for (const auto& [key, cost] : indexed) { static_cast<void>(key); costs.push_back(cost); }
-    // This is a loading-only probe. No RenderingServer getter is added to a frame.
-    const auto memory = GodotRenderer::gpu_memory();
-    const auto device = memory.budget.device_bytes;
-    const auto limit = usable_device_budget_bytes(device);
-    const auto accounted = memory.budget.other_bytes > std::numeric_limits<std::uint64_t>::max() - memory.budget.resident_bytes
-        ? std::numeric_limits<std::uint64_t>::max() : memory.budget.other_bytes + memory.budget.resident_bytes;
-    const auto used = std::max(memory.device_total, accounted);
-    const bool budget_off = memory.budget.source == "off";
-    const bool probe_available = memory.budget.constrained && device != 0;
-    // Only an explicit measurement switch disables admission limits. An unknown
-    // probe must never turn the entire authored campaign roster into an allocation.
-    if (!budget_off && !probe_available) for (auto& cost : costs) cost.instance_bytes.reset();
-    const ReserveWarmBudget budget{!budget_off, limit > used ? limit - used : 0};
-    const auto plan = plan_reserve_warm(arrival_slots_.plan.rows, costs, budget, true);
-    arrival_slots_.warm_complete = arrival_slots_.warm_complete && plan.complete();
-    arrival_slots_.warm_probe_available = probe_available;
-    arrival_slots_.warm_budget_off = budget_off;
-    arrival_slots_.warm_available_bytes = budget.available_bytes;
-    arrival_slots_.warm_estimated_bytes = plan.additional_bytes;
-    if (!plan.valid) return true; // Retain the finite recipe prefix and existing fallback.
-    const auto first_ship = placed_ships_.size();
-    const auto& filesystem = *arrival_slots_.filesystem;
-    const auto& catalog = *arrival_slots_.catalog;
-    for (const auto& row : plan.rows) {
-        arrival_slots_.warm_requested += row.requested;
-        arrival_slots_.warm_admitted += row.admitted;
-        const auto existing = indexed.find({row.owner, row.type});
-        if (existing == indexed.end()) continue;
-        const auto owner = std::find_if(start_->players.begin(), start_->players.end(),
-            [&](const auto& player) { return player.player.player_id == row.owner; });
-        battle::StartUnit anchor;
-        anchor.state.owner = row.owner;
-        for (std::size_t count = existing->second.existing; count < row.admitted; ++count) {
-            const auto ship = placed_ships_.size();
-            add_launch_slot(filesystem, catalog, row.type, anchor,
-                owner != start_->players.end() ? owner->colour : std::optional<battle::LobbyColour>{}, 0, false,
-                "campaign_warm");
-            if (auto clone = prepare_death_clone(filesystem, catalog, ship, placed_ships_[ship].live_entity)) {
-                launch_slots_.back().clone = launch_clones_.size();
-                launch_clones_.push_back(std::move(*clone));
+        std::map<Key, ReserveWarmCost> indexed;
+        std::map<Key, std::size_t> recipes;
+        // Only reusable owner/type slots count: previews and station-gated copies
+        // cannot serve an ordinary launch.
+        for (std::size_t index = 0; index < launch_slots_.size(); ++index) {
+            const auto& slot = launch_slots_[index];
+            if (slot.required_station != 0) continue;
+            const Key key{slot.station_owner, placed_ships_[slot.ship].object_id};
+            auto [found, inserted] = indexed.try_emplace(key);
+            auto& cost = found->second;
+            ++cost.existing;
+            if (!inserted) continue;
+            recipes.emplace(key, index);
+            cost.owner = key.first;
+            cost.type = key.second;
+            cost.instance_bytes = population.live_copy_bytes(renderer, slot.ship);
+            if (!population.live_ship_drawn(slot.ship)) {
+                cost.instance_bytes.reset();
+                note_preload_fallback(key.first, key.second, "unknown_recipe");
+            }
+            if (slot.clone && cost.instance_bytes) {
+                const auto clone = population.live_copy_bytes(renderer, launch_clones_[*slot.clone].ship);
+                if (!clone || *clone > std::numeric_limits<std::uint64_t>::max() - *cost.instance_bytes)
+                    cost.instance_bytes.reset();
+                else *cost.instance_bytes += *clone;
             }
         }
+        std::vector<ReserveWarmCost> costs;
+        for (const auto& [key, cost] : indexed) { static_cast<void>(key); costs.push_back(cost); }
+        // Loading-only probe; never add a RenderingServer getter to a frame.
+        const auto memory = GodotRenderer::gpu_memory();
+        const auto device = memory.budget.device_bytes;
+        const auto limit = usable_device_budget_bytes(device);
+        const auto accounted = memory.budget.other_bytes > std::numeric_limits<std::uint64_t>::max() - memory.budget.resident_bytes
+            ? std::numeric_limits<std::uint64_t>::max() : memory.budget.other_bytes + memory.budget.resident_bytes;
+        const auto used = std::max(memory.device_total, accounted);
+        const bool budget_off = memory.budget.source == "off";
+        const bool probe_available = memory.budget.constrained && device != 0;
+        if (!budget_off && !probe_available) for (auto& cost : costs) cost.instance_bytes.reset();
+        const ReserveWarmBudget budget{!budget_off, limit > used ? limit - used : 0};
+        const auto plan = plan_reserve_warm(arrival_slots_.plan.rows, costs, budget, true);
+        arrival_slots_.warm_probe_available = probe_available;
+        arrival_slots_.warm_budget_off = budget_off;
+        arrival_slots_.warm_available_bytes = budget.available_bytes;
+        arrival_slots_.warm_estimated_bytes = plan.additional_bytes;
+        if (!plan.valid) {
+            for (const auto& row : arrival_slots_.plan.rows) note_preload_fallback(row.owner, row.type, "overflow");
+            return true;
+        }
+        for (const auto& row : plan.rows) {
+            arrival_slots_.warm_requested += row.requested;
+            const auto existing = indexed.find({row.owner, row.type});
+            if (row.admitted < row.requested)
+                note_preload_fallback(row.owner, row.type, row.estimated ? "budget" : "unknown_budget_or_recipe");
+            if (existing == indexed.end()) continue;
+            arrival_slots_.warm_admitted += std::min(row.requested, existing->second.existing);
+            const auto recipe = launch_slots_[recipes.at({row.owner, row.type})];
+            // One pair at a time bounds failure recovery. All throwing metadata work
+            // precedes the renderer transaction. Successful hulls survive clone refusal
+            // as hidden unused placements; no slot refers to a partial pair.
+            for (std::size_t count = existing->second.existing; count < row.admitted; ++count) {
+                const auto first = placed_ships_.size();
+                if (first >= std::numeric_limits<sim::EntityId>::max() / 4U) {
+                    note_preload_fallback(row.owner, row.type, "overflow");
+                    break;
+                }
+                auto hull = placed_ships_[recipe.ship];
+                hull.live_entity = std::numeric_limits<sim::EntityId>::max() / 2U + first;
+                std::optional<DeathClone> clone;
+                std::optional<BattleScene::PlacedUnit> wreck;
+                if (recipe.clone) {
+                    clone = launch_clones_[*recipe.clone];
+                    wreck = placed_ships_[clone->ship];
+                    wreck->live_entity = std::numeric_limits<sim::EntityId>::max() - hull.live_entity;
+                    clone->ship = first + 1;
+                }
+                placed_ships_.reserve(first + (wreck ? 2U : 1U));
+                launch_slots_.reserve(launch_slots_.size() + 1);
+                launch_clones_.reserve(launch_clones_.size() + (clone ? 1U : 0U));
+                const auto appended = population.append_model_proxies(renderer, recipe.ship, std::span(&hull, 1));
+                if (appended.outcome != GodotRenderer::ProxyOutcome::reserved) {
+                    note_preload_fallback(row.owner, row.type, appended.outcome == GodotRenderer::ProxyOutcome::allocation_failed
+                        ? "out_of_memory" : appended.outcome == GodotRenderer::ProxyOutcome::refused_budget ? "budget" : "unknown_recipe");
+                    break;
+                }
+                arrival_slots_.warm_resident_bytes += appended.bytes;
+                placed_ships_.push_back(std::move(hull));
+                if (wreck) {
+                    const auto added = population.append_model_proxies(renderer, launch_clones_[*recipe.clone].ship,
+                        std::span(&*wreck, 1));
+                    if (added.outcome != GodotRenderer::ProxyOutcome::reserved) {
+                        note_preload_fallback(row.owner, row.type, added.outcome == GodotRenderer::ProxyOutcome::allocation_failed
+                            ? "out_of_memory" : added.outcome == GodotRenderer::ProxyOutcome::refused_budget ? "budget" : "unknown_clone_recipe");
+                        break;
+                    }
+                    arrival_slots_.warm_resident_bytes += added.bytes;
+                    placed_ships_.push_back(std::move(*wreck));
+                }
+                auto slot = recipe;
+                slot.ship = first;
+                slot.bound = slot.shadow_bound = false;
+                slot.clone.reset();
+                if (clone) {
+                    slot.clone = launch_clones_.size();
+                    launch_clones_.push_back(std::move(*clone));
+                }
+                launch_slots_.push_back(slot);
+                ++arrival_slots_.warm_admitted;
+            }
+        }
+    } catch (const std::bad_alloc&) {
+        // Each committed append already has its placement metadata. A failure in
+        // subsequent staging leaves previous pairs usable and never cancels Begin.
+        arrival_slots_.warm_complete = false;
+        if (!std::exchange(arrival_slots_.warm_out_of_memory, true))
+            godot::UtilityFunctions::printerr("EAWR hangar preload fallback: reason=out_of_memory roster=remaining_plan");
     }
-    // S-foil art belongs to loading too, just as for the original launch slots.
-    const auto exists = [&](const std::string& path) { return static_cast<bool>(filesystem.stat(path)); };
-    for (auto& ship : std::span(placed_ships_).subspan(first_ship)) {
-        const auto* model = tables_->find(ship.object_id);
-        if (!model) continue;
-        ship.defend_shell = std::any_of(model->abilities.begin(), model->abilities.end(),
-            [](const auto& row) { return row.type == "DEFEND"; });
-        ship.stealth_shell = std::any_of(model->abilities.begin(), model->abilities.end(),
-            [](const auto& row) { return row.type == "STEALTH"; });
-        if (!ship.clip.empty() || std::none_of(model->abilities.begin(), model->abilities.end(),
-            [](const auto& row) { return row.type == "SPOILER_LOCK"; })) continue;
-        const auto object = catalog.resolve(ship.object_id, data::Category::game_object);
-        if (!object) continue;
-        const auto path = space_model_path(object.value());
-        const auto override_name = tag_text(object.value(), "Space_Model_Anim_Override_Name");
-        const auto deploy = animation::model_clip_paths(path, animation::clip_types::deploy, exists, override_name);
-        const auto undeploy = animation::model_clip_paths(path, animation::clip_types::undeploy, exists, override_name);
-        if (!deploy.empty() && !undeploy.empty()) { ship.clip = deploy.front(); ship.alternate_clip = undeploy.front(); }
+    return true;
+}
+
+void LiveSessionView::warm_live_rosters(BattleScene& population, GodotRenderer& renderer,
+                                         const tactical::TacticalSnapshot& snapshot) {
+    if (options_.land || !motion() || !tables_ || !start_ || !arrival_slots_.filesystem || !arrival_slots_.catalog) return;
+    try {
+        std::map<tactical::TypeId, const units::UnitType*> names;
+        for (const auto& type : tables_->units) names.emplace(battle::type_id(type.id), &type);
+        std::map<tactical::PlayerId, std::uint32_t> tech;
+        for (const auto& economy : snapshot.economy()) tech.emplace(economy.player, economy.tech_level);
+        std::map<std::pair<tactical::PlayerId, tactical::TypeId>, std::size_t> carriers;
+        for (const auto& instance : snapshot.instances()) {
+            const auto found = names.find(instance.type_id);
+            if (found == names.end()) continue;
+            if (motion()->squadrons.tech_spawners.contains(instance.type_id)
+                || motion()->squadrons.find_spawner(instance.type_id, instance.owner))
+                ++carriers[{instance.owner, instance.type_id}];
+        }
+        std::vector<CampaignWarmType> types;
+        std::vector<CampaignWarmSeed> seeds;
+        for (const auto& [key, count] : carriers) {
+            const auto named = names.at(key.second);
+            CampaignWarmType warm{key.first, named->id, {}};
+            const auto craft_of = [&](const tactical::SpawnerProfile& profile) {
+                RosterCraft craft;
+                for (const auto& entry : profile.entries) {
+                    if (entry.starting <= 0) continue;
+                    const auto squadron = names.find(entry.squadron);
+                    if (squadron == names.end()) { warm.complete = false; continue; }
+                    const auto starting = static_cast<std::size_t>(entry.starting);
+                    if (squadron->second->members.empty()) craft.emplace_back(squadron->second->id, starting);
+                    for (const auto& member : squadron->second->members) craft.emplace_back(member.craft, starting);
+                }
+                return craft;
+            };
+            std::vector<RosterCraft> tiers;
+            if (const auto found = motion()->squadrons.tech_spawners.find(key.second);
+                found != motion()->squadrons.tech_spawners.end()) {
+                // The last entry is the invalid tech.
+                for (std::size_t tier = 0; tier + 1U < found->second.size(); ++tier) tiers.push_back(craft_of(found->second[tier]));
+            } else if (const auto* profile = motion()->squadrons.find_spawner(key.second, key.first)) {
+                tiers.push_back(craft_of(*profile));
+            }
+            warm.hangar = largest_roster_up_to(tiers, tech.contains(key.first) ? tech.at(key.first) : 0U);
+            types.push_back(std::move(warm));
+            seeds.push_back({key.first, named->id, count, 0});
+        }
+        const auto expanded = campaign_warm_arrivals(seeds, types);
+        arrival_slots_.warm_complete = arrival_slots_.warm_complete && expanded.complete;
+        std::map<std::pair<tactical::PlayerId, std::string>, std::size_t> alive;
+        for (const auto& instance : snapshot.instances()) {
+            const auto found = names.find(instance.type_id);
+            if (found != names.end()) ++alive[{instance.owner, found->second->id}];
+        }
+        const auto delta = restored_roster_delta(arrival_slots_.plan,
+            with_alive_demand(arrival_slots_.plan, expanded.plan, alive));
+        for (const auto& row : delta.additions)
+            arrival_slots_.plan.add(row.owner, row.type, row.simultaneous_maximum, battle::ArrivalSource::launch, 0);
+        const auto& fresh = delta.fresh;
+        launch_demand_valid_ = false;
+        // A type with no recipe yet reads its model once here, in the loading frame, instead of at its first launch.
+        for (const auto& key : fresh) {
+            const bool recipe = std::any_of(launch_slots_.begin(), launch_slots_.end(), [&](const auto& slot) {
+                return slot.required_station == 0 && slot.station_owner == key.first
+                    && placed_ships_[slot.ship].object_id == key.second;
+            });
+            if (recipe) continue;
+            struct RecipeRead final {
+                bool& flag;
+                explicit RecipeRead(bool& value) : flag(value) { flag = true; }
+                ~RecipeRead() { flag = false; }
+            } reading{warm_recipe_read_};
+            static_cast<void>(grow_launch_slot(0, battle::type_id(key.second), key.first));
+        }
+        arrival_slots_.warm_requested = arrival_slots_.warm_admitted = 0;
+        static_cast<void>(warm_campaign_slots(population, renderer));
+    } catch (const std::bad_alloc&) {
+        arrival_slots_.warm_complete = false;
     }
-    return population.append_live_ships(renderer, filesystem, std::span(placed_ships_).subspan(first_ship));
 }
 
 void LiveSessionView::register_squadron(const tactical::Squadron& squadron, const std::uint64_t tick) {
@@ -687,7 +834,11 @@ std::optional<std::size_t> LiveSessionView::grow_launch_slot(const sim::EntityId
     const tactical::TypeId type, const tactical::PlayerId owner) {
     // Planned launches may outgrow the warm pool. Purchase provenance remains
     // necessary for other skirmish types; a shared menu entry alone is insufficient.
-    const bool launch = launch_demanded(owner, type);
+    const auto* team = squadron_of(entity);
+    // A carrier can select a tech-tier roster absent from the initial warm plan,
+    // including after a purchase or tech change. The sim publishes launch provenance.
+    const bool launch = launch_demanded(owner, type) || squadron_launched(entity)
+        || (team && squadron_launched(team->container));
     // A launched craft must be drawn in the frame it launches: planned launches are exempt from the per-frame
     // arrival budget (their count is bounded by the plan's simultaneous maximum; warm_launches sets how many are
     // composed at load). Only purchases and reinforcement pools wait for the budget.
@@ -705,6 +856,22 @@ std::optional<std::size_t> LiveSessionView::grow_launch_slot(const sim::EntityId
     }
     if (named == nullptr || (named->kind == units::UnitKind::squadron && !named->members.empty()))
         return std::nullopt;
+    // The warm pass's own recipe reads before Begin are planned work, not fallbacks.
+    if (launch && !warm_recipe_read_) note_preload_fallback(owner, named->id,
+        launch_demanded(owner, type) ? "capacity_exhausted" : "unplanned_roster");
+    const auto growth_started = std::chrono::steady_clock::now();
+    struct ReadScope final {
+        std::uint64_t& total;
+        std::uint64_t& frame;
+        bool launch;
+        std::uint64_t before{core::load_profile::asset_read_bytes};
+        ~ReadScope() {
+            if (!launch) return;
+            const auto bytes = core::load_profile::asset_read_bytes - before;
+            total += bytes;
+            frame += bytes;
+        }
+    } reads{arrival_slots_.launch_read_bytes, arrival_slots_.frame_launch_read_bytes, launch};
     FrameTimer growth_timer(trace_frames_ ? &arrival_slots_.growth_ms : nullptr, true);
     if (!launch) --arrival_slots_.remaining; // deterministic work budget, independent of elapsed frame time
     // Projectile pools append model slots independently. Keep this metadata indexed by
@@ -770,6 +937,26 @@ std::optional<std::size_t> LiveSessionView::grow_launch_slot(const sim::EntityId
     }
     ++arrival_slots_.grown;
     ++arrival_slots_.frame_grown;
+    if (launch && trace_frames_) {
+        // Every launch growth, not only the first of a type: planned capacity against the slots that exist and hold a
+        // craft now, what the growth cost and read. Only with the trace on: this path is already a hitch.
+        std::size_t planned = 0, slots = 0, alive = 0;
+        for (const auto& row : arrival_slots_.plan.rows)
+            if (row.source == battle::ArrivalSource::launch && row.owner == owner && row.type == named->id)
+                planned += row.simultaneous_maximum;
+        for (const auto& slot : launch_slots_)
+            if (slot.required_station == 0 && slot.station_owner == owner
+                && placed_ships_[slot.ship].object_id == named->id) {
+                ++slots;
+                if (slot.bound) ++alive;
+            }
+        const auto milliseconds = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - growth_started).count();
+        godot::UtilityFunctions::print(warm_recipe_read_ ? "EAWR hangar recipe read: owner=" : "EAWR hangar launch growth: owner=",
+            static_cast<std::int64_t>(owner), " type=", godot::String::utf8(named->id.c_str()),
+            " planned=", static_cast<std::int64_t>(planned), " slots=", static_cast<std::int64_t>(slots),
+            " alive=", static_cast<std::int64_t>(alive), " ms=", milliseconds,
+            " bytes=", static_cast<std::int64_t>(core::load_profile::asset_read_bytes - reads.before));
+    }
     return first_ship;
 }
 

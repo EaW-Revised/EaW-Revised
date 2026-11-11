@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cstdlib>
 #include <cstddef>
 #include <cstdint>
 #include <exception>
@@ -38,6 +39,21 @@
 
 namespace galactic_campaign_gate {
 namespace cp = eawr::campaign;
+
+// Behaviour tests run the production schedule (K = 15, D = 30). EAWR_GCAI_TEST_SCHEDULE=reference runs the same test
+// on the synchronous reference (K = 1, D = 0), the comparison arm for a test that may assume per-tick effects.
+[[nodiscard]] inline eawr::script::foc::galactic_ai::AsyncSchedule test_schedule() {
+#ifdef _WIN32
+    char* value{}; std::size_t size{};
+    const bool reference = !_dupenv_s(&value, &size, "EAWR_GCAI_TEST_SCHEDULE") && value && std::string_view(value) == "reference";
+    std::free(value);
+#else
+    const char* value = std::getenv("EAWR_GCAI_TEST_SCHEDULE");
+    const bool reference = value && std::string_view(value) == "reference";
+#endif
+    return reference ? eawr::script::foc::galactic_ai::synchronous_reference_schedule
+                     : eawr::script::foc::galactic_ai::standard_async_schedule;
+}
 namespace gc = eawr::sim::galactic;
 namespace ga = eawr::script::foc::galactic_ai;
 namespace ck = eawr::checkpoint;

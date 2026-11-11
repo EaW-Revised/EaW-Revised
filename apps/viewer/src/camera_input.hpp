@@ -4,6 +4,7 @@
 #include "eawr/presentation/camera/camera.hpp"
 #include "eawr/presentation/camera/free_camera.hpp"
 #include "eawr/presentation/camera/input.hpp"
+#include "camera_pointer_hold.hpp"
 
 #include <algorithm>
 #include <array>
@@ -96,6 +97,8 @@ enum class Action : std::uint32_t {
     // motion while a rotate grab is held moves the target. Both schemas.
     translate_x = 23,
     translate_y = 24,
+    battlecam = 25,
+    unit_preview = 26,
 };
 
 // Binding contexts. Schema v1 accepts only land and space; `free` is a
@@ -350,6 +353,17 @@ public:
     // A frame sample carries position only; it cannot create a drag.
     void sample_pointer(float x, float y) noexcept;
     void clear_pointer_sample() noexcept { pointer_valid_ = false; }
+    // #5990: where a held middle-button drag started; the host keeps the
+    // pointer there. Empty when no drag holds it.
+    [[nodiscard]] const std::optional<std::array<float, 2>>& pointer_hold() const noexcept {
+        return hold_.anchor();
+    }
+    // The host's per-frame call: the anchor to warp the pointer to, and the
+    // adapter then drops the warp's own motion event. Empty when not holding.
+    [[nodiscard]] std::optional<std::array<float, 2>> take_pointer_hold_warp() noexcept {
+        hold_.note_warp();
+        return hold_.anchor();
+    }
 
     // Routes one normalised event. Events that are unbound or arrive while the
     // adapter is ineligible are counted and ignored; malformed values fail
@@ -402,6 +416,7 @@ private:
     float viewport_height_{};
     bool viewport_known_{};
     bool pointer_valid_{};
+    PointerHold hold_;
     float pointer_x_{};
     float pointer_y_{};
     float zoom_detents_{};

@@ -166,7 +166,7 @@ std::optional<SpacePopulation::SurfaceUpload> SpacePopulation::upload_surface(
             });
         profile.emplace(core::load_profile::Phase::surface_renderer_upload);
         std::optional<core::load_profile::DetailModelScope> upload_timer;
-        upload_timer.emplace(model_path, &core::load_profile::ModelCost::upload_ms);
+        upload_timer.emplace(model_path, core::load_profile::ModelField::upload);
         const auto uploaded = options_.reject_upload_for_test && upload_failures_.empty()
             ? core::Result<void>::failure({.code = "EAWR-SPACE-POPULATE-TEST",
                                            .message = "injected supported surface upload failure", .logical_path = {}, .line = {}, .column = {}, .source_id = {}})
@@ -183,8 +183,9 @@ std::optional<SpacePopulation::SurfaceUpload> SpacePopulation::upload_surface(
         SurfaceUpload upload;
         upload.renderer_asset = next_asset++;
         uploaded_.push_back(upload.renderer_asset);
-        if (legacy::reads_effect_time(material)) effect_clock_assets_.push_back(upload.renderer_asset);
-        passes_.emplace(upload.renderer_asset, material.pass);
+        const bool translated = renderer.translated_asset(upload.renderer_asset);
+        if (!translated && legacy::reads_effect_time(material)) effect_clock_assets_.push_back(upload.renderer_asset);
+        passes_.emplace(upload.renderer_asset, translated ? RenderPass::opaque : material.pass);
         ++surfaces_uploaded_;
         profile.emplace(core::load_profile::Phase::surface_pose_bounds);
         const std::int32_t bone = model.meshes[mesh_index].bone;

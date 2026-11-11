@@ -1,4 +1,5 @@
 #include "fighter_support.hpp"
+#include "../../src/sim/tactical/checkpoint_fields_internal.hpp"
 
 #include <algorithm>
 #include <array>
@@ -719,8 +720,266 @@ static void controller_launch_attribution() {
     }
 }
 
+// A checkpoint whose durability or hangar tables disagree with local content is rejected, and the damage and
+// hangar services fail cleanly if such state still reaches them.
+void test_restore_bindings() {
+    namespace archive = tactical::checkpoint_detail;
+    tactical::TacticalSetup setup;
+    setup.seed = seed;
+    setup.players = players();
+    setup.units = {unit(1, carrier_type, empire, at(0, 0)), unit(2, frigate_type, empire, at(100, 0))};
+    auto health = durability();
+    tactical::HardpointProfile bay;
+    bay.role = tactical::HardpointRole::fighter_bay;
+    bay.destroyable = true;
+    bay.max_health = units(100);
+    health.profiles[0].hardpoints.push_back(bay);
+    auto damaged = tactical::full_durability(health.profiles[0]);
+    damaged.hardpoints.clear();
+    const auto damage = tactical::apply_damage(health.profiles[0], damaged, 0, units(10));
+    expect(damage.invalid_target && damaged.hull == units(5000), "inconsistent damage state reports failure");
+    const auto table = motion();
+    std::string reference;
+    for (const auto workers : {1U, 2U, 4U, 8U}) {
+        auto made = tactical::TacticalSession::create(setup, sensors(), health, table);
+        expect(static_cast<bool>(made), "checkpoint binding fixture creates");
+        if (!made) continue;
+        auto session = std::move(made).value();
+        const auto saved = session.save_checkpoint_state();
+        if (!saved) { expect(false, "checkpoint binding fixture saves"); continue; }
+        auto fresh = tactical::TacticalSession::create(setup, sensors(), health, table);
+        expect(fresh && fresh.value().load_checkpoint_state(saved.value()), "honest checkpoint restores");
+        if (!fresh) continue;
+        const eawr::platform::ThreadWorkerAdapter executor(workers);
+        const auto advanced = fresh.value().step(executor);
+        expect(static_cast<bool>(advanced), "honest restored checkpoint advances");
+        if (advanced) {
+            if (reference.empty()) reference = advanced.value().state_sha256;
+            expect(reference == advanced.value().state_sha256, "restored checkpoint agrees across worker counts");
+        }
+        auto& state = archive::Access::state_for_testing(session);
+        archive::Reader reader(saved.value());
+        std::uint32_t version{};
+        reader(version);
+        reader.fire_range_bonuses = (version - 25U) % 2U == 1U;
+        reader.script_invulnerable = version >= 27U;
+        archive::Access::state(reader, state);
+        std::vector<tactical::LiveUnit> live;
+        reader(live);
+        const auto tail = saved.value().size() - reader.remaining();
+        const auto encode = [&] {
+            archive::Writer writer;
+            writer.fire_range_bonuses = reader.fire_range_bonuses;
+            writer.script_invulnerable = reader.script_invulnerable;
+            writer(version);
+            archive::Access::state(writer, state);
+            writer(live);
+            writer.bytes.insert(writer.bytes.end(), saved.value().begin() + static_cast<std::ptrdiff_t>(tail), saved.value().end());
+            return writer.bytes;
+        };
+        live[0].upgraded_durability = *state.base_profile(empire, carrier_type);
+        live[0].upgraded_durability->hardpoints.pop_back();
+        live[0].durability->hardpoints.pop_back();
+        auto malformed = encode();
+        auto rejected = tactical::TacticalSession::create(setup, sensors(), health, table);
+        expect(rejected && !rejected.value().load_checkpoint_state(malformed), "mismatched durability profile is rejected");
+        live[0].upgraded_durability.reset();
+        live[0].durability->hardpoints.push_back(units(100));
+        state.spawners.emplace(2, tactical::initial_spawner(seed, 1, 2));
+        malformed = encode();
+        rejected = tactical::TacticalSession::create(setup, sensors(), health, table);
+        expect(rejected && !rejected.value().load_checkpoint_state(malformed), "hangar bound to ordinary type is rejected");
+        state.spawners.erase(2);
+        auto& hangar = state.spawners.at(1);
+        hangar.ready = true;
+        hangar.entries.resize(table.squadrons.spawners[0].entries.size() + 1);
+        malformed = encode();
+        rejected = tactical::TacticalSession::create(setup, sensors(), health, table);
+        expect(rejected && !rejected.value().load_checkpoint_state(malformed), "hangar entry shape is rejected");
+        hangar = tactical::initial_spawner(seed, 1, 1);
+        state.spawners.emplace(3, tactical::initial_spawner(seed, 1, 3));
+        malformed = encode();
+        rejected = tactical::TacticalSession::create(setup, sensors(), health, table);
+        const auto missing = rejected ? rejected.value().load_checkpoint_state(malformed)
+                                      : eawr::core::Result<void>::failure(rejected.error());
+        expect(!missing && missing.error().message.find("hangar binding has no live unit") != std::string::npos,
+            "hangar without a live unit is rejected");
+        state.spawners.erase(3);
+        live[0].durability->hardpoints.clear();
+        malformed = encode();
+        rejected = tactical::TacticalSession::create(setup, sensors(), health, table);
+        const auto short_state = rejected ? rejected.value().load_checkpoint_state(malformed)
+                                           : eawr::core::Result<void>::failure(rejected.error());
+        expect(!short_state && short_state.error().message.find("durability binding disagrees") != std::string::npos,
+            "durability state shape is rejected independently");
+        live[0].durability->hardpoints.push_back(units(100));
+        live[0].upgraded_durability = *state.base_profile(empire, carrier_type);
+        live[0].upgraded_durability->hardpoints[0].role = tactical::HardpointRole::weapon;
+        malformed = encode();
+        rejected = tactical::TacticalSession::create(setup, sensors(), health, table);
+        const auto bad_role = rejected ? rejected.value().load_checkpoint_state(malformed)
+                                       : eawr::core::Result<void>::failure(rejected.error());
+        expect(!bad_role && bad_role.error().message.find("upgraded durability shape disagrees") != std::string::npos,
+            "upgraded hardpoint role is rejected independently");
+
+        // Exercise the defensive service paths independently of the restore barrier.
+        tactical::HardpointProfile point;
+        point.role = tactical::HardpointRole::other;
+        point.destroyable = true;
+        point.max_health = units(100);
+        auto service = tactical::TacticalSession::create(setup, sensors(), health, table);
+        expect(service && service.value().load_checkpoint_state(saved.value()), "hangar service fixture restores");
+        if (service) {
+            auto& injected = archive::Access::state_for_testing(service.value());
+            injected.spawners.emplace(2, tactical::initial_spawner(seed, 1, 2));
+            const auto step = service.value().step(executor);
+            expect(!step && step.error().code == tactical::diagnostic_codes::invalid_setup
+                && step.error().message.find("hangar binding disagrees") != std::string::npos,
+                "hangar service rejects a type without a profile");
+        }
+        auto retirement = tactical::TacticalSession::create(setup, sensors(), health, table);
+        expect(retirement && retirement.value().load_checkpoint_state(saved.value()), "hangar retirement fixture restores");
+        if (retirement) {
+            auto& injected = archive::Access::state_for_testing(retirement.value());
+            injected.spawners.emplace(2, tactical::initial_spawner(seed, 1, 2));
+            tactical::SquadronState orphan;
+            orphan.container = 3;
+            orphan.spawner = 2;
+            orphan.squadron_type = squadron_a;
+            injected.minds.emplace(3, orphan);
+            const auto step = retirement.value().step(executor);
+            expect(!step && step.error().code == tactical::diagnostic_codes::invalid_setup
+                && step.error().message.find("hangar binding disagrees") != std::string::npos,
+                "retiring a squadron rejects a missing hangar profile");
+        }
+        auto scripted_health = health;
+        scripted_health.profiles[2].hardpoints.push_back(point);
+        auto scripted = tactical::TacticalSession::create(setup, sensors(), scripted_health, table);
+        expect(static_cast<bool>(scripted), "scripted damage fixture creates");
+        if (scripted) {
+            const auto checkpoint = scripted.value().save_checkpoint_state();
+            auto restored = tactical::TacticalSession::create(setup, sensors(), scripted_health, table);
+            expect(checkpoint && restored && restored.value().load_checkpoint_state(checkpoint.value()),
+                "scripted damage fixture restores");
+            if (checkpoint && restored) {
+                auto& injected = archive::Access::state_for_testing(restored.value());
+                auto rows = injected.sorted_live();
+                rows[1].durability->hardpoints.push_back(units(100));
+                injected.rebuild(rows, false);
+                const auto submitted = restored.value().submit({{0, empire, 0}, {2}, tactical::DamagePayload{units(10)}});
+                expect(static_cast<bool>(submitted), "scripted damage command submits");
+                const auto step = restored.value().step(executor);
+                expect(!step && step.error().code == tactical::diagnostic_codes::invalid_setup
+                    && step.error().message.find("damage target disagrees") != std::string::npos,
+                    "scripted damage rejects an inconsistent durability state");
+            }
+        }
+        auto redirect_setup = setup;
+        redirect_setup.units = {unit(10, squadron_a, empire, at(0, 0)),
+            unit(11, craft_type, empire, at(0, 0)), unit(12, frigate_type, empire, at(0, 10))};
+        redirect_setup.squadrons = {{10, {11, 12}}};
+        auto redirect_health = durability();
+        redirect_health.profiles[2].hardpoints.push_back(point);
+        auto redirect_combat = combat();
+        redirect_combat.profiles[1].redirect_damage_to_teammates = true;
+        auto redirect = tactical::TacticalSession::create(redirect_setup, sensors(), redirect_health, table,
+            std::nullopt, redirect_combat);
+        expect(static_cast<bool>(redirect), "redirected damage fixture creates");
+        if (redirect) {
+            const auto checkpoint = redirect.value().save_checkpoint_state();
+            auto restored = tactical::TacticalSession::create(redirect_setup, sensors(), redirect_health, table,
+                std::nullopt, redirect_combat);
+            expect(checkpoint && restored && restored.value().load_checkpoint_state(checkpoint.value()),
+                "redirected damage fixture restores");
+            if (checkpoint && restored) {
+                auto& injected = archive::Access::state_for_testing(restored.value());
+                auto rows = injected.sorted_live();
+                rows[2].upgraded_durability = *injected.base_profile(empire, frigate_type);
+                rows[2].upgraded_durability->hardpoints.clear();
+                rows[2].durability->hardpoints.clear();
+                injected.rebuild(rows, false);
+                expect(static_cast<bool>(restored.value().submit({{0, empire, 0}, {11}, tactical::DamagePayload{units(10)}})),
+                    "redirected damage command submits");
+                const auto step = restored.value().step(executor);
+                expect(!step && step.error().code == tactical::diagnostic_codes::invalid_setup
+                    && step.error().message.find("damage target disagrees") != std::string::npos,
+                    "redirected scripted damage rejects inconsistent durability");
+            }
+        }
+        auto delayed_health = health;
+        tactical::DamageRules rules;
+        rules.shield_recharge_frames = 1;
+        delayed_health.damage = rules;
+        auto weapons = combat();
+        weapons.profiles[0].hardpoint_meshes = {"fixture_point"};
+        auto delayed = tactical::TacticalSession::create(setup, sensors(), delayed_health, table, std::nullopt, weapons);
+        expect(static_cast<bool>(delayed), "delayed damage fixture creates");
+        if (delayed) {
+            const auto checkpoint = delayed.value().save_checkpoint_state();
+            auto restored = tactical::TacticalSession::create(setup, sensors(), delayed_health, table, std::nullopt, weapons);
+            expect(checkpoint && restored && restored.value().load_checkpoint_state(checkpoint.value()),
+                "delayed damage fixture restores");
+            if (checkpoint && restored) {
+                auto& injected = archive::Access::state_for_testing(restored.value());
+                auto rows = injected.sorted_live();
+                rows[0].upgraded_durability = *injected.base_profile(empire, carrier_type);
+                rows[0].upgraded_durability->hardpoints.clear();
+                injected.rebuild(rows, false);
+                archive::Access::PendingBlastDamage blast;
+                blast.owner = empire;
+                blast.recipient = 1;
+                blast.amount = units(10);
+                blast.contacted_mesh = "fixture_point";
+                injected.pending_blast_damage.push_back(blast);
+                const auto step = restored.value().step(executor);
+                expect(!step && step.error().code == tactical::diagnostic_codes::invalid_setup
+                    && step.error().message.find("delayed damage target disagrees") != std::string::npos,
+                    "delayed damage rejects a missing hardpoint");
+            }
+        }
+        // Equal table sizes, hardpoint index one past the end: only the bounds clause can reject it.
+        auto beyond_weapons = combat();
+        beyond_weapons.profiles[0].hardpoint_meshes = {"unused_point", "fixture_point"};
+        auto beyond_blast = tactical::TacticalSession::create(setup, sensors(), health, table, std::nullopt, beyond_weapons);
+        expect(static_cast<bool>(beyond_blast), "delayed out-of-range fixture creates");
+        if (beyond_blast) {
+            auto& injected = archive::Access::state_for_testing(beyond_blast.value());
+            archive::Access::PendingBlastDamage blast;
+            blast.owner = empire;
+            blast.recipient = 1;
+            blast.amount = units(10);
+            blast.contacted_mesh = "fixture_point";
+            injected.pending_blast_damage.push_back(blast);
+            const auto step = beyond_blast.value().step(executor);
+            expect(!step && step.error().code == tactical::diagnostic_codes::invalid_setup
+                && step.error().message.find("delayed damage target disagrees") != std::string::npos,
+                "delayed damage rejects an out-of-range hardpoint index");
+        }
+        tactical::Hit bad_hit;
+        bad_hit.amount = units(10);
+        bad_hit.hardpoint = tactical::hull_target;
+        const auto hit = tactical::apply_hit(health.profiles[0], tactical::DamageRules{}, damaged, bad_hit, 0);
+        expect(!hit && hit.error().code == tactical::diagnostic_codes::invalid_setup
+            && hit.error().message.find("damage target disagrees") != std::string::npos,
+            "hit rejects inconsistent damage state");
+        auto exact = tactical::full_durability(health.profiles[0]);
+        const auto beyond = tactical::apply_damage(health.profiles[0], exact,
+            static_cast<std::uint32_t>(health.profiles[0].hardpoints.size()), units(10));
+        expect(beyond.invalid_target && exact.hull == units(5000), "damage rejects an out-of-range hardpoint index");
+        auto exact_state = tactical::full_durability(health.profiles[0]);
+        tactical::Hit beyond_hit;
+        beyond_hit.amount = units(10);
+        beyond_hit.hardpoint = static_cast<std::uint32_t>(health.profiles[0].hardpoints.size());
+        const auto beyond_applied = tactical::apply_hit(health.profiles[0], tactical::DamageRules{}, exact_state, beyond_hit, 0);
+        expect(!beyond_applied && beyond_applied.error().code == tactical::diagnostic_codes::invalid_setup
+            && beyond_applied.error().message.find("damage target disagrees") != std::string::npos,
+            "hit rejects an out-of-range hardpoint index");
+    }
+}
+
 // C-04 (FL-06, FL-07): the station's squadron leaves its bay; craft first, then the container.
 void test_launch() {
+    test_restore_bindings();
     controller_launch_attribution();
     tactical::TacticalSetup setup;
     setup.seed = seed;

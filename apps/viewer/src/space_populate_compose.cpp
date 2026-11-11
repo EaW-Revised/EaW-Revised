@@ -1,4 +1,5 @@
 #include "space_populate.hpp"
+#include "space_removed_records.hpp"
 #include "eawr/core/load_profile.hpp"
 #include "eawr/presentation/space/space.hpp"
 #include "frame_timer.hpp"
@@ -58,6 +59,7 @@ bool SpacePopulation::compose(GodotRenderer& renderer, const assets::Map& map, c
         });
     for (scene::SpacePlacementDecision& decision : decisions_) {
         const auto record = scene_->placements[decision.scene_ordinal].record_ordinal;
+        if (suppress_removed_space_placement(options_.battle_start, record, decision)) continue;
         if (std::find(options_.session_records.begin(), options_.session_records.end(), record)
             == options_.session_records.end()) continue;
         decision.role = scene::SpaceRole::not_drawable;

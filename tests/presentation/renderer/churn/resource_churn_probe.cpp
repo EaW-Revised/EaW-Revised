@@ -26,7 +26,9 @@
 #include <godot_cpp/classes/rendering_server.hpp>
 #include <godot_cpp/classes/scene_tree.hpp>
 #include <godot_cpp/classes/sub_viewport.hpp>
+#include <godot_cpp/classes/time.hpp>
 #include <godot_cpp/core/class_db.hpp>
+#include <godot_cpp/variant/utility_functions.hpp>
 #include <godot_cpp/godot.hpp>
 #include <godot_cpp/variant/packed_string_array.hpp>
 #include <godot_cpp/variant/utility_functions.hpp>
@@ -230,6 +232,9 @@ void EawrResourceChurnProbe::_process(double) {
         ++index_;
     }
     if (index_ < steps_.size()) {
+        godot::UtilityFunctions::print(godot::String("EAWR churn step ") + godot::String::num_int64(static_cast<int64_t>(index_)) + " "
+            + godot::String::utf8(steps_[index_].name.c_str()) + " frame=" + godot::String::num_int64(frames_)
+            + " ms=" + godot::String::num_int64(static_cast<int64_t>(godot::Time::get_singleton()->get_ticks_msec())));
         steps_[index_].act();
         wait_ = steps_[index_].hold;
         return;

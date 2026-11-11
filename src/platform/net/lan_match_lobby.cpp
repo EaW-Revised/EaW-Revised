@@ -34,8 +34,9 @@ bool TcpLanMatch::lobby_select(net::LobbySelection selection)  {
             auto options = net::decode_galactic_lobby_game(lobby_->snapshot().game); if (!options) return false;
             const auto side = net::galactic_lobby_side(options.value(), selection.slot);
             const auto row = std::find_if(options.value().rows.begin(), options.value().rows.end(), [&](const auto& value) { return value.player == selection.slot; });
-            if (!side || row == options.value().rows.end()) return false;
-            selection.faction = row->faction; selection.team = *side; selection.colour = 0;
+            if (row == options.value().rows.end()) return false;
+            // A row that is not planned for a player has no side yet (#6134): the host plans it when the seat takes it and sets the side.
+            selection.faction = row->faction; selection.team = side ? *side : 0; selection.colour = 0;
         } else if (local != lobby_->snapshot().seats.end() && selection.slot != local->selection.slot) {
             auto options = decode_lan_lobby_game(lobby_->snapshot()); if (!options) return false;
             if (lan_seat_kind(options.value(), selection.slot) != LanSeatKind::open) return false;
@@ -110,6 +111,10 @@ bool TcpLanMatch::lobby_kick(net::PeerIndex peer)  {
 
 void TcpLanMatch::configure_galactic(std::shared_ptr<GalacticLobbyBackend> backend) {
     galactic_ = std::move(backend);
+    // #6178 follow-up: the staging checkpoint transfer reports its progress to the lobby log, one line per event.
+    if (galactic_) galactic_->set_checkpoint_trace([diagnostics = diagnostics_](std::string_view event, const std::string& detail) {
+        diagnostics->emit("checkpoint-transfer", event, diagnostics->seat, detail);
+    });
     if (galactic_ && !galactic_->can_start()) {
         auto executor = std::make_shared<sim::InlineExecutor>();
         galactic_->set_adapter_factory([executor](const net::SetupOffer&, const campaign::MpAgreement& agreement)
@@ -225,11 +230,15 @@ std::optional<LanLobbyState> TcpLanMatch::lobby_state() const  {
         else if (state.start_reason.empty() && state.connections_pending)
             state.start_reason = "Waiting for connections between players. Every pair must connect before Start; My connections shows only your own links.";
         else if (state.start_reason.empty() && !all_ready) state.start_reason = "Waiting for every player to accept the current setup.";
-        state.ready_enabled = !state.preparing && !state.identity_pending && local != state.snapshot.seats.end()
+        const bool start_pending = lobby_->start_pending();
+        state.start_preparing = hosting && start_pending;
+        state.prepare_status = galactic_prepare_status();
+        if (start_pending && state.start_reason.empty()) state.start_reason = "The campaign is being prepared; the room is locked until it is done or cancelled.";
+        state.ready_enabled = !state.preparing && !state.identity_pending && local != state.snapshot.seats.end() && !start_pending
             && state.snapshot.phase == net::LobbyPhase::staging && (state.local_ready || valid);
         // An online room starts only complete: every seat present and every pair verified (docs/net-online-npeer.md, section 3).
         state.start_enabled = hosting && state.snapshot.seats.size() >= 2 && state.snapshot.phase == net::LobbyPhase::staging
-            && valid && match_startable
+            && !start_pending && valid && match_startable
             && mesh_complete && all_ready;
         return state;
     }
@@ -376,6 +385,26 @@ core::Result<void> TcpLanMatch::provision_mesh_repair(const net::SetupOffer& off
 
 net::LobbyHooks TcpLanMatch::lobby_hooks() {
         net::LobbyHooks hooks;
+        hooks.preparation_inputs = [this](const net::LobbySnapshot& state, const std::vector<net::SetupSeat>& seats)
+            -> core::Result<std::vector<sim::IdentityDomain>> {
+            if (net::lobby_game_mode(state.game) != net::LobbyGameMode::galactic)
+                return core::Result<std::vector<sim::IdentityDomain>>::success({});
+            if (!galactic_) return lobby_fail<std::vector<sim::IdentityDomain>>(net::LobbyReason::setup_failed, "Campaign content is unavailable.");
+            auto inputs = galactic_->preparation_inputs(state, seats);
+            if (!inputs || inputs.value().empty()) return inputs; // Checkpoint Start keeps all existing offer checks.
+            if (recovery_policy_.reconnect || recovery_policy_.resync)
+                return lobby_fail<std::vector<sim::IdentityDomain>>(net::LobbyReason::recovery_unavailable, "Recovery provisioning for staging is unavailable.");
+            if (state.host != io_->transport.self() && state.start_attempt != net::LobbyDigest{})
+                core::gc_load::trace.begin("mp_guest", true);
+            return inputs;
+        };
+        hooks.preparation_domains = [this](const net::SetupOffer& offer) {
+            return galactic_->preparation_domains(offer);
+        };
+        hooks.preparation_mounts = [this](const net::LobbySnapshot& snapshot, const net::SetupOffer* offer) {
+            return galactic_->preparation_mounts(snapshot, offer);
+        };
+        hooks.discard_preparation = [this] { if (galactic_) galactic_->abandon_prepare(); };
         if (galactic_ && galactic_host_game_) hooks.mounted_mods = galactic_->mounted_mods();
         hooks.bind_setup_seats = [this](const auto& snapshot, const auto& ordinary) {
             return galactic_ && net::lobby_game_mode(snapshot.game) == net::LobbyGameMode::galactic
@@ -393,6 +422,7 @@ net::LobbyHooks TcpLanMatch::lobby_hooks() {
             if (!galactic_ || !net::GalacticCheckpointTransfer::handles(frame.frame)) return false;
             if (net::lobby_game_mode(snapshot.game) == net::LobbyGameMode::galactic && snapshot.phase == net::LobbyPhase::staging)
                 galactic_->receive_transfer(transport, snapshot, frame, now);
+            log_checkpoint_transfer();
             return true;
         };
         hooks.application_pump = [this](auto& transport, const auto& snapshot, auto now) {
@@ -401,25 +431,49 @@ net::LobbyHooks TcpLanMatch::lobby_hooks() {
             if (view().host) for (const auto& seat : snapshot.seats) {
                 if (seat.peer == snapshot.host) continue;
                 const auto found = mod_review_edges_.find(seat.peer);
-                if (found == mod_review_edges_.end() || found->second != room_edge(seat.peer)) return false;
+                if (found == mod_review_edges_.end() || found->second != room_edge(seat.peer)) {
+                    // The transfer waits for every guest's mod review: say so once per guest, not every frame.
+                    if (transfer_blocked_peer_ != static_cast<std::int64_t>(seat.peer)) {
+                        transfer_blocked_peer_ = seat.peer;
+                        diagnostics_->emit("checkpoint-transfer", "blocked-mod-review", transport.self(),
+                            "now=" + std::to_string(now) + " peer=" + std::to_string(seat.peer)
+                            + (found == mod_review_edges_.end() ? " ack=missing" : " ack=stale-edge"));
+                    }
+                    return false;
+                }
+            }
+            if (transfer_blocked_peer_ >= 0) {
+                diagnostics_->emit("checkpoint-transfer", "unblocked", transport.self(), "now=" + std::to_string(now));
+                transfer_blocked_peer_ = -1;
             }
             galactic_->pump_transfer(transport, snapshot, now);
+            log_checkpoint_transfer();
             const auto epoch = galactic_->selection_epoch();
             const bool changed = epoch != galactic_selection_epoch_;
             galactic_selection_epoch_ = epoch;
             return changed;
         };
         hooks.validate = [this](const net::LobbySnapshot& state, bool starting) { return validate_lobby(state, starting); };
+        // #6134: a guest who picks a free playable faction takes its row with it (two human sides at most). Not while a saved game
+        // is selected: that room's rows belong to the save.
+        hooks.follow_choice = [this](const net::LobbySnapshot& before, net::LobbySnapshot& candidate, net::PeerIndex peer) {
+            if (!galactic_ || galactic_->checkpoint_view()) return core::Result<void>::success();
+            return net::follow_galactic_choice(before, candidate, peer, galactic_->campaigns());
+        };
         hooks.offer = [this](const net::LobbySnapshot& state, const std::vector<net::SetupSeat>& seats) -> core::Result<net::SetupOffer> {
             if (net::lobby_game_mode(state.game) == net::LobbyGameMode::galactic) {
                 // GC: seal the roster from the agreed choices and local content, and publish the galactic-campaign-v1 offer.
                 if (!galactic_) return lobby_fail<net::SetupOffer>(net::LobbyReason::setup_failed, "This build has no campaign content for this room.");
-                auto built = while_pumping<net::SetupOffer>(io_->transport, [&] { return galactic_->offer(state, seats); });
+                // The derivation runs on a worker thread; the room keeps pumping and answers "pending" until it is done (#6045).
+                auto built = GalacticLobbyBackend::offer_async(galactic_, state, seats);
                 if (!built) return built;
                 // The host's offer, or the guest's own derivation of the same choices: equal digests mean the peers agree.
                 diagnostics_->emit("campaign-start", "offer", io_->transport.self(),
                     galactic_->start_summary(built.value(), state.host == io_->transport.self()));
                 if (recovery_policy_.reconnect || recovery_policy_.resync) return lobby_fail<net::SetupOffer>(net::LobbyReason::recovery_unavailable, "Recovery provisioning for staging is unavailable.");
+                // Concurrent preparation exchanges only claims here. Credentials are still provisioned from the
+                // final offer by configure_session, after unanimous claims and before setup can send Start.
+                if (state.start_attempt != net::LobbyDigest{}) return built;
                 if (auto provisioned = provision_mesh_repair(built.value(), state.frozen_revision); !provisioned)
                     return core::Result<net::SetupOffer>::failure(provisioned.error());
                 return built;
@@ -438,8 +492,10 @@ net::LobbyHooks TcpLanMatch::lobby_hooks() {
             return core::Result<net::SetupOffer>::success(std::move(offer));
         };
         hooks.setup = [this](net::MessageTransport& stream, const net::LobbySnapshot& staged) -> core::Result<net::LobbySetupContext> {
+            if (io_->transport.tcp) io_->transport.tcp->stop_checkpoint();
             // Start before the frozen-offer derivation inside this pump, not after it returns to the UI.
-            if (!view().host && net::lobby_game_mode(staged.game) == net::LobbyGameMode::galactic)
+            if (!view().host && net::lobby_game_mode(staged.game) == net::LobbyGameMode::galactic
+                && staged.start_attempt == net::LobbyDigest{})
                 core::gc_load::trace.begin("mp_guest", true);
             lobby_stream_ = &stream;
             net::LobbySetupContext context; context.options.auto_accept = false; context.options.auto_start = false;
@@ -537,11 +593,70 @@ net::LobbyHooks TcpLanMatch::lobby_hooks() {
     }
 
 void TcpLanMatch::reset_lobby() {
+        if (io_->transport.tcp) io_->transport.tcp->stop_checkpoint();
         gate_.reset();
         lobby_.reset(); lobby_result_.reset(); lobby_stream_ = nullptr; prepared_setup_.reset(); ready_pending_ = false; lobby_setup_accepted_ = false; lobby_room_committed_ = false;
         removed_peers_.clear(); known_edges_.clear(); mod_review_edges_.clear(); closing_peers_.clear(); lobby_notice_.reset(); last_lobby_state_.reset(); identity_retry_at_ms_ = 0;
-        galactic_host_game_.reset(); galactic_start_.reset(); galactic_flush_started_.reset();
+        galactic_host_game_.reset(); galactic_start_.reset(); galactic_flush_started_.reset(); galactic_pending_start_.reset();
+        if (galactic_) galactic_->release_prepare();
     }
+
+std::string TcpLanMatch::galactic_prepare_status() const {
+    if (!galactic_ || !lobby_) return {};
+    const bool host_waits = view().host && lobby_->start_pending();
+    const bool guest_waits = !view().host && lobby_->setup_pending();
+    if (!host_waits && !guest_waits) return {};
+    const auto progress = galactic_->prepare_progress();
+    const auto minutes = progress.elapsed.count() / 60;
+    const std::string so_far = minutes <= 0 ? std::string("under 1 min so far") : std::to_string(minutes) + " min so far";
+    if (progress.state == GalacticLobbyBackend::PrepareProgress::State::waiting_for_earlier)
+        return "Waiting for an earlier campaign preparation to finish before this one can start (" + so_far
+            + "). The window stays usable; it cannot be speeded up.";
+    if (host_waits)
+        return "Preparing the campaign for all players (" + so_far + "). A large mod chain can take up to 20 minutes. "
+            "The room is locked; Cancel stops waiting.";
+    return "Preparing your copy of the campaign (" + so_far + "). A large mod chain can take up to 20 minutes.";
+}
+
+// #6130: one line per seat when the staging checkpoint has fully arrived (host: every guest restored; guest: its own
+// restore done). Times use the transfer worker's steady clock; pump_ms is its mean service interval.
+void TcpLanMatch::log_checkpoint_transfer() {
+    if (!galactic_) return;
+    const auto progress = galactic_->checkpoint_progress();
+    const bool done = view().host ? progress.agreed : progress.restored;
+    if (!done || progress.refusal || progress.epoch == 0 || progress.epoch == galactic_transfer_logged_epoch_) return;
+    galactic_transfer_logged_epoch_ = progress.epoch;
+    const auto elapsed = progress.restored_ms >= progress.first_chunk_ms ? progress.restored_ms - progress.first_chunk_ms : 0;
+    std::ostringstream detail;
+    detail << "role=" << (view().host ? "host" : "guest") << " bytes=" << progress.total << " chunks=" << progress.chunks
+           << " wire_ms=" << (progress.last_chunk_ms >= progress.first_chunk_ms ? progress.last_chunk_ms - progress.first_chunk_ms : 0)
+           << " restore_ms=" << (view().host ? (progress.restored_ms >= progress.last_chunk_ms ? progress.restored_ms - progress.last_chunk_ms : 0)
+                                              : progress.restore_wall_ms)
+           << " pumps=" << progress.pumps << " pump_ms=" << (progress.pumps ? elapsed / progress.pumps : 0);
+    diagnostics_->emit("checkpoint-transfer", view().host ? "agreed" : "restored", io_->transport.self(), detail.str());
+}
+void TcpLanMatch::cancel_galactic_start() {
+    if (!lobby_ || !view().host || !lobby_->start_pending()) return;
+    (void)lobby_feedback(lobby_->cancel_start());
+    galactic_pending_start_.reset();
+    if (galactic_) galactic_->abandon_prepare();
+}
+
+void TcpLanMatch::finish_galactic_start(net::GalacticLobbyOptions options) {
+    auto raw = io_->transport.tcp->poll();
+    if (raw) { io_->transport.pending_bytes += raw->frame.size(); io_->transport.pending.push_back(std::move(*raw)); }
+    last_lobby_state_ = lobby_state();
+    galactic_start_ = GalacticLobbyStart{std::move(options), lobby_, galactic_};
+}
+
+// Called after every room pump: a pending Start has either been published (the derivation finished) or cancelled.
+void TcpLanMatch::settle_galactic_start() {
+    if (!galactic_pending_start_ || lobby_->start_pending()) return;
+    auto options = std::move(*galactic_pending_start_);
+    galactic_pending_start_.reset();
+    if (lobby_->snapshot().phase == net::LobbyPhase::starting) { finish_galactic_start(std::move(options)); return; }
+    if (galactic_) galactic_->abandon_prepare(); // cancelled by the room: the notice says why
+}
 
 void TcpLanMatch::start_galactic_lobby() {
         const auto state = lobby_state();
@@ -558,10 +673,9 @@ void TcpLanMatch::start_galactic_lobby() {
             else (void)lobby_feedback(started);
             return;
         }
-        auto raw = io_->transport.tcp->poll();
-        if (raw) { io_->transport.pending_bytes += raw->frame.size(); io_->transport.pending.push_back(std::move(*raw)); }
-        last_lobby_state_ = lobby_state();
-        galactic_start_ = GalacticLobbyStart{std::move(options).value(), lobby_, galactic_};
+        if (lobby_->start_pending()) { galactic_pending_start_ = std::move(options).value(); return; } // published by settle_galactic_start
+        if (lobby_->snapshot().phase != net::LobbyPhase::starting) return; // A synchronous preparation refusal returned to staging.
+        finish_galactic_start(std::move(options).value());
     }
 
 void TcpLanMatch::start_lobby() {
@@ -613,6 +727,12 @@ void TcpLanMatch::pump_lobby(const skirmish::FixtureOptions& selected) {
             }
             return;
         }
+        if (galactic_ && galactic_room() && lobby_ && lobby_->snapshot().phase == net::LobbyPhase::staging)
+            io_->transport.tcp->start_checkpoint(galactic_->checkpoint_worker());
+        else io_->transport.tcp->stop_checkpoint();
+        if (galactic_ && galactic_room()) {
+            if (const auto error = galactic_->checkpoint_worker()->failure()) { set_failure(*error); return; }
+        }
         if (galactic_room()) {
             // GC provisions pair credentials on ordinary LAN and two-seat
             // online rooms too. Receive them before pumping the frozen setup.
@@ -624,6 +744,8 @@ void TcpLanMatch::pump_lobby(const skirmish::FixtureOptions& selected) {
         sample_online_route();
         if (galactic_start_) { pump_galactic_start(); return; }
         if (lobby_ && lobby_->snapshot().phase == net::LobbyPhase::starting
+            && !lobby_->start_pending() && !lobby_->setup_pending()
+            && (!galactic_room() || lobby_->setup_phase().has_value())
             && (view().host || io_->transport.tcp->staging_capacity())) {
             auto raw = io_->transport.tcp->poll();
             if (raw) {
@@ -717,6 +839,7 @@ void TcpLanMatch::pump_lobby(const skirmish::FixtureOptions& selected) {
                 if (raw->from == 0 && lan_host_match_running(raw->frame)) {
                     set_failure(net::lobby_diagnostic(net::LobbyReason::frozen, lan_match_running_refusal)); return;
                 }
+                if (raw->from == 0 && !decoded) { set_failure(decoded.error()); return; }
                 if (!snapshot || raw->from != 0) { set_failure(net::lobby_diagnostic(net::LobbyReason::malformed, "Missing authoritative admission snapshot.")); return; }
                 auto created = net::LobbySession::join(io_->transport, snapshot->room, 0, lobby_hooks());
                 if (!created) { set_failure(created.error()); return; }
@@ -821,6 +944,7 @@ void TcpLanMatch::pump_lobby(const skirmish::FixtureOptions& selected) {
             }
         }
         auto pumped = lobby_->pump(lobby_clock_); flush_lobby_closes(); if (!pumped) { set_failure(pumped.error()); return; }
+        settle_galactic_start();
         if (online_options_ && mesh_material_revision_ && lobby_->snapshot().phase == net::LobbyPhase::staging
             && *mesh_material_revision_ != lobby_->snapshot().revision) clear_mesh_repair_material();
         if (!view().host && lobby_->snapshot().phase == net::LobbyPhase::staging && lobby_clock_ >= identity_retry_at_ms_) {
@@ -891,7 +1015,8 @@ void TcpLanMatch::pump_lobby(const skirmish::FixtureOptions& selected) {
             io_->transport.tcp->close(); (void)io_->transport.tcp->poll();
         }
         if (state->snapshot.phase == net::LobbyPhase::starting && !view().host && offered_) { accepted_ = true; pending_ = offered_; }
-        if (state->snapshot.phase == net::LobbyPhase::starting && !view().host && !galactic_start_ && galactic_room() && galactic_) {
+        if (state->snapshot.phase == net::LobbyPhase::starting && !view().host && !galactic_start_ && galactic_room() && galactic_
+            && !lobby_->setup_pending() && lobby_->setup_phase().has_value()) {
             // GC guest: the host started the room; the galactic driver (GCMP-03) finishes the barrier from here.
             auto agreed = net::decode_galactic_lobby_game(state->snapshot.game);
             if (agreed) galactic_start_ = GalacticLobbyStart{std::move(agreed).value(), lobby_, galactic_};

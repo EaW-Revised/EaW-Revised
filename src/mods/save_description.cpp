@@ -71,13 +71,15 @@ struct Reader {
 
 std::optional<std::vector<std::uint8_t>> encode_description(const ModDescription& d) {
     if (!valid(d)) return std::nullopt;
-    std::vector<std::uint8_t> b{1, static_cast<std::uint8_t>(d.complete)};
+    std::vector<std::uint8_t> b{3, static_cast<std::uint8_t>(d.complete)};
     put_u32(b, static_cast<std::uint32_t>(d.entries.size()));
     for (const auto& e : d.entries) {
         b.push_back(static_cast<std::uint8_t>(e.kind)); put_string(b, e.key); put_string(b, e.name);
         b.push_back(static_cast<std::uint8_t>(e.version.has_value())); if (e.version) put_string(b, *e.version);
         b.push_back(static_cast<std::uint8_t>(e.checksum.has_value()));
         if (e.checksum) b.insert(b.end(), e.checksum->begin(), e.checksum->end());
+        b.push_back(static_cast<std::uint8_t>(e.portable_tree.has_value()));
+        if (e.portable_tree) b.insert(b.end(), e.portable_tree->begin(), e.portable_tree->end());
         if (b.size() > kMaxDescriptionBytes) return std::nullopt;
     }
     return b;
@@ -85,7 +87,7 @@ std::optional<std::vector<std::uint8_t>> encode_description(const ModDescription
 std::optional<ModDescription> decode_description(std::span<const std::uint8_t> bytes) {
     if (bytes.size() > kMaxDescriptionBytes) return std::nullopt;
     Reader r{bytes}; std::uint8_t version = 0, complete = 0; std::uint32_t count = 0;
-    if (!r.byte(version) || version != 1 || !r.byte(complete) || complete > 1 || !r.u32(count) || count > kMaxDescriptionLayers) return std::nullopt;
+    if (!r.byte(version) || (version != 2 && version != 3) || !r.byte(complete) || complete > 1 || !r.u32(count) || count > kMaxDescriptionLayers) return std::nullopt;
     ModDescription d; d.complete = complete != 0; d.entries.reserve(count);
     for (std::uint32_t i = 0; i < count; ++i) {
         std::uint8_t kind = 0, present = 0; DescriptionEntry e;
@@ -97,6 +99,12 @@ std::optional<ModDescription> decode_description(std::span<const std::uint8_t> b
             std::array<std::uint8_t, 32> checksum{};
             for (auto& byte : checksum) if (!r.byte(byte)) return std::nullopt;
             e.checksum = checksum;
+        }
+        if (version == 3 && (!r.byte(present) || present > 1)) return std::nullopt;
+        if (version == 3 && present) {
+            std::array<std::uint8_t, 32> tree{};
+            for (auto& byte : tree) if (!r.byte(byte)) return std::nullopt;
+            e.portable_tree = tree;
         }
         d.entries.push_back(std::move(e));
     }
@@ -132,6 +140,7 @@ ModDescription describe_chain(const Chain& chain, std::span<const ModRecord> rec
         if (it == nullptr) { d.complete = false; }
         else {
             e.name = it->name;
+            e.portable_tree = digest_bytes(it->fingerprint.portable_tree);
             if (it->content.state == ContentDigestState::ready) e.checksum = digest_bytes(it->content.sha256);
             if (it->kind == ModKind::manual) e.kind = DescriptionKeyKind::manual;
             else { e.kind = it->kind == ModKind::workshop ? DescriptionKeyKind::workshop : DescriptionKeyKind::mods_folder; e.key = it->key; }
@@ -163,6 +172,16 @@ ModDescription describe_mounted_profile(const Profile& profile, std::span<const 
     Chain chain;
     for (const auto& layer : profile.layers) chain.layers.push_back(layer.key);
     return describe_chain(chain, records);
+}
+bool matching_portable_trees(const ModDescription& host, const ModDescription& local) {
+    if (!host.complete || !local.complete || host.entries.size() != local.entries.size()) return false;
+    for (std::size_t i = 0; i < host.entries.size(); ++i) {
+        const auto& a = host.entries[i]; const auto& b = local.entries[i];
+        if (!known(a) || a.kind != b.kind || a.key != b.key || a.version != b.version ||
+            !a.portable_tree || a.portable_tree != b.portable_tree ||
+            (a.checksum && b.checksum && a.checksum != b.checksum)) return false;
+    }
+    return true;
 }
 std::vector<DescriptionFinding> compare_descriptions(const ModDescription& saved, const ModDescription& current) {
     std::vector<DescriptionFinding> out;

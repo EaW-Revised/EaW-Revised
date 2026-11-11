@@ -67,6 +67,7 @@ public:
     GalacticSetup setup;
     core::LoadNoteCollector load_note_collector; // diagnostics only, never checkpointed or hashed
     std::size_t load_note_count{};
+    bool discovery_shape_noted{}; // diagnostics only: the discovery guard notes its cause once
     void merge_load_notes(core::LoadNoteBuffer& buffer) {
         load_note_collector.merge(buffer);
         load_note_count = load_note_collector.snapshot().size();
@@ -150,6 +151,8 @@ public:
     [[nodiscard]] core::Result<bool> planet_destruction_victory(PlayerId actor_owner, PlayerId current_controller, std::span<const TypeId> landed);
     void detach_observer_sources(std::span<const EntityId> sources);
     [[nodiscard]] math::Fixed planet_base_credits(std::size_t fiscal_index) const;
+    // Async lane shell (refresh_lane): the live session's per-planet base credits at the refresh, so the shell never reads control/ability state.
+    std::vector<math::Fixed> lane_base_credits;
     core::Result<void> capture_corruption(PlanetId, PlayerId, PlayerId);
     void prepare_corruption(const GameCommand&, const CensusObject&, std::uint64_t, std::vector<GalacticEvent>&);
     void execute_corruption(const GameCommand&, const CensusObject&, const PreparedAbility&, std::uint64_t, std::vector<GalacticEvent>&);
@@ -159,7 +162,10 @@ public:
     const CensusObject* movement_actor(EntityId id) const {
         const auto at = actor_records.find(id); return at == actor_records.end() ? nullptr : &at->second;
     }
-    void dispatch_ground_ability(EntityId supplied, PlanetId, SeatId, std::uint64_t sequence, std::uint64_t tick, std::vector<GalacticEvent>&);
+    // `explicit_use` is a seat's own drop (a DeployGroundAbility or a remote drop that arrived): its refusals answer the seat. A
+    // transport landing is not (#6120): neutralization found nothing to offer there is silent, as the theft prefilters are.
+    void dispatch_ground_ability(EntityId supplied, PlanetId, SeatId, std::uint64_t sequence, std::uint64_t tick, std::vector<GalacticEvent>&,
+        bool explicit_use);
     void execute_ability(const GameCommand&, std::uint64_t, std::vector<GalacticEvent>&);
     [[nodiscard]] std::optional<HeroDefeat> prepare_ability_defeat(const CensusObject&, math::Fixed, bool bypass);
     // WGCH-27..30/96..99: live structure sabotage and WGCH-20..26/91..95 hero neutralization on the shared host.
@@ -171,6 +177,7 @@ public:
     void execute_neutralization(const GameCommand&, const CensusObject&, const PreparedAbility&, std::uint64_t, std::vector<GalacticEvent>&);
     void prepare_theft(const GameCommand&, const CensusObject&, const GalacticAbilityProfile&, std::uint64_t, std::vector<GalacticEvent>&);
     void execute_spy(const GameCommand&, const CensusObject&, const GalacticAbilityProfile&, PlanetId, std::uint64_t, std::vector<GalacticEvent>&);
+    void execute_removal(const GameCommand&, const CensusObject&, const GalacticAbilityProfile&, PlanetId, std::uint64_t, std::vector<GalacticEvent>&);
     void apply_observer(const GameCommand&, std::uint64_t, std::vector<GalacticEvent>&);
     void execute_theft(const GameCommand&, const CensusObject&, const PreparedAbility&, std::uint64_t, std::vector<GalacticEvent>&);
     // Sparse expiry calendar; reconstructed from the saved ledger at creation.
@@ -190,6 +197,8 @@ public:
     // Derived source gather, rebuilt only by relevant ordered commits. Never serialized.
     std::uint64_t income_input_generation{1};
     mutable std::uint64_t income_gather_generation{}, income_sources_gathered{};
+    // The gather generation whose inputs `income->inputs` holds (0: unknown); service_income is its only writer.
+    std::uint64_t income_inputs_stored{};
     mutable std::optional<IncomeSetup> gathered_income_inputs;
     std::uint64_t income_control_generation{1}; // derived; separate from physical source gather
     using IncomeSourceCandidate = session_detail::NativeIncomeSourceCandidate;
@@ -240,6 +249,7 @@ public:
     mutable std::optional<detail::ProductionOfferRows> production_offer_rows;
     // Derived observer-local offer rows (never hashed), keyed by their admission inputs.
     mutable std::uint64_t production_offer_rebuilds{};
+    bool production_lock_batch{}, production_lock_publication_pending{};
     // Published production state: copied again only after the production section changed (its dirty flag is
     // counted before the hash consumes it, like the economy input generation).
     mutable std::shared_ptr<const std::optional<ProductionSetup>> published_production;
@@ -310,6 +320,10 @@ public:
         std::vector<std::uint8_t> admission;
         friend bool operator==(const ProductionOfferInputs&, const ProductionOfferInputs&) = default;
     };
+    // The reduction sources of the live income gather over the current planets: a pure function of the gather and of
+    // the planets section, so it is kept until either generation moves (it was gathered and sorted on every tick).
+    mutable std::optional<std::pair<std::uint64_t, std::uint64_t>> reduction_sources_key;
+    mutable std::vector<ProductionReductionSource> reduction_sources_cache;
     [[nodiscard]] ProductionOfferInputs production_offer_inputs(
         std::span<const ObservedPlanet> observations, std::span<const Fleet> fleet_inputs,
         std::span<const Planet> planets, PlayerId) const;
@@ -343,6 +357,8 @@ public:
     bool conflict_requests_enabled{};
     bool native_invasions_enabled{}; // runtime capability of the explicit-list campaign owner
     std::uint64_t next_native_invasion{1};
+    EntityId native_rewound_next{}; // async AI: the counter value to restore while a lane-range readmission runs; never saved
+    std::uint64_t native_rewound_invasion{}; // same temporary guard for a reserved invasion handle
     std::map<std::uint64_t, NativeInvasion> native_invasions;
     std::vector<std::uint64_t> native_invasion_queue;
     std::size_t native_invasion_transport_count{}; // derived bounded queue inventory

@@ -1,5 +1,52 @@
 # Space unit abilities: power modes, their timers and multipliers
 
+## Passive retreat prevention
+
+The debug-build walk WRP-01 to WRP-03 establishes tactical-space admission,
+automatic activation and the bearer-player scope of `Retreat_Prevention_Ability`.
+The campaign space binding accepts automatic styles and initial named locks, and
+tracks ordinary bearers and contained riders. Destruction of a rider removes its source;
+a destroyed carrier's hero riders are destroyed with it and never re-homed to another flagship (WRP-03;
+only upgrade dummies relocate, WGT-51). Deletion removes the source;
+a space retreat's escape service does not itself delete departing objects
+(WRP-03/04). Ground and nonautomatic activation, and changes to named locks after
+the battle starts, remain separate work.
+
+## Lucky Shot
+
+These space rules come from targeted reads of the debug build. Private evidence and the
+address map remain under ignored research output. Authored data selects the behavior for
+every type; no ship identity or stock value is a runtime condition.
+
+| Rule | Behaviour | Source |
+|---|---|---|
+| WLK-01 | `LUCKY_SHOT` resolves `GUI_Activated_Ability_Name` to a `Lucky_Shot_Attack_Ability`. A manual request locks an enemy target and optional hardpoint; an absent named handler fails the request without discarding the owner. Admission uses `Applicable_Unit_Categories` and `Applicable_Unit_Types` through the shared filter, requires a target model, and refuses a target in a nebula. The ordinary availability and hero-clash gates still apply where those states are modelled. | debug build; WHE-14; WHD-07 |
+| WLK-02 | The active holder selects the first `Projectile_Types_Override` for shots directed at its locked target, or a member of that target's team, and the selected hardpoint when present. Team craft use the holder's authored override; a solo holder uses its own. Hardpoint weapons suppress ordinary shots while a team lock cannot supply its override. The override retains the ordinary hardpoint damage/range inputs. | debug build; WWP-18 |
+| WLK-03 | Lucky Shot is excluded from ordinary active-mode multipliers. The first qualifying positive projectile impact against the locked target/hardpoint consumes the whole holder's shot and applies its authored `CAUSE_DAMAGE_MULTIPLIER`. It does not spend one bonus per craft. Other projectiles already in flight receive ordinary damage after consumption. An untargeted hull impact can route the boosted hit to the nearest hardpoint. The supported multiplier has no stock-derived ceiling; its application uses checked fixed-point multiplication. | debug build |
+| WLK-04 | Ending a lock starts the full authored `Recharge_Seconds` only if a qualifying hit spent the shot. Cancellation before that hit is free. Target removal, target nebula and loss of availability end the lock. The remake retains the target and an appended spent flag between impact and its next ability-service phase, then clears the target and starts recharge. Checkpoints preserve that distinction. Exact retail within-frame service placement remains the frame-service-map seam; this work uses the existing partitioned ability boundary. | debug build; project boundary; FC-03 |
+| WLK-05 | A `User_Input` handler joins targeted autofire on its current attack target in ordinary range, never a new search. AI owners default to autofire independently of `Supports_Autofire`; the supported flag permits the human toggle. An explicit stored autofire preference overrides the AI default. Named activation also admits an authored `Space_Automatic` handler. Ground activation styles do not execute in this space path. | debug build; WAB-30/36 |
+| WLK-06 | Presentation follows the selected projectile's authored appearance and detonation sounds. The existing target-ability response cue uses the runtime holder's `SFXEvent_Target_Ability` (the authored team container for a squadron), then the team-to-member fallback, once on activation. | debug build target-handler boundary; BA-54; project presentation routing |
+
+The stock Red Squadron container's recharge and damage multiplier are content, not constants.
+The ordinary mode-multiplier cap of 64 remains unchanged; the shot-only exemption applies
+only to Lucky Shot's cause-damage input, and its other modifiers keep the existing limits.
+Projectile override selection reads the firing craft's primary ordinary ability; a secondary
+Lucky slot can still boost a qualifying normal hit without selecting that override.
+If ion and Lucky locks are both active, the remake's combat-world projection uses
+Lucky's target, hardpoint and arming state for the shared weapon lock. This does not
+clear either ability slot. This precedence is a project choice; retail precedence
+for that combination remains unverified.
+Autofire uses the common authored-order candidate pass: an earlier successful targeted
+handler defers Lucky Shot until a later pass, rather than activating both in one pass.
+Delayed damage retains no source object ([WAD-26](walks/area-damage.md)), so it neither
+receives nor consumes the holder's Lucky bonus.
+Immunity and ordinary cause/take-damage modes that leave no positive damage also
+preserve the unspent lock.
+`tests/replay/lucky_shot_tests.cpp` perturbs the handler name, style, category/type filter,
+projectile override, damage multiplier, recharge and autofire support, and compares checkpoint
+continuation and worker-count hashes. Ordinary stun and hero-clash state remain the shared
+unmodelled interfaces described above; this change does not invent separate Lucky Shot states for them.
+
 ## Applicability
 
 - Product: Star Wars Empire at War: Forces of Corruption, space tactical battles, the abilities
@@ -52,7 +99,7 @@
 | AB-12 | Switching off an ability that is off does nothing. A timed ability switched off early recharges for the share of its duration it ran: round(elapsed / duration x recharge), halves up, so 150 of `DEFEND`'s 450 frames give 600 frames, and a switch-off in the frame it started gives none. An ability without an expiration switches on and off freely and never recharges (`SPOILER_LOCK`). | research AB-R03 |
 | AB-13 | An ability is ready when the unit has it, it is not recharging and its gate holds (AB-14, AB-16). A ready ability stays ready while it is on. This is what the Lua `Is_Ability_Ready` reports, and `Activate_Ability` acts only on a ready ability. | research AB-R02, AB-R13 |
 | AB-14 | `DEFEND` may switch on only on a shielded unit whose shield generators are online and whose shield is not in its depletion effect ([space damage](space-damage.md) DG-08). It is also refused while the unit is ion stunned ([space damage](space-damage.md) IS-07, ion weapons, energy drain and stun), and in retail in an ion storm, which M2 does not have. | research AB-R02, IR-04 |
-| AB-15 | A squadron container passes a non-team ability command to its live craft, and each craft uses its own type's ability data, not the squadron's: the X-wing craft's `SPOILER_LOCK` multiplies its speed by 1.3, not by the squadron's 2. The remake switches the craft on only when every live craft has the ability ready and off, and off together, so a squadron never runs split (**unverified**). A container has no ability status of its own. | research AB-R09; data; project |
+| AB-15 | A squadron container passes a non-team ability request to its live craft in member-index order, and each eligible craft uses its own type's ability data. The first failed request stops the dispatch; earlier successes remain in effect, so a team can have a split state. Manual dispatch does not yet enforce the container's declaration and admission gates (legacy EAWR-6531). | research AB-R09; data; debug build FS-52 |
 | AB-16 | When a unit's engines go offline (space-hardpoints HD-11), its `TURBO` and `SPOILER_LOCK` end, early (AB-12). The remake also keeps them from switching on while the engines are offline (**unverified**: the least visible choice; the other order would switch the mode on for one frame). The shared hardpoint gate retains this engine-online policy (WHD-05). | research AB-R14; project |
 | AB-17 | Any shield set to zero or below ends an active `DEFEND` (early, AB-12). A shield generator loss drops the shield to zero (DG-17), so it ends `DEFEND` too (HD-12). | research AB-R06, AB-R14 |
 
@@ -111,6 +158,7 @@ knocks shields down and stuns ([space damage](space-damage.md) IS-01 to IS-07).
 | AB-67 | A craft that fires the override at the target has fired it: its own slot switches off. One ion bolt per Y-wing. | research IR-11 |
 | AB-68 | **Autofire.** With autofire on, a ready ion shot locks onto the squadron's attack target when that is a valid target (AB-62). A player the engine plays (not human) always has autofire (AB-40), so the Rebel AI's Y-wings use it; a human player's only when they switch it on. FoC queues the ability when the unit attacks; when exactly it is asked is not traced (**unverified**): the remake asks every frame while the squadron attacks and the ability is ready. | research IR-11 (autofire); project |
 | AB-69 | FoC's Lua `Activate_Ability` takes a target object for a targeted ability and issues it on the unit: called on a Y-wing squadron with a Tartan, it fires the ion shot at the Tartan (retail recording, ion weapons, energy drain and stun). No M2 script calls it for `ION_CANNON_SHOT`; only a story mission queries it. So the remake reports such a call instead of issuing it (AB-U8). `Is_Ability_Ready` and the other queries read the container's slot. | research IR-13; retail recording; data |
+| AB-70 | **Authored ion handler admission.** The team ability's `GUI_Activated_Ability_Name` selects its nested `Ion_Cannon_Shot_Attack_Ability` by case-insensitive `Name`; no matching handler means activation fails. The selected handler's explicit included type admits first; otherwise the target must overlap `Applicable_Unit_Categories` and avoid excluded categories and types. Empty/omitted categories admit nothing unless an included type matches. The ion handler defaults to `Special_Attack`, overriding the base unspecified style. An attack-target pass admits that exact style without an autofire flag; a `User_Input` handler joins only while autofire is on (including the AI default). `Space_Automatic`, `Ground_Automatic`, `Global_Automatic` and `Combat_Automatic` handlers do not join this attack-target pass, even with autofire on: mode eligibility alone does not make them attack triggers (debug build ION-E01). Named activation accepts these tactical styles or an automatic style admitted in that battle mode; explicit unsupported styles remain inert. The existing AB-60 to AB-68 firing, cancellation and recharge remain unchanged. Craft firing slots do not require their own nested handler. Stock Y-wing, TIE Defender and Hutt V-wing team handlers author matching names, `User_Input` and `All`; these bindings preserve their visible behavior while making authored variants effective. | debug build ION-E01; authored XML; synthetic XML and deterministic ion admission/checkpoint contracts |
 
 <a id="the-command-bar-api-454"></a>
 
@@ -175,7 +223,7 @@ implemented, without reusing the ion-stun gate.
 |---|---|---|
 | AB-U1 | The phase of retail's damage-rate service. Each object's service runs 30 frames after its own start, not on a shared clock. | A switch-on can land up to 29 frames apart from retail's. In the S-15 recording the frigate takes about 8 damage every 90 frames until the 400-point hit at tick 500 and switches `DEFEND` on at 529. Since retail time-to-kill comparison the remake's frigate also takes about 8 damage a hit from the Tartan's lasers (space-damage DG-24, DG-36; before it took about 21 a second and switched `DEFEND` on at tick 60), so its stand-in switches `DEFEND` on at tick 511, after the same hit. The duel's end is unaffected (DEFEND leaves the weapons as they are). |
 | AB-U2 | Where retail's replanned move ends. | S-17's retail corvette stops 55.8 units short of its target after `TURBO`; the remake's replanned move arrives. |
-| AB-U3 | Whether a squadron container needs all its craft ready (AB-15). | A split squadron, possible only after craft losses mid-recharge, switches on in retail and not in the remake. |
+| AB-U3 | FS-52 settles member order: a non-team request visits eligible members in order and stops at the first failure; it does not precheck the whole team. Manual dispatch does not yet enforce the container's declaration and admission gates (legacy EAWR-6531). | AB-15; FS-52. |
 | AB-U4 | Whether lost engines block `TURBO` from switching on or only end it (AB-16). | At most a one-frame flicker in retail. |
 | AB-U5 | The order within a frame of the shield hit that ends `DEFEND` and the move plan. | The remake plans the slower speed from the next tick (one tick late after a depletion). |
 | AB-U6 | `DEFEND` blocking hangar launches (space-hardpoints HD-13). | No M2 type has both a hangar and `DEFEND`; not modelled. |
@@ -183,3 +231,15 @@ implemented, without reusing the ion-stun gate.
 | AB-U8 | A Lua `Activate_Ability` with a target (AB-69). | No M2 script issues one; the remake reports it. |
 
 Duplicate `Mod_Flag` and `Mod_Multiplier` precedence (AB-26) is unverified in retail. For abilities read by the loader, the remake retains every authored occurrence for content identity and uses the last value in the ability profile as an inferred host choice. Conflicting duplicate flags or multipliers in mod data may therefore differ from retail; stock data has no duplicate flags.
+
+**APD-01 — point ability preview.** The loader retains the authored distance for
+every ability type. Entering point targeting with a positive
+`Area_Effect_Decal_Distance` creates a cursor-centred overlay for the local player.
+Its square has side twice that distance times the local faction's
+`Land_Area_Effect_Range_Overlay_Scale_Factor`; material and tint come from the
+faction's `Land_Area_Effect_Range_Overlay_Material_Name` and
+`Land_Area_Effect_Range_Overlay_RGBA`. Zero gives no overlay. A squadron uses its
+leader's ability data. Right-click ends targeting; the Broadside retail capture
+shows the overlay remains behind the menu opened by Escape. The targeting radius
+does not alter the ability's effect or reveal range (BARR-04, WFP-01).
+Evidence: debug build and Broadside retail capture.

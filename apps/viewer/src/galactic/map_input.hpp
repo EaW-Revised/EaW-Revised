@@ -510,9 +510,9 @@ public:
     [[nodiscard]] bool wheel_zoom() const {
         return gates.world_allowed() && !held_scroll && !held_rotate && !box_start && !dragged;
     }
-    [[nodiscard]] std::optional<Vec3> radar(PointerPoint point, float width, float height) const {
+    [[nodiscard]] std::optional<Vec3> radar(PointerPoint point, float width, float height, RadarExtents extents = {}) const {
         if (!gates.tutorial_scroll || !gates.world_allowed()) return std::nullopt;
-        return radar_to_world({point.x, point.y, 0}, width, height);
+        return radar_to_world({point.x, point.y, 0}, width, height, extents);
     }
     // WGUI-55 / WGM-23: typed intents enter the ordinary seat-issued command sink.
     // Path search/acceptance stays in movement; the UI rechecks discovery at dispatch.

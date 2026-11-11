@@ -46,6 +46,29 @@ struct Clocks {
     std::uint64_t mode{};
     bool operator==(const Clocks&) const = default;
 };
+// Async AI schedule. The AI processes `batch_ticks` (K) virtual ticks per snapshot and
+// the slice of virtual tick j is applied at the end of tick snapshot + apply_delay (D) + j - 1. K=1, D=0 is the in-barrier
+// ordering of today and is the test-only synchronous reference; the standard schedule becomes the only production behaviour
+// with the batch driver. Constants of the build, never a user setting.
+struct AsyncSchedule {
+    std::uint32_t batch_ticks{1};
+    std::uint32_t apply_delay{0};
+    bool operator==(const AsyncSchedule&) const = default;
+};
+inline constexpr AsyncSchedule synchronous_reference_schedule{1, 0};
+inline constexpr AsyncSchedule standard_async_schedule{15, 30};
+// Clocks of virtual tick j (1..K) of a batch whose snapshot is at `snapshot`; j = 1 is the snapshot tick itself.
+[[nodiscard]] constexpr Clocks virtual_clocks(const Clocks& snapshot, std::uint32_t j) noexcept {
+    return Clocks{snapshot.synchronization + (j - 1U), snapshot.mode + (j - 1U)};
+}
+// The tick whose tail applies the slice of virtual tick j of a batch with the given snapshot tick.
+[[nodiscard]] constexpr std::uint64_t apply_tick(const AsyncSchedule& schedule, std::uint64_t snapshot_tick, std::uint32_t j) noexcept {
+    return snapshot_tick + schedule.apply_delay + (j - 1U);
+}
+// Snapshot phase (ticks) of the stream of the player at `rank` among `count` AI players: streams spread over the K ticks.
+[[nodiscard]] constexpr std::uint64_t stream_phase(const AsyncSchedule& schedule, std::size_t rank, std::size_t count) noexcept {
+    return count == 0 ? 0 : (static_cast<std::uint64_t>(rank) * schedule.batch_ticks) / count;
+}
 struct Admission {
     Mode active_mode{Mode::galactic};
     bool processing{true};
@@ -219,8 +242,10 @@ public:
 // length framing and canonical map-key order. Include the component domain and
 // version in its bytes. Hashes are lowercase, 64-hex-digit SHA-256 digests of
 // those canonical bytes; the whole-game owner composes them with Lua/world state.
+// 2: the galactic-async component (batch phase and the slices decided but not applied yet).
+inline constexpr std::uint32_t native_state_version = 2;
 struct NativeState {
-    std::uint32_t version{1};
+    std::uint32_t version{native_state_version};
     std::map<std::string, std::vector<std::uint8_t>, std::less<>> components;
 };
 class StateContributor {
@@ -332,6 +357,7 @@ struct LifecycleSetup {
     std::vector<std::string> xml_paths;
     std::vector<PlanInput> plans; // definitions loaded by the shared plan host
     ServicePeriods service_periods{retail_service_periods};
+    AsyncSchedule schedule{synchronous_reference_schedule}; // not part of the configuration digest; the saved outbox records it and a restore refuses a different schedule
 };
 struct PlayerLifecycle {
     PlayerSelection selected;
@@ -345,7 +371,7 @@ struct PlayerLifecycle {
 };
 enum class NativeProviderFault : std::uint8_t { result = 1, deterministic_exception = 2 };
 struct LifecycleState {
-    std::uint32_t version{2};
+    std::uint32_t version{3}; // 3: deadlines and clocks are virtual-time values of the batch driver (2 is refused)
     Clocks clocks;
     Admission admission;
     std::vector<PlayerLifecycle> players; // ascending player identity
@@ -397,6 +423,17 @@ public:
     [[nodiscard]] static core::Result<std::shared_ptr<Manager>> create(LifecycleSetup, Capabilities);
     ~Manager() override;
     [[nodiscard]] core::Result<void> service(Clocks, Admission, authoritative::ScriptScheduler&);
+    // One frozen world copy at `snapshot`, serviced for admissions.size() virtual ticks (clocks virtual_clocks(snapshot, j)).
+    // service() is the one-tick window.
+    // first_virtual_tick: the batch position (1-based) of the first admission; the batch driver services one tick at a time.
+    [[nodiscard]] core::Result<void> service_window(Clocks snapshot, std::span<const Admission> admissions, authoritative::ScriptScheduler&,
+        std::uint32_t first_virtual_tick = 1);
+    // Batch driver: the virtual tick (1-based) before_service serves next.
+    void set_virtual_tick(std::uint32_t) noexcept;
+    // The mode (frame) clock of the current virtual tick over the snapshot's `real_mode`: real + (j - 1), but never behind
+    // the lifecycle's last served frame (a paused galaxy keeps its frame while the AI keeps serving batches).
+    [[nodiscard]] std::uint64_t virtual_mode(std::uint64_t real_mode) const noexcept;
+    [[nodiscard]] AsyncSchedule schedule() const noexcept;
     [[nodiscard]] core::Result<authoritative::ServiceOptions> before_service(
         const sim::PartitionExecutor&, const gc::GalacticSession&, const gc::GalacticTick&, authoritative::ScriptScheduler&) override;
     [[nodiscard]] bool admits_service(const gc::GalacticTick&) const noexcept override;

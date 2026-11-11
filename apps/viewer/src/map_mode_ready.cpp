@@ -6,6 +6,7 @@
 #include "texture_census_journal.hpp"
 #include "texture_prefetch_policy.hpp"
 #include "battle_content.hpp"
+#include "shader_activation_owner.hpp"
 #include "map_mode.hpp"
 #include "map_mode_internal.hpp"
 #include "eawr/presentation/camera/overview.hpp"
@@ -53,6 +54,8 @@ bool MapMode::State::fail_ready(std::string message) {
 
         state.failure = std::move(message);
         state.status = "failed";
+        // A load that fails after the audio preload started stops its readers and drops their buffers.
+        if (state.battle_audio) state.battle_audio->cancel_loading();
         // #1923: a battle that cannot start never leaves its loading screen over the window.
         if (state.loading) state.loading->dismiss();
         UtilityFunctions::printerr(String::utf8(state.failure.c_str()));
@@ -477,9 +480,27 @@ bool MapMode::State::configure_ready_options(std::string& lighting_argument, std
         state.live_options.speed_step = static_cast<std::uint32_t>(presentation::ui::session_values(*saved).speed_step);
     }
 
+    // #6560: the Advanced video page's particle detail and heat distortions apply at this battle's start
+    // (no mid-battle change). A launch argument that was given wins. Presentation only: no sim or replay effect.
+    if (const auto* saved = ActiveSettings::get()) {
+        const presentation::ui::ParticleSettingValues particles = presentation::ui::resolve_particle_values(
+            saved->video,
+            state.live_options.particle_global_given ? std::optional<float>{state.live_options.particle_detail.global} : std::nullopt,
+            state.live_options.particle_heat_given ? std::optional<bool>{state.live_options.particle_detail.heat} : std::nullopt);
+        state.live_options.particle_detail.global = particles.global;
+        state.live_options.particle_detail.heat = particles.heat;
+    }
+
     if (!state.options.replay_input.empty()) {
         state.live_options.fixture = "replay";
         state.live_options.replay_input = state.options.replay_input;
+    }
+    if (!state.options.battle_save_input.empty()) {
+        state.live_options.fixture = "skirmish";
+        state.live_options.skirmish.map = state.options.map_path;
+        state.live_options.load_path = state.options.battle_save_input;
+        state.live_options.saved_preparation = state.options.saved_preparation;
+        if (!state.options.battle_save_keep_inputs) state.live_options.inputs.clear(); // gestures belonged to the battle that opened the menu
     }
     if (!fog_argument_error.empty()) return state.fail_ready(fog_argument_error);
     if (state.live_options.fixture != "skirmish" && (state.live_options.skirmish.map
@@ -664,21 +685,23 @@ bool MapMode::State::configure_ready_options(std::string& lighting_argument, std
     return true;
 }
 
-bool MapMode::State::mount_ready_content(assets::ObjectTypeCatalog& placement_catalog, std::string& catalog_failure) {
+bool MapMode::State::mount_ready_content(Node3D& host, assets::ObjectTypeCatalog& placement_catalog, std::string& catalog_failure) {
     State& state = *this;
+    std::vector<vfs::LayerRoot> roots;
     if (state.options.content) {
         const auto& content = *state.options.content;
         state.filesystem = content.filesystem;
         state.catalog = content.catalog;
         state.profile = content.profile;
         state.layers = content.layers;
+        state.shader_generation = content.shader_generation;
+        state.shader_receipt = content.shader_receipt;
         placement_catalog = assets::object_type_catalog(*state.catalog);
     } else {
         // The installed layers select the default; an explicit profile keeps the
         // base-game corpus available for regression fixtures.
         const std::filesystem::path expansion = state.options.game_root / "corruption" / "Data";
         const std::filesystem::path base = state.options.game_root / "GameData" / "Data";
-        std::vector<std::pair<std::string, std::filesystem::path>> roots;
         if (!std::filesystem::is_directory(base)) {
             return state.fail_ready("map mode requires an installation with GameData/Data");
         }
@@ -734,6 +757,30 @@ bool MapMode::State::mount_ready_content(assets::ObjectTypeCatalog& placement_ca
             state.catalog = std::make_shared<const data::Catalog>(std::move(loaded.value().catalog));
         } else {
             catalog_failure = core::format_diagnostic(loaded.error());
+        }
+    }
+    if (!state.shader_generation && OS::get_singleton()->get_cmdline_user_args().has("--eawr-shader-translation")) {
+        if (roots.empty()) {
+            // Reused catalog content can originate outside the setup screen.
+            // Reconstruct only contributor metadata; the effective VFS stays pinned.
+            const auto& content = *state.options.content;
+            const auto& game_root = content.game_root.empty() ? state.options.game_root : content.game_root;
+            const auto& mod_root = content.mod_root.empty() ? state.options.mod_root : content.mod_root;
+            if (state.profile == "remake") roots = vfs::mod_chain_roots(mod_root);
+            if (state.profile != "eaw") roots.emplace_back("expansion", game_root / "corruption" / "Data");
+            roots.emplace_back("base", game_root / "GameData" / "Data");
+            mount_revised_layer(roots);
+        }
+        if (!state.options.shaders) state.options.shaders = std::make_shared<GodotShaderCache>();
+        ShaderActivationOwner owner;
+        auto started = begin_mod_shaders(owner, *state.filesystem, roots, state.profile, host, state.options.shaders);
+        if (!started) UtilityFunctions::printerr(String::utf8(core::format_diagnostic(started.error()).c_str()));
+        else {
+            while (!owner.step(1U)) {}
+            state.shader_generation = owner.generation();
+            state.shader_receipt = owner.receipt();
+            if (const auto& report = owner.report(); report && report->note)
+                UtilityFunctions::printerr(String::utf8(report->note->text.c_str()));
         }
     }
 
@@ -944,7 +991,7 @@ struct MapMode::State::ReadyLoad final {
         },
         [](ReadyContext& context) {
             auto& state = context.state;
-            if (!state.mount_ready_content(context.catalog, context.catalog_failure)) return false;
+            if (!state.mount_ready_content(context.host, context.catalog, context.catalog_failure)) return false;
             context.model_load = std::make_unique<scene::VfsAssetCache::ModelLoadScope>(*state.filesystem);
             // Bound the strong cache from the first decode instead of only at the end of load. A galactic battle load
             // keeps the cache unbounded: the call is ignored while the load scope above is open.
@@ -1043,6 +1090,7 @@ struct MapMode::State::ReadyLoad final {
             state.triangle_count = mesh.triangle_count;
 
             state.renderer = std::make_unique<GodotRenderer>(host, state.options.shaders);
+            install_mod_shaders(*state.renderer, state.shader_generation, state.filesystem);
             state.renderer->set_texture_loader([filesystem = state.filesystem](const assets::Source& source) -> std::optional<assets::Texture> {
                 auto loaded = assets::load_texture(*filesystem, source.logical_path);
                 if (!loaded) return std::nullopt;

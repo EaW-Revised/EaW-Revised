@@ -13,7 +13,7 @@ import test_live_launch_slot_roster as fixture
 
 def interleaved_projectile_harness(harness):
     harness = harness.split('\nnamespace {\nLiveSessionView session', 1)[0]
-    harness = harness.replace('bool launch_slot = false,', 'bool death_clone = false, projectile_slot = false; bool launch_slot = false,')
+    harness = harness.replace('bool launch_slot = false,', 'bool projectile_slot = false; bool launch_slot = false,')
     harness = harness.replace('''    std::optional<DeathClone> prepare_death_clone(const vfs::Vfs&, const data::Catalog&, std::size_t, sim::EntityId) {
         return std::nullopt;
     }''', '''    std::optional<DeathClone> prepare_death_clone(const vfs::Vfs&, const data::Catalog&, std::size_t source, sim::EntityId) {

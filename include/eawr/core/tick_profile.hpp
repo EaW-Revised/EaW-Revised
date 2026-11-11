@@ -128,6 +128,8 @@ public:
     }
     JobScope(const JobScope&) = delete;
     JobScope& operator=(const JobScope&) = delete;
+    // For a job whose identity is known only after the scope opened.
+    void identify(const std::uint64_t identity, const std::uint64_t type = 0) noexcept { identity_ = identity; type_ = type; }
     ~JobScope() {
         if (!recording_) return;
         recording_->costs.push_back({name_,

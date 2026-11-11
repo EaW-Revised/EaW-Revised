@@ -299,6 +299,24 @@ void offer_projection() {
         else expect(std::equal(after.begin(), after.end(), baseline.begin(), baseline.end()), "offer projection equal on 1/2/4/8 workers");
     }
     {
+        // A story lock must reach the menu even when the purchase query sees insufficient credits first.
+        auto input = config;
+        input.player_economy->players[0].credits = f(100);
+        input.production->technology_types = {{1000, 2, false, false, {1}}, {1001, 2, false, false, {1}}};
+        input.production->planets[0].offers[0].seconds = f(60);
+        eawr::sim::InlineExecutor executor;
+        auto game = take(galactic::GalacticSession::create(input));
+        submit(game, buy(0, 1));
+        (void)take(game.step(executor));
+        (void)take(game.apply_production_lock({1, 0, 1000, false}));
+        const auto rows = game.snapshot()->production_offers();
+        const auto found = std::ranges::find_if(rows, [](const auto& row) { return row.planet == 1 && row.type == 1000; });
+        expect(found != rows.end() && found->already_in_production && !found->current
+            && found->admission == galactic::ProductionAdmission::credits
+            && found->capability == galactic::ProductionAdmission::locked,
+            "queued type exposes the story lock separately from the purchase credits denial");
+    }
+    {
         auto multiplayer = config;
         multiplayer.seats.push_back({{2}, 2, galactic::SeatKind::human, 1, true, 2});
         multiplayer.observer->human_observers = {1, 2}; multiplayer.observer->solo_reference_human = 0;

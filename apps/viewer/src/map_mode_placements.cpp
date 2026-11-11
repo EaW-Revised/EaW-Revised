@@ -1,5 +1,6 @@
 #include "map_mode_internal.hpp"
 #include "render_profile_viewport.hpp"
+#include "shader_activation_owner.hpp"
 
 #include "family_textures.hpp"
 #include "legacy/registry.hpp"
@@ -494,6 +495,7 @@ bool MapMode::State::compose_placements(const assets::Map& map,
         return false;
     }
     scene::VfsAssetCache cache(*filesystem);
+    if (renderer) admit_scene_shaders(cache, *renderer);
     scene::BuildInput input;
     input.map = &map;
     input.map_sha256 = map_hash;

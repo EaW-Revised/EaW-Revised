@@ -47,6 +47,7 @@ ModRecord folder_record(const DiscoveryInput& input, std::string key, ModKind ki
     if (input.walk_trees) {
         const TreeFingerprint tree = tree_fingerprint(root, input.tree_entry_cap);
         record.fingerprint.tree = tree.tree;
+        record.fingerprint.portable_tree = tree.portable_tree;
         record.fingerprint.tree_files = tree.files;
         record.fingerprint.tree_capped = tree.capped;
         if (tree.capped) {

@@ -2,6 +2,7 @@
 #include "eawr/vfs/vfs.hpp"
 #include "space_environment.hpp"
 #include "space_environment_internal.hpp"
+#include "shader_activation_owner.hpp"
 #include "startup_trace.hpp"
 
 namespace eawr::presentation::godot_backend {
@@ -625,6 +626,7 @@ bool SpaceEnvironment::ready(Node3D& host, const assets::Map& map, const vfs::Vf
     // One renderer on the host's own scenario; no second device and no
     // per-object scene nodes. The camera is live before any upload or frame.
     state.renderer = std::make_unique<GodotRenderer>(host, state.options.shaders);
+    install_mod_shaders(*state.renderer, state.options.shader_generation, state.options.shader_filesystem);
     state.renderer->set_texture_loader([&filesystem](const assets::Source& source) -> std::optional<assets::Texture> {
         auto loaded = assets::load_texture(filesystem, source.logical_path);
         if (!loaded) return std::nullopt;

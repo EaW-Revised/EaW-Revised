@@ -2,6 +2,7 @@
 #include "galactic_support.hpp"
 #include "eawr/checkpoint/game.hpp"
 #include "eawr/core/sha256.hpp"
+#include "eawr/sim/galactic/offer_pool.hpp"
 #include "eawr/platform/sim_workers.hpp"
 #include "../../src/checkpoint/game_session_internal.hpp"
 
@@ -93,7 +94,10 @@ Bytes window_replay(const Bytes& save) {
     const auto checkpoint = parsed(save);
     eawr::checkpoint::detail::Reader in(checkpoint.find(cp::SectionId::session)->bytes);
     const auto prefix = cp::detail::read_session_prefix(in);
-    return Bytes(prefix.replay.begin(), prefix.replay.end());
+    // The section stores the recording with its offer tables pooled; the frontier digest chains the standalone form.
+    auto pool = galactic::OfferPool::decode(checkpoint.find(cp::SectionId::offer_pool)->bytes);
+    expect(pool.has_value(), "the checkpoint's offer pool decodes");
+    return take(galactic::write_replay(take(galactic::parse_replay(prefix.replay, {}, &*pool))));
 }
 eawr::campaign::HistoryBase history_base(const Bytes& save) {
     const auto checkpoint = parsed(save);

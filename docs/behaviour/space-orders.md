@@ -81,10 +81,22 @@ guard differ from a move only for craft.
   in place under way, A-04's, carries on; FoC's handling of it is not traced); otherwise it gets
   the approach slot: the point 0.9 × the approach distance from the target's predicted position
   (OR-07), on the planar line from that position towards the unit, and plans a move there (MV-10 to
-  MV-19; with avoidance rules AV-10 to AV-15 and the destination search of AV-19 when the slot is
-  occupied). A unit on the target's own XY gets the predicted position, which moves nothing (MV-03).
-  FoC tries the slot on that line first and turns it about the target in 4, then 5 degree steps
-  while it is blocked (OR-U1).
+  MV-19; with avoidance rules AV-10 to AV-15). With tracking, OR-28 places an occupied slot
+  before the path search. A unit on the target's own XY gets the predicted position,
+  which moves nothing (MV-03).
+- **OR-28** (debug build; project adaptation) A blocked approach slot is searched around the
+  target, retaining its distance from the target. The remake uses AV-19's square of the mover's soft radius
+  times `OccupationRadiusCoefficientSpace`, facing +X, against its own dynamic layer and the
+  static layer, with the static transverse padding of FM-05. Ignore the mover itself and use
+  the movement context's collision filter, from the planning frame through frame 2^32.
+  The debug build alternates five-degree retries, with an arc bound derived from group radii
+  and capped at a quarter turn. Our per-unit mapping uses the maximum arc on each side:
+  nominal, +5, -5, through +90, -90 degrees, at most 37 candidate queries. An empty result
+  retains the existing AV-19 planner fallback: a guard's range can be smaller than the hulls
+  around it, leaving no open point on its ring. An open result keeps the approach destination
+  on the attack ring. Slot queries run in the existing per-layer search lanes,
+  before an immediate or sliced path search, without changing planning barriers or cadence.
+  This does not reproduce group arc layout or the smaller signed-ring fallback (OR-U1).
 - **OR-06** (research E452-10, E452-11, E452-22) The first mapping runs with the order and plans
   from the next frame, like a move (MV-02). Afterwards the unit is checked every
   `MovementReevaluationFrameCount` frames (10) counted from the order's tick: it keeps its movement
@@ -283,9 +295,15 @@ Evidence tags HO-nn are opaque IDs from the FoC debug build; their map stays pri
 
 ## Unknowns
 
-- **OR-U1** FoC's slot search turns a blocked slot about the target (4 then 5 degree steps, up to a
-  bound from the group's radii) and shrinks the ring when no slot fits; the remake plans to the slot
-  on the line and lets the destination search of AV-19 move it.
+- **OR-U1** OR-28 resolves blocked slots around the target. Exact group layout remains open:
+  the debug build selects a starting angle separately, bounds five-degree blocked-slot retries
+  from padded group occupation diameters, ignores the original group while separately checking
+  its mapped slots, and shrinks signed rings when no batch fits. The remake retains independent
+  mappings and checks existing tracked predictions instead, using AV-19's soft-radius footprint
+  rather than the group's FM-04 occupation radius, and the maximum arc at the
+  original ring radius. It does not implement the group starting-angle search, radius shrink
+  or the far-side fallback. OR-U2's coordinator grouping is needed for those rules; tracked by
+  group attack-slot layout (legacy EAWR-6278).
 - **OR-U2** FoC checks a coordinator's ships by layer (corvettes, frigates, capitals, super
   capitals) at frames staggered by coordinator ID, remaps a whole layer when any ship needs it, and
   staggers the new plans by `SpacePathfindFrameDelayDelta`; the remake checks each unit at its

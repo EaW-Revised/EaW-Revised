@@ -14,6 +14,7 @@
 #include "eawr/platform/live_game_session.hpp"
 #include "eawr/platform/campaign_service_configuration.hpp"
 #include "eawr/checkpoint/game.hpp"
+#include "eawr/sim/galactic/offer_pool.hpp"
 #include "eawr/sim/galactic/observer.hpp"
 #include "../../apps/viewer/src/galactic/save_input.hpp"
 #include "../../apps/viewer/src/galactic/save_dialog_model.hpp"
@@ -109,6 +110,18 @@ void retained_invasion_input() {
         "saved deferred invasion acceptance round-trips as its typed command beside ordinary input");
     saved.sections.front().bytes.pop_back();
     expect(!platform::save_detail::decode_input(saved), "a truncated deferred-order blob refuses the save");
+    // Version 4: the recordings reference the checkpoint's own offer pool, which the container must carry.
+    galactic::OfferPool pool;
+    auto pooled = take(platform::save_detail::encode_input(initial, 4, input, &pool));
+    expect(pooled.version == 4, "a pooled live-input section is version 4");
+    eawr::checkpoint::Checkpoint with_pool;
+    with_pool.header = saved.header;
+    with_pool.sections.push_back({static_cast<std::uint16_t>(eawr::checkpoint::SectionId::offer_pool), eawr::checkpoint::galaxy_section_version, true, pool.encode()});
+    with_pool.sections.push_back(pooled);
+    expect(take(platform::save_detail::decode_input(with_pool)).orders.size() == 2, "a pooled live-input section reads back against the container's pool");
+    eawr::checkpoint::Checkpoint without_pool;
+    without_pool.header = saved.header; without_pool.sections.push_back(pooled);
+    expect(!platform::save_detail::decode_input(without_pool), "a pooled live-input section without the container's pool refuses the save");
 }
 std::uint64_t save(platform::LiveGameSession& live, std::string name, bool quick = false,
     bool wait_before_poll = false) {

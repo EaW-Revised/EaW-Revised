@@ -127,7 +127,7 @@ constexpr double default_wait_seconds = 60.0;
         output << "{\"custom\": " << (gc.custom ? "true" : "false")
                << ", \"credits\": " << gc.credits << ", \"starting_tech\": " << gc.starting_tech
                << ", \"maximum_tech\": " << gc.maximum_tech << ", \"difficulty\": " << json(gc.difficulty)
-               << ", \"heroes\": " << (gc.allow_heroes ? "true" : "false") << ", \"auto_resolve\": " << gc.auto_resolve << "}";
+               << ", \"heroes\": " << (gc.allow_heroes ? "true" : "false") << ", \"auto_resolve\": " << gc.auto_resolve << ", \"vote_timeout\": " << gc.vote_timeout << "}";
     } else output << "null";
     output << "}";
     return output.str();
@@ -587,7 +587,11 @@ bool LanLobbyMode::ready(Node3D& host) {
         BroadcastLobbySource::Options discovery;
         if (state.options.broadcast_port != 0) discovery.port = state.options.broadcast_port;
         discovery.extra_ports = state.options.extra_ports;
-        screen_options.source = BroadcastLobbySource::open(std::move(discovery), state.discovery_failure);
+        screen_options.lan_source_factory = [discovery = std::move(discovery), &state](std::string& failure) {
+            auto source = BroadcastLobbySource::open(discovery, failure);
+            state.discovery_failure = failure;
+            return source;
+        };
     }
     if (!state.options.online_rooms.empty() || state.options.online_list_failed) {
         state.fixed_online = std::make_shared<net::FixedOnlineLobbySource>();

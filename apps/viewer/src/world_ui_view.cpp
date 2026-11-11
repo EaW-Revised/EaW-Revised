@@ -52,18 +52,25 @@ WorldUiView::~WorldUiView() {
     if (rendering && owner_canvas_.is_valid()) rendering->free_rid(owner_canvas_);
     if (owner_layer_) memdelete(owner_layer_);
     if (rendering == nullptr) return;
+    if (area_preview_instance_.is_valid()) rendering->free_rid(area_preview_instance_);
+    for (const RID& blob : healing_blob_instances_) if (blob.is_valid()) rendering->free_rid(blob);
     for (const RID& circle : circles_) {
         if (circle.is_valid()) rendering->free_rid(circle);
     }
 }
 
 void WorldUiView::draw(const Frame& frame, const RID canvas_item) {
+    area_preview_side_drawn_.reset();
     draw_owner_name(frame);
     draw_waypoints(frame, canvas_item);
     if (!frame.visible) {
         if (auto* rendering = RenderingServer::get_singleton()) {
             for (const RID& circle : circles_) rendering->instance_set_visible(circle, false);
+            if (area_preview_instance_.is_valid()) rendering->instance_set_visible(area_preview_instance_, false);
+            for (const RID& blob : healing_blob_instances_) rendering->instance_set_visible(blob, false);
         }
+        healing_blobs_drawn_ = 0;
+        healing_blobs_last_.clear();
         circles_drawn_ = health_bars_ = shield_bars_ = reticles_drawn_ = grid_icons_ = 0;
         bar_rows_.clear();
         icon_rows_.clear();
@@ -75,7 +82,25 @@ void WorldUiView::draw(const Frame& frame, const RID canvas_item) {
         return;
     }
     if (frame.units == nullptr || frame.selection == nullptr || frame.live == nullptr || !frame.project) return;
+    if (auto* rendering = RenderingServer::get_singleton(); rendering && scenario_.is_valid()) {
+        if (!area_preview_instance_.is_valid() && area_preview_mesh_.is_valid()) {
+            area_preview_instance_ = rendering->instance_create2(area_preview_mesh_->get_rid(), scenario_);
+            rendering->instance_geometry_set_cast_shadows_setting(area_preview_instance_, RenderingServer::SHADOW_CASTING_SETTING_OFF);
+        }
+        if (area_preview_instance_.is_valid()) {
+            const auto side = frame.area_preview ? ui::area_preview_side(frame.area_preview->radius, area_preview_scale_) : std::nullopt;
+            if (side) {
+                const auto& preview = *frame.area_preview;
+                rendering->instance_set_transform(area_preview_instance_, Transform3D(
+                    Basis().scaled(Vector3(*side, 1.0F, *side)),
+                    Vector3(preview.position[0], preview.position[2], -preview.position[1])));
+                area_preview_side_drawn_ = *side;
+            }
+            rendering->instance_set_visible(area_preview_instance_, side.has_value());
+        }
+    }
     place_circles(frame);
+    place_healing_blobs(frame);
     // The UI reference scale (layout.hpp UI-L1): screen height over 768 at 4:3 and wider.
     const float ui_scale = frame.viewport[1] > 0.0F
         ? std::min(frame.viewport[1] / 768.0F, frame.viewport[0] / 1024.0F * (frame.viewport[0] / frame.viewport[1] >= 4.0F / 3.0F ? 1.0e9F : 1.0F))

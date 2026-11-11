@@ -216,6 +216,10 @@ int main() {
     test_orbit_cancellation();
     test_mouse_units_follow_the_screen();
     test_click_reset();
+    test_pointer_hold();
+    test_pointer_hold_object();
+    test_middle_drag_ignores_other_modifiers();
+    test_galaxy_drag_hold_step();
     test_input_default_ledger();
     if (failures != 0) {
         std::cerr << failures << " camera binding contract failure(s)\n";

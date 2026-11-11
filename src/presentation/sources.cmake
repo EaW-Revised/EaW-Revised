@@ -5,6 +5,7 @@
 set(EAWR_PRESENTATION_SOURCES
     "${CMAKE_CURRENT_LIST_DIR}/shader_material.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/shader_material_activation.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/shader_material_route.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/shader_evaluation.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/shader_activation.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/shader_activation_snapshot.cpp"
@@ -24,6 +25,7 @@ set(EAWR_PRESENTATION_SOURCES
     "${CMAKE_CURRENT_LIST_DIR}/galactic_pause.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/animation/animation.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/animation/idle_playback.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/animation/land_locomotion_clips.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/animation/unit_clips.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/audio/sfx.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/audio/galactic.cpp"

@@ -25,8 +25,21 @@ public:
     core::Result<void> land_combat(std::vector<LiveUnit>& live,
         const std::vector<std::pair<EntityId, math::Vec3>>& starts,
         std::vector<Event>& events, std::vector<CombatEvent>& combat_events);
+    // LC-91: one V-19 flash per weapon_fired event, from the combat view of this tick (session_land_combat.cpp).
+    core::Result<void> land_fire_flashes(const SensorField& sensing, const std::vector<CombatEvent>& combat_events,
+        std::vector<FogFlash>& flashes) const;
     core::Result<void> land_victory_census(const std::vector<LiveUnit>& live);
+    // G-09: the death phase of the garrison service (session_land_garrison.cpp), run inside land_combat after the kills.
+    core::Result<void> land_garrison_deaths(std::vector<LiveUnit>& live);
     void land_commit_victory(std::vector<Event>& events);
+    // LC-54..57: the shared economy and pad services on the land step (session_land_economy.cpp).
+    core::Result<void> land_economy(std::vector<LiveUnit>& live, const std::vector<PlayerCommand>& economy_commands,
+        std::vector<Event>& events, std::vector<core::Diagnostic>& diagnostics);
+    // LC-52/53: the shared capture service over the land objects with a capture profile (session_land_reinforce.cpp).
+    core::Result<void> land_capture(std::vector<LiveUnit>& survivors, std::vector<Event>& events);
+    // LC-51: finalize the companies whose landing has run its course.
+    core::Result<void> land_reinforcements(std::vector<LiveUnit>& live, std::vector<Event>& events,
+        std::vector<core::Diagnostic>& diagnostics);
 
 
 private:
@@ -35,6 +48,9 @@ private:
     void record_damage_change(const LiveUnit& target, math::Fixed before,
         EntityId source = invalid_entity_id, const UnitStage* staged = nullptr);
     std::vector<DamageChange> damage_changes_; // ordered commits only, not partition jobs
+    // FL-18: accepted activations feed the existing partitioned hangar/birth commit this tick.
+    std::map<EntityId, std::uint64_t> deploy_squad_requests_;
+    core::Result<RejectReason> deploy_squad(LiveUnit&, const AbilityPayload&, std::uint64_t tick);
     core::Result<void> gather();
     core::Result<void> prepare_craft();
     core::Result<void> prepare_chase_pairs(std::vector<CraftView>& craft_views, std::map<EntityId, EntityId>& craft_squadron,
@@ -75,6 +91,7 @@ private:
         const std::map<EntityId, EntityId>& craft_squadron);
     core::Result<void> retry_buzz_targets(std::vector<LiveUnit>& moving, detail::MapStage<SquadronState>& minds,
         std::map<EntityId, SquadronFrame>& squadron_frames, const std::map<EntityId, ArrivalState>& arrivals);
+    core::Result<void> lucky_shots();
     core::Result<void> ion_team();
     core::Result<void> orders();
     core::Result<void> projectile_inputs();
@@ -127,6 +144,7 @@ private:
     struct CommandHandlers;
     struct PlanLanes;
     core::Result<void> commands();
+    core::Result<void> request_survivor_defaults(std::span<const EntityId> created);
     core::Result<void> service_retreat_flight(UnitStage&, std::vector<Event>&, std::vector<UnitState>&);
     core::Result<void> retreat_service();
     core::Result<void> special_weapons();

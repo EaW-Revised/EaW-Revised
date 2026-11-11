@@ -59,6 +59,7 @@ struct Fingerprint {
     std::uint64_t tree_files = 0;    // files hashed into `tree`
     bool tree_capped = false;        // the walk stopped at its cap (codes::tree_walk_capped): `tree` covers part of
                                      // the folder only, so an equal `tree` does not mean unchanged
+    std::string portable_tree{};     // path and size, independent of timestamps
 
     friend bool operator==(const Fingerprint&, const Fingerprint&) = default;
 };
@@ -66,12 +67,12 @@ struct Fingerprint {
 // A digest of the mod's file BYTES (content_digest.hpp), as opposed to the cheap tree `Fingerprint` above (path, size,
 // mtime). A save compares it to notice a mod that kept its name but changed its files.
 //
-// Canonical material: SHA-256 over one line per regular file, sorted by the relative path's UTF-8 bytes,
-//   "<relative path>\t<size>\t<sha256 hex of the file bytes>\n"
+// Canonical material: versioned XXH3 over one line per regular file, sorted by the relative path's UTF-8 bytes,
+//   "<relative path>\t<size>\t<XXH3-128 hex of the file bytes>\n"
 // with '/' separators and the path's original case; symbolic links and junctions are not followed (the walk of
 // tree_fingerprint). A folder without files has no digest (unavailable, note "no files"), and neither has a capped
 // or incomplete walk: the digest is never a guess.
-//  - ready:       `sha256` (lowercase hex) covers `files` files / `bytes` bytes.
+//  - ready:       `sha256` (legacy field name; lowercase XXH3 identity) covers `files` files / `bytes` bytes.
 //  - pending:     a background job is hashing; `files` / `bytes` are what it has covered so far, `sha256` is empty.
 //  - unavailable: `note` says why (empty when nobody asked for this record's digest); `sha256` is empty.
 struct ContentDigest {

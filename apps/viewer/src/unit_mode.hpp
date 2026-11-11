@@ -25,6 +25,9 @@ public:
         std::string times{"0"};
         // Render-basis direction from the unit towards the eye.
         std::string view{"0.8,0.5,1.0"};
+        // --eawr-unit-camera: eye xyz, target xyz, up xyz, vertical FOV,
+        // near, far (render basis). Omitted: keep the bounds-fitted preview.
+        std::optional<std::string> camera;
         std::optional<int> lod;
         // Optional "r,g,b" team colour for colorized effects.
         std::string colour;

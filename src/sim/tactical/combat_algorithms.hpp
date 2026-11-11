@@ -54,6 +54,11 @@ public:
     [[nodiscard]] core::Result<CombatState> retaliation_state(const CombatUnit& attacker,
         math::Fixed divert, math::Vec3 anchor, const FormationAttackContext* formation);
 
+    // LC-29: the land step shares one target per squad leader and decides replacement itself, with this
+    // object's priority lookup, better() and sticky(). An ordered attack never reaches that decision, so
+    // the leader's last-frame direct flag must not protect the held target (better() reads it).
+    void land_release_direct() noexcept { state_.direct = false; }
+
     // --- shared helpers ---------------------------------------------------------------------
 
     template <typename T>
@@ -89,16 +94,7 @@ public:
 
     // R-09 through the resolved set; a parent without a set scores every candidate 1.0.
     [[nodiscard]] std::optional<math::Fixed> priority(const CombatUnit& target) const {
-        if (!profile_.priority_set) {
-            return math::Fixed::from_raw(one_raw);
-        }
-        const auto& set = world_.table->priority_sets[*profile_.priority_set];
-        const auto found = std::lower_bound(set.rows.begin(), set.rows.end(), target.type_id,
-            [](const PriorityRow& row, const TypeId id) { return row.type_id < id; });
-        if (found != set.rows.end() && found->type_id == target.type_id) {
-            return found->priority;
-        }
-        return set.unlisted;
+        return target_priority(world_, profile_, target);
     }
 
     [[nodiscard]] bool hardpoint_destroyed_on(const CombatUnit& target, const std::uint32_t index) const {

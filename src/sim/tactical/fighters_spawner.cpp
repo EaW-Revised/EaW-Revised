@@ -26,9 +26,11 @@ SpawnerState initial_spawner(const std::uint64_t seed, const std::uint64_t frame
 }
 
 std::optional<SpawnDecision> service_spawner(const SpawnerProfile& profile, SpawnerState& state, const std::uint64_t seed,
-    const std::uint64_t frame, const EntityId unit, const std::vector<bool>& bay_intact, const bool suspended) {
-    if (frame != state.next_service_frame) return std::nullopt;
-    state.next_service_frame = frame + service_interval;
+    const std::uint64_t frame, const EntityId unit, const std::vector<bool>& bay_intact, const bool suspended,
+    const bool manual, const std::optional<std::uint64_t> deploy_deadline, const bool garrison_enabled) {
+    const bool deploying = deploy_deadline.has_value() && state.ready_to_deploy;
+    if (frame != state.next_service_frame && !deploying) return std::nullopt;
+    if (frame == state.next_service_frame) state.next_service_frame = frame + service_interval;
     if (!state.ready) {
         // FL-02: the first service builds the entries and may launch at once.
         state.ready = true;
@@ -40,13 +42,18 @@ std::optional<SpawnDecision> service_spawner(const SpawnerProfile& profile, Spaw
         state.next_spawn_frame = frame;
     }
     // FL-12: arrival suspension gates launch, without pausing the hangar's service cadence.
-    if (suspended || state.next_spawn_frame > frame) return std::nullopt;
+    if (!deploying && (state.ready_to_deploy || suspended || state.next_spawn_frame > frame)) return std::nullopt;
+    if (deploying) {
+        state.ready_to_deploy = false;
+        // FL-18: the next readiness service leads the ability's recharge by one second.
+        state.next_spawn_frame = *deploy_deadline;
+    }
     // FL-03: a space spawner needs a standing fighter bay.
     std::vector<std::uint32_t> bays;
     for (std::uint32_t index = 0; index < profile.bays.size(); ++index) {
         if (index < bay_intact.size() && bay_intact[index]) bays.push_back(index);
     }
-    if (bays.empty() || state.entries.empty()) return std::nullopt;
+    if (!garrison_enabled || bays.empty() || state.entries.empty()) return std::nullopt;
     const auto eligible = [&](const std::size_t index) {
         const auto& entry = state.entries[index];
         return entry.alive < profile.entries[index].starting
@@ -54,6 +61,10 @@ std::optional<SpawnDecision> service_spawner(const SpawnerProfile& profile, Spaw
     };
     if (std::none_of(state.entries.begin(), state.entries.end(),
             [&](const SpawnEntryState& entry) { return eligible(static_cast<std::size_t>(&entry - state.entries.data())); })) {
+        return std::nullopt;
+    }
+    if (manual && !deploying) {
+        state.ready_to_deploy = true;
         return std::nullopt;
     }
     // FL-04, FL-05: a random start, then the first eligible entry in cyclic order.
@@ -71,7 +82,7 @@ std::optional<SpawnDecision> service_spawner(const SpawnerProfile& profile, Spaw
         decision = SpawnDecision{index, bays[bay_draw.uniform(0, static_cast<std::uint32_t>(bays.size() - 1))]};
         break;
     }
-    state.next_spawn_frame = frame + profile.delay_frames;
+    if (!deploying) state.next_spawn_frame = frame + profile.delay_frames;
     return decision;
 }
 

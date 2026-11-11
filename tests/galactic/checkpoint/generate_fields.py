@@ -17,6 +17,7 @@ from viewer_mode_sources import SOURCE_BUNDLES, source_text  # noqa: E402
 EXCLUDED = {
     "eawr::sim::galactic::story::State": {
         "edits": "serialized as the optional Lua-edit tail after the goals in game_session_lifecycle.cpp (WST-56); absent when nothing was edited",
+        "ai_flags": "serialized as the optional TRIGGER_AI flag tail after the Lua edits in game_session_lifecycle.cpp (WST-49); absent when no flag is set",
     },
     "eawr::sim::tactical::QueueEntry": {
         "controller_seat": "serialized and identity-validated by the v4 co-op controller tail in session_state.cpp; disabled policy requires the default value",
@@ -59,11 +60,12 @@ OWNER_EXCLUSIONS = {
         "immutable setup encoded by the recording codec": "setup",
         "registry objects encoded by the world object sections": "registry planets routes fleets",
         "runtime callbacks rebound by the caller": "ability_consumption_handler ground_ability_story_handler conflict_tail control_handler corruption_completion_handler corruption_mission_handler corruption_result_handler credit_notification_handler hasher movement_access_provider native_actor_changes_handler native_movement_listener native_production_handler native_production_outcome_handler native_replayers planet_ruins_story_handler technology_notice_handler timeline_service",
-        "synchronous consumption guard, zero at every checkpoint barrier": "consuming_spy",
+        "synchronous consumption guard, zero at every checkpoint barrier": "consuming_spy native_rewound_next native_rewound_invasion",
         "scoped native commit callback pointer; restored on exit and rebound from the runtime handler for each commit": "native_live_ability_actor_changes",
-        "derived service inputs and indexes rebuilt on load": "ability_input_generation ability_work conflict_requests_enabled conflict_tail_outer_timer control_stealth_generation control_stealth_inputs economy_input_generation gathered_income_inputs graph income_control_generation income_edges income_forecast_cache income_gather_generation income_input_generation income_modifier_generation income_modifiers incident_route_cache income_source_candidates movement_access_generation native_invasion_transport_count native_invasions_enabled observer_input_generation observer_neighbours    published_actor_records   published_economy_input_generation   published_production published_production_generation  published_production_originals published_sale_types snapshot technology_price_expiry victory_tail_deferred  production_generation",
-        "match-local diagnostic collector; never authoritative, hashed or checkpointed": "load_note_collector load_note_count",
-        "derived hash caches and host diagnostics": "cached_hash cached_hash_present digests dirty production_offer_hashes production_offer_rows exchange_scratch discovery_records discovery_targets income_forecast_rebuilds income_modifier_rebuilds income_sources_gathered observer_projection_records population_objects population_producers population_projection_cache population_projection_key production_entries production_offer_rebuilds production_producers verify_cached_hash",
+        "async lane shell input copied by refresh_lane from the live session; empty on every live session, never authoritative, hashed or checkpointed": "lane_base_credits",
+        "derived service inputs and indexes rebuilt on load": "ability_input_generation ability_work conflict_requests_enabled conflict_tail_outer_timer control_stealth_generation control_stealth_inputs economy_input_generation gathered_income_inputs graph income_control_generation income_edges income_forecast_cache income_gather_generation income_input_generation income_inputs_stored income_modifier_generation income_modifiers incident_route_cache income_source_candidates movement_access_generation native_invasion_transport_count native_invasions_enabled observer_input_generation observer_neighbours    published_actor_records reduction_sources_cache reduction_sources_key   published_economy_input_generation   published_production published_production_generation  published_production_originals published_sale_types snapshot technology_price_expiry victory_tail_deferred  production_generation",
+        "match-local diagnostic collector; never authoritative, hashed or checkpointed": "load_note_collector load_note_count discovery_shape_noted",
+        "derived hash caches and host diagnostics": "cached_hash cached_hash_present digests dirty production_offer_hashes production_offer_rows exchange_scratch discovery_records discovery_targets income_forecast_rebuilds income_modifier_rebuilds income_sources_gathered observer_projection_records population_objects population_producers population_projection_cache population_projection_key production_entries production_offer_rebuilds production_lock_batch production_lock_publication_pending production_producers verify_cached_hash",
         "test-only runtime options of the population projection memo, never authoritative state": "population_memo_enabled population_memo_drop_orbit",
         "local per-player publication caches rebuilt on demand, never serialized": "view_publications",
         "immutable snapshot section copies and revision counters rebuilt on load": "published_sections section_generation",
@@ -88,6 +90,7 @@ OWNER_EXCLUSIONS = {
         "history rebase scheduled by a save or load and applied at the next step; a recapture before it sees the saved window (#4058)": "scheduled_base",
         "unhealthy or reconstruction-only state cannot reach a save barrier": "failure reconstructing_native_notices restoring_child",
         "the running step's executor, set only inside a step (#683)": "executor",
+        "battle notices queued for the AI side; the service step drains them, so the inbox is empty at every save barrier": "battle_inbox",
     },
     "eawr::campaign::GameSession::Impl::TimelinePublication": {
         "process-local publication slots rebuilt from saved timelines": "child_slot historical_slot",

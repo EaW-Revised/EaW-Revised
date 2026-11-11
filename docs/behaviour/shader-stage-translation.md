@@ -67,6 +67,20 @@ with `invalid_cached_result` for an invalid entry or the actual budget/cancellat
 reason. P6 projects the wrapper's `compiler_failure` to P8's `compile_failure`;
 these are typed enum mappings, never interpretations of raw compiler text.
 
+The public compiler's `INVALID_SHADER` return (-4 in the pinned public header)
+is a distinct `invalid_shader` reason. Other nonzero returns, including memory
+exhaustion, remain `compiler_failure`. Both project to the same activation
+`compile_failure`; neither changes the fallback or permits material admission.
+The activation owner alone may persist the exact single error diagnostic for
+`invalid_shader`. Its separate `material-stage-refusal/1` key binds the freshly
+verified package, ABI, capability, stage, options, schemas and outer input identity.
+The only accepted payload is the fixed canonical typed marker
+`eawr-stage-refusal/1:stage_compile:invalid_shader:error`; it reconstructs the
+same bounded wrapper detail and absent location, retaining no compiler text.
+Malformed entries are misses. Cancellation, budgets, unavailable dependencies,
+other compiler statuses and all other refusals are never persisted. A warm
+refusal increments cache hits and performs no translation or source compilation.
+
 All successful values are independent of session/context lifetime. To reconstruct
 the borrowed effect-program view, call `view_stage_program` over the artifact's
 immutable owned stage bytes and retain those bytes while using the view. The

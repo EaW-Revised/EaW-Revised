@@ -57,7 +57,9 @@ inline constexpr std::uint8_t opcode_beacon = 31; // coordinator-reserved, HCB-1
 inline constexpr std::uint8_t opcode_gift = 32; // ADR-020: coordinator-reserved controller transfer.
 inline constexpr std::uint8_t opcode_battle_control = 33; // ADR-020: coordinator-reserved engine transition.
 inline constexpr std::uint8_t opcode_script_invulnerable = 34; // TL-03: Lua Make_Invulnerable, engine only.
-inline constexpr std::uint8_t max_command_opcode = opcode_script_invulnerable;
+inline constexpr std::uint8_t opcode_land_garrison = 35;
+inline constexpr std::uint8_t opcode_land_unload = 36;
+inline constexpr std::uint8_t max_command_opcode = opcode_land_unload;
 
 [[nodiscard]] core::Diagnostic diagnostic(
     std::string_view code,

@@ -25,10 +25,12 @@ namespace eawr::presentation::godot_backend {
 // the full-size hull texture at 16-64 texels per screen pixel and its surface shimmers. Chosen by effect phase and by the texture's format and chain state (the reader skips
 // anything it cannot complete), never by file or mod name.
 //
-// The additive effects (the ship window lights, MeshAdditive and its variants) are transparent-phase selectors and so are
-// NOT in the class: chaining them dims the lights at distance (retail's look), and the owner prefers the original
-// brightness. Putting them in is this one function: return colour_mip_chain for them too.
+// Additive ship materials use brightness-compensated chains, keeping the authored top level and the first filtered
+// level unchanged. Other transparent effects are unchanged. Processing is load-time beside the read-ahead.
 [[nodiscard]] inline scene::TextureProcessing texture_processing_for(const scene::LegacySelector& selector) noexcept {
+    if (selector.program == "MeshAdditive.fx" || selector.program == "MeshAdditive2x.fx"
+        || selector.program == "MeshAdditiveOffset.fx" || selector.program == "MeshAdditiveVColor.fx"
+        || selector.program == "RSkinAdditive.fx") return scene::TextureProcessing::compensated_light_mip_chain;
     return selector.transparent ? scene::TextureProcessing::none : scene::TextureProcessing::colour_mip_chain;
 }
 
@@ -68,6 +70,7 @@ public:
         switch (processing) {
         case scene::TextureProcessing::colour_mip_chain: return path + "|chain";
         case scene::TextureProcessing::normal_mip_chain: return path + "|normal-chain";
+        case scene::TextureProcessing::compensated_light_mip_chain: return path + "|light-chain";
         default: return path;
         }
     }

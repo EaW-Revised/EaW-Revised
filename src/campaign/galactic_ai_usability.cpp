@@ -1042,11 +1042,12 @@ core::Result<GalacticAiUsabilityProvider::ConnectivityPublication> GalacticAiUsa
     const auto snapshot = session.snapshot(); const auto* graph = session.graph();
     if (!graph || !snapshot->observer() || !snapshot->planet_access())
         return refuse<ConnectivityPublication>("B complete live graph/observer/access owners are required");
-    if (auto prepared = prepare_stealth(*snapshot); !prepared)
+    if (auto prepared = [&] { gc_profile::Scope scope(gc_profile::Phase::conn_stealth); return prepare_stealth(*snapshot); }(); !prepared)
         return core::Result<ConnectivityPublication>::failure(prepared.error());
     // WGA-185/360: force presence consumes the qualified live aggregate before
     // any selected-player tokens; strength and observation masks keep their owners.
-    if (!world.available() || world.observer_input_generation() != snapshot->observer_input_generation()
+    if (gc_profile::Scope rebind_scope(gc_profile::Phase::conn_rebind);
+        !world.available() || world.observer_input_generation() != snapshot->observer_input_generation()
         || (!reconstructed_ && world.needs_observation_refresh(session.completed_tick()))
         || world.stealth_fleets() != stealth_fleets_) {
         auto inputs = std::make_shared<ai::GalacticConnectivity>(*published_); inputs->stealth_fleets = stealth_fleets_;
@@ -1106,12 +1107,14 @@ core::Result<GalacticAiUsabilityProvider::ConnectivityPublication> GalacticAiUsa
         return core::Result<ConnectivityPublication>::success(published_);
     }
     world.set_synchronized_frame(session.completed_tick());
-    if (!world.available() || world.observer_input_generation() != snapshot->observer_input_generation()) {
+    if (gc_profile::Scope rebind_scope(gc_profile::Phase::conn_rebind);
+        !world.available() || world.observer_input_generation() != snapshot->observer_input_generation()) {
         auto rebound = world.bind_publication(snapshot, published_, executor, session.completed_tick(), session.next_entity_id());
         if (!rebound) return core::Result<ConnectivityPublication>::failure(rebound.error());
     }
     // This is the synchronization owner clock, not a camera or elapsed wall clock.
     const auto frame = world.synchronized_frame();
+    std::optional<gc_profile::Scope> check_scope(std::in_place, gc_profile::Phase::conn_check);
     bool dirty = live_stealth_unavailable_ || story_path_unavailable_ || reconstructed_
         || published_->stealth_fleets != stealth_fleets_;
     const bool source_changed = std::any_of(caches_.begin(), caches_.end(), [](const auto& row) { return row.second.source_changed; });
@@ -1124,6 +1127,7 @@ core::Result<GalacticAiUsabilityProvider::ConnectivityPublication> GalacticAiUsa
             || at->second.perception_revision != world.movement_input_revision()
             || frame > at->second.connectivity_through || Real(frame) > at->second.valid_through;
     }
+    check_scope.reset();
     if (!dirty) return core::Result<ConnectivityPublication>::success(published_);
     // #4529: keep ordinary owner order and scratch through four workers; the
     // measured two-worker prepass adds work at 250/12. Higher worker counts
@@ -1131,6 +1135,7 @@ core::Result<GalacticAiUsabilityProvider::ConnectivityPublication> GalacticAiUsa
     if (executor.worker_count() > 4 && std::count_if(content_->players.begin(), content_->players.end(),
         [](const auto& player) { return player.ai; }) > 1)
         return parallel_connectivity(*snapshot, world, engine, executor, *graph, frame);
+    gc_profile::Scope serial_scope(gc_profile::Phase::conn_serial);
     // The retained rows change in place: a row keeps the value it had before its first change here, a created row is
     // listed, and a refusal anywhere below puts every row back exactly as the old full copy of the map would have.
     std::vector<PlayerPreparation::Undo> undo;
@@ -1284,6 +1289,7 @@ core::Result<GalacticAiUsabilityProvider::ConnectivityPublication> GalacticAiUsa
         }
     }};
     ai::GalacticConnectivity output; output.stealth_fleets = stealth_fleets_;
+    std::optional<gc_profile::Scope> phase_scope(std::in_place, gc_profile::Phase::conn_par_setup);
     const auto frozen_perception_revision = world.movement_input_revision();
     const auto prepare_retained = [&](PlayerPreparation& task) {
         const auto owner = task.player.player;
@@ -1299,6 +1305,10 @@ core::Result<GalacticAiUsabilityProvider::ConnectivityPublication> GalacticAiUsa
             task.held.push_back(&walker->second); task.new_rows.push_back(added ? 1 : 0);
         }
     };
+    // One allocation: a regrowing vector would copy each prepared player's whole cache (its map members make the move
+    // throwing on MSVC), once per doubling, on every tick that publishes.
+    players.reserve(static_cast<std::size_t>(std::count_if(content_->players.begin(), content_->players.end(),
+        [](const auto& player) { return player.ai; })));
     for (const auto& player : content_->players) if (player.ai) {
         auto& task = players.emplace_back(); task.player = player; task.perception_revision = frozen_perception_revision;
         if (const auto at = caches_.find(player.player); at != caches_.end()) task.cache = std::move(at->second);
@@ -1313,6 +1323,7 @@ core::Result<GalacticAiUsabilityProvider::ConnectivityPublication> GalacticAiUsa
     const auto reads = world.partitioned_reads();
     // Project each MP owner's knowledge once, before the flat planet phase.
     // The projection is pure and each partition owns its vector.
+    phase_scope.emplace(gc_profile::Phase::conn_par_knowledge);
     auto knowledge_phase = executor.execute_phase("galactic-ai-connectivity-knowledge", players.size(), [&](std::size_t index) {
         auto& task = players[index];
         task.knowledge_player = multiplayer(snapshot) ? task.player.player : snapshot.observer()->solo_reference_human;
@@ -1325,6 +1336,7 @@ core::Result<GalacticAiUsabilityProvider::ConnectivityPublication> GalacticAiUsa
     });
     if (!knowledge_phase) return core::Result<ConnectivityPublication>::failure(knowledge_phase.error());
     for (const auto& task : players) if (task.error) return core::Result<ConnectivityPublication>::failure(*task.error);
+    phase_scope.emplace(gc_profile::Phase::conn_par_access);
     {
         auto access_phase = executor.execute_phase("galactic-ai-usability", sim::tick_partition_count, [&](std::size_t part) {
             const auto range = sim::partition_range(part, players.size() * snapshot.planets().size());
@@ -1385,6 +1397,7 @@ core::Result<GalacticAiUsabilityProvider::ConnectivityPublication> GalacticAiUsa
         if (!finished) task.error = finished.error();
         task.movement_after = world.movement_input_revision(task.player.player);
     };
+    phase_scope.emplace(gc_profile::Phase::conn_par_refresh);
     auto refresh_phase = executor.execute_phase("galactic-ai-connectivity-refresh", players.size(), [&](std::size_t index) {
         auto& task = players[index];
         const auto owner_reads = world.owner_reads(task.player.player);
@@ -1393,9 +1406,11 @@ core::Result<GalacticAiUsabilityProvider::ConnectivityPublication> GalacticAiUsa
     });
     if (!refresh_phase) return core::Result<ConnectivityPublication>::failure(refresh_phase.error());
     for (const auto& task : players) if (task.error) return core::Result<ConnectivityPublication>::failure(*task.error);
+    phase_scope.emplace(gc_profile::Phase::conn_par_sites);
     auto sites_phase = executor.execute_phase("galactic-ai-production-sites", sim::tick_partition_count,
         [&](std::size_t part) { prepare_sites(part, false); });
     if (!sites_phase) return core::Result<ConnectivityPublication>::failure(sites_phase.error());
+    phase_scope.emplace(gc_profile::Phase::conn_par_players);
     auto players_phase = executor.execute_phase("galactic-ai-connectivity-players", players.size(),
         [&](std::size_t index) { finish_player(players[index]); });
     if (!players_phase) return core::Result<ConnectivityPublication>::failure(players_phase.error());
@@ -1437,6 +1452,7 @@ core::Result<GalacticAiUsabilityProvider::ConnectivityPublication> GalacticAiUsa
         for (const auto& task : players) if (task.error) return core::Result<ConnectivityPublication>::failure(*task.error);
     }
     // Shared contributor state and rows publish only after the join, in player order.
+    phase_scope.emplace(gc_profile::Phase::conn_par_tail);
     for (auto& task : players) {
         auto& cache = caches_.at(task.player.player) = std::move(task.cache.value());
         if (task.output_changed || !cache.output_version) cache.output_version = ++output_epoch_;

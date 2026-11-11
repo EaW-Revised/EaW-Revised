@@ -752,10 +752,19 @@ production remains a separate existing seam.
 | Arrival, orbit/transit and detector distinction | sourced local readers WGM-164..168; transition callers qualified | Movement/conflict owner, per-observer masks, source registry and discovery context. Test hidden enemy fleet versus allied fleet, anonymous ordinary count, detected hero without fleet card, superweapon transit exception and strict reveal-range equality. |
 | Saved live actor state | sourced fields WGM-169; complete restore qualified | Archive live scalars/Boolean and referenced membership/ability state. Compare fresh-owner checkpoint continuation with uninterrupted controls on 1/2/4/8 workers. |
 
+The follow-up validation reading **GST-DESPAWN-E01** covers common automatic
+validation, specific stealth validation and successful activation consumption.
+Its private evidence remains in ignored research storage.
+
+| ID | Rule and conditions | Source |
+|---|---|---|
+| WGM-215 | `Galactic_Stealth_Ability/Causes_Despawn` has no actor-consumption effect. Common validation reports and clears a true despawn flag for every automatic activation style, including **Galactic_Automatic**. Specific stealth validation calls that common validation first, then corrects every non-galactic-automatic style and clears despawn (WGM-160). Thus a true flag cannot survive validation, whether the style is omitted, valid automatic, another automatic style or manual. The generic success-only consumption hook (WGCH-70) does not make this handler consumable. Omitted, false and true authoring therefore produce the same validated stealth behavior; no runtime removal is added for a rejected true value. | debug build GST-DESPAWN-E01; WGM-160; WGCH-70 |
+
 Consumed tags are `Abilities/Galactic_Stealth_Ability/@Name`,
-`Initially_Enabled`, `Activation_Style`, `Causes_Despawn` and
+`Initially_Enabled`, `Activation_Style` and
 `Evade_Detection_Chance`, with common ability lock/effect metadata supplied by
-the shared ability owner. The registry currently marks common fields
+the shared ability owner. `Causes_Despawn` is a sourced no-effect row under
+WGM-215, rather than a missing actor-removal feature. The registry marks other common fields
 partial/todo or land-or-galactic; this docs pass does not claim new application
 or regenerate its rows. A modded `Detect_Hero_Ability` needs its detection
 chance, interval and credit-siphon option from validated data. Planet base
@@ -925,8 +934,10 @@ prove production installation or the complete capture chain.
 
 ### GCMP-06 multiplayer session policy
 
-The live campaign installer reads `Battle_Pending_Timeout_Seconds` from mounted data and
-injects its 30 Hz duration into the campaign session. Every space conflict with at least one
+The live campaign installer injects the vote timeout's 30 Hz duration into the campaign session. The host's
+agreed lobby value wins (5 to 120 s, default 15) (legacy EAWR-6156): every peer carries it in the agreed roster. The
+`Battle_Pending_Timeout_Seconds` constant from mounted data only sets the default a new room offers (clamped to that range) and
+still applies to setups that did not come from a lobby. A resumed save keeps the value it recorded, even outside 5 to 120. Every space conflict with at least one
 active human side opens session vote 8 for the humans of that side or sides (owner update 10-21;
 a human against an AI side votes alone, the AI side never votes). Owner D10 overrides the retail
 WGM-44/WAR-01 arbitration: Begin against an AI side launches a child tactical battle on every

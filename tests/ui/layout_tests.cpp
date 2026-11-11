@@ -7,6 +7,7 @@
 
 #include "eawr/data/ui/shell_anchors.hpp"
 #include "eawr/presentation/ui/layout.hpp"
+#include "eawr/presentation/ui/combo_popup.hpp"
 #include "eawr/presentation/ui/skirmish_setup.hpp"
 #include "eawr/presentation/ui/command_bar_placement.hpp"
 #include "eawr/presentation/ui/fleet_cells.hpp"
@@ -582,6 +583,80 @@ void text_anchor_contracts() {
     expect(near(lowered.y_shift, 8.0 * 0.9375, 1e-9), "a negative authored y lowers it");
 }
 
+// #6065: a modal panel with a long body keeps its footer button on screen on every viewport.
+void scroll_panel_contracts() {
+    using layout::ScrollPanelSpec;
+    const auto on_screen = [](const PixelRect& rect, const Viewport view) {
+        return rect.x >= 0.0 && rect.y >= 0.0 && rect.right() <= view.width && rect.bottom() <= view.height;
+    };
+    // The story summary of the report: a 3314 px chapter, title 40 px, OK 31 px, 640 px frame, 24 px margins.
+    const ScrollPanelSpec story{640.0, 24.0, 16.0, 40.0, 3314.0, 31.0, 16.0};
+    for (const Viewport view : {Viewport{1280, 720}, Viewport{1024, 768}, Viewport{1920, 1080}, Viewport{800, 600},
+                                Viewport{3840, 2160}, Viewport{1280, 400}}) {
+        const auto result = layout::scroll_panel_layout(view, story);
+        expect(on_screen(result.panel, view), "#6065: " + name_of(view) + " the panel stays on screen");
+        expect(on_screen(result.footer, view), "#6065: " + name_of(view) + " the OK button stays on screen");
+        expect(result.footer.y >= result.body.bottom() && result.body.y >= result.header.bottom()
+                && result.footer.bottom() <= result.panel.bottom(),
+            "#6065: " + name_of(view) + " header, body and footer stack inside the panel");
+        expect(result.body_scrolls && result.body.height > 0.0, "#6065: " + name_of(view) + " the long chapter scrolls");
+        expect(near(result.panel.centre_x(), view.width / 2.0, 0.5) && near(result.panel.centre_y(), view.height / 2.0, 0.5),
+            "#6065: " + name_of(view) + " the panel is centred");
+    }
+    {
+        // 720 px: the panel fills the screen less the margins and the body takes what the fixed parts leave.
+        const auto result = layout::scroll_panel_layout({1280, 720}, story);
+        expect(near(result.panel.height, 688.0, 0.001), "#6065: the panel is the screen less twice the screen margin");
+        expect(near(result.body.height, 688.0 - (48.0 + 40.0 + 31.0 + 32.0), 0.001), "#6065: the body gives up the height");
+    }
+    {
+        // The footer's height is whatever the widget measured: the button never overhangs the panel's bottom, whatever it is
+        // (#6065 review: a height measured too early made the panel too short by the button's height).
+        for (const double footer : {18.0, 31.0, 45.0, 64.0})
+            for (const Viewport view : {Viewport{1280, 720}, Viewport{800, 600}, Viewport{1280, 400}}) {
+                ScrollPanelSpec measured = story; measured.footer_height = footer;
+                const auto result = layout::scroll_panel_layout(view, measured);
+                expect(result.footer.height == footer && result.footer.bottom() <= result.panel.bottom() - 24.0 + 1e-9
+                        && result.footer.bottom() <= view.height - 16.0 + 1e-9,
+                    "#6065 the button never overhangs the panel bottom or the screen margin at footer height "
+                        + std::to_string(footer) + " on " + name_of(view));
+            }
+        ScrollPanelSpec taller = story; taller.footer_height = story.footer_height + 20.0;
+        const auto base = layout::scroll_panel_layout({1280, 720}, story);
+        const auto grown = layout::scroll_panel_layout({1280, 720}, taller);
+        expect(near(grown.body.height, base.body.height - 20.0, 0.001) && near(grown.panel.height, base.panel.height, 0.001),
+            "#6065 a taller footer takes its height from the body, so the panel still fits the screen");
+    }
+    {
+        // A short body is untouched: natural height, no scrolling.
+        ScrollPanelSpec shorter = story;
+        shorter.body_height = 120.0;
+        const auto result = layout::scroll_panel_layout({1280, 720}, shorter);
+        expect(!result.body_scrolls && near(result.body.height, 120.0, 0.001)
+                && near(result.panel.height, 48.0 + 40.0 + 120.0 + 31.0 + 32.0, 0.001),
+            "#6065: a short body keeps its natural height and does not scroll");
+    }
+    {
+        // No header or footer: no stray gaps.
+        const auto result = layout::scroll_panel_layout({1280, 720}, {400.0, 10.0, 8.0, 0.0, 100.0, 0.0, 0.0});
+        expect(near(result.panel.height, 120.0, 0.001) && result.header.height == 0.0 && result.footer.height == 0.0,
+            "#6065: absent parts take no height and no gap");
+    }
+    {
+        // A screen narrower than the frame narrows the panel to the screen less the margins.
+        const auto result = layout::scroll_panel_layout({500, 720}, story);
+        expect(near(result.panel.width, 468.0, 0.001) && on_screen(result.panel, {500, 720}),
+            "#6065: a narrow screen narrows the panel");
+    }
+    {
+        // Fixed parts alone taller than the screen: empty body, panel at the top, nothing negative.
+        const auto result = layout::scroll_panel_layout({800, 100}, story);
+        expect(result.body.height == 0.0 && result.panel.y == 0.0 && result.footer.height == 31.0,
+            "#6065: a screen shorter than the fixed parts leaves an empty body");
+    }
+    expect(layout::scroll_panel_layout({0, 0}, story).panel == PixelRect{}, "#6065: a zero viewport gives an empty layout");
+}
+
 } // namespace
 
 void layout_contracts() {
@@ -676,6 +751,24 @@ void layout_contracts() {
             "widened dialog keeps status within its columns and above its footer");
     }
     text_anchor_contracts();
+    // The same resource budget at both viewport scales holds whole rows, for
+    // both setup dialogs. Short lists shrink naturally; long lists scroll.
+    for (const double scale : {1.0, 1.5}) {
+        for (const double budget : {98.5, 93.5}) {
+            const int height = layout::combo_popup_height(budget, scale, 8, 15, 720 * scale);
+            expect(height <= budget * scale, "popup respects the authored list budget");
+            expect(near(height / scale, 98.0, 0.7) || near(height / scale, 83.0, 0.7),
+                "popup capacity rounds down to complete rows after frame margins");
+            for (const int count : {3, 10, 25}) {
+                const double needed = (8 + count * 15) * scale;
+                expect((needed > height) == (count > 6), "only lists beyond capacity need scrolling");
+            }
+        }
+        const int clamped = layout::combo_popup_height(900, scale, 8, 15, 80);
+        expect(clamped <= 80 && clamped > 0, "a popup also fits a smaller viewport");
+        expect(layout::combo_popup_height(0, scale, 8, 15, 720) > 300 * scale,
+            "controls with closed-only geometry keep a usable viewport-bounded list");
+    }
     command_bar_offset_contracts();
     reference_space_table();
     aspect_correct_table();
@@ -685,6 +778,7 @@ void layout_contracts() {
     game_menu_centres_on_live_viewport();
     aspect_correct_dialog_contracts();
     fit_16x9_contracts();
+    scroll_panel_contracts();
     font_contracts();
     corpus_contracts();
 }

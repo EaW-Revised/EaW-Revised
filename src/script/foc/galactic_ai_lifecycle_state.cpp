@@ -103,7 +103,7 @@ struct Reader {
 core::Result<LifecycleState> decoded(Reader& in) {
     using Result = core::Result<LifecycleState>;
     LifecycleState state;
-    if (in.text() != domain || in.word() != 2) return Result::failure(lifecycle_error("unsupported lifecycle component schema"));
+    if (in.text() != domain || in.word() != 3) return Result::failure(lifecycle_error("unsupported lifecycle component schema"));
     state.clocks = {in.word(), in.word()};
     const auto mode = in.word();
     if (mode > static_cast<std::uint64_t>(Mode::land)) in.bad = true;

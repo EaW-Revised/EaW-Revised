@@ -32,7 +32,7 @@ core::Result<LockstepSession> LockstepSession::create(SessionAdapter& adapter, M
     const auto count = transport.peer_count();
     if (count < 2 || count > max_match_seats || transport.self() >= count || seats.size() != count || adapter.completed_tick() != options.initial_tick
         || options.initial_tick > options.final_tick_count
-        || options.input_delay == 0 || options.input_delay > max_input_delay || options.final_tick_count > max_session_ticks
+        || options.input_delay == 0 || options.input_delay > max_input_delay || options.final_tick_count > adapter.tick_limit()
         || options.completeness_timeout_ms == 0 || options.max_frames_per_pump == 0)
         return refused<LockstepSession>(session_errors::options, "invalid roster, initial tick or session options");
     if (options.adaptive_timing && (!options.non_lan || options.adaptive_timing->host >= count || options.input_delay > 64))

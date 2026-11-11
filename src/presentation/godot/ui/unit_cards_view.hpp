@@ -151,6 +151,8 @@ public:
         std::int32_t point_size{6};
         std::function<presentation::ui::ShellPlacement()> placement;
         std::function<presentation::ui::ReferenceSpace()> space;
+        // External hosts may place the shared encyclopedia at their own shell anchor.
+        std::function<godot::Vector2()> external_popup_anchor;
     };
     struct Card final {
         std::size_t slot{};
@@ -186,7 +188,8 @@ public:
     void set_clock(std::function<double()> clock) { clock_ = std::move(clock); }
     // A generic, already observer-filtered hover source. Empty content clears
     // immediately so a hidden/dead object cannot retain an encyclopedia.
-    void set_external_hover(std::uint64_t identity, std::optional<presentation::ui::UnitCardLooks> content);
+    void set_external_hover(std::uint64_t identity, std::optional<presentation::ui::UnitCardLooks> content,
+        EncyclopediaPopupStatus status = {});
 
     [[nodiscard]] std::size_t slot_count() const noexcept { return setup_.slots.size(); }
     // A slot's mesh on the screen (its hit rect), or nothing for an unknown slot.
@@ -237,6 +240,8 @@ private:
     double serviced_at_{};
     std::uint64_t external_identity_{};
     std::optional<presentation::ui::UnitCardLooks> external_content_;
+    EncyclopediaPopupStatus external_status_;
+    EncyclopediaPopupStatus shown_external_status_;
     std::optional<Card> shown_card_;
     bool shown_external_{};
     std::optional<presentation::ui::UnitCardLooks> shown_external_content_;

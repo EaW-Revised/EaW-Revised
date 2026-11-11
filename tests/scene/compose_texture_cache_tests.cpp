@@ -180,20 +180,24 @@ struct LightTree final {
     }
 };
 
-void opaque_ship_materials_ask_for_a_chain_and_lights_do_not() {
+void ship_materials_choose_their_chain() {
     using eawr::presentation::godot_backend::texture_processing_for;
     using eawr::scene::TextureProcessing;
     std::size_t opaque = 0, transparent = 0;
     for (const auto& selector : eawr::scene::legacy_selectors()) {
-        const auto want = selector.transparent ? TextureProcessing::none : TextureProcessing::colour_mip_chain;
-        expect(texture_processing_for(selector) == want, "only opaque lit materials ask for a chain: " + std::string(selector.program));
+        const bool additive = selector.program == "MeshAdditive.fx" || selector.program == "MeshAdditive2x.fx"
+            || selector.program == "MeshAdditiveOffset.fx" || selector.program == "MeshAdditiveVColor.fx"
+            || selector.program == "RSkinAdditive.fx";
+        const auto want = additive ? TextureProcessing::compensated_light_mip_chain
+            : selector.transparent ? TextureProcessing::none : TextureProcessing::colour_mip_chain;
+        expect(texture_processing_for(selector) == want, "each material selects its chain: " + std::string(selector.program));
         (selector.transparent ? transparent : opaque) += 1;
     }
     expect(opaque > 0 && transparent > 0, "the selector table has both kinds");
-    // The ship window lights are the owner's call, not part of the class: the additive effects stay as they were.
+    // Additive lights receive compensated chains by default.
     for (const char* program : {"MeshAdditive.fx", "MeshAdditive2x.fx", "MeshAdditiveOffset.fx", "MeshAdditiveVColor.fx", "RSkinAdditive.fx"}) {
         const auto* selector = eawr::scene::find_legacy_selector(program);
-        if (selector != nullptr) expect(texture_processing_for(*selector) == TextureProcessing::none, std::string(program) + " asks for no chain");
+        if (selector != nullptr) expect(texture_processing_for(*selector) == TextureProcessing::compensated_light_mip_chain, std::string(program) + " asks for compensated chains");
     }
     const auto* hull = eawr::scene::find_legacy_selector("MeshGloss.fx");
     expect(hull != nullptr && texture_processing_for(*hull) == TextureProcessing::colour_mip_chain, "MeshGloss.fx asks for a chain");
@@ -269,12 +273,12 @@ void hull_textures_reach_the_renderer_with_a_full_chain() {
             else expect(length < 0.9, "and its coarse levels are the plain box average, shorter than unit (" + std::to_string(length) + ")");
         }
         const auto lights = upload_texture(cache, base_path, texture_processing_for(*light));
-        expect(lights && lights->mips.size() == 1 && lights->mips[0].bytes == colour.mips[0].bytes,
-               "the same file under an additive effect (the lights) is untouched");
+        expect(lights && lights->mips.size() == 9 && lights->mips[0].bytes == colour.mips[0].bytes,
+               "the same file under an additive effect receives a chain and keeps its authored level");
         prefetch.finish();
         const auto stats = prefetch.stats();
-        expect(stats.chained == 2 && stats.chained_by_loader == 0, "both chains were built by a reader, not the loader");
-        expect(stats.chain_added_bytes == eawr::assets::mip_chain_added_bytes(colour) + eawr::assets::mip_chain_added_bytes(normal),
+        expect(stats.chained == 3 && stats.chained_by_loader == 0, "all chains were built by a reader, not the loader");
+        expect(stats.chain_added_bytes == 2 * eawr::assets::mip_chain_added_bytes(colour) + eawr::assets::mip_chain_added_bytes(normal),
                "and added the bytes the model predicts");
     }
     {
@@ -315,7 +319,7 @@ void every_live_session_gets_the_read_ahead_on_the_separate_render_thread() {
 
 int main() {
     every_live_session_gets_the_read_ahead_on_the_separate_render_thread();
-    opaque_ship_materials_ask_for_a_chain_and_lights_do_not();
+    ship_materials_choose_their_chain();
     hull_textures_reach_the_renderer_with_a_full_chain();
     unbounded_holds_everything();
     bounded_release_keeps_the_budget();

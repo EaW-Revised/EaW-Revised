@@ -6,6 +6,7 @@
 
 #include "eawr/assets/map.hpp"
 #include "eawr/units/content_selection.hpp"
+#include "eawr/core/load_profile.hpp"
 #include "eawr/core/sha256.hpp"
 #include "eawr/data/tag_trace.hpp"
 #include "eawr/scene/scene.hpp"
@@ -56,8 +57,10 @@ sim::MatchIdentity match_identity(const StartInputs& inputs, const std::span<con
     return sim::compute_match_identity(std::move(identity));
 }
 
-static core::Result<DataIdentity> read_data_identity_impl(const vfs::Vfs& filesystem, const bool hash_content) {
+static core::Result<DataIdentity> read_data_identity_impl(const vfs::Vfs& filesystem, const bool hash_content,
+    std::vector<units::InputFile>* consumed_inputs = nullptr) {
     using Result = core::Result<DataIdentity>;
+    core::load_profile::Scope identity_scope(core::load_profile::Phase::data_identity);
     DataIdentity identity;
     // Conservative effective closure: all mounted Lua and XML, including future
     // require() dependencies and AI references. Paths, never mount provenance.
@@ -69,6 +72,8 @@ static core::Result<DataIdentity> read_data_identity_impl(const vfs::Vfs& filesy
         if (!source) return Result::failure(source.error());
         const std::string text(reinterpret_cast<const char*>(source.value().data()), source.value().size());
         if (auto added = manifest.add(script.canonical_path, text); !added) return Result::failure(added.error());
+        if (consumed_inputs) consumed_inputs->push_back({script.canonical_path, script.source_id, script.layer_id,
+            core::sha256_hex(std::span(reinterpret_cast<const std::uint8_t*>(source.value().data()), source.value().size()))});
     }
     if (hash_content) identity.script_manifest_digest = manifest.digest();
     auto xml = filesystem.enumerate("data/xml/", ".xml");
@@ -95,7 +100,10 @@ static core::Result<DataIdentity> read_data_identity_impl(const vfs::Vfs& filesy
         const auto size = static_cast<std::uint32_t>(record.canonical_path.size());
         for (unsigned shift = 0; shift < 32; shift += 8) listing.push_back(static_cast<std::uint8_t>(size >> shift));
         listing.insert(listing.end(), record.canonical_path.begin(), record.canonical_path.end());
-        const auto digest = core::sha256(std::span(reinterpret_cast<const std::uint8_t*>(source.value().data()), source.value().size()));
+        core::Sha256Hasher hasher;
+        hasher.update(std::span(reinterpret_cast<const std::uint8_t*>(source.value().data()), source.value().size()));
+        const auto digest = hasher.digest();
+        if (consumed_inputs) consumed_inputs->push_back({selected.canonical_path, selected.source_id, selected.layer_id, hasher.hex_digest()});
         listing.insert(listing.end(), digest.begin(), digest.end());
     }
     if (hash_content) identity.ai_data_digest = core::sha256_hex(listing);
@@ -105,6 +113,9 @@ static core::Result<DataIdentity> read_data_identity_impl(const vfs::Vfs& filesy
 
 core::Result<DataIdentity> read_data_identity(const vfs::Vfs& filesystem) {
     return read_data_identity_impl(filesystem, true);
+}
+core::Result<DataIdentity> read_data_identity(const vfs::Vfs& filesystem, std::vector<units::InputFile>* consumed_inputs) {
+    return read_data_identity_impl(filesystem, true, consumed_inputs);
 }
 
 namespace {
@@ -180,7 +191,8 @@ constexpr std::string_view colour_prefix = "MP_Color_";
 [[nodiscard]] core::Result<MapPlacement> placement_facts(
     const assets::Placement& source,
     const data::Catalog& catalog,
-    const std::vector<StartFaction>& factions) {
+    const std::vector<StartFaction>& factions,
+    const bool land_map = false) {
     MapPlacement placement;
     placement.record = source.key.record_ordinal;
     for (const auto& field : source.fields) {
@@ -233,6 +245,7 @@ constexpr std::string_view colour_prefix = "MP_Color_";
     placement.element = object.type_name;
     placement.marker = scene::space_object_tags(object).marker;
     for (const auto tag : {"Behavior", "SpaceBehavior"}) for (const auto& behavior : detail::tokens(text_of(object, tag))) {
+        if (land_map && detail::iequals(tag, "Behavior") && detail::iequals(behavior, "REINFORCEMENT_POINT")) placement.reinforcement_point = true;
         if (detail::iequals(behavior, "DUMMY_SPECIAL_WEAPON_SOURCE")) placement.special_weapon_source = true;
         if (detail::iequals(behavior, "DUMMY_TACTICAL_SUPER_WEAPON_TARGET")) placement.tactical_super_weapon_target = true;
         if (detail::iequals(tag, "Behavior") && detail::iequals(behavior, "MARKER")) placement.marker_behavior = true;
@@ -385,15 +398,23 @@ void purchase_policy_facts(StartInputs& inputs, const data::Catalog& catalog) {
 core::Result<MatchOptions> read_match_defaults(const vfs::Vfs& filesystem) {
     auto constants = data::load_document(filesystem, constants_path);
     if (!constants) return core::Result<MatchOptions>::failure(constants.error());
-    data::tag_trace::document(constants.value().root);
-    return defaults_from_constants(constants.value().root);
+    return read_match_defaults(constants.value().root);
+}
+
+core::Result<MatchOptions> read_match_defaults(const data::XmlNode& constants) {
+    data::tag_trace::document(constants);
+    return defaults_from_constants(constants);
 }
 
 core::Result<CreditsBounds> read_credits_bounds(const vfs::Vfs& filesystem) {
     using Result = core::Result<CreditsBounds>;
     auto constants = data::load_document(filesystem, constants_path);
     if (!constants) return Result::failure(constants.error());
-    const auto& root = constants.value().root;
+    return read_credits_bounds(constants.value().root);
+}
+
+core::Result<CreditsBounds> read_credits_bounds(const data::XmlNode& root) {
+    using Result = core::Result<CreditsBounds>;
     data::tag_trace::document(root);
     CreditsBounds bounds;
     std::string invalid;
@@ -418,8 +439,12 @@ core::Result<std::vector<LobbyColour>> read_lobby_colours(const vfs::Vfs& filesy
     using Result = core::Result<std::vector<LobbyColour>>;
     auto constants = data::load_document(filesystem, constants_path);
     if (!constants) return Result::failure(constants.error());
-    data::tag_trace::document(constants.value().root);
-    return palette_from_constants(constants.value().root);
+    return read_lobby_colours(constants.value().root);
+}
+
+core::Result<std::vector<LobbyColour>> read_lobby_colours(const data::XmlNode& constants) {
+    data::tag_trace::document(constants);
+    return palette_from_constants(constants);
 }
 
 std::optional<std::pair<std::uint32_t, std::uint32_t>> declared_extent_bits(
@@ -619,6 +644,15 @@ core::Result<void> read_start_rules(StartInputs& inputs, const std::span<const L
                 *value;
             continue;
         }
+        // LC-85: the land twins, last entry wins. Only a land start uses them, so a value that is not a positive
+        // number is kept as zero here and refused by land_fog_rules; a space start never fails on it.
+        if (detail::iequals(child.name, "DesiredLandFOWCellSize") || detail::iequals(child.name, "LandFOWRegrowTime")) {
+            data::tag_trace::used(child);
+            const auto value = detail::number(child.raw_text);
+            (detail::iequals(child.name, "DesiredLandFOWCellSize") ? inputs.land_fog_cell_size : inputs.land_fog_regrow_seconds) =
+                value && value->raw() > 0 ? *value : sim::math::Fixed{};
+            continue;
+        }
     }
     return Result::success();
 }
@@ -777,14 +811,27 @@ core::Result<StartInputs> read_start_inputs(
     const data::Catalog& catalog,
     const units::UnitTables& tables,
     const DataIdentity& identity) {
+    CampaignStartInputsCache cache;
+    return read_start_inputs(fixture, filesystem, catalog, tables, identity, cache);
+}
+
+core::Result<StartInputs> read_start_inputs(
+    const Fixture& fixture,
+    const vfs::Vfs& filesystem,
+    const data::Catalog& catalog,
+    const units::UnitTables& tables,
+    const DataIdentity& identity,
+    CampaignStartInputsCache& cache) {
     using Result = core::Result<StartInputs>;
-    StartInputs inputs;
+    // Recording retains all loader visits even when the caller reuses a cache.
+    const bool reuse = cache.common.has_value() && !data::tag_trace::enabled();
+    StartInputs inputs = reuse ? *cache.common : StartInputs{};
     inputs.map = fixture.map;
     inputs.tables = &tables;
 
     inputs.script_manifest_digest = identity.script_manifest_digest;
     inputs.ai_data_digest = identity.ai_data_digest;
-    inputs.difficulty = load_difficulty_table(filesystem);
+    if (!reuse) inputs.difficulty = load_difficulty_table(filesystem);
 
     auto record = filesystem.stat(fixture.map);
     if (!record) return Result::failure(record.error());
@@ -793,13 +840,17 @@ core::Result<StartInputs> read_start_inputs(
     const std::span<const std::uint8_t> octets(
         reinterpret_cast<const std::uint8_t*>(bytes.value().data()), bytes.value().size());
     inputs.map_sha256 = core::sha256_hex(octets);
-    auto map = assets::load_map(bytes.value(), assets::source_from(record.value()), assets::object_type_catalog(catalog));
+    auto types = cache.object_types ? assets::ObjectTypeCatalog{} : assets::object_type_catalog(catalog);
+    const auto& object_types = cache.object_types ? *cache.object_types : types;
+    auto map = assets::load_map(bytes.value(), assets::source_from(record.value()), object_types);
     if (!map) return Result::failure(map.error());
     inputs.map_extents = declared_extent_bits(octets, map.value());
     inputs.new_markers = map.value().lobby.new_markers == true;
 
-    if (auto factions = read_start_factions(inputs, catalog); !factions)
-        return Result::failure(factions.error());
+    if (!reuse) {
+        if (auto factions = read_start_factions(inputs, catalog); !factions)
+            return Result::failure(factions.error());
+    }
     const units::FootprintTypeSelection selection(tables);
     for (const auto& source : map.value().placements) {
         if (skip_bad_position(source, fixture.map, &inputs.placement_load_notes)
@@ -818,7 +869,7 @@ core::Result<StartInputs> read_start_inputs(
             note.message = "colliding placement type CRC uses the first catalog definition";
             inputs.placement_load_notes.push_back(std::move(note));
         }
-        auto placement = placement_facts(source, catalog, inputs.factions);
+        auto placement = placement_facts(source, catalog, inputs.factions, map.value().kind == assets::MapKind::land);
         if (!placement && placement.error().code == data::diagnostic_codes::variant_missing_base) {
             core::LoadNote note;
             note.code = placement.error().code;
@@ -848,8 +899,18 @@ core::Result<StartInputs> read_start_inputs(
         inputs.placements.push_back(std::move(placement).value());
     }
 
-    if (auto rules = read_start_rules(inputs, fixture.slots, filesystem, catalog); !rules)
-        return Result::failure(rules.error());
+    if (!reuse) {
+        if (auto rules = read_start_rules(inputs, fixture.slots, filesystem, catalog); !rules)
+            return Result::failure(rules.error());
+        if (!data::tag_trace::enabled() && cache.object_types) {
+            cache.common = inputs;
+            cache.common->map.clear();
+            cache.common->map_sha256.clear();
+            cache.common->placements.clear();
+            cache.common->placement_load_notes.clear();
+            cache.common->map_extents.reset();
+        }
+    }
     return Result::success(std::move(inputs));
 }
 

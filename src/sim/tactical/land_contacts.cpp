@@ -1,3 +1,4 @@
+#include "land_phase_internal.hpp"
 #include "eawr/sim/tactical/land_movement.hpp"
 #include "eawr/sim/math/trig.hpp"
 #include "eawr/core/tick_profile.hpp"
@@ -147,9 +148,11 @@ core::Result<void> LandMovement::service_contacts(const LandOccupancy& grid,
     // Copy pair observations on workers before the ordered quota/installation decisions. A
     // contact never reads a partially installed neighbor route to decide its initial role.
     contact_observations_.resize(state_.contacts.size());
-    struct PairContext { const LandContactSettings& settings; } pairs{settings};
-    auto observed = executor.execute_phase("land-member-proposals", tick_partition_count,
-        [this, &pairs, &collides](std::size_t partition) {
+    // A phase lambda captures at most two pointers: libstdc++ keeps only 16 bytes inside a std::function and allocates for more,
+    // where the MSVC STL keeps 48; the rest travels in this context.
+    struct PairContext { const LandContactSettings& settings; const decltype(collides)& collision_test; } pairs{settings, collides};
+    auto observed = land_phase(executor, "land-member-proposals", tick_partition_count,
+        [this, &pairs](std::size_t partition) {
         const auto range = partition_range(partition, state_.contacts.size());
         for (auto i = range.begin; i < range.end; ++i) {
             const auto& contact = state_.contacts[i]; auto& proposal = contact_observations_[i];
@@ -161,7 +164,7 @@ core::Result<void> LandMovement::service_contacts(const LandOccupancy& grid,
             proposal.kind = a.moving && b.moving ? LandContactKind::moving_moving
                 : a.moving || b.moving ? LandContactKind::moving_stopped : LandContactKind::stopped_stopped;
             Arithmetic arithmetic;
-            proposal.predicts = collides(arithmetic, a, b, pairs.settings);
+            proposal.predicts = pairs.collision_test(arithmetic, a, b, pairs.settings);
             proposal.score = arithmetic.length(arithmetic.sub(a.position, b.position));
             proposal.same_direction = same_heading(as.facing, bs.facing);
             proposal.first_behind = !ahead_of(a, b);
@@ -479,6 +482,16 @@ core::Result<void> LandMovement::service_contacts(const LandOccupancy& grid,
         if (placement.status == LandPlacementStatus::none || placement.position == pushed.position) {
             c.search = LandContactSearch::no_route; return false;
         }
+        // The open-position search rings around the desired point and tries the mover's side first, so when the desired
+        // point is closed the ring that reaches back to the mover lands on the mover's own spot (give or take a rounding
+        // step). A spot that does not leave the other body by at least a unit is no push: no route, no zero-length escape
+        // that completes at once and is installed again (#6115).
+        {
+            Arithmetic gap;
+            const auto before = gap.length(gap.sub(pushed.position, other.position));
+            const auto after = gap.length(gap.sub(placement.position, other.position));
+            if (!gap.valid || after < gap.add(before, one)) { c.search = LandContactSearch::no_route; return false; }
+        }
         LandPathRequest request;
         request.entity = pushed.object; request.mask = query.mask; request.radius = query.radius;
         request.start = pushed.position; request.end = placement.position;
@@ -792,10 +805,11 @@ core::Result<void> LandMovement::service_contacts(const LandOccupancy& grid,
     for (const auto& body : bodies_) if (!body.valid) return overflow();
     if (!reference_pair_scans_) {
         core::tick_profile::Scope phase("land-contact-index");
-        auto prepared = executor.execute_phase("land-member-proposals", tick_partition_count,
-            [this, &grid, &predict](std::size_t partition) {
+        struct PredictContext { const LandOccupancy& grid; const decltype(predict)& prediction_fn; } prediction{grid, predict};
+        auto prepared = land_phase(executor, "land-member-proposals", tick_partition_count,
+            [this, &prediction](std::size_t partition) {
                 const auto range = partition_range(partition, bodies_.size());
-                const auto occupations = grid.occupations();
+                const auto occupations = prediction.grid.occupations();
                 for (auto b = range.begin; b < range.end; ++b) {
                     const auto& body = bodies_[b];
                     // A container holds no occupation of its own; its soldiers do.
@@ -807,7 +821,7 @@ core::Result<void> LandMovement::service_contacts(const LandOccupancy& grid,
                         present = at != occupations.end() && at->object == object;
                     }
                     Arithmetic a;
-                    const auto end = predict(a, body, state_.contact_settings);
+                    const auto end = prediction.prediction_fn(a, body, state_.contact_settings);
                     // The scratch index needs the union of the sweeps; exact pair policy above uses the same prediction.
                     neighbours_.bodies[b] = {body.position, end, body.radius, present, a.valid};
                 }
@@ -821,9 +835,9 @@ core::Result<void> LandMovement::service_contacts(const LandOccupancy& grid,
     const bool indexed = !reference_pair_scans_ && neighbours_.safe();
     // Per-body discovery reads only committed occupancy and writes disjoint retained scratch lists.
     // New contacts are not serviced until the next late invocation (LR1-09).
-    struct DiscoveryContext { const LandOccupancy& grid; const LandContactSettings& settings; bool indexed; } discovery{grid, settings, indexed};
-    auto result = executor.execute_phase("land-member-proposals", tick_partition_count,
-        [this, &discovery, &collides](std::size_t partition) {
+    struct DiscoveryContext { const LandOccupancy& grid; const LandContactSettings& settings; bool indexed; const decltype(collides)& collision_test; } discovery{grid, settings, indexed, collides};
+    auto result = land_phase(executor, "land-member-proposals", tick_partition_count,
+        [this, &discovery](std::size_t partition) {
         const auto& occupancy = discovery.grid;
         const auto& profile = discovery.settings;
         const auto range = partition_range(partition, bodies_.size());
@@ -840,7 +854,7 @@ core::Result<void> LandMovement::service_contacts(const LandOccupancy& grid,
             const auto visit = [&](std::size_t j) {
                 if (j >= bodies_.size() || bodies_[j].object <= a.object) return;
                 const auto& b = bodies_[j];
-                if (!collides(arithmetic, a, b, profile)) return;
+                if (!discovery.collision_test(arithmetic, a, b, profile)) return;
                 LandContact c; c.first = a.object; c.second = b.object;
                 c.kind = a.moving && b.moving ? LandContactKind::moving_moving
                     : a.moving || b.moving ? LandContactKind::moving_stopped : LandContactKind::stopped_stopped;

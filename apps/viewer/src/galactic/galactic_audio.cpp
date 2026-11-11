@@ -279,6 +279,16 @@ void GalacticAudio::play_event(const std::string_view name) {
 void GalacticAudio::negative_feedback() {
     play_event(value(audio_fields_, "SFXEvent_GUI_Negative_Feedback"));
 }
+void GalacticAudio::ability_sound(const std::string_view name, const audio::Vec3 position) {
+    if (name.empty()) return;
+    const auto* event = registry_.find(std::string(name));
+    if (!event) { if (problems_.size() < 256) problems_.push_back("missing SFX event: " + std::string(name)); return; }
+    ++sounds_[std::string(name)];
+    const auto location = event->is_3d ? std::optional(position) : std::nullopt;
+    if (location && !space_) return;
+    const auto accepted = events_.admit({{event, location, false, false, false, clock_}, 0, false}, random_);
+    if (!accepted.handle) ++playback_failures_[std::string(name) + ": admission_" + std::string(audio::to_string(accepted.result))];
+}
 
 const std::vector<audio::Field>& GalacticAudio::type_fields(const std::string_view type) {
     const auto key = audio::upper(type);

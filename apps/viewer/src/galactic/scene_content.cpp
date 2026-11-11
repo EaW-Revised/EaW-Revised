@@ -230,6 +230,38 @@ SceneLayer galactic_particle_layer(const data::Catalog& catalog, const std::stri
     if (fields.flag("In_Midforeground")) return SceneLayer::midforeground;
     return SceneLayer::world;
 }
+DestructionEffectArt load_destruction_effect_art(const data::Catalog& catalog,
+    const std::string_view source_type, const std::string_view ability_name) {
+    DestructionEffectArt result;
+    const auto effective = catalog.resolve(source_type, data::Category::game_object);
+    if (!effective) return result;
+    std::vector<const data::Definition*> layers;
+    for (const auto& name : effective.value().chain)
+        if (const auto* definition = catalog.find(name, data::Category::game_object)) layers.push_back(definition);
+    const data::XmlNode* selected = nullptr;
+    for (const auto* block : data::retail::list(layers, "Abilities", data::retail::ListRule::replace_in_variant)) {
+        for (const auto& ability : block->children) {
+            if (folded(ability.name) != "planet_destruction_ability") continue;
+            for (const auto& attribute : ability.attributes)
+                if (folded(attribute.name) == "name" && folded(attribute.value) == folded(ability_name)) {
+                    selected = &ability; break;
+                }
+            if (selected) break;
+        }
+        if (selected) break;
+    }
+    if (!selected) return result;
+    const Fields ability(*selected);
+    result.target_sfx = ability.text("SFXEvent_Target_Affected");
+    result.target_particle = ability.text("Target_Particle_Effect");
+    if (result.target_particle.empty()) return result;
+    result.layer = galactic_particle_layer(catalog, result.target_particle);
+    const Fields particle(catalog, result.target_particle, data::Category::game_object);
+    if (const auto frames = particle.number("Particle_Lifetime_Frames"); frames && *frames > 0)
+        result.lifetime_seconds = *frames / sim::galactic::galactic_frames_per_second;
+    if (const auto scale = particle.number("Scale_Factor"); scale && *scale > 0) result.scale = *scale;
+    return result;
+}
 
 core::Result<SceneContent> load_scene_content(const vfs::Vfs& filesystem, const data::Catalog& catalog,
     const data::galactic::GalacticData& tables, std::string_view campaign_name,

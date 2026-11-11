@@ -351,7 +351,7 @@ class LoadCheckContracts(unittest.TestCase):
                     client.close()
                 normal = contract.normalise(transcript.read_bytes()).decode()
                 # Volatile hello/root/key/timing fields are normalized; raw timing/status/key semantics are asserted above and below.
-                normal = normal.replace(str(game).replace("\\", "\\\\"), "<game-root>")
+                normal = normal.replace(str(game.resolve()).replace("\\", "\\\\"), "<game-root>")
                 destination = Path(__file__).with_name("transcripts") / f"loadcheck_{mode}.jsonl"
                 if UPDATE:
                     destination.write_text(normal, encoding="utf-8", newline="\n")

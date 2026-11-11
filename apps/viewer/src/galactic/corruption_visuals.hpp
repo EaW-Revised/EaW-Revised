@@ -68,6 +68,8 @@ struct GalacticEffectFact final {
     std::optional<Vec3> position;
     std::optional<std::size_t> layer;
     std::optional<float> lifetime_seconds;
+    std::optional<std::uint64_t> born_frame{};
+    float scale{1};
 };
 struct CorruptionPublication final {
     SeatId seat{};

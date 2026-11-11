@@ -1,3 +1,4 @@
+#include "../../support/runtime_path.hpp"
 #include "fog_mode.hpp"
 
 #include "eawr/sim/fog.hpp"
@@ -50,7 +51,7 @@ int main() {
     auto loaded = presentation::godot_backend::FogMode::load({file_a, file_b}, 2, 47, error);
     assert(loaded && error.empty());
     auto& mode = *loaded;
-    std::ifstream replay_file(EAWR_REPLAY_FIXTURE_PATH, std::ios::binary);
+    std::ifstream replay_file(eawr::testing::runtime_path("EAWR_TEST_SOURCE_ROOT", "tests/replay/fixtures/original-v1.eawr-replay", EAWR_REPLAY_FIXTURE_PATH), std::ios::binary);
     std::vector<std::uint8_t> replay_bytes{
         std::istreambuf_iterator<char>(replay_file), std::istreambuf_iterator<char>()};
     const auto replay = sim::parse_replay(replay_bytes);

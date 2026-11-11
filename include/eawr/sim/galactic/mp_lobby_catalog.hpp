@@ -38,6 +38,9 @@ struct MpLobbyCampaign {
     bool supports_custom_settings{};
     // Campaign limits for the custom starting and maximum tech (WGP-69); absent means the data states none.
     std::optional<std::int64_t> minimum_custom_tech, maximum_custom_tech;
+    // The data's Battle_Pending_Timeout_Seconds, in whole seconds (negative reads as zero): the default a new room offers
+    // for the battle-vote timeout (#6156). Absent when the data states none.
+    std::optional<std::int64_t> vote_timeout_seconds;
     std::vector<MpLobbyFaction> factions; // ascending player ID
     // Co-op on a single-player campaign entry (design B2): the entry's authored single-player rules apply and its
     // only playable faction is the Starting_Active_Player, held by every human seat. False for multiplayer entries.

@@ -24,11 +24,16 @@ public:
         const viewer::galactic::GalaxyView& view, const viewer::galactic::CorruptionStyle& style,
         const particles::SystemDefinition& system, std::uint64_t logical_frame,
         const FixedCamera& camera, double elapsed, std::string& failure);
+    [[nodiscard]] bool service_effects(std::span<const viewer::galactic::GalacticEffectFact>,
+        const data::Catalog&, std::size_t layer, std::uint64_t logical_frame,
+        const FixedCamera&, double elapsed, std::string& failure);
     [[nodiscard]] std::size_t live_effects() const { return registry_->live_effects(); }
     [[nodiscard]] std::size_t resources() const { return registry_->live_backend_resources(); }
     [[nodiscard]] std::uint64_t particle_count() const { return particle_count_; }
     [[nodiscard]] std::size_t reserved_particles() const { return budget_.used(); }
     [[nodiscard]] std::size_t refused_effects() const { return budget_.refused(); }
+    [[nodiscard]] std::size_t one_shots() const { return one_shots_.size(); }
+    [[nodiscard]] std::uint64_t one_shots_started() const { return one_shots_started_; }
 private:
     [[nodiscard]] const assets::Texture* texture(std::string_view name);
     struct Live final { particles::EffectHandle handle{}; std::uint64_t generation{}; };
@@ -36,12 +41,20 @@ private:
         particles::EffectHandle handle{};
         viewer::galactic::CorruptionLineGrowth growth;
     };
+    struct OneShot final {
+        particles::EffectHandle handle{};
+        std::uint64_t born{};
+        std::optional<float> lifetime{};
+        bool draining{};
+    };
     std::shared_ptr<const vfs::Vfs> filesystem_;
     std::map<std::string, std::optional<assets::Texture>, std::less<>> textures_;
     std::unique_ptr<GodotParticleBackend> backend_;
     std::unique_ptr<particles::EffectRegistry> registry_;
     std::map<viewer::galactic::ObjectId, Live> live_;
     std::map<std::uint64_t, Line> lines_;
+    std::map<std::uint64_t, OneShot> one_shots_;
+    std::uint64_t one_shots_started_{};
     std::map<std::string, std::optional<particles::SystemDefinition>, std::less<>> systems_;
     std::map<std::string, std::size_t, std::less<>> layers_;
     std::uint32_t seed_{};

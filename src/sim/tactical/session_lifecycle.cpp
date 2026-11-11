@@ -240,6 +240,36 @@ TacticalSession::Impl::Impl(const TacticalSetup& source, const std::span<const S
             free_garrisons.push_back({binding, binding.registered, std::nullopt, {}});
         }
         bind_squadrons(live);
+        // FS-51/52, #6523: setup already supplies attached rosters. Apply member
+        // defaults first, then the container request; pre-attachment creation is
+        // unobservable in this representation and remains a separate seam.
+        if (std::any_of(live.begin(), live.end(), [&](const LiveUnit& unit) {
+                const auto* profile = abilities.find(unit.state.type_id);
+                return profile && (!profile->default_member_abilities.empty()
+                    || std::any_of(profile->abilities.begin(), profile->abilities.end(), [](const auto& ability) {
+                        return ability.active_by_default && ability.kind == AbilityKind::replenish_wingmen;
+                    }));
+            })) {
+            UnitStage staged(std::move(live));
+            detail::MapStage<CraftState> staged_crafts(crafts);
+            detail::MapStage<SquadronState> staged_minds(minds);
+            auto staged_groups = squadrons;
+            std::vector<EntityId> born_spawners;
+            std::vector<PlayerCommand> pad_requests;
+            std::vector<BattleEconomyCue> cues;
+            EconomyStage stage{ledgers, arrivals, shares, staged_crafts, staged_minds, staged_groups,
+                born_spawners, earners, next_id, pads, construction, pad_requests, pad_stage, construction_stage, cues};
+            std::vector<EntityId> created;
+            created.reserve(source.units.size());
+            for (const auto& unit : source.units) created.push_back(unit.entity_id);
+            if (const auto applied = request_creation_defaults(created, staged, stage, 0); !applied)
+                initialization_error = applied.error();
+            staged_crafts.commit();
+            staged_minds.commit();
+            squadrons = std::move(staged_groups);
+            live = staged.release();
+            rebuild(live, false);
+        }
         if (source.campaign && !source.campaign->upgrades.empty() && !bonus_categories.empty()) {
             std::map<EntityId, TypeId> containers;
             for (const auto& u : source.campaign->upgrades) {
@@ -320,7 +350,24 @@ LiveUnit TacticalSession::Impl::new_unit(const UnitState& unit, const std::uint6
                                 : std::nullopt,
             std::nullopt, entering_abilities(unit.type_id, unit.owner)};
         if (live.abilities) {
-            const auto& handlers = abilities.find(unit.type_id)->special;
+            const auto& ability_profile = *abilities.find(unit.type_id);
+            // FS-51/FD-81: ordinary default requests occur before creation returns.
+            // Team dispatch after attachment is handled at the team creation seam (FS-52).
+            if (!ability_profile.dispatch_defaults_to_members) {
+                for (std::size_t i = 0; i < ability_profile.abilities.size(); ++i) {
+                    const auto& ability = ability_profile.abilities[i];
+                    if (!ability.active_by_default || ability.kind != AbilityKind::interdict) continue;
+                    const auto switched = activate_ability(ability, live.abilities->slots[i], ability_gate(live, frame), frame);
+                    if (switched.changed) {
+                        // A newborn has no move to halt: clearing the order is the same stop that the team path
+                        // below reaches through plan_order (FS-51/52).
+                        live.state.order = {};
+                        live.motion = live.motion ? std::optional(MotionState{}) : std::nullopt;
+                        live.speed = {};
+                    }
+                }
+            }
+            const auto& handlers = ability_profile.special;
             for (std::size_t i = 0; i < handlers.size(); ++i) {
                 if (handlers[i].kind != SpecialAbilityKind::force_healing) continue;
                 // WSH-06: immediate first eligible poll with a keyed 0..1-frame creation phase.
@@ -491,12 +538,32 @@ core::Result<TacticalSession> TacticalSession::create(const TacticalSetup& setup
             return core::Result<TacticalSession>::failure(valid.error());
         if (auto valid = validate_victory(content.victory, resolved.players); !valid)
             return core::Result<TacticalSession>::failure(valid.error());
+        // LC-54..57: the land session runs the shared economy and pad services on the authored land profiles. A content
+        // without rows (no players) keeps the previous inert economy.
+        auto owned_economy = prepare_economy(content.economy, resolved.players, load_notes ? *load_notes : local_notes);
+        if (!owned_economy) return core::Result<TacticalSession>::failure(owned_economy.error());
+        // LC-85/86: the land sensor rows and fog grid; a content without them keeps the unfogged land session.
+        if (auto valid = validate_sensors(content.sensors); !valid) return core::Result<TacticalSession>::failure(valid.error());
+        if (content.fog) if (auto valid = validate_fog_rules(*content.fog); !valid)
+            return core::Result<TacticalSession>::failure(valid.error());
         // Land owns locomotion; the same authored combat and durability rows bind its members.
-        auto impl = std::make_unique<Impl>(resolved, std::span<const SensorProfile>{}, owned_durability.value(), MotionTable{},
-            std::nullopt, content.combat, content.victory, AbilityTable{}, EconomyRules{}, content.map_box);
+        auto impl = std::make_unique<Impl>(resolved, content.sensors, owned_durability.value(), MotionTable{},
+            content.fog, content.combat, content.victory, AbilityTable{}, owned_economy.value(), content.map_box);
         if (impl->initialization_error) return core::Result<TacticalSession>::failure(*impl->initialization_error);
         if (auto initialized = impl->initialize_land(content); !initialized)
             return core::Result<TacticalSession>::failure(initialized.error());
+        for (const auto& [parent, child] : content.land.initial_pad_children) {
+            const auto pad = impl->pads.find(parent);
+            const auto parent_unit = std::find_if(resolved.units.begin(), resolved.units.end(),
+                [&](const auto& unit) { return unit.entity_id == parent; });
+            const auto child_unit = std::find_if(resolved.units.begin(), resolved.units.end(),
+                [&](const auto& unit) { return unit.entity_id == child; });
+            if (pad == impl->pads.end() || parent_unit == resolved.units.end() || child_unit == resolved.units.end()
+                || parent == child || parent_unit->owner != child_unit->owner || pad->second.constructed != 0)
+                return core::Result<TacticalSession>::failure(detail::diagnostic(diagnostic_codes::invalid_setup,
+                    "invalid initial land pad child"));
+            pad->second.constructed = child;
+        }
         return core::Result<TacticalSession>::success(TacticalSession(std::move(impl)));
     }
     if (content.retreat) resolve_cinematic_seats(resolved, content.economy.players);
@@ -558,6 +625,39 @@ core::Result<EntityId> TacticalSession::stage_spawn(const UnitState& unit) {
         return core::Result<EntityId>::failure(assigned.error());
     auto live = impl_->sorted_live();
     live.push_back(impl_->new_unit(state, impl_->completed_tick));
+    auto next_after_creation = state.entity_id == std::numeric_limits<EntityId>::max() ? invalid_entity_id : state.entity_id + 1;
+    const auto* defaults = impl_->abilities.find(state.type_id);
+    if (defaults && std::any_of(defaults->abilities.begin(), defaults->abilities.end(), [](const auto& ability) {
+            return ability.kind == AbilityKind::replenish_wingmen && ability.active_by_default;
+        })) {
+        UnitStage staged(std::move(live));
+        auto accounts = impl_->ledgers;
+        auto arrivals = impl_->arrivals;
+        auto shares = impl_->shares;
+        auto flights = impl_->crafts;
+        auto orders = impl_->minds;
+        detail::MapStage<CraftState> staged_flights(flights);
+        detail::MapStage<SquadronState> staged_orders(orders);
+        auto groups = impl_->squadrons;
+        auto earners = impl_->earners;
+        auto pads = impl_->pads;
+        auto construction = impl_->construction;
+        ObjectStage<PadState> pad_stage;
+        ObjectStage<ConstructionState> construction_stage;
+        std::vector<EntityId> born_spawners;
+        std::vector<PlayerCommand> pad_requests;
+        std::vector<BattleEconomyCue> cues;
+        Impl::EconomyStage stage{accounts, arrivals, shares, staged_flights, staged_orders, groups,
+            born_spawners, earners, next_after_creation, pads, construction, pad_requests, pad_stage, construction_stage, cues};
+        const std::array<EntityId, 1> created{state.entity_id};
+        const auto applied = impl_->request_creation_defaults(created, staged, stage, impl_->completed_tick);
+        if (!applied) return core::Result<EntityId>::failure(applied.error());
+        staged_flights.commit(); staged_orders.commit();
+        impl_->ledgers = std::move(accounts); impl_->arrivals = std::move(arrivals); impl_->shares = std::move(shares);
+        impl_->crafts = std::move(flights); impl_->minds = std::move(orders); impl_->squadrons = std::move(groups);
+        impl_->earners = std::move(earners);
+        live = staged.release();
+    }
     std::optional<Impl::CommandLedger> command_ledger;
     if (!impl_->economy.command_bonuses.empty()) {
         auto changed = impl_->update_command_ledger(live, state.entity_id, InlineExecutor{});
@@ -567,7 +667,8 @@ core::Result<EntityId> TacticalSession::stage_spawn(const UnitState& unit) {
         if (!applied) return core::Result<EntityId>::failure(applied.error());
     }
     if (!impl_->economy.upgrades.empty() && !command_ledger) {
-        const auto applied = impl_->apply_bonuses(live.back(), impl_->bonuses_for(live.back(), true));
+        const auto holder = std::find_if(live.begin(), live.end(), [&](const auto& row) { return row.state.entity_id == state.entity_id; });
+        const auto applied = impl_->apply_bonuses(*holder, impl_->bonuses_for(*holder, true));
         if (!applied) return core::Result<EntityId>::failure(applied.error());
     }
     auto locks = impl_->named_ability_locks;
@@ -597,7 +698,7 @@ core::Result<EntityId> TacticalSession::stage_spawn(const UnitState& unit) {
         impl_->pads.emplace(state.entity_id, PadState{state.owner});
         impl_->pad_stage.initialized = false;
     }
-    impl_->next_id = state.entity_id == std::numeric_limits<EntityId>::max() ? invalid_entity_id : state.entity_id + 1;
+    impl_->next_id = next_after_creation;
     const auto& published = *impl_->current_snapshot;
     impl_->publish_staged(live, {published.events().begin(), published.events().end()},
         {published.combat_events().begin(), published.combat_events().end()});

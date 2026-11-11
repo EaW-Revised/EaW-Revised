@@ -156,6 +156,30 @@ int case_galactic_fleet_stacks_tests() {
         assert(icons[2].icon == 2 && icons[2].count == 1 && icons[2].best == eawr::sim::galactic::TypeId{1000});
     }
     {
+        // #6122 (GHUDL-16, the debug build's best-ship helper): with the hero bit set the ranked hero wins the image even
+        // against a much larger hull; the lowest Ranking_In_Category wins, the first group on a tie; no hero falls back to health.
+        const std::map<eawr::sim::galactic::TypeId, std::int64_t> ranks{{1002, 7}, {1000, 3}, {1004, 3}};
+        StackHeroPreference prefer{true, [&](const eawr::sim::galactic::TypeId type) -> std::optional<std::int64_t> {
+            const auto found = ranks.find(type);
+            return found == ranks.end() ? std::nullopt : std::optional<std::int64_t>(found->second);
+        }};
+        std::vector<ObservedFleet> cards;
+        cards.push_back(local_card(601, 0, {group(2, 1003, 601), group(1, 1002, 601)})); // big ship + hero 1002
+        auto icons = fleet_stack_icons(view(cards), health, textures, std::nullopt, {});
+        assert(icons[0].best == eawr::sim::galactic::TypeId{1003}); // bit clear: the greatest hull
+        icons = fleet_stack_icons(view(cards), health, textures, std::nullopt, prefer);
+        assert(icons[0].best == eawr::sim::galactic::TypeId{1002}); // bit set: the hero, though its hull is smaller
+        cards[0] = local_card(601, 0, {group(2, 1003, 601), group(1, 1002, 601), group(1, 1000, 601)});
+        icons = fleet_stack_icons(view(cards), health, textures, std::nullopt, prefer);
+        assert(icons[0].best == eawr::sim::galactic::TypeId{1000}); // lower ranking number wins over a larger hull
+        cards[0] = local_card(601, 0, {group(1, 1004, 601), group(1, 1000, 601), group(1, 1003, 601)});
+        icons = fleet_stack_icons(view(cards), health, textures, std::nullopt, prefer);
+        assert(icons[0].best == eawr::sim::galactic::TypeId{1004}); // equal rank: the first group stays
+        cards[0] = local_card(601, 0, {group(2, 1003, 601), group(1, 1005, 601)});
+        icons = fleet_stack_icons(view(cards), health, textures, std::nullopt, prefer);
+        assert(icons[0].best == eawr::sim::galactic::TypeId{1003}); // no hero in the fleet: the health winner
+    }
+    {
         // WGUI-92: an icon shows the stealth overlay only when every fleet it merges is all-stealth.
         std::vector<ObservedFleet> cards;
         cards.push_back(local_card(601, 0, {group(1, 1000, 601)}));

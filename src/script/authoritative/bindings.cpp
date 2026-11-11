@@ -956,26 +956,26 @@ void end_slot(Instance& instance, ::std::size_t index) {
 
 namespace eawr::script::authoritative {
 namespace {
-core::Diagnostic global_value_error(std::string message) {
-    core::Diagnostic out; out.code = std::string(codes::invalid_request); out.message = std::move(message); return out;
+core::Diagnostic global_value_error(::std::string message) {
+    core::Diagnostic out; out.code = ::std::string(codes::invalid_request); out.message = ::std::move(message); return out;
 }
 }
 core::Result<void> register_shared_global_values(ScriptScheduler& scripts, GlobalValueReader reader) {
-    if (auto added = scripts.register_binding("GlobalValue.Get", [reader = std::move(reader)](
+    if (auto added = scripts.register_binding("GlobalValue.Get", [reader = ::std::move(reader)](
             BindingContext&, const ValueList& args) {
-        const auto* key = args.empty() ? nullptr : std::get_if<std::string>(&args[0].data);
-        const auto found = key && reader ? reader(*key) : std::nullopt;
+        const auto* key = args.empty() ? nullptr : ::std::get_if<::std::string>(&args[0].data);
+        const auto found = key && reader ? reader(*key) : ::std::nullopt;
         return core::Result<ValueList>::success(found ? ValueList{*found} : ValueList{});
     }); !added) return added;
     return scripts.register_binding("GlobalValue.Set", [](BindingContext& context, const ValueList& args) {
-        if (args.size() != 2 || !std::holds_alternative<std::string>(args[0].data))
+        if (args.size() != 2 || !::std::holds_alternative<::std::string>(args[0].data))
             return core::Result<ValueList>::failure(global_value_error("GlobalValue.Set expects a name and a value"));
-        if (std::holds_alternative<Handle>(args[1].data))
+        if (::std::holds_alternative<Handle>(args[1].data))
             return core::Result<ValueList>::failure(global_value_error("GlobalValue.Set rejects engine objects (L-55)"));
-        if (std::holds_alternative<std::vector<Value>>(args[1].data)) {
+        if (::std::holds_alternative<::std::vector<Value>>(args[1].data)) {
             context.report(codes::unsupported_api, "GlobalValue.Set: table identity is unsupported; registry unchanged (L-55)");
-            context.issue_command(std::string(global_value_command), {args[0]});
-        } else context.issue_command(std::string(global_value_command), args);
+            context.issue_command(::std::string(global_value_command), {args[0]});
+        } else context.issue_command(::std::string(global_value_command), args);
         return core::Result<ValueList>::success({});
     });
 }

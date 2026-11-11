@@ -188,11 +188,11 @@ core::Result<TacticalSession::Impl::CommandLedger> TacticalSession::Impl::update
         const auto range = partition_range(partition, command_ledger.sources.size());
         for (auto index = range.begin; index < range.end; ++index) {
             const auto& source = command_ledger.sources[index];
-            const auto* host = find(source.host);
-            if (host == nullptr) continue;
-            const auto type = source.id == source.host ? host->state.type_id
-                : contained_type(contained_type, host->state.contained, source.id);
             const auto& profile = economy.command_bonuses[source.profile];
+            const auto* host = find(source.host);
+            const auto type = host == nullptr ? TypeId{} : source.id == source.host ? host->state.type_id
+                : contained_type(contained_type, host->state.contained, source.id);
+            if (host == nullptr) continue;
             if (type == profile.type && (!profile.battlefield || std::binary_search(profile.enabled_players.begin(), profile.enabled_players.end(), host->state.owner)))
                 retained[partition].push_back(source);
         }
@@ -675,6 +675,106 @@ const Player* TacticalSession::Impl::player_of(const PlayerId id) const noexcept
         return found != setup.players.end() ? &*found : nullptr;
     }
 
+core::Result<void> TacticalSession::Impl::request_creation_defaults(const std::span<const EntityId> created,
+    UnitStage& units, EconomyStage& stage, const std::uint64_t tick) {
+    // FS-51/52; UFS-40: the batch has attached the supplied teams before their requests.
+    std::vector<EntityId> pending(created.begin(), created.end());
+    // Each request fills a team or creates one, and a born team container is itself requested, so data whose
+    // container re-creates its own team type never runs out of requests. Bound the units this call may birth:
+    // a fixed multiple of the creation batch (a stock team adds a handful per leader), so the chain ends the same
+    // way on every worker count. Exceeding it refuses the creation with a diagnostic instead of looping.
+    constexpr std::size_t births_per_created = 64;
+    const std::size_t birth_limit = births_per_created * (created.size() + 1);
+    const auto remember_births = [&](const EntityId first) -> core::Result<void> {
+        for (auto id = first; id != invalid_entity_id && id != stage.next_id;
+                id = id == std::numeric_limits<EntityId>::max() ? invalid_entity_id : id + 1) {
+            if (units.find(id) != units.end()) pending.push_back(id);
+        }
+        if (pending.size() - created.size() > birth_limit) return core::Result<void>::failure(detail::diagnostic(
+            diagnostic_codes::resource_limit, "creation default chain exceeds its birth bound: an authored default "
+            "replenishment keeps creating new teams"));
+        return core::Result<void>::success();
+    };
+    for (std::size_t begin = 0; begin < pending.size();) {
+        const auto end = pending.size();
+        for (auto index = begin; index < end; ++index) {
+            const auto id = pending[index];
+            const auto found = units.find(id);
+            const auto* profile = found != units.end() ? abilities.find(found->second.state.type_id) : nullptr;
+            const auto slot = profile ? ability_slot(*profile, AbilityKind::replenish_wingmen) : std::nullopt;
+            if (slot && profile->abilities[*slot].active_by_default) {
+                const auto first = stage.next_id;
+                const auto result = request_replenishment(id, units, stage, tick);
+                if (auto bounded = remember_births(first); !bounded) return bounded;
+                if (!result) return core::Result<void>::failure(result.error());
+            }
+        }
+        for (auto index = begin; index < end; ++index) {
+            const auto id = pending[index];
+            const auto container = units.find(id);
+            const auto* profile = container != units.end() ? abilities.find(container->second.state.type_id) : nullptr;
+            if (!profile || profile->default_member_abilities.empty()) continue;
+            const auto group = std::find_if(stage.squadrons.begin(), stage.squadrons.end(),
+                [id](const Squadron& candidate) { return candidate.container == id; });
+            if (group == stage.squadrons.end()) continue;
+        const auto members = group->members;
+        for (const auto& request : profile->default_member_abilities) {
+            const AbilitySlot container_slot;
+            const auto current = units.find(id);
+            if (current == units.end() || !ability_ready(request, container_slot, ability_gate(current->second, tick), tick)) continue;
+            const auto kind = request.kind;
+                for (const auto member : members) {
+                    const auto found = units.find(member);
+                    const auto* member_profile = found != units.end() ? abilities.find(found->second.state.type_id) : nullptr;
+                    const auto slot = member_profile ? ability_slot(*member_profile, kind) : std::nullopt;
+                    if (!slot || !found->second.abilities) continue;
+                    if (kind == AbilityKind::replenish_wingmen) {
+                        const auto first = stage.next_id;
+                        const auto result = request_replenishment(member, units, stage, tick);
+                        if (auto bounded = remember_births(first); !bounded) return bounded;
+                        if (!result) return core::Result<void>::failure(result.error());
+                        if (result.value() != RejectReason::none) break;
+                    } else {
+                        auto& holder = found->second;
+                        auto& state = holder.abilities->slots[*slot];
+                        const auto result = activate_ability(member_profile->abilities[*slot], state, ability_gate(holder, tick), tick);
+                        if (!result.changed) break;
+                        holder.formation.reset();
+                        holder.state.order = Order{OrderKind::stop, tick};
+                        if (auto stopped = plan_order(holder, StopPayload{}, tick); !stopped) return stopped;
+                    }
+                }
+            }
+        }
+        begin = end;
+    }
+    return core::Result<void>::success();
+}
+
+core::Result<RejectReason> TacticalSession::Impl::request_replenishment(const EntityId leader,
+    UnitStage& units, EconomyStage& stage, const std::uint64_t tick) {
+    const auto found = units.find(leader);
+    const auto* profile = found != units.end() ? abilities.find(found->second.state.type_id) : nullptr;
+    const auto slot = profile ? ability_slot(*profile, AbilityKind::replenish_wingmen) : std::nullopt;
+    if (!profile || !slot || !found->second.abilities)
+        return core::Result<RejectReason>::success(RejectReason::ability_unavailable);
+    const auto& ability = profile->abilities[*slot];
+    const auto& state = found->second.abilities->slots[*slot];
+    if (!ability_ready(ability, state, ability_gate(found->second, tick), tick)
+        || !motion.squadrons.find_squadron(ability.replenish_team))
+        return core::Result<RejectReason>::success(RejectReason::ability_unavailable);
+    const auto filled = replenish_wingmen(leader, ability.replenish_team, units, stage, tick);
+    if (!filled) return core::Result<RejectReason>::failure(filled.error());
+    // FS-52/WHE-63: a full team (nothing created) is a failed request that leaves the slot uncharged, so ordered
+    // member dispatch stops there.
+    if (!filled.value()) return core::Result<RejectReason>::success(RejectReason::ability_unavailable);
+    auto& current = units.at(leader).abilities->slots[*slot];
+    current.active = false;
+    current.started_tick = tick;
+    current.ready_tick = tick + ability.recharge_frames;
+    return core::Result<RejectReason>::success(RejectReason::none);
+}
+
 core::Result<bool> TacticalSession::Impl::replenish_wingmen(const EntityId leader, const TypeId team,
     UnitStage& units, EconomyStage& stage, const std::uint64_t tick) {
     using Result = core::Result<bool>;
@@ -1132,6 +1232,8 @@ std::optional<core::Result<void>> execute_economy_production(auto& impl, const P
         state->second.cooldown_until = 0;
         state->second.cooldown_start = 0;
         stage.next_id = id == std::numeric_limits<EntityId>::max() ? invalid_entity_id : id + 1;
+        const std::array<EntityId, 1> created_defaults{id};
+        if (auto defaults = impl.request_creation_defaults(created_defaults, staged, stage, tick); !defaults) return defaults;
         if (!executing_pad) events.push_back(event);
         events.push_back(Event{tick, EventKind::pad_construction_started, issuer, 0, id});
         return Void::success();
@@ -1345,6 +1447,7 @@ core::Result<void> execute_economy_reinforcement(auto& impl, const PlayerCommand
     if (auto assigned = impl.attribute_output(attribution, preferred, pool_token); !assigned)
         return finish(RejectReason::cannot_produce);
     // PU-34, PU-35: a new unit at the start of its lane, arriving at `exit`.
+    std::vector<EntityId> created_defaults;
     const auto add = [&](const TypeId type, const math::Vec3& exit, const math::Quat& facing,
                          const std::int64_t share, const bool root = false) -> core::Result<EntityId> {
         if (stage.next_id == invalid_entity_id) {
@@ -1362,6 +1465,7 @@ core::Result<void> execute_economy_reinforcement(auto& impl, const PlayerCommand
         state.control = attribution.control;
         state.controller_seat = attribution.controller_seat;
         staged.emplace(id, impl.new_unit(state, tick));
+        created_defaults.push_back(id);
         impl.adjust_owned(staged.at(id).state, true);
         // WR-32/41: a squadron's craft receive the modifier; its container does not.
         if ((impl.motion.squadrons.find_squadron(type) == nullptr || impl.motion.squadrons.find_craft(type) != nullptr)
@@ -1384,6 +1488,7 @@ core::Result<void> execute_economy_reinforcement(auto& impl, const PlayerCommand
     if (auto deployed_result = execute_reinforcement_deployment(impl, staged, stage, event, tick,
         deployed, population, squadron, solo, point, direction, rotation, arrival_yaw, add); !deployed_result)
         return deployed_result;
+    if (auto defaults = impl.request_creation_defaults(created_defaults, staged, stage, tick); !defaults) return defaults;
     if (campaign_reserve != nullptr && (campaign_reserve->purchase_type != 0 || !campaign_reserve->contained.empty())) {
         auto& carrier = staged.at(event.unit).state;
         impl.adjust_owned(carrier, false);
@@ -1448,6 +1553,8 @@ core::Result<void> TacticalSession::Impl::execute_economy(const PlayerCommand& c
             return std::move(*handled);
         if (auto handled = execute_economy_production(*this, command, tick, staged, stage, events, event, ledger, player, finish, executing_pad); handled)
             return std::move(*handled);
+        // LC-42..51: land reinforcement admits a whole company against the land cap and lands it after a delay.
+        if (setup.domain == BattleDomain::land) return execute_land_reinforcement(command, tick, staged, stage, *ledger, *player, event, events);
         return execute_economy_reinforcement(*this, command, tick, staged, stage, ledger, player, finish, event, collisions);
     }
 
@@ -1464,7 +1571,7 @@ void TacticalSession::Impl::retire_income_modifier(PlayerEconomy& account, const
 
 core::Result<void> TacticalSession::Impl::service_income_modifiers(std::vector<PlayerEconomy>& accounts,
     const std::span<const LiveUnit> live, const std::span<const std::pair<EntityId, PlayerId>> streams,
-    const std::uint64_t frame, const PartitionExecutor& executor, const bool initialization_only) {
+    const std::uint64_t frame, const PartitionExecutor& executor, const NamedAbilityLocks& locks, const bool initialization_only) {
     using Void = core::Result<void>;
     auto& references = income_service_refs;
     references.clear();
@@ -1475,6 +1582,12 @@ core::Result<void> TacticalSession::Impl::service_income_modifiers(std::vector<P
         for (std::size_t slot = 0; slot < profile->income_modifiers.size(); ++slot) {
             const auto& modifier = profile->income_modifiers[slot];
             auto& state = held.income_modifiers[slot];
+            if (!modifier.automatic || !named_ability_enabled(locks, account.player, held.type,
+                modifier.name, modifier.initially_enabled)) {
+                state.attached.clear();
+                state.initialized = false;
+                continue;
+            }
             if (residual && !modifier.reverse) continue;
             const bool due = !state.initialized || (!residual && !modifier.reverse && frame >= state.next_scan_frame);
             // Capacity planning is outside the worker phase; a repeated warmed scan adds no allocation.

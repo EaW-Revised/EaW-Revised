@@ -12,7 +12,7 @@ branch eawr/4.7.2-stable, built with `BUILD_NAME=eawr`.
 - **What happens on an unpatched engine.**
   - Test, gate, perf and rig runs refuse: they exit non-zero (the viewer exits with code 7; `--quit-after` smokes
     count as tests). The single refusal line names both hashes, e.g.
-    `official Godot detected, not our patched engine: UNPATCHED ENGINE: found sha256 c8f0a6bc… expected 194a5bbf…
+    `official Godot detected, not our patched engine: UNPATCHED ENGINE: found sha256 c8f0a6bc… expected 96c03783…
     (tools/engine_pins.json); <exe>`. The viewer prints the same `UNPATCHED ENGINE: found … expected …` part after
     `EAWR-ENGINE-UNPATCHED:`.
   - Normal play only warns: a log line, "UNPATCHED ENGINE (...)" in the window title and a red row on the perf overlay. It never aborts a match.

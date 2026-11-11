@@ -739,7 +739,7 @@ core::Result<void> GalacticSession::Impl::service_movement(std::span<const sessi
             // Transit was consumed by relink, so failure or actor loss cannot replay the action.
             if (completed.destination_actor) {
                 const auto before = events.size();
-                dispatch_ground_ability(completed.destination_actor, destination, completed.producer, completed.sequence, tick, events);
+                dispatch_ground_ability(completed.destination_actor, destination, completed.producer, completed.sequence, tick, events, true);
                 // The drop was accepted before travel: a refusal on arrival still answers the seat that issued it.
                 if (events.size() == before) events.push_back({tick, GalacticEventKind::command_rejected, completed.producer,
                     completed.destination_actor, completed.sequence, 0, GalacticRejectReason::unknown_value});

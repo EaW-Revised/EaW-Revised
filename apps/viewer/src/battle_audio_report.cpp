@@ -196,6 +196,8 @@ void BattleAudio::write_report(std::ostream& output) const {
     output << ", \"audio_preparation\": {\"preload_enabled\": " << (options_.preload ? "true" : "false")
            << ", \"wall_ms\": " << audio_prepare_wall_ms_
            << ", \"workers\": " << audio_worker_count_
+           << ", \"main_publish_ms\": " << audio_publish_ms_
+           << ", \"main_blocked_ms\": " << audio_blocked_ms_
            << ", \"deferred_runtime_requests\": " << deferred_audio_requests_
            << ", \"queue_retries\": " << audio_queue_retries_
            << ", \"pending\": " << pending_audio_.size()

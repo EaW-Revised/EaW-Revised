@@ -100,6 +100,7 @@ struct IncomePayment {
     PlayerId owner{};
     std::int64_t amount{};
     bool split{};
+    std::int64_t owner_amount{};
 };
 
 struct RespawnBatch {

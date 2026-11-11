@@ -204,12 +204,13 @@ std::optional<std::pair<EntityId, core::Diagnostic>> session_detail::Tick::PlanL
         auto round = schedule.next();
         if (round.empty()) break;
         const std::size_t count = round.size();
-        // Which jobs search now, each within the rest of its layer's budget.
+        // Resolve approach slots in the same immutable lane as searches, including a
+        // budget-empty job that will start sliced after this round (OR-28).
         std::vector<char> searches(count);
         std::vector<std::size_t> searching;
         for (std::size_t index = 0; index < count; ++index) {
             const auto& job = pending[round[index]];
-            searches[index] = !job.landing && paths.remaining(job.layer) != 0 ? 1 : 0;
+            searches[index] = !job.landing && (job.approach_centre || paths.remaining(job.layer) != 0) ? 1 : 0;
             if (searches[index] != 0) searching.push_back(index);
         }
         std::vector<CollisionWorld> worlds(count);
@@ -224,8 +225,21 @@ std::optional<std::pair<EntityId, core::Diagnostic>> session_detail::Tick::PlanL
         }
         const auto search = [&](const std::size_t index) {
             if (errors[index]) return;
-            const auto& job = pending[round[index]];
+            auto& job = pending[round[index]];
             core::tick_profile::JobScope path_job_scope("job.pending-search", job.unit, nullptr, units[index]->state.type_id);
+            if (job.approach_centre) {
+                const auto& live = *units[index];
+                const auto* footprint = tracked_footprint(phase.impl_->motion, live.state.type_id);
+                auto slot = detail::open_approach_slot(job.destination, *job.approach_centre, live.state.position,
+                    *phase.impl_->motion.avoidance, *footprint, worlds[index], job.unit, frame,
+                    live.state.order.through_hazards);
+                if (!slot) { errors[index] = slot.error(); return; }
+                // OR-28: an entirely occupied ring retains the existing planner's
+                // fallback, including guards whose range is smaller than either hull.
+                if (slot.value()) job.destination = *slot.value();
+                job.approach_centre.reset();
+            }
+            if (paths.remaining(job.layer) == 0) return;
             auto result = phase.impl_->plan_path_within(*units[index], job.destination, frame, &worlds[index], job.max_speed,
                 &work[index], paths.remaining(job.layer));
             if (!result) {
@@ -341,7 +355,7 @@ core::Result<void> session_detail::Tick::PlanLanes::plan_group(const PlayerComma
     };
     if (group.size() == 1) {
         pending.push_back({group.front(), destination, std::nullopt, layer_of(staged.at(group.front())), command.key, 0,
-            false});
+            false, {}});
         return core::Result<void>::success();
     }
     // The slot mapping reads the layers: the queued searches plan first.
@@ -394,7 +408,7 @@ core::Result<void> session_detail::Tick::PlanLanes::plan_group(const PlayerComma
         const auto& slot = slots.value()[rank];
         if (slot.delay != 0) continue;
         pending.push_back({slot.entity, slot.destination, slot.max_speed, layer_of(staged.at(slot.entity)), command.key,
-            static_cast<std::uint32_t>(rank), false});
+            static_cast<std::uint32_t>(rank), false, {}});
     }
     return core::Result<void>::success();
 }
@@ -414,7 +428,7 @@ core::Result<void> session_detail::Tick::PlanLanes::plan_approach(const EntityId
     if (footprint != nullptr) layer = dynamic_layer_index(footprint->layer);
     live.approach = Approach{plan.prediction_frame};
     if (tracking && layer) {
-        pending.push_back({unit_id, plan.slot, std::nullopt, layer.value_or(0), CommandKey{}, 0, false});
+        pending.push_back({unit_id, plan.slot, std::nullopt, layer.value_or(0), CommandKey{}, 0, false, plan.centre});
         return core::Result<void>::success();
     }
     if (auto planned = phase.impl_->plan_path(live, plan.slot, frame, nullptr, std::nullopt, nullptr); !planned) return planned;
@@ -440,7 +454,7 @@ core::Result<void> session_detail::Tick::PlanLanes::replan(const EntityId unit_i
     const auto layer_index = layer.value_or(0);
     // A tracked unit's search is a job of its lane (PC-07, PC-08).
     if (tracking && layered) {
-        pending.push_back({unit_id, target, std::nullopt, layer_index, CommandKey{}, 0, false});
+        pending.push_back({unit_id, target, std::nullopt, layer_index, CommandKey{}, 0, false, {}});
         return core::Result<void>::success();
     }
     if (auto planned = phase.impl_->plan_path(live, target, frame, nullptr, std::nullopt, nullptr); !planned) return planned;
@@ -451,6 +465,12 @@ core::Result<void> session_detail::Tick::PlanLanes::replan(const EntityId unit_i
 core::Result<void> session_detail::Tick::PlanLanes::queue_targeted_autofire() {
     auto& arrivals = phase.staging_.value().arrivals.value();
     auto& staged = phase.tracked_.value().staged.value();
+    const auto& minds = phase.craft_prep_.value().minds.value();
+    const auto attack_target = [&](const LiveUnit& unit) {
+        if (unit.combat) return unit.combat->attack_target;
+        const auto team = minds.find(unit.state.entity_id);
+        return team == minds.end() ? invalid_entity_id : team->second.target;
+    };
     if (std::none_of(phase.impl_->abilities.profiles.begin(), phase.impl_->abilities.profiles.end(), [](const auto& profile) {
             return std::any_of(profile.special.begin(), profile.special.end(), [](const auto& nested) {
                 return nested.style == SpecialActivationStyle::user_input && attack_target_ability(nested.kind).has_value();
@@ -458,7 +478,7 @@ core::Result<void> session_detail::Tick::PlanLanes::queue_targeted_autofire() {
         })) return core::Result<void>::success();
     std::vector<const LiveUnit*> holders;
     for (const auto& [id, unit] : staged) {
-        if (unit.abilities && unit.combat && unit.combat->attack_target != invalid_entity_id
+        if (unit.abilities && (unit.combat || phase.impl_->lucky_slot(unit)) && attack_target(unit) != invalid_entity_id
             && !arrivals.contains(id)) holders.push_back(&unit);
     }
     if (holders.empty()) return core::Result<void>::success();
@@ -474,18 +494,25 @@ core::Result<void> session_detail::Tick::PlanLanes::queue_targeted_autofire() {
                 && std::binary_search(phase.impl_->basic_ai.begin(), phase.impl_->basic_ai.end(), unit.state.owner);
             if (departed && !takeover) continue;
             const auto* profile = phase.impl_->abilities.find(unit.state.type_id);
-            const auto target = staged.find(unit.combat->attack_target);
+            const auto target = staged.find(attack_target(unit));
             if (profile == nullptr || target == staged.end() || target->first == id) continue;
             const bool human = phase.impl_->abilities.human(unit.state.owner);
             for (const auto& candidate : profile->special) {
                 const auto served = candidate.style == SpecialActivationStyle::user_input
                     ? attack_target_ability(candidate.kind) : std::nullopt;
                 if (!served) continue;
+                if (!unit.combat && *served != AbilityKind::lucky_shot) continue;
                 const auto slot = ability_slot(*profile, *served);
                 if (!slot) continue;
                 const auto& state = unit.abilities->slots[*slot];
                 if (state.active || (human && !state.autofire)) continue;
-                if (*served != AbilityKind::concentrate_fire) {
+                if (*served == AbilityKind::lucky_shot) {
+                    if ((state.lucky_autofire_set && !state.autofire)
+                        || phase.impl_->lucky_profile(unit) != &candidate
+                        || !ability_ready(profile->abilities[*slot], state, phase.impl_->ability_gate(unit, phase.tick), phase.tick)
+                        || !phase.impl_->lucky_target_valid(unit, target->second)
+                        || !phase.impl_->lucky_in_range(unit, target->second)) continue;
+                } else if (*served != AbilityKind::concentrate_fire) {
                     const auto* beam = phase.impl_->beam_profile(unit, *served);
                     if (beam != &candidate || !phase.impl_->beam_usable(unit, *served, phase.tick)
                         || !phase.impl_->beam_target_valid(unit, target->second, *beam)
@@ -615,7 +642,7 @@ core::Result<void> session_detail::Tick::PlanLanes::prepare_paths() {
             const auto sliced = wait.sliced ? phase.impl_->searches.find(std::get<2>(entry)) : phase.impl_->searches.end();
             const bool landing = sliced != phase.impl_->searches.end() && sliced->second.frame == frame;
             pending.push_back({std::get<2>(entry), wait.destination, wait.max_speed,
-                *dynamic_layer_index(tracked_footprint(table, live.state.type_id)->layer), wait.order, wait.rank, landing});
+                *dynamic_layer_index(tracked_footprint(table, live.state.type_id)->layer), wait.order, wait.rank, landing, {}});
         }
     }
 
@@ -886,7 +913,7 @@ core::Result<void> session_detail::Tick::PlanLanes::finish() {
                 std::optional<std::size_t> layer;
                 if (footprint) layer = dynamic_layer_index(footprint->layer);
                 if (tracking && layer) {
-                    pending.push_back({move.unit, move.destination, std::nullopt, *layer, CommandKey{}, 0, false});
+                    pending.push_back({move.unit, move.destination, std::nullopt, *layer, CommandKey{}, 0, false, {}});
                 } else {
                     if (auto planned = phase.impl_->plan_order(live, MovePayload{move.destination}, frame); !planned) return planned;
                     if (layer && live.motion) {
@@ -1049,6 +1076,9 @@ core::Result<void> session_detail::Tick::PlanLanes::scripted_damage(const Player
             if (!amount) return core::Result<void>::failure(amount.error());
             redirected = apply_damage(*recipient_profile, *live.durability, hull_target, amount.value());
         }
+        if (redirected.invalid_target)
+            return core::Result<void>::failure(detail::diagnostic(diagnostic_codes::invalid_setup,
+                "damage target disagrees with durability state"));
         phase.impl_->track_damage(live, hull_before, shields_before);
         phase.record_damage_change(live, hull_before);
         if (redirected.unit_destroyed) {
@@ -1076,7 +1106,9 @@ core::Result<void> session_detail::Tick::PlanLanes::scripted_damage(const Player
         hit.take_damage_multiplier = unit->second.take_damage_mode;
         auto applied = apply_hit(*profile, *damage_rules, *unit->second.durability, hit, phase.tick);
         if (!applied) {
-            return core::Result<void>::failure(detail::diagnostic(diagnostic_codes::worker_failure,
+            const auto code = applied.error().code == diagnostic_codes::invalid_setup
+                ? diagnostic_codes::invalid_setup : diagnostic_codes::worker_failure;
+            return core::Result<void>::failure(detail::diagnostic(code,
                 command_context(command.key) + " unit " + std::to_string(unit_id) + ": "
                     + applied.error().message));
         }
@@ -1087,6 +1119,9 @@ core::Result<void> session_detail::Tick::PlanLanes::scripted_damage(const Player
         if (!amount) return core::Result<void>::failure(amount.error());
         outcome = apply_damage(*profile, *unit->second.durability, damage->hardpoint, amount.value());
     }
+    if (outcome.invalid_target)
+        return core::Result<void>::failure(detail::diagnostic(diagnostic_codes::invalid_setup,
+            "damage target disagrees with durability state"));
     // WCC-54/82: raw scripted damage is tracked even without the optional damage rules.
     phase.impl_->track_damage(unit->second, hull_before, shields_before);
     phase.record_damage_change(unit->second, hull_before);

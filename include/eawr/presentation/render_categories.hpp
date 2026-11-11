@@ -116,6 +116,15 @@ struct Sample final {
     std::uint64_t eligible_units{}, compatible_groups{}, grouped_units{}, potential_colour_saving{}, group_hidden_units{};
     std::uint64_t band_hidden_instances{}, unclassified_hull_surfaces{}, named_hull_surfaces{};
     std::uint64_t declared_turret_surfaces{}, other_hull_surfaces{};
+    // Rest-pose multimesh yield (per-piece key, bind-pose palette, opaque, no billboard):
+    // colour-pass surfaces that one draw per group would remove; shadow figure is per cascade.
+    std::uint64_t t1_visible_pieces{}, t1_visible_surfaces{}, t1_eligible_pieces{}, t1_groups{};
+    std::uint64_t t1_collapsed_surfaces{}, t1_collapsed_shadow_surfaces{};
+    std::uint64_t t1_excluded_pass{}, t1_excluded_billboard{}, t1_excluded_proxy{}, t1_excluded_pose{};
+    // Instanced hulls (opt-in): live groups, pieces drawn through them and the colour surfaces that saves.
+    bool batch_enabled{}, batch_active{};
+    std::uint64_t batch_groups{}, batch_members{}, batch_collapsed_surfaces{}, batch_joins{}, batch_leaves{};
+    std::uint64_t batch_sticky{}, batch_flushes{}, batch_repairs{}, batch_key_builds{};
     std::uint64_t frame{};
     std::uint64_t viewport{};
     std::array<Counts, role_count> roles{};
@@ -167,6 +176,11 @@ inline void write_json(std::ostream& out, const Sample& sample) {
         << ",\"requested_casters\":" << sample.fighter_requested_casters
         << ",\"impostor_candidates\":" << sample.fighter_impostor_candidates
         << ",\"impostor_quads\":" << sample.fighter_impostor_quads << '}';
+    if (sample.batch_enabled) out << ",\"batching\":{\"active\":" << sample.batch_active << ",\"groups\":" << sample.batch_groups
+        << ",\"members\":" << sample.batch_members << ",\"collapsed_surfaces\":" << sample.batch_collapsed_surfaces
+        << ",\"joins\":" << sample.batch_joins << ",\"leaves\":" << sample.batch_leaves
+        << ",\"sticky\":" << sample.batch_sticky << ",\"flushes\":" << sample.batch_flushes
+        << ",\"repairs\":" << sample.batch_repairs << ",\"key_builds\":" << sample.batch_key_builds << '}';
     if (ablation != "off") out << ",\"ablation\":\"" << ablation << '"';
     if (ablation != "off") out << ",\"diagnostic\":{\"cutoff\":" << band_cutoff()
         << ",\"band_hidden_instances\":" << sample.band_hidden_instances
@@ -178,7 +192,14 @@ inline void write_json(std::ostream& out, const Sample& sample) {
         << ",\"unclassified_hull_surfaces\":" << sample.unclassified_hull_surfaces
         << ",\"named_hull_surfaces\":" << sample.named_hull_surfaces
         << ",\"declared_turret_surfaces\":" << sample.declared_turret_surfaces
-        << ",\"other_hull_surfaces\":" << sample.other_hull_surfaces << '}';
+        << ",\"other_hull_surfaces\":" << sample.other_hull_surfaces
+        << ",\"rest_pose_batching\":{\"visible_pieces\":" << sample.t1_visible_pieces
+        << ",\"visible_surfaces\":" << sample.t1_visible_surfaces
+        << ",\"eligible_pieces\":" << sample.t1_eligible_pieces << ",\"groups\":" << sample.t1_groups
+        << ",\"collapsed_surfaces\":" << sample.t1_collapsed_surfaces
+        << ",\"collapsed_shadow_surfaces\":" << sample.t1_collapsed_shadow_surfaces
+        << ",\"excluded_pass\":" << sample.t1_excluded_pass << ",\"excluded_billboard\":" << sample.t1_excluded_billboard
+        << ",\"excluded_proxy\":" << sample.t1_excluded_proxy << ",\"excluded_pose\":" << sample.t1_excluded_pose << "}}";
     out << "}";
 }
 class Source final {

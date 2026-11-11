@@ -175,7 +175,7 @@ core::Result<void> validate_replay(const GalacticReplay& replay) {
         const auto& effect = replay.native_effects[i];
         if (effect.sequence != i + 1 || effect.frontier > replay.final_tick_count
             || effect.phase > NativeEffectPhase::world_service || effect.kind < NativeEffectKind::fleet
-            || effect.kind > NativeEffectKind::identity_reservation
+            || effect.kind > NativeEffectKind::story_ai_usage
             || (effect.phase == NativeEffectPhase::world_service && effect.frontier == replay.final_tick_count)
             || effect.payload.size() > galactic_replay_max_payload)
             return fail<void>(diagnostic_codes::replay_order, "invalid native effect framing, phase or frontier");
@@ -192,7 +192,7 @@ core::Result<void> validate_replay(const GalacticReplay& replay) {
     return core::Result<void>::success();
 }
 
-core::Result<std::vector<std::uint8_t>> write_replay(const GalacticReplay& replay) {
+core::Result<std::vector<std::uint8_t>> write_replay(const GalacticReplay& replay, OfferPool* const pool) {
     using Bytes = std::vector<std::uint8_t>;
     if (auto valid = validate_replay(replay); !valid) return core::Result<Bytes>::failure(valid.error());
     const auto& setup = replay.setup;
@@ -247,7 +247,9 @@ core::Result<std::vector<std::uint8_t>> write_replay(const GalacticReplay& repla
         detail::put_bytes(bytes, payload);
     }
     if (setup.production) {
-        Bytes payload; detail::encode_production(payload, *setup.production);
+        Bytes payload;
+        if (pool) detail::encode_production_pooled(payload, *setup.production, *pool);
+        else detail::encode_production(payload, *setup.production);
         detail::put_u16(bytes, production_tag); detail::put_u32(bytes, static_cast<std::uint32_t>(payload.size()));
         detail::put_bytes(bytes, payload);
     }
@@ -508,7 +510,7 @@ core::Result<void> parse_fiscal_contributions(sim::detail::Reader& input, Fiscal
     if (!count(rows, 17) || rows != fiscal.planets.size()) return malformed("bad fiscal alignment planet count");
     for (std::uint32_t i = 0; i < rows; ++i) {
         IncomePlanet row; std::uint8_t alignment{}; std::int64_t strength{};
-        if (!input.read_u64(row.planet) || !input.read_u8(alignment) || alignment > 2 || !input.read_i64(strength))
+        if (!input.read_u64(row.planet) || !input.read_u8(alignment) || alignment > 3 || !input.read_i64(strength))
             return malformed("bad fiscal planet alignment");
         row.alignment = static_cast<IncomeAlignment>(alignment); row.strength = math::Fixed::from_raw(strength); contribution_rules.planets.push_back(row);
     }
@@ -574,7 +576,7 @@ core::Result<void> parse_replay_extensions(sim::detail::Reader& reader, Galactic
     std::vector<std::pair<RouteId, math::Fixed>>& route_factors,
     std::vector<std::pair<FleetId, std::uint8_t>>& fleet_slots,
     std::vector<std::pair<FleetId, FleetMotion>>& fleet_motions,
-    const std::string_view logical_path) {
+    const std::string_view logical_path, const OfferPool* const pool) {
     using Out = void;
     const auto malformed = [&](const std::string& what) {
         return fail<Out>(diagnostic_codes::replay_malformed, what, logical_path);
@@ -642,7 +644,7 @@ core::Result<void> parse_replay_extensions(sim::detail::Reader& reader, Galactic
             if (auto parsed = parse_outcomes_extension(input, setup, count, logical_path); !parsed)
                 return core::Result<Out>::failure(parsed.error());
         } else if (tag == production_tag) {
-            auto decoded = detail::decode_production(payload);
+            auto decoded = detail::decode_production(payload, pool);
             if (!decoded) return malformed("invalid production extension");
             setup.production = std::move(*decoded);
             continue;
@@ -876,7 +878,8 @@ core::Result<void> parse_replay_header(sim::detail::Reader& reader, GalacticRepl
 
 } // namespace
 
-core::Result<GalacticReplay> parse_replay(const std::span<const std::uint8_t> bytes, const std::string_view logical_path) {
+core::Result<GalacticReplay> parse_replay(const std::span<const std::uint8_t> bytes, const std::string_view logical_path,
+    const OfferPool* const pool) {
     using Out = GalacticReplay;
     const auto malformed = [&](const std::string& what) {
         return fail<Out>(diagnostic_codes::replay_malformed, what, logical_path);
@@ -900,7 +903,7 @@ core::Result<GalacticReplay> parse_replay(const std::span<const std::uint8_t> by
     std::vector<std::pair<FleetId, std::uint8_t>> fleet_slots;
     std::vector<std::pair<FleetId, FleetMotion>> fleet_motions;
     if ((flags & flag_header_extensions) != 0) {
-        if (auto parsed = parse_replay_extensions(reader, replay, route_factors, fleet_slots, fleet_motions, logical_path); !parsed)
+        if (auto parsed = parse_replay_extensions(reader, replay, route_factors, fleet_slots, fleet_motions, logical_path, pool); !parsed)
             return core::Result<Out>::failure(parsed.error());
     }
     // Counts are bounded before anything is reserved, so a hostile count cannot allocate.

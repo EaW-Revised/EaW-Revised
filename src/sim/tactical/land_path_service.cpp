@@ -1,3 +1,4 @@
+#include "land_phase_internal.hpp"
 #include "land_path_internal.hpp"
 
 #include <algorithm>
@@ -82,7 +83,7 @@ core::Result<LandSliceReport> LandSliceScheduler::run(const PartitionExecutor& e
     report.admitted = admitted_.size();
     before_.resize(admitted_.size());
     for (std::size_t i = 0; i < admitted_.size(); ++i) before_[i] = admitted_[i]->expansions();
-    const auto executed = executor.execute_phase("land-path-slices", tick_partition_count, [this, slice](const std::size_t partition) {
+    const auto executed = land_phase(executor, "land-path-slices", tick_partition_count, [this, slice](const std::size_t partition) {
         const auto range = partition_range(partition, admitted_.size());
         for (auto index = range.begin; index < range.end; ++index) admitted_[index]->run(slice);
     });

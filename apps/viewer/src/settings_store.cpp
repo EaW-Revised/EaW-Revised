@@ -188,7 +188,7 @@ void update_frame_pacing(const ui::VideoSettings& video, const bool menu) {
     godot::Engine* engine = godot::Engine::get_singleton();
     if (display == nullptr || engine == nullptr) return;
     const double hz = display->screen_get_refresh_rate(display->window_get_current_screen());
-    const int refresh = std::isfinite(hz) && hz >= 30.0 && hz <= 1000.0 ? static_cast<int>(hz) : 60;
+    const double refresh = std::isfinite(hz) && hz >= 30.0 && hz <= 1000.0 ? hz : -1.0;
     const bool focused = display->window_is_focused()
         && display->window_get_mode() != godot::DisplayServer::WINDOW_MODE_MINIMIZED;
     auto effective = video;

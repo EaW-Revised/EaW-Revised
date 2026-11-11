@@ -7,6 +7,8 @@ set(EAWR_CAMPAIGN_SOURCES
     "${CMAKE_CURRENT_LIST_DIR}/galactic_ai_stock_runtime.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/galactic_ai_usability.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/galactic_ai_services.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/galactic_ai_lane_inbox.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/galactic_world_immediate_host.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/ai_selection_content.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/ai_perception_content.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/game_session.cpp"

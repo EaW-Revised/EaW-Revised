@@ -37,7 +37,7 @@ $commit = (& git -C $repoRoot rev-parse "$Ref^{commit}").Trim()
 $table = Get-RigHostTable
 $cand = @(Select-RigHost -Table $table -Machine @($Machine) -Kind suite)
 if ($cand.Count -ne 1) { throw "expected exactly one host for -Machine $Machine, got $($cand.Count)" }
-if ($cand[0].Connection -eq 'local') { throw 'never the local workstation' }
+if (Test-RigFrameCapGuarded $cand[0]) { throw 'never the local workstation or a frame-cap guarded host' }
 $savedOffloadOnly = $env:EAWR_OFFLOAD_ONLY
 # The staged archive and the checkout are removed on every exit (success, failed verdict or an error part-way) once the
 # evidence is fetched; if the suite ran but its evidence could not be copied back, the checkout and host folder stay for diagnosis.

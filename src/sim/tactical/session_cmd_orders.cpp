@@ -116,6 +116,9 @@ core::Result<void> session_detail::Tick::CommandOrders::apply(
         const auto holder = member == membership.end() ? unit_id : member->second;
         const auto stopped = apply_ability(holder, AbilityPayload{AbilityKind::hunt, AbilityAction::deactivate});
         if (!stopped) return core::Result<void>::failure(stopped.error());
+        // WLK-04: an accepted Stop releases the holder's unspent target lock too.
+        if (const auto parent = staged.find(holder); parent != staged.end()) impl->end_lucky_shot(parent->second, command_tick);
+        if (holder != unit_id) impl->end_lucky_shot(live, command_tick);
     }
     // WSQ-59 (#741): a move given to one craft of a squadron changes nothing on the
     // craft (its order, targets and flight stay); only the cancellations below apply.
@@ -145,6 +148,8 @@ core::Result<void> session_detail::Tick::CommandOrders::apply(
                 if (const auto holder = staged.find(member_id); holder != staged.end()) cancel_hunt(holder->second);
             }
         }
+        if (parent != staged.end()) impl->end_lucky_shot(parent->second, command_tick);
+        if (parent_id != unit_id) impl->end_lucky_shot(live, command_tick);
         auto* team = parent != staged.end() ? impl->ion_slot(parent->second) : nullptr;
         if (team != nullptr && team->active && minds.find(parent_id) != minds.end()) {
             const auto squadron = std::find_if(impl->squadrons.begin(), impl->squadrons.end(),

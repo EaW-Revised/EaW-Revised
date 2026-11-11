@@ -567,6 +567,77 @@ void crusader_probe(const std::filesystem::path& root) {
     expect(replayed && replayed.value() == runs.front().world_hashes, "WLD-10: the Crusader battle replays without the script");
 }
 
+// OR-U1 regression: matrix case 10, two nearby capitals attacking one held target.
+// Check the loaded hardpoint geometry: centre distance alone can admit a parked ship
+// even while every actual aim point is beyond reach.
+static int capital_blocked_slot(const Content& content) {
+    namespace math = eawr::sim::math;
+    using math::Fixed;
+    const auto whole = [](const std::int64_t n) { return Fixed::from_raw(n * Fixed::scale); };
+    const auto number = [](const Fixed value) { return static_cast<double>(value.raw()) / Fixed::scale; };
+    const auto home = skirmish::type_id("Home_One");
+    const auto destroyer = skirmish::type_id("Star_Destroyer");
+    const auto* attacker = content.content.combat.find(home);
+    const auto* target = content.content.combat.find(destroyer);
+    const auto* footprint = content.content.combat.footprint(destroyer);
+    expect(attacker && attacker->max_attack_distance && target && footprint, "4466 case 10: stock profiles exist");
+    if (!attacker || !attacker->max_attack_distance || !target || !footprint) return 1;
+    std::vector<tactical::SensorProfile> sensors{{home, whole(10000)}, {destroyer, whole(10000)}};
+    std::sort(sensors.begin(), sensors.end(), [](const auto& a, const auto& b) { return a.type_id < b.type_id; });
+    tactical::TacticalReplay replay;
+    replay.setup.seed = 4466;
+    replay.setup.content_identity.fill(0x46);
+    replay.setup.players = {{1, 1, 1, tactical::player_flag_commandable}, {2, 2, 2, tactical::player_flag_commandable}};
+    replay.setup.units = {
+        {1, home, 1, {{}, whole(-100), whole(-290)}, tactical::yaw_rotation({}).value(), {}},
+        {2, home, 1, {{}, whole(100), whole(-290)}, tactical::yaw_rotation({}).value(), {}},
+        {4, destroyer, 2, {whole(3000), {}, whole(-290)}, tactical::yaw_rotation(whole(180)).value(), {}},
+    };
+    replay.commands = {{{30, 1, 0}, {1, 2}, tactical::AttackPayload{4, tactical::attack_hull}}};
+    replay.final_tick_count = 3600;
+    const auto transform = math::to_matrix(replay.setup.units.back().rotation, replay.setup.units.back().position);
+    if (!transform) return 1;
+    std::vector<math::Vec3> aim_points;
+    for (const auto& point : target->hardpoints) {
+        if (!point.targetable) continue;
+        const auto placed = math::transform_point(transform.value(), point.position);
+        if (!placed) return 1;
+        aim_points.push_back(placed.value());
+    }
+    expect(!aim_points.empty(), "4466 case 10: held target has targetable hardpoints");
+    if (aim_points.empty()) return 1;
+    const auto reach = number(*attacker->max_attack_distance) + number(footprint->radius);
+    std::vector<std::string> reference;
+    for (const std::size_t workers : {1U, 8U}) {
+        auto created = tactical::TacticalSession::from_replay(replay, sensors, {}, content.content.motion,
+            std::nullopt, content.content.combat);
+        expect(static_cast<bool>(created), "4466 case 10: session starts");
+        if (!created) return 1;
+        auto session = std::move(created).value();
+        const eawr::platform::ThreadWorkerAdapter executor(workers);
+        std::vector<std::string> hashes;
+        for (std::uint64_t tick = 0; tick < replay.final_tick_count; ++tick) {
+            const auto stepped = session.step(executor);
+            if (!stepped) { std::cerr << stepped.error().message << '\n'; return 1; }
+            hashes.push_back(session.state_sha256());
+        }
+        for (const auto& unit : session.units()) {
+            if (unit.entity_id > 2) continue;
+            double gap = 1e30;
+            for (const auto& point : aim_points) {
+                gap = std::min(gap, std::hypot(number(unit.position.x) - number(point.x),
+                    number(unit.position.y) - number(point.y)));
+            }
+            std::cout << "case10 workers=" << workers << " unit=" << unit.entity_id << " nearest_aim=" << gap
+                      << " reach=" << reach << '\n';
+            expect(gap <= reach, "4466 case 10: each capital finishes in reach of an actual target hardpoint");
+        }
+        if (reference.empty()) reference = std::move(hashes);
+        else expect(hashes == reference, "4466 case 10: every tick matches on 1 and 8 workers");
+    }
+    return failures == 0 ? 0 : 1;
+}
+
 // #4466: installed capital geometry, three ships closing on one held target.
 // No durability keeps the target alive; no scripts or economy can replace the attack.
 int capital_avoidance_probe(const std::filesystem::path& root) {
@@ -651,7 +722,8 @@ int capital_avoidance_probe(const std::filesystem::path& root) {
             expect(final_distance[index] <= reach, "4466: every capital finishes within weapon reach by 120 seconds");
         }
     }
-    return failures == 0 ? 0 : 1;
+    const auto blocked_result = capital_blocked_slot(*content);
+    return failures == 0 ? blocked_result : 1;
 }
 
 } // namespace foc_ai_test_support

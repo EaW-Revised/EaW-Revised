@@ -3,6 +3,7 @@
 // side (the HUD, the brackets and the held image in a live battle) is test_battle_input.py.
 
 #include "eawr/presentation/ui/overview_ui.hpp"
+#include "eawr/presentation/ui/production.hpp"
 #include "ui_test_support.hpp"
 
 #include <cmath>
@@ -27,6 +28,27 @@ void test_visibility() {
     expect(!on.unit_brackets, "V-5d: the unit brackets hide in the overview");
     expect(on.world_markers, "V-5e: squadron icons, reticles, circles, the drag box and the pointer stay");
     expect(!on.distance_fog, "V-5f: the distance fog is off in the overview");
+}
+
+void test_reinforcement_during_movie() {
+    for (const bool initially_open : {false, true}) {
+        bool pane_open = initially_open;
+        bool dragging = true;
+        const auto update = [&](bool movie) {
+            const auto shell = ui::overview_ui(movie).tactical_shell;
+            ui::apply_reinforcement_availability(ui::reinforcement_available(true, shell, movie, false),
+                [&] { pane_open = false; }, [&] { dragging = false; });
+            return shell && pane_open;
+        };
+        expect(update(false) == initially_open, "initial pane state is shown");
+        expect(!update(true), "movie hides the pane");
+        expect(update(false) == initially_open, "movie exit preserves the prior pane state");
+        ui::apply_reinforcement_availability(false, [&] { pane_open = false; }, [&] { dragging = false; });
+        expect(!pane_open && !dragging, "lost eligibility closes the pane and cancels the drag");
+    }
+    expect(!ui::reinforcement_available(true, false, false, false), "overview still closes the pane");
+    expect(!ui::reinforcement_available(false, false, true, false), "movie does not override game restrictions");
+    expect(!ui::reinforcement_available(true, false, true, true), "movie does not enable land reinforcement");
 }
 
 void test_fade() {
@@ -57,6 +79,7 @@ void test_fade() {
 
 int main() {
     test_visibility();
+    test_reinforcement_during_movie();
     test_fade();
     if (test::ui::failures() != 0) {
         std::cerr << test::ui::failures() << " overview UI check(s) failed\n";

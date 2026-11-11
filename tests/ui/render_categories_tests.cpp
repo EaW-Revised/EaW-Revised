@@ -162,6 +162,18 @@ int main() {
     expect(json.str().find("\"viewport_draws\"") != std::string::npos
         && json.str().find("\"retained_surfaces\"") != std::string::npos,
         "report names separate actual draws and retained surfaces");
+    expect(json.str().find("rest_pose_batching") == std::string::npos, "flag-off report keeps the production schema");
+    {
+        categories::Sample yield;
+        yield.t1_groups = 2; yield.t1_collapsed_surfaces = 30; yield.t1_collapsed_shadow_surfaces = 12;
+        categories::ablation = "none";
+        std::ostringstream diagnostic;
+        categories::write_json(diagnostic, yield);
+        categories::ablation = "off";
+        expect(diagnostic.str().find("\"rest_pose_batching\":{\"visible_pieces\":0") != std::string::npos
+            && diagnostic.str().find("\"collapsed_surfaces\":30,\"collapsed_shadow_surfaces\":12") != std::string::npos
+            && diagnostic.str().back() == '}', "diagnostic report carries the rest-pose batching yield");
+    }
 
     // A warmed diagnostic traversal, not a GPU/frame speedup. Production also
     // records the complete sampler cost (including viewport queries) per frame.

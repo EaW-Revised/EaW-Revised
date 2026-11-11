@@ -5,6 +5,8 @@
 #include "eawr/core/load_profile.hpp"
 #include "live_session_view.hpp"
 #include "perf_trace.hpp"
+#include "skirmish_save_hints.hpp"
+#include "eawr/checkpoint/checkpoint.hpp"
 
 #include "battle_source_internal.hpp"
 #include "battle_source_draw.hpp"
@@ -461,11 +463,6 @@ bool LiveSessionView::start(std::string& failure) {
         failure = "battle saves need a solo local space battle with the AI (not LAN, replay, land or a campaign battle)";
         return false;
     }
-    if (loading && !options_.inputs.empty()) {
-        // Scripted gestures fire by shown tick; those before the saved tick would all fire on the first frame.
-        failure = "--eawr-live-input is not available with --eawr-live-load";
-        return false;
-    }
     std::vector<std::uint8_t> checkpoint;
     if (loading) {
         std::ifstream input(options_.load_path, std::ios::binary);
@@ -474,6 +471,30 @@ bool LiveSessionView::start(std::string& failure) {
             return false;
         }
         checkpoint.assign(std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>());
+        const auto input_header = eawr::checkpoint::parse_checkpoint(checkpoint);
+        if (!input_header) { failure = core::format_diagnostic(input_header.error()); return false; }
+        if (std::any_of(options_.inputs.begin(), options_.inputs.end(), [&](const auto& gesture) {
+                return !gesture.frame && gesture.tick <= input_header.value().header.completed_tick;
+            })) {
+            failure = "--eawr-live-input tick must be after the saved tick";
+            return false;
+        }
+        if (scoring_) {
+            auto container = eawr::checkpoint::parse_checkpoint(checkpoint);
+            if (container) if (const auto* section = container.value().find(eawr::checkpoint::SectionId::presentation_hints)) {
+                const auto hints = viewer::decode_skirmish_save_hints(section->bytes);
+                if (hints && !hints->scoring.empty()) {
+                    auto candidate = scoring_->fresh();
+                    if (!candidate) {
+                        godot::UtilityFunctions::printerr("EAWR battle scoring restore: ", godot::String::utf8(core::format_diagnostic(candidate.error()).c_str()));
+                    } else if (auto restored = candidate.value()->load(hints->scoring); !restored) {
+                        godot::UtilityFunctions::printerr("EAWR battle scoring restore: ", godot::String::utf8(core::format_diagnostic(restored.error()).c_str()));
+                    } else {
+                        scoring_ = std::move(candidate).value();
+                    }
+                }
+            }
+        }
     }
     platform::LiveSession::Options session_options;
     session_options.load_note_sink = [](std::span<const core::LoadNote> notes) {
@@ -618,6 +639,7 @@ bool LiveSessionView::start(std::string& failure) {
         // The loaded battle continues at its saved tick: the local scheduler, the driven clock and
         // --eawr-live-ticks (which counts from here) start there, and the first frame composes every arrival.
         loaded_tick_ = live.value()->completed_tick();
+        godot::UtilityFunctions::print("EAWR skirmish save loaded at tick ", static_cast<int64_t>(loaded_tick_));
         scheduler_ = std::make_shared<ui::CommandScheduler>(player_, live.value()->next_sequence(player_), loaded_tick_,
             std::function<std::uint64_t()>{}, setup_->controllers ? options_.controller_seat : sim::SeatId{});
         order_input_ = std::make_unique<ui::OrderInput>(*scheduler_);

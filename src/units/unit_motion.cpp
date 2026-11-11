@@ -434,7 +434,8 @@ void append_spawner_motion_profiles(const UnitTables& tables, tactical::MotionTa
     };
     for (const auto& unit : tables.units) {
         if (!type_selection.keeps(unit)) continue;
-        if (!unit.spawner || (unit.kind != UnitKind::ship && unit.kind != UnitKind::station)) continue;
+        if (!unit.spawner || (unit.kind != UnitKind::ship && unit.kind != UnitKind::craft
+                && unit.kind != UnitKind::station)) continue;
         tactical::SpawnerProfile spawner;
         spawner.type_id = assets::object_type_crc(unit.id);
         const auto entries = [&](const auto& starting, const auto& reserves) {
@@ -456,11 +457,8 @@ void append_spawner_motion_profiles(const UnitTables& tables, tactical::MotionTa
                 row.ship = ship;
                 row.arrival = ship && spawned->campaign_hyperspace;
                 row.starting = entry.count;
-                // SK-36 (owner, #179 Q2): the M2 fixture ignores Reserve_Spawned_Units_Tech_0, so each
-                // entry launches its starting squadrons once and a lost one is not replaced. The
-                // hangar keeps the retail reserve rule (FL-02, FL-08) for a table that sets one.
                 row.reserve = 0;
-                if (campaign) {
+                if (campaign || spawn_policy.mode == SpawnPolicy::Mode::skirmish) {
                     const auto reserve = std::find_if(reserves.begin(), reserves.end(), [&](const auto& candidate) {
                         return assets::object_type_crc(candidate.squadron) == id;
                     });
@@ -491,7 +489,7 @@ void append_spawner_motion_profiles(const UnitTables& tables, tactical::MotionTa
                 times(axis.z, flyout, unit.id + " bay")});
             spawner.bays.push_back(bay);
         }
-        spawner.mobile = unit.kind == UnitKind::ship;
+        spawner.mobile = unit.kind != UnitKind::station;
         // WSL-26: the registered station role is DUMMY_STAR_BASE in either
         // behavior list; STARBASE is not a registered behavior alias.
         const auto starbase = [](const auto& names) {
@@ -500,18 +498,32 @@ void append_spawner_motion_profiles(const UnitTables& tables, tactical::MotionTa
         spawner.starbase = starbase(unit.footprint.hazard.behavior) || starbase(unit.footprint.hazard.space_behavior);
         const bool base_present = !spawner.entries.empty() || (spawner.starbase && !spawner.bays.empty());
         bool campaign_launches = false;
-        if (campaign) for (const auto& owner : spawn_policy.owners) {
-            const auto select = [&](const auto& tiers, const auto& fallback) -> const std::vector<SpawnEntry>& {
+        const auto select = [&](const auto& tiers, const auto& fallback, const unsigned selected_tech) -> const std::vector<SpawnEntry>& {
                 const bool authored = std::any_of(tiers.begin(), tiers.end(), [](const auto& rows) { return !rows.empty(); });
                 if (!authored) return fallback; // explicit synthetic Tech0 profiles
-                for (auto tech = static_cast<int>(owner.tech); tech >= 0; --tech)
+                for (auto tech = static_cast<int>(selected_tech); tech >= 0; --tech)
                     if (!tiers[static_cast<std::size_t>(tech)].empty()) return tiers[static_cast<std::size_t>(tech)];
                 static const std::vector<SpawnEntry> empty;
                 return empty;
-            };
+        };
+        if (spawn_policy.mode == SpawnPolicy::Mode::skirmish) {
+            std::array<tactical::SpawnerProfile, 7> tiers;
+            bool any = false;
+            for (unsigned tech = 0; tech < 6; ++tech) {
+                tiers[tech] = spawner;
+                tiers[tech].entries = entries(select(unit.spawner->campaign_starting, unit.spawner->starting, tech),
+                    select(unit.spawner->campaign_reserves, unit.spawner->reserves, tech));
+                any = any || !tiers[tech].entries.empty();
+            }
+            tiers[6] = spawner;
+            tiers[6].entries.clear();
+            if (any) squadrons.tech_spawners.emplace(spawner.type_id, std::move(tiers));
+            campaign_launches = any && !spawner.bays.empty();
+        }
+        if (campaign) for (const auto& owner : spawn_policy.owners) {
             auto selected = spawner;
-            selected.entries = entries(select(unit.spawner->campaign_starting, unit.spawner->starting),
-                select(unit.spawner->campaign_reserves, unit.spawner->reserves));
+            selected.entries = entries(select(unit.spawner->campaign_starting, unit.spawner->starting, owner.tech),
+                select(unit.spawner->campaign_reserves, unit.spawner->reserves, owner.tech));
             if (!selected.entries.empty() && !spawner.bays.empty()) campaign_launches = true;
             // An empty selected tier overrides a populated base profile as well.
             if (base_present || !selected.entries.empty())
@@ -534,7 +546,7 @@ void append_spawner_motion_profiles(const UnitTables& tables, tactical::MotionTa
                                                    : "the type has a starting complement but no fighter bay hardpoint; the hangar launches nothing";
             load_notes.append(std::move(note));
         }
-        if (base_present) squadrons.spawners.push_back(std::move(spawner));
+        if (base_present || campaign_launches) squadrons.spawners.push_back(std::move(spawner));
     }
     std::sort(squadrons.spawners.begin(), squadrons.spawners.end(),
               [](const auto& left, const auto& right) { return left.type_id < right.type_id; });

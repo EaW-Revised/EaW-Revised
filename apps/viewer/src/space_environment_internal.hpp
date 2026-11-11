@@ -36,6 +36,7 @@
 
 #include <algorithm>
 #include <array>
+#include <optional>
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
@@ -319,6 +320,8 @@ public:
     void camera_pointer_left();
     void camera_sample_pointer(float x, float y);
     void camera_clear_pointer_sample();
+    [[nodiscard]] std::optional<std::array<float, 2>> camera_pointer_hold() const;
+    [[nodiscard]] std::optional<std::array<float, 2>> camera_take_pointer_hold_warp();
     void camera_viewport(float width, float height);
     // The attract's locked view moves its eye and look-at (SpaceEnvironment::set_attract_pose).
     void set_attract_pose(const std::array<float, 3>& eye, const std::array<float, 3>& target);
@@ -330,6 +333,21 @@ public:
     [[nodiscard]] std::optional<presentation::camera::SourceTargetBounds> camera_bounds() const;
     void overview_key();
     void movie(bool on, const std::array<float, 3>& target);
+    void movie_eye(const std::array<float, 3>& eye) noexcept { movie_eye_ = eye; }
+    // #6448 J1: called once per frame after the live step has composed the frame's poses and before the
+    // frame is submitted. Returns true when it moved a subject-attached camera input (battlecam pose or
+    // follow focus), which recomposes the drawn camera from the current frame's poses.
+    void set_finalize_camera(std::function<bool()> hook) { finalize_camera_ = std::move(hook); }
+    void movie_fov(std::optional<float> fov) noexcept {
+        movie_fov_ = fov;
+        if (locked_view_) locked_frame_.vertical_fov_degrees = fov.value_or(locked_default_fov_);
+    }
+    [[nodiscard]] bool battlecam_key(const viewer::camera_input::RawEvent& event) const noexcept {
+        return bridge_ && bridge_->cinematic_key(event, viewer::camera_input::Action::battlecam);
+    }
+    [[nodiscard]] bool preview_key(const viewer::camera_input::RawEvent& event) const noexcept {
+        return bridge_ && bridge_->cinematic_key(event, viewer::camera_input::Action::unit_preview);
+    }
     [[nodiscard]] bool movie() const noexcept { return movie_; }
     [[nodiscard]] std::string overview_level() const;
     // #888 perf trace: the last frame's snapshot build and submit.
@@ -425,13 +443,17 @@ private:
     bool locked_view_{};
     // The attract's frame before the view's own adjustments (window size, eye and look-at).
     tactical::TacticalFrame locked_frame_{};
+    float locked_default_fov_{};
     bool attract_pose_pending_{};
     // #82: FoC's tactical overview over an interactive space map camera, and the clock its wheel
     // clicks are timed on. Absent for a locked (capture) camera and the camera self-tests.
     std::optional<tactical::TacticalOverview> overview_;
     bool movie_{};
+    std::function<bool()> finalize_camera_;
     double movie_seconds_{};
     std::array<float, 3> movie_target_{};
+    std::array<float, 3> movie_eye_{};
+    std::optional<float> movie_fov_;
     std::string overview_status_{"unavailable"};
     std::chrono::steady_clock::time_point overview_clock_{std::chrono::steady_clock::now()};
     std::string camera_source_{"default"};

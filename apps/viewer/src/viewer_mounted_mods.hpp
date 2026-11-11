@@ -1,13 +1,15 @@
 #pragma once
 // The description of the mods this process mounted, for the galactic save header (GalacticMode::Options::mounted_mods).
 // Records are discovered once (prime), the content digests are requested then so they are ready by save time, and every
-// launch path copies the same cached description. Nothing here waits for hashing: a digest that is not ready stays null.
+// save/load operation copies the current cached description. Nothing here waits for hashing: a digest that is not ready stays null.
 #include "eawr/mods/content_digest.hpp"
 #include "eawr/mods/save_description.hpp"
 #include "eawr/mods/steam/library_folders.hpp"
 #include "eawr/mods/steam/paths.hpp"
 #include "viewer_load_notes.hpp"
 
+#include <algorithm>
+#include <cstdint>
 #include <filesystem>
 #include <memory>
 #include <mutex>
@@ -23,6 +25,7 @@ struct State {
     std::mutex mutex; // guards the fields below; never held across discovery or hashing
     bool primed = false;
     bool discovered = false; // records are filled (the background discovery finished)
+    mods::Profile profile; // immutable mounted layers, read without Godot on service threads
     std::thread worker;
     std::vector<mods::ModRecord> records;
     std::shared_ptr<mods::ContentDigests> digests;
@@ -36,6 +39,14 @@ inline mods::ContentDigestOptions digest_options() {
     const auto user = ViewerPath{std::string(root.get_data(), static_cast<std::size_t>(root.length()))}.native();
     if (!user.empty()) {
         auto folder = user / "mods" / "cache" / "content";
+        const auto args = godot::OS::get_singleton()->get_cmdline_user_args();
+        for (int i = 0; i + 1 < args.size(); ++i) {
+            if (args[i] == godot::String("--eawr-digest-cache")) {
+                const auto value = godot::String(args[i + 1]).utf8();
+                folder = ViewerPath{std::string(value.get_data(), static_cast<std::size_t>(value.length()))}.native();
+                break;
+            }
+        }
         std::error_code ec;
         std::filesystem::create_directories(folder, ec);
         if (!ec) options.cache_folder = std::move(folder);
@@ -87,6 +98,7 @@ inline void prime_mounted_mods(const std::filesystem::path& game_root) {
     if (s.primed) return;
     s.primed = true;
     mods::Profile profile = viewer_load_note_context().profile; // Godot state is read here, not on the worker
+    s.profile = profile;
     auto options = mounted_mods_detail::digest_options();
     s.worker = std::thread([game_root, profile = std::move(profile), options = std::move(options)]() mutable {
         mounted_mods_detail::discover_mounted(game_root, profile, std::move(options));
@@ -114,8 +126,8 @@ inline void shutdown_mounted_mods() {
 // and never waits for the discovery thread (not finished yet -> an explicitly incomplete description).
 [[nodiscard]] inline std::optional<mods::ModDescription> mounted_mod_description() {
     auto& s = mounted_mods_detail::state();
-    const auto& profile = viewer_load_note_context().profile;
     std::lock_guard lock(s.mutex);
+    const auto& profile = s.profile;
     if (s.final_description) return s.final_description;
     if (!s.discovered) return mods::describe_mounted_profile(profile, {});
     bool settled = true;
@@ -134,5 +146,21 @@ inline void shutdown_mounted_mods() {
     auto& s = mounted_mods_detail::state();
     std::lock_guard lock(s.mutex);
     return s.final_description.has_value();
+}
+// How far the content digests of the mounted layers are: files hashed so far of the files in all the trees (0, 0 while the
+// discovery thread has not finished). Cheap like mounted_mods_ready(): memory only, no mod file is read.
+struct MountedModProgress { std::uint64_t files_done = 0, files_total = 0; };
+[[nodiscard]] inline MountedModProgress mounted_mods_progress() {
+    auto& s = mounted_mods_detail::state();
+    std::lock_guard lock(s.mutex);
+    MountedModProgress total;
+    if (!s.discovered || !s.digests) return total;
+    for (const auto& record : s.records) {
+        total.files_total += record.fingerprint.tree_files;
+        const auto done = record.content.state == mods::ContentDigestState::ready
+            ? record.fingerprint.tree_files : s.digests->progress(record.key).files;
+        total.files_done += std::min(done, record.fingerprint.tree_files);
+    }
+    return total;
 }
 } // namespace eawr::presentation::godot_backend

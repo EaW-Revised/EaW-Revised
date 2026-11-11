@@ -12,8 +12,12 @@ namespace eawr::presentation::godot_backend {
 using namespace godot;
 BattleCursor::~BattleCursor() {
     if (capture_layer_ != nullptr) memdelete(capture_layer_);
+    suspend();
+}
+void BattleCursor::suspend() {
     if (installed_) {
         if (auto* input = Input::get_singleton()) input->set_custom_mouse_cursor(Ref<Resource>{}, Input::CURSOR_ARROW);
+        installed_ = false;
     }
 }
 void BattleCursor::prepare(const vfs::Vfs& filesystem) {

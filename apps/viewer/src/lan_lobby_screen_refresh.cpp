@@ -1,4 +1,5 @@
 #include "lan_lobby_screen_internal.hpp"
+#include "viewer_mounted_mods.hpp"
 
 namespace eawr::presentation::godot_backend {
 void EawrLanLobby::refresh_staging() {
@@ -78,16 +79,29 @@ void EawrLanLobby::refresh_staging_status(Impl& impl, PageState& state, Resource
     if (view.phase != LanPhase::idle && view.phase != LanPhase::running && view.phase != LanPhase::ended)
         status = online ? view.message : lan_message(view);
     if (view.phase == LanPhase::setup && view.read_only && !view.accept_enabled) status = utf8(resolved(resources.text, "TEXT_WAITING"));
+    const bool checking_mods = view.mod_review_pending && !mounted_mods_ready();
     if (lan_reconnect_disabled_notice(view)) {
         if (!status.empty()) status += "\n";
         status += "Reconnect: disabled. " + view.reconnect_unavailable;
     }
     if (room && (room->preparing || room->snapshot.phase == net::LobbyPhase::starting)) status = utf8(resolved(resources.text, "TEXT_WAITING"));
+    // #6045: a campaign derivation runs on a worker; say what the room waits for and how long it has taken (one line a minute).
+    if (room && !room->prepare_status.empty()) status = room->prepare_status;
     if (online && impl.host && room && room->connections_pending && room->ready_reason.empty() && view.phase == LanPhase::setup)
         status = room->start_reason;
-    if (!status.empty() && status != impl.status) {
+    if (checking_mods) {
+        const auto progress = mounted_mods_progress();
+        status = progress.files_total == 0 ? "Reading mod folders" :
+            "Checking mod files (" + std::to_string(progress.files_done) + " of " + std::to_string(progress.files_total) + ")";
+    }
+    if (auto* progress = EAWR_CONTROL(EawrUiLabel, "EAWR_MOD_REVIEW_STATUS")) {
+        progress->set_visible(checking_mods);
+        if (checking_mods) progress->set_text(text(status));
+    }
+    if (auto* title = EAWR_CONTROL(EawrUiLabel, "IDC_INTERNET_DIALOG_HEADER")) title->set_visible(!checking_mods);
+    if (status != impl.status) {
         impl.status = status;
-        note_chat(model::ChatKind::notice, status);
+        if (!checking_mods && !status.empty()) note_chat(model::ChatKind::notice, status);
     }
 }
 
@@ -494,9 +508,18 @@ void EawrLanLobby::refresh_staging_start(Impl& impl, Resources& resources, const
                                          const std::vector<model::StagingRow>& rows, bool online) {
     // The start (host) or accept (joiner) button.
     if (auto* start = EAWR_CONTROL(EawrUiButton, "IDC_LAN_START_GAME_BUTTON")) {
-        const bool enabled = room ? (impl.host ? room->start_enabled : room->ready_enabled)
+        // While the host's campaign Start is being prepared the room is locked and the button stops waiting (#6045).
+        const bool cancelling = room && impl.host && room->start_preparing;
+        const bool enabled = cancelling ? true : room ? (impl.host ? room->start_enabled : room->ready_enabled)
             : impl.host ? (view.start_enabled && model::host_start_enabled(rows, impl.human_owners.size())) : view.accept_enabled;
         if (room && !impl.host) start->set_text(resolved(resources.text, room->local_ready ? "TEXT_BUTTON_CANCEL" : "TEXT_BUTTON_ACCEPT"));
+        if (cancelling) {
+            if (impl.start_original_caption.empty()) impl.start_original_caption = utf8(start->get_text());
+            start->set_text(resolved(resources.text, "TEXT_BUTTON_CANCEL"));
+        } else if (!impl.start_original_caption.empty()) {
+            start->set_text(text(impl.start_original_caption));
+            impl.start_original_caption.clear();
+        }
         start->set_disabled(!enabled || impl.launch.has_value());
         impl.start_reason = room ? (impl.host ? room->start_reason : room->ready_reason) : online ? view.message : std::string{};
         start->set_tooltip_text(text(impl.start_reason));
@@ -885,6 +908,14 @@ bool EawrLanLobby::action_staging_selection(const std::string& verb, const std::
 }
 
 bool EawrLanLobby::action_start(Impl& impl) {
+    if (match_->galactic_room()) {
+        // The button reads Cancel while the campaign is being prepared (#6045).
+        if (const auto room = match_->lobby_state(); room && room->start_preparing) {
+            match_->cancel_galactic_start();
+            refresh_staging();
+            return false;
+        }
+    }
     refresh_staging();
     if (match_->galactic_room() && !impl.start_enabled) return false;
     if (match_->galactic_room()) {
@@ -962,7 +993,7 @@ bool EawrLanLobby::condition(const std::string& wanted) const {
         const std::string shown = utf8(header->get_text());
         const std::string title = utf8(resolved(resources_->text, impl.host ? "TEXT_INTERNET_HOST_GAME_TITLE" : "TEXT_INTERNET_JOIN_GAME_TITLE"));
         return !shown.empty() && shown != title && shown != "Checking saved games" && shown != "Loading campaign content..."
-            && shown != "Reading saved game";
+            && shown != "Reading saved game" && !shown.starts_with("Checking mod files");
     }
     if (key == "listing_pending") return impl.checkpoint_listing.valid();
     if (key == "content_ready") return impl.galactic_backend && impl.galactic_backend->content_ready();

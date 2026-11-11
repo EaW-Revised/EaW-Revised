@@ -2,13 +2,20 @@
 #include "galactic_support.hpp"
 #include "eawr/checkpoint/game.hpp"
 #include "eawr/platform/sim_workers.hpp"
+#include "eawr/platform/live_game_session.hpp"
+#include "eawr/sim/galactic/offer_pool.hpp"
 #include "eawr/sim/galactic/victory.hpp"
 #include "eawr/sim/galactic/observer.hpp"
 #include "../../src/campaign/checkpoint_owner_internal.hpp"
+#include "../../src/platform/galactic/live_save_transport.hpp"
+#include "../../src/sim/galactic/session_impl.hpp"
+#include "../../src/sim/galactic/encoding.hpp"
 #include "../../src/sim/tactical/checkpoint_archive_internal.hpp"
+#include "../../src/sim/galactic/checkpoint_fields_internal.hpp"
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -38,6 +45,13 @@
 #include <windows.h>
 #include <psapi.h>
 #endif
+
+namespace eawr::sim::galactic {
+struct GalacticCheckpointTestAccess {
+    static auto& pending(GalacticSession& session) { return session.impl_->pending_actor_changes; }
+    static auto& observer(GalacticSession& session) { return session.impl_->observer; }
+};
+}
 
 namespace {
 using namespace galactic_test;
@@ -142,6 +156,24 @@ galactic::GalacticSetup multiplayer_setup(bool multiplayer, bool coop) {
     if (multiplayer) galactic_test::mark_multiplayer(result);
     return result;
 }
+void pending_actor_checkpoint_roundtrip() {
+    using Change = galactic::GalacticSession::NativeActorChange;
+    using Access = galactic::GalacticCheckpointTestAccess;
+    auto config = setup();
+    expect(cp::game_identities(config).state_encoding_version == galactic::detail::state_encoding_version,
+        "game checkpoint identity names the current galactic state encoding");
+    auto original = take(galactic::GalacticSession::create(config));
+    Access::pending(original).push_back({Change::Kind::changed, 123, 0, {}, {}, {}, true, false});
+    const auto bytes = take(original.save_checkpoint_state());
+    auto restored = take(galactic::GalacticSession::create(config));
+    check(restored.load_checkpoint_state(bytes));
+    const auto& pending = Access::pending(restored);
+    expect(pending.size() == 1 && pending[0].actor == 123
+        && pending[0].prevent_ai_usage == std::optional<bool>(true)
+        && pending[0].prefer_ground == std::optional<bool>(false),
+        "galaxy owner checkpoint retains pending actor AI-usage writes");
+    expect(take(restored.save_checkpoint_state()) == bytes, "pending actor changes recapture exactly");
+}
 void resume_metadata_contracts() {
     for (const unsigned workers : {1U, 2U, 4U, 8U}) {
         eawr::platform::ThreadWorkerAdapter executor(workers);
@@ -166,6 +198,19 @@ void resume_metadata_contracts() {
             && resume.control == game.galaxy().seat_control() && resume.producer_sequences.at(seat) == 100,
             "resume preserves logical seats, control configuration and full producer continuation");
         expect(game.record().setup.interactive_seat.value == 0, "MP observer stays outside canonical bytes");
+        {   // #6156: the battle-vote timeout a save recorded, read without restoring it, and kept by a restore.
+            expect(!take(cp::inspect_game_vote_timeout(container)), "a game without voting saved no timeout");
+            auto voting = take(campaign::GameSession::create(config));
+            check(voting.configure_multiplayer_votes(45 * galactic::galactic_frames_per_second));
+            const auto voting_saved = take(cp::save_game_checkpoint(voting, ids));
+            const auto voting_container = take(cp::parse_checkpoint(voting_saved));
+            const auto timeout = take(cp::inspect_game_vote_timeout(voting_container));
+            expect(timeout && *timeout == 45U * galactic::galactic_frames_per_second, "a saved game shows its 45 s vote timeout in ticks");
+            auto voting_restored = take(cp::load_game_checkpoint(voting_saved, ids, {}, executor));
+            expect(take(cp::save_game_checkpoint(voting_restored.session, ids)) == voting_saved
+                && *take(cp::inspect_game_vote_timeout(take(cp::parse_checkpoint(take(cp::save_game_checkpoint(voting_restored.session, ids)))))) == 45U * galactic::galactic_frames_per_second,
+                "a restored game keeps the saved vote timeout");
+        }
         auto restored = take(cp::load_game_checkpoint(saved, ids, {}, executor));
         expect(take(cp::save_game_checkpoint(restored.session, ids)) == saved, "resume metadata recaptures exactly");
         check(restored.session.retain_network_producer_sequences({}));
@@ -236,6 +281,10 @@ void mod_description_contracts() {
     auto& section = *std::find_if(corrupt.sections.begin(), corrupt.sections.end(), [](const auto& value) {
         return value.id == static_cast<std::uint16_t>(cp::SectionId::mod_list);
     });
+    section.bytes[0] = 1;
+    const auto old_description = cp::inspect_game_mods(corrupt);
+    expect(!old_description && old_description.error().message.find("mod list version 1, this build needs version 2") != std::string::npos,
+        "old mod description gives a clear version diagnostic");
     section.bytes[0] = 99;
     expect(!cp::load_game_checkpoint(take(cp::write_checkpoint(corrupt)), ids, options, executor),
         "malformed description is rejected even in a valid container");
@@ -1061,13 +1110,14 @@ void refusals() {
     unchanged(Bytes(cp::max_bytes + 1, 0), identities);
     const auto original = take(cp::parse_checkpoint(bytes));
     for (const auto id : {cp::SectionId::session, cp::SectionId::seats, cp::SectionId::players, cp::SectionId::planets,
-        cp::SectionId::fleets, cp::SectionId::production, cp::SectionId::conflicts, cp::SectionId::victory, cp::SectionId::scripts, cp::SectionId::mod_list, cp::SectionId::galactic_owner}) {
+        cp::SectionId::fleets, cp::SectionId::production, cp::SectionId::conflicts, cp::SectionId::victory, cp::SectionId::scripts, cp::SectionId::mod_list, cp::SectionId::galactic_owner,
+        cp::SectionId::offer_pool}) {
         auto mutated = original;
         for (auto& section : mutated.sections) if (section.id == static_cast<std::uint16_t>(id)) section.bytes.push_back(0);
         unchanged(take(cp::write_checkpoint(mutated)), identities);
     }
     auto frontier = original; ++frontier.header.frontier.sequence; unchanged(take(cp::write_checkpoint(frontier)), identities);
-    auto tick = original; tick.header.completed_tick = 1'000'001; unchanged(take(cp::write_checkpoint(tick)), identities);
+    auto tick = original; tick.header.completed_tick = galactic::galactic_max_ticks + 1; unchanged(take(cp::write_checkpoint(tick)), identities);
     auto version = original; version.sections.front().version = cp::galaxy_section_version + 1; unchanged(take(cp::write_checkpoint(version)), identities);
     auto missing = original; missing.sections.erase(missing.sections.begin() + 2); unchanged(take(cp::write_checkpoint(missing)), identities);
     expect(!running.session.submit({{10, {1}, 12}, galactic::PauseGalaxy{}}), "accepted future cursor restored");
@@ -1294,7 +1344,7 @@ void child_roundtrip() {
 // the galactic-owner section. The reader bounded every count by an eighth of the byte budget, so the
 // blob was refused ("state count exceeds remaining byte budget") while shorter saves restored.
 template <class Archive> void large_blob_contracts(const char* label) {
-    constexpr std::size_t big = (Archive::byte_limit / 8U) + 1000U;
+    constexpr std::size_t big = (64U * 1024U * 1024U / 8U) + 1000U;
     Bytes blob(big); std::string text(big, 'x');
     for (std::size_t i = 0; i < blob.size(); ++i) blob[i] = static_cast<std::uint8_t>(i * 31U);
     typename Archive::Writer out; out(blob, text, std::optional(blob));
@@ -1302,7 +1352,7 @@ template <class Archive> void large_blob_contracts(const char* label) {
     Bytes restored_blob; std::string restored_text; std::optional<Bytes> restored_optional;
     in(restored_blob, restored_text, restored_optional);
     expect(restored_blob == blob && restored_text == text && restored_optional == blob && in.remaining() == 0,
-        std::string(label) + " byte blobs and strings above an eighth of the budget round trip");
+        std::string(label) + " byte blobs and strings above the former eighth-budget boundary round trip");
     // Wider rows keep the tighter count bound: more rows than the eighth cannot be real state.
     typename Archive::Writer wide; wide(static_cast<std::uint64_t>(Archive::byte_limit / 8U + 1U));
     wide.bytes.resize(wide.bytes.size() + Archive::byte_limit / 8U + 1U);
@@ -1315,6 +1365,20 @@ template <class Archive> void large_blob_contracts(const char* label) {
     typename Archive::Reader lie_in(lie.bytes); Bytes lied; refused = false;
     try { lie_in(lied); } catch (const typename Archive::Invalid&) { refused = true; }
     expect(refused, std::string(label) + " byte blob count beyond the remaining bytes stays refused");
+}
+void large_galactic_archive_checkpoint() {
+    constexpr std::size_t size = 64U * 1024U * 1024U + 1U;
+    Bytes input(size, 0x5a);
+    galactic::checkpoint_detail::Writer writer;
+    writer(input);
+    cp::Checkpoint checkpoint;
+    checkpoint.sections.push_back({0x8000, 1, false, std::move(writer.bytes)});
+    auto encoded = take(cp::write_checkpoint(checkpoint));
+    expect(encoded.size() > size, "checkpoint writes more than the former 64 MiB budget");
+    auto parsed = take(cp::parse_checkpoint(encoded));
+    galactic::checkpoint_detail::Reader reader(parsed.sections.front().bytes);
+    Bytes decoded; reader(decoded);
+    expect(decoded == input && reader.remaining() == 0, "large archive survives container save and load");
 }
 struct GalacticArchive {
     static constexpr std::size_t byte_limit = galactic::checkpoint_detail::byte_limit;
@@ -1649,8 +1713,208 @@ galactic::GalacticSetup tech_setup() {
     }
     return config;
 }
+// The discovery guard degrades a mismatched observer table to a diagnostic: one note for the cause, not one per tick.
+void discovery_guard_notes_once() {
+    auto config = setup();
+    galactic::ObserverSetup observer; observer.human_observers = {1}; observer.solo_reference_human = 1;
+    observer.players = {{1}, {2}};
+    for (const auto& planet : config.planets) {
+        galactic::ObserverPlanet facts; facts.planet = planet.id;
+        facts.allegiance = facts.target_owner = facts.current_owner = facts.current_controller = planet.owner;
+        observer.planets.push_back(facts);
+    }
+    for (const auto& fleet : config.fleets) for (const auto& member : fleet.members)
+        if (std::none_of(observer.types.begin(), observer.types.end(), [&](const auto& row) { return row.type == member.type; }))
+            observer.types.push_back({member.type});
+    for (const auto& player : observer.players) for (const auto& planet : observer.planets) {
+        galactic::ObserverRecord row; row.player = player.player; row.planet = planet.planet; observer.records.push_back(row);
+    }
+    config.observer = observer;
+    auto game = take(galactic::GalacticSession::create(config));
+    galactic::GalacticCheckpointTestAccess::observer(game)->records.pop_back(); // shape no longer players x planets
+    const eawr::platform::ThreadWorkerAdapter executor(1);
+    for (int tick = 0; tick < 5; ++tick) (void)take(game.step(executor));
+    const auto notes = game.load_notes();
+    const auto count = std::count_if(notes.begin(), notes.end(), [](const auto& note) {
+        return note.message.find("discovery skipped") != std::string::npos; });
+    expect(count == 1, "the discovery guard notes its cause once, not on every tick");
+}
+
+void malformed_production_restore() {
+    const auto config = tech_setup();
+    auto source = take(galactic::GalacticSession::create(config));
+    auto bytes = take(source.save_checkpoint_state());
+    namespace archive = galactic::checkpoint_detail;
+    auto production = source.snapshot()->production();
+    archive::Writer original; original(production);
+    galactic::ProductionEntry entry{}; entry.type = 999999;
+    production->planets.front().queues[0].push_back(entry);
+    archive::Writer replacement; replacement(production);
+    const auto at = std::search(bytes.begin(), bytes.end(), original.bytes.begin(), original.bytes.end());
+    expect(at != bytes.end(), "production table found in checkpoint owner");
+    if (at == bytes.end()) return;
+    const auto offset = static_cast<std::size_t>(at - bytes.begin());
+    bytes.erase(bytes.begin() + offset, bytes.begin() + offset + original.bytes.size());
+    bytes.insert(bytes.begin() + offset, replacement.bytes.begin(), replacement.bytes.end());
+    auto restored = take(galactic::GalacticSession::create(config));
+    const auto result = restored.load_checkpoint_state(bytes);
+    expect(!result && result.error().code == galactic::diagnostic_codes::invalid_setup,
+        "restored production queue with absent offer is refused");
+}
+
+// A game whose planets each carry `offers` production offers. With `distinct`, every planet's table differs from the
+// others' (the price of the first offer), so no two planets can share a pool table.
+galactic::GalacticSetup offer_pool_setup(const std::size_t offers, const bool distinct) {
+    auto config = tech_setup();
+    for (std::size_t p = 0; p < config.production->planets.size(); ++p) {
+        auto& planet = config.production->planets[p];
+        galactic::ProductionOffer offer = planet.offers.front();
+        std::vector<galactic::ProductionOffer> table;
+        for (std::size_t i = 0; i < offers; ++i) {
+            offer.type = 1000 + i; offer.price = f(static_cast<std::int64_t>(100 + (distinct && i == 0 ? p : 0)));
+            table.push_back(offer);
+        }
+        planet.offers = table;
+    }
+    return config;
+}
+const cp::Section& section_of(const cp::Checkpoint& saved, const cp::SectionId id) {
+    const auto* section = saved.find(id);
+    if (!section) throw std::runtime_error("expected checkpoint section is missing");
+    return *section;
+}
+// The static offer tables are stored once: the session recording, the production state and the owner barrier hold one
+// table index per planet, so their size does not depend on how many offers a planet carries.
+void offer_pool_size_contracts() {
+    const eawr::sim::InlineExecutor executor;
+    for (const bool distinct : {false, true}) {
+        const std::string label = distinct ? " (every planet has its own table)" : " (planets share one table)";
+        std::array<std::array<std::size_t, 4>, 2> sizes{};
+        std::array<std::size_t, 2> pools{}, tables{}, total{};
+        const std::array<std::size_t, 2> offers{2, 302};
+        for (std::size_t variant = 0; variant < 2; ++variant) {
+            const auto config = offer_pool_setup(offers[variant], distinct);
+            const auto identities = cp::game_identities(config);
+            auto game = take(campaign::GameSession::create(config));
+            (void)take(game.step(executor));
+            const auto bytes = take(cp::save_game_checkpoint(game, identities));
+            const auto saved = take(cp::parse_checkpoint(bytes));
+            sizes[variant] = {section_of(saved, cp::SectionId::session).bytes.size(), section_of(saved, cp::SectionId::production).bytes.size(),
+                section_of(saved, cp::SectionId::galactic_owner).bytes.size(), section_of(saved, cp::SectionId::offer_pool).bytes.size()};
+            pools[variant] = sizes[variant][3]; total[variant] = bytes.size();
+            auto pool = galactic::OfferPool::decode(section_of(saved, cp::SectionId::offer_pool).bytes);
+            expect(pool.has_value(), "the offer pool decodes" + label);
+            if (pool) tables[variant] = pool->table_count();
+            // The pool is the only copy: a restore reads the tables back and re-saves the same bytes.
+            auto restored = take(cp::load_game_checkpoint(bytes, identities, {}, executor));
+            expect(restored.session.state_sha256() == game.state_sha256(), "a pooled save restores the same state" + label);
+            expect(take(cp::save_game_checkpoint(restored.session, identities)) == bytes, "a pooled save re-saves canonically" + label);
+            expect(restored.session.galaxy().snapshot()->production()->planets.front().offers.size() == offers[variant],
+                "the restored offer table has every offer" + label);
+        }
+        expect(sizes[0][0] == sizes[1][0] && sizes[0][1] == sizes[1][1] && sizes[0][2] == sizes[1][2],
+            "the session, production and owner sections do not grow with the offer count" + label);
+        expect(pools[1] > pools[0] + 300 * 100, "the offer pool carries the offers" + label);
+        expect(total[1] < total[0] + 3 * (pools[1] - pools[0]) / 2,
+            "the offer data is stored about once, not three times" + label);
+        expect(tables[0] == (distinct ? 4U : 1U) && tables[1] == (distinct ? 4U : 1U), "equal tables share one pool entry, distinct ones do not" + label);
+    }
+}
+// The pool keeps a table that differs from the others as its own entry, so the writers never have to refuse over it (a
+// save cannot fail on offers). A restored game must still match its setup: the restore validation refuses a live table
+// that differs, exactly as it does for the inline form, and the pool is no way around it.
+void offer_pool_live_differs_from_setup() {
+    const auto config = tech_setup();
+    namespace archive = galactic::checkpoint_detail;
+    auto source = take(campaign::GameSession::create(config));
+    galactic::OfferPool pool;
+    const auto owner = take(source.save_checkpoint_state(&pool));
+    // The world's production state, written the way the owner writes it, then with one planet's table changed.
+    auto production = source.galaxy().snapshot()->production();
+    archive::Writer original; original.offers = &pool; original(production);
+    expect(pool.table_count() == 1, "the shared setup table is one pool entry before the change");
+    production->planets[1].offers.front().price = f(777);
+    archive::Writer changed; changed.offers = &pool; changed(production);
+    expect(pool.table_count() == 2 && pool.row_count() == 3, "the changed table adds one table and one row, and nothing else");
+    auto decoded = galactic::OfferPool::decode(pool.encode());
+    expect(decoded && decoded->table_count() == 2 && decoded->table(0)->front().price == f(100) && decoded->table(1)->front().price == f(777)
+        && decoded->table(0)->back() == decoded->table(1)->back(), "both tables round-trip and share their unchanged row");
+    // Campaign owner layout: format u32, the galaxy owner as a byte list, then the game's own state.
+    archive::Reader head(owner); std::uint32_t format{}; Bytes world; head(format, world);
+    const auto tail = owner.size() - head.remaining();
+    const auto at = std::search(world.begin(), world.end(), original.bytes.begin(), original.bytes.end());
+    expect(at != world.end(), "the pooled production table is found in the owner");
+    if (at == world.end()) return;
+    const auto offset = static_cast<std::size_t>(at - world.begin());
+    world.erase(world.begin() + static_cast<std::ptrdiff_t>(offset), world.begin() + static_cast<std::ptrdiff_t>(offset + original.bytes.size()));
+    world.insert(world.begin() + static_cast<std::ptrdiff_t>(offset), changed.bytes.begin(), changed.bytes.end());
+    archive::Writer doctored; doctored(format, world);
+    doctored.bytes.insert(doctored.bytes.end(), owner.begin() + static_cast<std::ptrdiff_t>(tail), owner.end());
+    auto game = take(campaign::GameSession::create(config));
+    const auto refused = game.load_checkpoint_state(doctored.bytes, &pool);
+    expect(!refused && refused.error().message.find("offers differ from setup") != std::string::npos,
+        "a pooled owner whose live table differs from the setup's is refused by the restore validation");
+}
+// The pooled recording form is distinct from the replay file's: the pool is required to read it.
+void offer_pool_recording_contracts() {
+    const auto config = tech_setup();
+    galactic::GalacticReplay replay; replay.setup = config; replay.final_tick_count = 0;
+    galactic::OfferPool pool;
+    const auto pooled = take(galactic::write_replay(replay, &pool));
+    const auto inline_form = take(galactic::write_replay(replay));
+    expect(pooled.size() < inline_form.size(), "the pooled recording is smaller than the standalone replay");
+    const auto parsed = take(galactic::parse_replay(pooled, {}, &pool));
+    expect(take(galactic::write_replay(parsed, &pool)) == pooled && parsed.setup.production->planets.size() == config.production->planets.size(),
+        "a pooled recording reads back with its pool and re-writes to the same bytes");
+    for (std::size_t i = 0; i < config.production->planets.size(); ++i)
+        expect(parsed.setup.production->planets[i].offers == config.production->planets[i].offers, "each pooled offer table reads back equal");
+    expect(!galactic::parse_replay(pooled), "a pooled recording is refused without its pool");
+    expect(!galactic::parse_replay(inline_form, {}, &pool), "a standalone replay is refused where a pool is required");
+    expect(take(galactic::write_replay(take(galactic::parse_replay(inline_form)))) == inline_form, "the replay file format is unchanged");
+    // A table the pool does not hold is malformed, and so is a damaged pool.
+    galactic::OfferPool empty;
+    expect(!galactic::parse_replay(pooled, {}, &empty), "a recording naming a table the pool lacks is refused");
+    auto bytes = pool.encode();
+    expect(galactic::OfferPool::decode(bytes).has_value(), "an intact pool decodes");
+    auto truncated = bytes; truncated.pop_back();
+    auto trailing = bytes; trailing.push_back(0);
+    auto outside = bytes; for (std::size_t i = 0; i < 4; ++i) outside[outside.size() - 1 - i] = 0xFF;
+    expect(!galactic::OfferPool::decode(truncated) && !galactic::OfferPool::decode(trailing) && !galactic::OfferPool::decode(outside),
+        "a truncated pool, trailing bytes and a row index past the rows are refused");
+}
+// The live-input section never makes a save fail over the pool: with the tables in the checkpoint's pool its two recordings
+// reference them (version 4); if the pool lacked one, they carry their tables inline (version 3) and still read back.
+void offer_pool_live_input_contracts() {
+    namespace save = eawr::platform::save_detail;
+    const auto config = tech_setup();
+    save::Input input; input.orders = {{{1}, galactic::ResumeGalaxy{}, 5}};
+    galactic::OfferPool full;
+    galactic::GalacticReplay replay; replay.setup = config;
+    (void)take(galactic::write_replay(replay, &full)); // what a capture does first: every setup table joins the pool
+    const auto pooled_tables = full.table_count();
+    auto pooled = take(save::encode_input(config, 4, input, &full));
+    expect(pooled.version == 4 && full.table_count() == pooled_tables, "with its tables in the pool the live input references them");
+    galactic::OfferPool empty;
+    auto inline_form = take(save::encode_input(config, 4, input, &empty));
+    expect(inline_form.version == 3, "a pool that lacks the setup's tables does not fail the save: the live input carries them inline");
+    expect(inline_form.bytes.size() > pooled.bytes.size(), "the inline form is the larger one");
+    cp::Checkpoint container; container.header.identities = cp::game_identities(config);
+    container.header.seed = config.seed; container.header.completed_tick = 4;
+    container.sections.push_back(inline_form);
+    expect(take(save::decode_input(container)).orders.size() == 1, "the inline live input reads back without any pool");
+}
+void offer_pool_contracts() {
+    offer_pool_recording_contracts();
+    offer_pool_live_input_contracts();
+    offer_pool_size_contracts();
+    offer_pool_live_differs_from_setup();
+}
+
 // WGA-375..384/GFSA-16..18: independent retained mode scalars and exact archive.
 void timeline_contracts() {
+    malformed_production_restore();
+    discovery_guard_notes_once();
+    offer_pool_contracts();
     std::string reference;
     for (const auto workers : eawr::platform::determinism_worker_counts()) {
         eawr::platform::ThreadWorkerAdapter executor(workers);
@@ -1861,9 +2125,38 @@ void summary_hold_barriers(const bool paused_planning, const bool monitored) {
     }
     expect(held_barriers > 0 && refused == 0, "barriers were taken inside the summary hold and none was refused" + label);
 }
+void live_mod_description_contracts() {
+    namespace platform = eawr::platform;
+    namespace mods = eawr::mods;
+    const auto directory = std::filesystem::temp_directory_path() / "eawr-live-mod-snapshot";
+    mods::DescriptionEntry mod{mods::DescriptionKeyKind::workshop, "workshop:1", "Synthetic mod", "1", std::array<std::uint8_t, 32>{}};
+    (*mod.checksum)[0] = 42;
+    const mods::ModDescription settled{true, {mod}};
+    std::atomic<bool> ready{false};
+    platform::LiveGameSession::Options options;
+    options.workers = 1; options.pacing = platform::LiveGameSession::Pacing::driven;
+    const auto path = directory.generic_u8string(); options.saves.directory.assign(path.begin(), path.end());
+    options.saves.mounted_mods_snapshot = [&] { return ready.load() ? settled : mods::ModDescription{}; };
+    auto live = take(platform::LiveGameSession::start(setup(), options));
+    ready = true; // Discovery and checksum hashing finish after session creation.
+    platform::LiveSaveRequest request; request.seat = {1}; request.name = "Modded"; request.overwrite = true;
+    const auto token = live->request_save(request); live->advance_to(1);
+    expect(live->wait_for(1, std::chrono::seconds(5)) && live->wait_save(token, std::chrono::seconds(5)),
+        "a live modded save completes without the former mod-list refusal");
+    auto bytes = take(platform::read_saved_game_bytes(options.saves.directory, request.name));
+    expect(take(cp::inspect_game_mods(take(cp::parse_checkpoint(bytes)))) == settled,
+        "save snapshots the ready per-mod checksum rather than pending startup metadata");
+    auto prepared = take(live->prepare_load(request.name, false));
+    expect(prepared->completed_tick() == 1, "a modded live save round-trips");
+    live->stop(); check(live->delete_save(request.name)); std::filesystem::remove(directory);
+}
 } // namespace
 int case_galactic_game_checkpoint_tests(int argc, char** argv) {
     try {
+        if (argc == 2 && std::string_view(argv[1]) == "--mods") {
+            mod_description_contracts(); live_mod_description_contracts(); return failures == 0 ? 0 : 1;
+        }
+        if (argc == 2 && std::string_view(argv[1]) == "--large-archive") { large_galactic_archive_checkpoint(); return failures == 0 ? 0 : 1; }
         if (argc == 2 && std::string_view(argv[1]) == "--capacity") { checkpoint_capacity(); return failures == 0 ? 0 : 1; }
         if (argc == 2 && std::string_view(argv[1]) == "--timeline") { timeline_contracts(); return failures == 0 ? 0 : 1; }
         if (argc == 2 && std::string_view(argv[1]) == "--summary-hold") {
@@ -1882,7 +2175,7 @@ int case_galactic_game_checkpoint_tests(int argc, char** argv) {
         if (argc == 2 && std::string_view(argv[1]) == "--pending-conflict") {
             pending_conflict_resave(); return failures == 0 ? 0 : 1;
         }
-        mod_description_contracts(); resume_metadata_contracts(); nested_child_commands(); large_blob_contracts<GalacticArchive>("galactic"); large_blob_contracts<TacticalArchive>("tactical"); direct_child_refusals(); direct_restore_equality(); owner_journal_refusal(); owner_journal_after_rebase(); human_command_history_growth(); future_native_frontier(); scripted_roundtrip(); victory_tail_barrier(); victory_tail_refusals(); hero_return_tail_barrier(); story_clock_refusals(); pending_conflict_resave();
+        pending_actor_checkpoint_roundtrip(); mod_description_contracts(); resume_metadata_contracts(); nested_child_commands(); large_blob_contracts<GalacticArchive>("galactic"); large_blob_contracts<TacticalArchive>("tactical"); direct_child_refusals(); direct_restore_equality(); owner_journal_refusal(); owner_journal_after_rebase(); human_command_history_growth(); future_native_frontier(); scripted_roundtrip(); victory_tail_barrier(); victory_tail_refusals(); hero_return_tail_barrier(); story_clock_refusals(); pending_conflict_resave();
         admission_and_fixups(); prebattle_autosave_admission(); refusals(); child_roundtrip(); observer_load_clock(); child_return_and_future_input();
         scripted_child_barriers(); child_casualty_return();
         if (argc != 2) throw std::runtime_error("expected corpus directory");

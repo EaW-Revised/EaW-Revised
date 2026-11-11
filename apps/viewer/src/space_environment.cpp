@@ -159,6 +159,20 @@ void SpaceEnvironment::camera_clear_pointer_sample() {
     if (state_->bridge) state_->bridge->clear_pointer_sample();
 }
 
+std::optional<std::array<float, 2>> SpaceEnvironment::camera_pointer_hold() const {
+    if (state_->view) return state_->view->camera_pointer_hold();
+    if (state_->options.camera_terminal_baseline_test || state_->options.camera_terminal_hold_test
+        || state_->options.camera_terminal_release_test) return std::nullopt;
+    return state_->bridge ? state_->bridge->pointer_hold() : std::nullopt;
+}
+
+std::optional<std::array<float, 2>> SpaceEnvironment::camera_take_pointer_hold_warp() {
+    if (state_->view) return state_->view->camera_take_pointer_hold_warp();
+    if (state_->options.camera_terminal_baseline_test || state_->options.camera_terminal_hold_test
+        || state_->options.camera_terminal_release_test) return std::nullopt;
+    return state_->bridge ? state_->bridge->take_pointer_hold_warp() : std::nullopt;
+}
+
 void SpaceEnvironment::camera_pointer_left() {
     if (state_->view) { state_->view->camera_pointer_left(); return; }
     if (state_->options.camera_terminal_baseline_test || state_->options.camera_terminal_hold_test

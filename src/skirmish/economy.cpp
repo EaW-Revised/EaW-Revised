@@ -25,6 +25,13 @@ namespace {
 namespace tactical = sim::tactical;
 using sim::math::Fixed;
 
+// PU-08: canonical names allow allocation-free heterogeneous WHD-05 lookup in workers.
+[[nodiscard]] std::string income_name(std::string name) {
+    for (auto& character : name)
+        if (character >= 'A' && character <= 'Z') character = static_cast<char>(character - 'A' + 'a');
+    return name;
+}
+
 [[nodiscard]] core::Diagnostic failure(std::string message) {
     return detail::error(diagnostic_codes::input, "economy rules: " + std::move(message));
 }
@@ -134,12 +141,20 @@ core::Result<tactical::PadRules> capture_rules(const tactical::TacticalSetup& se
                 "Tactical_Respawn_Time_In_Secs");
             rules.respawn.push_back({type_id(type.id), frames_of(seconds)});
         }
-        if (type.capture_point && type.capture_radius && type.capture_seconds) {
+        // LE-LOADER: a land build pad is a pad profile whether or not it is a CAPTURE_POINT (build menu, WBP-07 proximity radius), and on
+        // land no pad captures until the land capture service (LE-CAPTURE) runs for pads: the land step does not service them, and a
+        // capturing profile would require a declared neutral player that a land start does not always have. The space domain keeps its
+        // rule: a profile needs the capture point, and it captures.
+        const bool land = tables.domain == sim::tactical::BattleDomain::land;
+        const bool land_pad = land && type.build_pad && type.capture_radius && type.capture_seconds;
+        if ((type.capture_point && type.capture_radius && type.capture_seconds) || land_pad) {
             tactical::CaptureProfile profile;
             profile.type = type_id(type.id);
+            profile.captures = !land;
             profile.radius = *type.capture_radius;
             profile.transition_seconds = *type.capture_seconds;
-            for (const auto& faction : inputs.factions) {
+            // The affiliation is kept for a capture point, so the land capture service finds it ready; a pad that is not one has none.
+            if (type.capture_point) for (const auto& faction : inputs.factions) {
                 // WBP-04: exact faction tokens, never substring affiliation matches.
                 std::string text = type.affiliation;
                 std::replace(text.begin(), text.end(), ',', ' ');
@@ -437,7 +452,7 @@ core::Result<tactical::EconomyRules> economy_rules(
                     && std::none_of(built->special_unlocks.begin(), built->special_unlocks.end(),
                         [](const units::UnitType::SpecialUnlock& unlock) { return unlock.enable; })
                     && std::none_of(costs.income_bonuses.begin(), costs.income_bonuses.end(), [&](const units::IncomeBonus& bonus) {
-                        return (bonus.activation_style.empty() || detail::iequals(bonus.activation_style, "Space_Automatic"))
+                        return tactical::automatic_ability_style(bonus.activation_style, start.setup.domain, !campaign)
                             && std::any_of(tables.units.begin(), tables.units.end(), [&](const units::UnitType& target) {
                             return selection.keeps(target) && !target.production.income.empty()
                                 && selection.find(bonus.target_source) == &target;
@@ -534,10 +549,8 @@ core::Result<tactical::EconomyRules> economy_rules(
                 upgrade.ability_enables.push_back(std::move(rule));
             }
             for (const auto& authored : production.income_bonuses) {
-                // WBP-25: stock modifier abilities omit Activation_Style; their loaded
-                // space source selects this automatic consumer. Explicit ground styles stay out.
-                if (authored.target_source.empty() || (!authored.activation_style.empty()
-                    && !detail::iequals(authored.activation_style, "Space_Automatic"))) continue;
+                if (authored.target_source.empty()
+                    || !tactical::automatic_ability_style(authored.activation_style, start.setup.domain, !campaign)) continue;
                 const auto* target = selection.find(authored.target_source);
                 if (target == nullptr || target->production.income.empty()) continue;
                 tactical::IncomeModifier modifier;
@@ -556,6 +569,9 @@ core::Result<tactical::EconomyRules> economy_rules(
                 modifier.interval_percentage = interval.value();
                 modifier.all_allies = authored.all_allied_sources;
                 modifier.reverse = authored.reverse;
+                modifier.name = income_name(authored.name);
+                modifier.initially_enabled = authored.initially_enabled;
+                modifier.automatic = tactical::automatic_ability_style(authored.activation_style, start.setup.domain, !campaign);
                 upgrade.income_modifiers.push_back(modifier);
             }
             rules.upgrades.push_back(std::move(upgrade));
@@ -574,21 +590,31 @@ core::Result<tactical::EconomyRules> economy_rules(
             income.interval_seconds = *stream.interval_seconds;
             income.split_with_allies = stream.split_with_allies;
             income.full_amount_to_everyone = stream.full_amount_to_everyone;
+            income.name = income_name(stream.name);
+            income.initially_enabled = stream.initially_enabled;
+            income.automatic = tactical::automatic_ability_style(stream.activation_style, start.setup.domain, !campaign);
+            income.split_favors_owner = stream.split_favors_owner;
+            income.owner_income_percentage = stream.owner_income_percentage;
             for (const auto& bonus : production.income_bonuses) {
                 if (!bonus.additive || (!bonus.target_source.empty() && selection.find(bonus.target_source) != &type)) {
                     continue;
                 }
                 const auto hardpoint = std::find_if(type.hardpoints.begin(), type.hardpoints.end(),
                     [&](const units::Hardpoint& entry) { return detail::iequals(entry.special_ability_name, bonus.name); });
-                if (hardpoint == type.hardpoints.end()) continue; // enabled by nothing M2 has
                 auto amount = per_frame(*bonus.additive, *stream.interval_seconds);
                 if (!amount) {
                     note_value(notes, "EAWR-LOAD-0359", type.id, "income_bonus", decimal(*bonus.additive), "omitted bonus",
                         "an income bonus is out of range", core::LoadAction::skipped_object);
                     continue;
                 }
-                income.bonuses.push_back(tactical::IncomeBonus{
-                    amount.value(), static_cast<std::uint32_t>(hardpoint - type.hardpoints.begin())});
+                tactical::IncomeBonus applied;
+                applied.per_frame = amount.value();
+                applied.hardpoint = hardpoint == type.hardpoints.end() ? tactical::always_on
+                    : static_cast<std::uint32_t>(hardpoint - type.hardpoints.begin());
+                applied.name = income_name(bonus.name);
+                applied.initially_enabled = bonus.initially_enabled;
+                applied.automatic = tactical::automatic_ability_style(bonus.activation_style, start.setup.domain, !campaign);
+                income.bonuses.push_back(std::move(applied));
             }
             rules.income.push_back(std::move(income));
             break; // one stream per source type

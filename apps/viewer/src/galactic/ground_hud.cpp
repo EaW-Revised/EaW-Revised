@@ -7,6 +7,7 @@
 #include <charconv>
 #include <cmath>
 #include <ostream>
+#include <sstream>
 #include <string_view>
 
 using namespace godot;
@@ -180,17 +181,27 @@ bool GalacticMode::State::build_ground_hud() {
         if (name == "Slot_00") button->set_action([this] { static_cast<void>(request_ground_land(true)); });
         else button->set_action([] {});
     }
-    ground_hud.count = memnew(Label); fleet_organize->add_child(ground_hud.count);
-    ground_hud.count->set_mouse_filter(Control::MOUSE_FILTER_IGNORE);
-    ground_hud.count->hide();
-    if (const auto* style = command_catalog.find("Text_Land_Fleet")) {
-        const auto face = hud_fonts->resolve({std::string(style->text(data::ui::Field::font_name)),
-            style->integer(data::ui::Field::font_point_size).value_or(0)}, "english");
-        ground_hud.count->add_theme_font_override("font", hud_fonts->font(face));
-        ground_hud.count->add_theme_font_size_override("font_size", std::max(1, presentation::ui::font_pixel_height(face.point_size, camera.height)));
-        const auto colour = style->color(data::ui::Field::text_color).value_or(data::ui::Rgba8{255,255,255,255});
-        ground_hud.count->add_theme_color_override("font_color", Color(colour.r / 255.0F, colour.g / 255.0F, colour.b / 255.0F, colour.a / 255.0F));
-        ground_hud.count->add_theme_constant_override("outline_size", style->flag(data::ui::Field::text_outline) ? 1 : 0);
+    // The focused shell's "Base Layout" text: TEXT_BASE_LAYOUT as the first text, TEXT_UNKNOWN as the second (debug
+    // build Update_Organization_Display). Retail shows no landed-force count here.
+    {
+        const auto database = data::ui::load_language_text_database(*filesystem, "english");
+        const auto get = [&](const char* key) {
+            const auto* entry = database ? database.value().find(key) : nullptr;
+            return entry ? data::ui::to_utf8(entry->value) : std::string{};
+        };
+        ground_hud.caption_text = get("TEXT_BASE_LAYOUT");
+        ground_hud.unknown_text = get("TEXT_UNKNOWN");
+        const auto make = [&](const char* name) {
+            auto* label = memnew(EawrHudText);
+            label->set_name(name);
+            label->set_mouse_filter(Control::MOUSE_FILTER_IGNORE);
+            label->set_horizontal_alignment(HORIZONTAL_ALIGNMENT_CENTER);
+            fleet_organize->add_child(label);
+            label->hide();
+            return label;
+        };
+        ground_hud.caption = make("base_layout_caption");
+        ground_hud.unknown = make("base_layout_unknown");
     }
     auto* input = memnew(EawrGroundInput); hud->add_child(input); ground_hud.input = input;
     input->set_anchors_and_offsets_preset(Control::PRESET_FULL_RECT);
@@ -740,15 +751,32 @@ void GalacticMode::State::update_ground_hud() {
             if (name == "b_underground") button->set_icon_texture({});
         }
     }
-    const auto* count_anchor = fleet_anchors.find("Text_Land_Fleet");
-    if (count_anchor) {
-        const auto rect = presentation::ui::shell_to_screen(count_anchor->rect, placement);
-        ground_hud.count->set_position({static_cast<float>(rect.x),static_cast<float>(rect.y)});
-        ground_hud.count->set_size({static_cast<float>(rect.width),static_cast<float>(rect.height)});
-    }
-    if (changed) ground_hud.count->set_text(roster.count ? String::num_uint64(*roster.count) : String{});
-    // H052: show the admitted count at its authored mesh or bone point.
-    ground_hud.count->set_visible(count_anchor && roster.accessible && roster.count.has_value());
+    // Text_Land_Fleet: both texts are centred on the bone origin plus their own offset (y up, shell units).
+    const auto* land_anchor = fleet_anchors.find("Text_Land_Fleet");
+    const auto* text_style = command_catalog.find("Text_Land_Fleet");
+    const auto lines = galactic_view::base_layout_text(roster);
+    const auto place = [&](EawrHudText* label, const std::string& value, const bool second, const bool shown) {
+        const bool visible = shown && land_anchor && text_style && !value.empty();
+        label->set_visible(visible);
+        if (!visible) return;
+        const auto upper = String::utf8(value.c_str()).to_upper();
+        if (label->get_text() != upper) label->set_text(upper);
+        configure_command_bar_text(placement, *label, *text_style, *land_anchor, second);
+        const auto offset = text_style->vec2(second ? data::ui::Field::text_offset2 : data::ui::Field::text_offset)
+            .value_or(data::ui::Vec2{});
+        const auto origin = land_anchor->origin.value_or(assets::Vec2f{land_anchor->rect.x, land_anchor->rect.y});
+        const auto point = presentation::ui::text_anchor({origin.x, origin.y, 0.0F, 0.0F}, {offset.x, offset.y}, placement);
+        const auto base = presentation::ui::shell_to_screen({origin.x, origin.y, 0.0F, 0.0F}, placement);
+        const auto tint = text_style->color(data::ui::Field::text_color).value_or(data::ui::Rgba8{255, 255, 255, 255});
+        label->set_colour(Color(tint.r / 255.0F, tint.g / 255.0F, tint.b / 255.0F, tint.a / 255.0F));
+        const float width = std::max(label->get_minimum_size().x, 1.0F);
+        const float height = static_cast<float>(std::max(label->glyph_pixels(), 1));
+        label->set_size({width, height});
+        label->set_position({static_cast<float>(point.x) - width * 0.5F,
+            static_cast<float>(base.y + point.y_shift) - height * 0.5F});
+    };
+    place(ground_hud.caption, ground_hud.caption_text, false, lines.caption);
+    place(ground_hud.unknown, ground_hud.unknown_text, true, lines.unknown);
     if (!fleet_organize->is_visible_in_tree() || !selectable(*this)) {
         map_input.box_start.reset(); map_input.box_end.reset(); ground_hud.pressed = 0;
         ground_hud.input->queue_redraw();
@@ -757,10 +785,19 @@ void GalacticMode::State::update_ground_hud() {
 
 void GalacticMode::State::write_ground_report(std::ostream& output) const {
     using galactic_detail::json;
-    const auto count_rect = ground_hud.count ? ground_hud.count->get_global_rect() : Rect2{};
-    output << "{\"count_visible\":" << (ground_hud.count && ground_hud.count->is_visible_in_tree() ? "true" : "false")
-        << ",\"count\":" << json(ground_hud.count ? galactic_detail::utf8(ground_hud.count->get_text()) : std::string{})
-        << ",\"count_rect\":[" << count_rect.position.x << ',' << count_rect.position.y << ',' << count_rect.size.x << ',' << count_rect.size.y << ']'
+    const auto text_json = [&](const EawrHudText* label) {
+        const auto rect = label ? label->get_global_rect() : Rect2{};
+        std::ostringstream text;
+        text << "{\"visible\":" << (label && label->is_visible_in_tree() ? "true" : "false")
+            << ",\"text\":" << json(label ? galactic_detail::utf8(label->get_text()) : std::string{})
+            << ",\"rect\":[" << rect.position.x << ',' << rect.position.y << ',' << rect.size.x << ',' << rect.size.y << "]}";
+        return text.str();
+    };
+    const auto landed = ground_roster_find(selected_planet);
+    const auto landed_count = landed != ground_hud.rosters.end() && landed->second.count
+        ? std::to_string(*landed->second.count) : std::string{};
+    output << "{\"count\":" << json(landed_count) << ",\"caption\":" << text_json(ground_hud.caption)
+        << ",\"unknown\":" << text_json(ground_hud.unknown)
         << ",\"projection_rebuilds\":" << ground_hud.rebuilds << ",\"clicks\":" << ground_hud.clicks
         << ",\"sale_opened\":" << ground_hud.sale_opened << ",\"sales_submitted\":" << ground_hud.sales_submitted
         << ",\"sale\":{\"object\":" << ground_hud.sale_object << ",\"visible\":"

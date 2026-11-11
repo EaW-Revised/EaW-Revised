@@ -197,6 +197,13 @@ public:
     }
     void sample_pointer(float x, float y) noexcept { adapter_.sample_pointer(x, y); }
     void clear_pointer_sample() noexcept { adapter_.clear_pointer_sample(); }
+    // #5990: where a held middle-button drag keeps the pointer; empty otherwise.
+    [[nodiscard]] const std::optional<std::array<float, 2>>& pointer_hold() const noexcept {
+        return adapter_.pointer_hold();
+    }
+    [[nodiscard]] std::optional<std::array<float, 2>> take_pointer_hold_warp() noexcept {
+        return adapter_.take_pointer_hold_warp();
+    }
     void pointer_left() noexcept {
         adapter_.pointer_left();
         if (controller_) controller_->stop_pan();
@@ -239,6 +246,15 @@ public:
         return *controller_;
     }
     [[nodiscard]] const camera_input::Adapter& adapter() const noexcept { return adapter_; }
+    [[nodiscard]] bool cinematic_key(const camera_input::RawEvent& event, camera_input::Action action) const noexcept {
+        const auto* table = adapter_.table();
+        if (!table || event.kind != camera_input::RawKind::key) return false;
+        return std::any_of(table->bindings.begin(), table->bindings.end(), [&](const auto& binding) {
+            return binding.context == context_ && binding.action == action
+                && binding.device == camera_input::Device::keyboard && binding.code == event.code
+                && (event.modifiers == binding.modifiers || !event.pressed);
+        });
+    }
     [[nodiscard]] const MapCameraConfig& config() const noexcept { return config_; }
     [[nodiscard]] const presentation::camera::Constants& constants() const noexcept { return constants_; }
     [[nodiscard]] std::uint64_t steps() const noexcept { return steps_; }

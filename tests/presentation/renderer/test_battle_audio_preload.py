@@ -215,6 +215,51 @@ class AudioPreloadSourceTests(unittest.TestCase):
         self.assertIn('audio::parse_wav(data, error)', worker)
         self.assertIn('audio_loader_->take_ready(1)', source)
 
+    def test_unqueued_preload_reads_beside_the_load_and_is_joined_before_begin(self):
+        source = (ROOT / 'apps/viewer/src/battle_audio_prepare.cpp').read_text(encoding='utf-8')
+        prepare = source[source.index('void BattleAudio::prepare('):source.index('void BattleAudio::finish_prepare()')]
+        self.assertIn('start_audio_readers(scheduled);', prepare)
+        self.assertNotIn('prepare_audio_chunk', prepare)
+        # Same disk order as the stepped path, a bound on buffers waiting for the owner thread, publication in order.
+        readers = source[source.index('void BattleAudio::start_audio_readers('):source.index('void BattleAudio::pump_loading()')]
+        self.assertIn('order_by_disk_position(*filesystem_, state->ordered);', readers)
+        self.assertIn('max_waiting_bytes', source)
+        self.assertIn('index = state.published;', readers)
+        # Owner-thread publication only: no Godot resource is created on a reader.
+        loop = source[source.index('void read_loop('):source.index('void BattleAudio::start_audio_readers(')]
+        for forbidden in ('godot::', 'commit_audio(', 'wav_stream(', 'mp3_stream('):
+            self.assertNotIn(forbidden, loop)
+        hud = (ROOT / 'apps/viewer/src/map_mode_hud.cpp').read_text(encoding='utf-8')
+        ready = (ROOT / 'apps/viewer/src/map_mode_ready_population.cpp').read_text(encoding='utf-8')
+        release = (ROOT / 'apps/viewer/src/battle_audio.cpp').read_text(encoding='utf-8')
+        self.assertIn('battle_audio->pump_loading();', hud)
+        finish = ready[ready.index('bool MapMode::State::finish_ready_space('):]
+        self.assertLess(finish.index('battle_audio->finish_loading();'), finish.index('loading_complete()'))
+        self.assertIn('async_prepare_.reset();', release)
+
+    def test_a_failed_or_refused_load_stops_the_readers_without_publishing(self):
+        source = (ROOT / 'apps/viewer/src/battle_audio_prepare.cpp').read_text(encoding='utf-8')
+        header = (ROOT / 'apps/viewer/src/battle_audio.hpp').read_text(encoding='utf-8')
+        ready = (ROOT / 'apps/viewer/src/map_mode_ready.cpp').read_text(encoding='utf-8')
+        population = (ROOT / 'apps/viewer/src/map_mode_ready_population.cpp').read_text(encoding='utf-8')
+        cancel = source[source.index('void BattleAudio::cancel_loading() {'):source.index('void BattleAudio::finish_loading() {')]
+        self.assertIn('async_prepare_.reset();', cancel)
+        self.assertNotIn('publish_audio(', cancel)
+        # Every failure path that reaches fail_ready, and the ready path with ready == false, cancel the preload.
+        fail = ready[ready.index('bool MapMode::State::fail_ready('):]
+        fail = fail[:fail.index('void MapMode::State::parse_ready_arguments(')]
+        self.assertIn('battle_audio->cancel_loading();', fail)
+        finish = population[population.index('bool MapMode::State::finish_ready_space('):]
+        self.assertIn('if (ready) state.battle_audio->finish_loading();', finish)
+        self.assertIn('else state.battle_audio->cancel_loading();', finish)
+        # Nothing is looked up, read or requested while the preload is still being published.
+        self.assertIn('if (async_prepare_) return false;', source)
+        self.assertIn('if (async_prepare_) return pending_sample_;', source)
+        # The bound on waiting buffers counts the decoded copy; a reader's exception is reported.
+        self.assertIn('pcm->converted.size()', source)
+        self.assertIn('audio loading thread: ', source)
+        self.assertNotIn('prepare_audio_batch', header + source)
+
     def test_runtime_paths_queue_instead_of_opening_files(self):
         source = (ROOT / 'apps/viewer/src/battle_audio_prepare.cpp').read_text(encoding='utf-8')
         sample = source[source.index('const BattleAudio::Sample& BattleAudio::sample('):]
@@ -239,6 +284,167 @@ class AudioPreloadNativeTests(unittest.TestCase):
             queue = (ROOT / 'apps/viewer/src/battle_audio_load_queue.hpp').as_posix()
             cpp.write_text(HARNESS.replace('__QUEUE__', queue).replace('__PRELOAD__', preload_body()), encoding='utf-8')
             compile_fixture(toolchain, cpp, executable)
+            ran = subprocess.run([str(executable)], capture_output=True, text=True, timeout=10)
+            self.assertEqual(ran.returncode, 0, ran.stdout + ran.stderr)
+
+
+class AbilityLoopCpuTests(unittest.TestCase):
+    def test_authored_loop_perturbation_and_firing_gate(self):
+        preparation = (ROOT / 'apps/viewer/src/battle_audio_prepare.cpp').read_text(encoding='utf-8')
+        self.assertIn('ability_loop_audio::bind(kind', preparation)
+        toolchain = select_toolchain()
+        if toolchain is None:
+            self.skipTest('No native C++20 fixture compiler')
+        source = r'''
+#include "ability_loop_audio.hpp"
+#include <cassert>
+#include <string>
+#include <map>
+#include <optional>
+using namespace eawr;
+using namespace presentation::godot_backend::ability_loop_audio;
+int main() {
+    using K = sim::tactical::AbilityKind;
+    std::map<std::string, int> events{{"mod_a", 1}, {"mod_b", 2}};
+    for (const auto kind : {K::leech_shields, K::tractor_beam, K::energy_weapon, K::super_laser}) {
+        std::string authored = "mod_a";
+        auto read = [&] { return authored; };
+        auto resolve = [&](const std::string& name) { return events.at(name); };
+        assert(bind(kind, read, resolve) == 1);
+        authored = "mod_b";
+        assert(bind(kind, read, resolve) == 2);
+        sim::tactical::AbilityStatus status{};
+        status.kind = kind; status.active = true; status.target = 7; status.started_tick = 10;
+        assert(!playing(status, 9, 4) || kind != K::super_laser);
+        assert(playing(status, 14, 4));
+        if (kind == K::super_laser) assert(!playing(status, 13, 4));
+        status.active = false;
+        assert(!playing(status, 20, 4));
+    }
+    assert(!supported(K::defend));
+    struct Cue { double fade; } a{1.25}, b{0.5};
+    struct Active { const Cue* event; std::optional<int> handle; };
+    std::map<int, Active> active;
+    std::map<int, const Cue*> desired{{1, &a}, {2, &a}};
+    int starts = 0, stops = 0;
+    double faded = 0;
+    auto start = [&](int id, const Cue* cue) -> std::optional<Active> {
+        ++starts; return Active{cue, id == 2 ? std::nullopt : std::optional<int>{id}};
+    };
+    auto stop = [&](const Active& old) { if (old.handle) { ++stops; faded += old.event->fade; } };
+    reconcile(active, desired, start, stop);
+    reconcile(active, desired, start, stop);
+    assert(starts == 2 && stops == 0); // refused endpoint also does not retry
+    desired[1] = &b; desired.erase(2);
+    reconcile(active, desired, start, stop);
+    assert(starts == 3 && stops == 1 && faded == 1.25 && active.size() == 1);
+    desired.clear(); reconcile(active, desired, start, stop);
+    assert(stops == 2 && faded == 1.75 && active.empty());
+}
+'''
+        with tempfile.TemporaryDirectory(prefix='eawr-ability-loop-') as temp:
+            directory = Path(temp)
+            cpp = directory / 'ability_loop.cpp'
+            executable = directory / ('ability_loop.exe' if os.name == 'nt' else 'ability_loop')
+            cpp.write_text(source, encoding='utf-8')
+            compile_fixture(toolchain, cpp, executable,
+                            (ROOT / 'include', ROOT / 'apps/viewer/src'))
+            ran = subprocess.run([str(executable)], capture_output=True, text=True, timeout=10)
+            self.assertEqual(ran.returncode, 0, ran.stdout + ran.stderr)
+
+
+def _braced_source(text, needle):
+    start = text.index(needle)
+    opening = text.index('{', start)
+    depth = 1
+    end = opening + 1
+    while depth:
+        depth += (text[end] == '{') - (text[end] == '}')
+        end += 1
+    return text[start:end]
+
+
+class AbilityLoopAuthoredReadTests(unittest.TestCase):
+    def test_real_authored_read_and_preload_selection(self):
+        toolchain = select_toolchain()
+        if toolchain is None:
+            self.skipTest('No native C++20 fixture compiler')
+        prepare = (ROOT / 'apps/viewer/src/battle_audio_prepare.cpp').read_text(encoding='utf-8')
+        trim = _braced_source(prepare, '[[nodiscard]] std::string trim(')
+        same = _braced_source(prepare, '[[nodiscard]] bool same(')
+        child = _braced_source(prepare, '[[nodiscard]] std::string child(')
+        binding = _braced_source(prepare, 'if (ability_loop_audio::supported(kind))')
+        event = _braced_source(prepare, 'const auto event = [this, &immediate_roots, &binding_unit, &first_type]') + ';'
+        source = r'''
+#include "ability_loop_audio.hpp"
+#include <algorithm>
+#include <cassert>
+#include <cctype>
+#include <map>
+#include <set>
+#include <string>
+#include <string_view>
+#include <vector>
+namespace sim = eawr::sim;
+namespace tactical = sim::tactical;
+namespace ability_loop_audio = eawr::presentation::godot_backend::ability_loop_audio;
+namespace data {
+struct XmlNode { std::string name, raw_text; std::vector<XmlNode> children; };
+namespace tag_trace { inline void used(const XmlNode&) {} }
+}
+namespace audio { struct SfxEvent { std::string name; bool is_3d; }; }
+__TRIM__
+__SAME__
+__CHILD__
+struct Nested { tactical::SpecialAbilityKind kind; std::string name; unsigned fire_delay_frames; };
+struct Type { std::vector<Nested> special_abilities; };
+struct Sounds { std::map<tactical::AbilityKind, const audio::SfxEvent*> ability_loops; unsigned super_laser_fire_delay{}; };
+struct Fixture {
+    struct Options { bool preload{true}; } options_;
+    std::map<std::string, audio::SfxEvent> registry{{"mod_a", {"mod_a", true}}, {"mod_b", {"mod_b", true}}};
+    const audio::SfxEvent* event(std::string_view name, const std::string&) {
+        const auto found = registry.find(trim(name));
+        return found == registry.end() ? nullptr : &found->second;
+    }
+    auto run(const data::XmlNode& ability, tactical::AbilityKind kind, bool first_type) {
+        std::set<std::string> immediate_roots;
+        bool binding_unit = true;
+        Type type{};
+        Sounds sounds{};
+        const std::string where = "synthetic";
+        __EVENT__
+        __BINDING__
+        return std::pair{sounds, immediate_roots};
+    }
+};
+int main() {
+    Fixture fixture;
+    using K = tactical::AbilityKind;
+    for (auto kind : {K::leech_shields, K::tractor_beam, K::energy_weapon, K::super_laser}) {
+        data::XmlNode ability{"Unit_Ability", "", {{"SFXEvent_Special_Ability_Loop", " mod_a ", {}}}};
+        auto [first, roots] = fixture.run(ability, kind, true);
+        assert(first.ability_loops.at(kind)->name == "mod_a" && roots == std::set<std::string>{"mod_a"});
+        ability.children[0].raw_text = "mod_b";
+        auto [second, changed_roots] = fixture.run(ability, kind, true);
+        assert(second.ability_loops.at(kind)->name == "mod_b" && changed_roots == std::set<std::string>{"mod_b"});
+        auto [later, no_roots] = fixture.run(ability, kind, false);
+        assert(later.ability_loops.at(kind)->name == "mod_b" && no_roots.empty());
+        ability.children.clear();
+        auto [missing, empty] = fixture.run(ability, kind, true);
+        assert(missing.ability_loops.at(kind) == nullptr && empty.empty());
+    }
+}
+'''
+        for key, value in (('__TRIM__', trim), ('__SAME__', same), ('__CHILD__', child),
+                           ('__EVENT__', event), ('__BINDING__', binding)):
+            source = source.replace(key, value)
+        with tempfile.TemporaryDirectory(prefix='eawr-loop-authored-') as temp:
+            directory = Path(temp)
+            cpp = directory / 'authored.cpp'
+            executable = directory / ('authored.exe' if os.name == 'nt' else 'authored')
+            cpp.write_text(source, encoding='utf-8')
+            compile_fixture(toolchain, cpp, executable,
+                            (ROOT / 'include', ROOT / 'apps/viewer/src'))
             ran = subprocess.run([str(executable)], capture_output=True, text=True, timeout=10)
             self.assertEqual(ran.returncode, 0, ran.stdout + ran.stderr)
 

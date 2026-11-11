@@ -61,6 +61,8 @@ PlayerId service_capture(const CaptureProfile& profile, PadState& state, const P
     const PlayerId neutral, const std::span<const Player> players,
     const std::span<const CaptureCandidate> candidates, const PadRules& rules,
     const EntityId point, const math::Vec3& position, const math::Fixed adjustment) {
+    // A pad that is not a capture point keeps its owner (LE-LOADER).
+    if (!profile.captures) return owner;
     if (state.under_construction != invalid_entity_id || state.constructed != invalid_entity_id) return owner;
     PlayerId wanted = neutral;
     bool present = false;

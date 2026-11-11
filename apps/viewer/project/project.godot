@@ -4,6 +4,8 @@ config_version=5
 [application]
 config/name="EAWR Viewer"
 run/main_scene="res://main.tscn"
+boot_splash/show_image=false
+boot_splash/bg_color=Color(0, 0, 0, 1)
 
 [debug]
 file_logging/max_log_files=30

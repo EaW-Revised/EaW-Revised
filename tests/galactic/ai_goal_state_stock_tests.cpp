@@ -371,9 +371,11 @@ void degraded_battle_entry_contracts() {
                     expect(admitted.admitted && admitted.request == 1, "registered native TaskForce movement precedes battle entry");
                     cp::GalacticAiServices services;
                     services.state = std::make_shared<ai::GoalStateContributor>(control.engine, fixture_identity());
-                    services.battle = ga::retained_movement_battle_listener(actions,
+                    // The production listener reads the notice's owned facts, as the runtime hands them over (A2.1).
+                    services.battle = [listener = ga::retained_movement_battle_listener(actions,
                         scenario == 2 ? std::shared_ptr<ai::Engine>{} : control.engine,
-                        std::function<auth::ScriptScheduler*()>{[&] { return scenario == 0 ? nullptr : &control.scripts; }});
+                        std::function<auth::ScriptScheduler*()>{[&] { return scenario == 0 ? nullptr : &control.scripts; }})]
+                        (const cp::GalacticAiBattleNotice& notice) { return listener(cp::galactic_ai_battle_facts(notice)); };
                     return eawr::core::Result<cp::GalacticAiServices>::success(std::move(services));
                 }));
                 if (!recorded) must(game.stage_battle(conflict, content, cp::ScriptRequirement::none));
@@ -570,6 +572,30 @@ Create_Thread('main')
         expect(must(resumed.state_hash()) == hash && must(resumed.record_sync_hash()) == sync,
             "optional scalar checkpoint tail restores exact state and sync hashes");
         expect(std::get<std::string>(restored.engine->global_value("shared")->data) == std::string("serialized\0payload", 18), "load restores serialized string bytes");
+        {
+            // A save from other content or start settings refuses by name, not as an encoding line, and changes nothing.
+            ai::GoalStateContributor other(restored.engine, std::string(64, '1'));
+            const auto refused = other.restore(capture);
+            expect(!refused && refused.error().message.find("different campaign content or start settings") != std::string::npos
+                && refused.error().message.find("identity is " + fixture_identity().substr(0, 8)) != std::string::npos
+                && must(resumed.state_hash()) == hash, "a changed content identity refuses with its plain cause and leaves the state alone");
+        }
+        {
+            // A save made with the group digests names the groups that differ on a refusal; the digest alone decides a load.
+            ai::GoalStateContributor grouped(owner.engine, fixture_identity(), "types=11111111 start-settings=22222222");
+            const auto grouped_capture = must(grouped.capture());
+            ai::GoalStateContributor other(restored.engine, std::string(64, '1'), "types=11111111 start-settings=33333333");
+            const auto refused = other.restore(grouped_capture);
+            expect(!refused && refused.error().message.find("differing groups: start-settings (saved 22222222, now 33333333)") != std::string::npos
+                && refused.error().message.find("types (") == std::string::npos,
+                "a refused save names only the identity groups that differ");
+            const auto old_style = other.restore(capture);
+            expect(!old_style && old_style.error().message.find("carries no group list") != std::string::npos,
+                "a save without a group list says so and shows this load's groups");
+            ai::GoalStateContributor same_digest(restored.engine, fixture_identity(), "types=99999999");
+            expect(same_digest.restore(grouped_capture).has_value() && must(resumed.state_hash()) == hash,
+                "an equal digest loads whatever the group list says");
+        }
         for (const bool truncate : {false, true}) {
             auto corrupt = capture;
             auto& bytes = corrupt.components.at(std::string(ai::GoalStateContributor::component));
@@ -853,7 +879,7 @@ void goal_state_contracts() {
             expect(!restored.restore(bad), "corrupt native state refuses restore");
             expect(must(restored.state_hash()) == hash, "restore refusal leaves replacement owner unchanged");
         };
-        auto bad = bytes; bad.version = 2; assert_rejected(bad);
+        auto bad = bytes; bad.version = lifecycle::native_state_version + 1; assert_rejected(bad);
         bad = bytes; bad.components.clear(); assert_rejected(bad);
         bad = bytes; bad.components.at("galactic-goals").push_back(0); assert_rejected(bad);
         const auto& payload = bytes.components.at("galactic-goals");

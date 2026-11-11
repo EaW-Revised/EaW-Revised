@@ -1,3 +1,4 @@
+#include "ability_loop_audio.hpp"
 #include "eawr/core/load_profile.hpp"
 #include "battle_audio.hpp"
 #include "audio_output.hpp"
@@ -994,7 +995,8 @@ void BattleAudio::toggle_abilities(const tactical::TacticalSnapshot& snapshot, c
                 if (status.kind == tactical::AbilityKind::harmonic_bomb || status.kind == tactical::AbilityKind::weaken_enemy
                     || status.kind == tactical::AbilityKind::buzz_droids || status.kind == tactical::AbilityKind::self_destruct
                     || status.kind == tactical::AbilityKind::corrupt_systems || status.kind == tactical::AbilityKind::blast
-                    || status.kind == tactical::AbilityKind::cluster_bomb || status.kind == tactical::AbilityKind::fow_reveal_ping) {
+                    || status.kind == tactical::AbilityKind::cluster_bomb || status.kind == tactical::AbilityKind::fow_reveal_ping
+                    || status.kind == tactical::AbilityKind::lucky_shot) {
                     lap(audio_trace::Lap::t_toggle_main);
                     const auto visible = snapshot.visible_entities(local);
                     spawned_ability(instance, status, !std::binary_search(visible.begin(), visible.end(), instance.entity_id), live);
@@ -1033,31 +1035,30 @@ void BattleAudio::toggle_abilities(const tactical::TacticalSnapshot& snapshot, c
         ++self_destruct_sound_stops_;
         sound = self_destruct_sounds_.erase(sound);
     }
-    // WLS-05: one attached loop at each endpoint while any shield-leech lock uses it.
+    // BA-87/WLS-05: the same event is attached at both beam endpoints.
     std::map<sim::EntityId, const audio::SfxEvent*> leeching;
     for (const auto& instance : snapshot.instances()) {
         for (const auto& status : instance.abilities) {
-            if (!status.active || status.kind != tactical::AbilityKind::leech_shields) continue;
-            // Only a unit with an active leech lock looks up its type; one whose type has no leech loop is skipped whole.
+            if (!status.active || !ability_loop_audio::supported(status.kind)) continue;
             const auto type = types_.find(instance.type_id);
-            if (type == types_.end() || !type->second.leech_loop) break;
+            if (type == types_.end()) break;
+            if (!ability_loop_audio::playing(status, snapshot.completed_tick(), type->second.super_laser_fire_delay)) continue;
+            const auto cue = type->second.ability_loops.find(status.kind);
+            if (cue == type->second.ability_loops.end() || !cue->second || cue->second->play_count != -1) continue;
             tally(audio_trace::Count::leech_active);
-            leeching[instance.entity_id] = type->second.leech_loop;
-            leeching[status.target] = type->second.leech_loop;
+            leeching[instance.entity_id] = cue->second;
+            leeching[status.target] = cue->second;
         }
     }
-    for (auto active = leech_loops_.begin(); active != leech_loops_.end();) {
-        if (leeching.contains(active->first)) { ++active; continue; }
-        events_.stop(active->second, event_backend());
-        active = leech_loops_.erase(active);
-    }
-    for (const auto& [id, cue] : leeching) {
-        if (leech_loops_.contains(id)) continue;
-        const auto frame = live.unit_frame(id);
-        if (!frame) continue;
-        const auto started = play(cue, frame->position, false, "ability_leech_loop", sim::invalid_entity_id, id);
-        if (started) leech_loops_[id] = *started;
-    }
+    ability_loop_audio::reconcile(leech_loops_, leeching,
+        [&](const sim::EntityId id, const audio::SfxEvent* cue) -> std::optional<AbilityLoop> {
+            const auto frame = live.unit_frame(id);
+            if (!frame) return std::nullopt;
+            return AbilityLoop{cue, play(cue, frame->position, false, "ability_leech_loop", sim::invalid_entity_id, id, true)};
+        },
+        [&](const AbilityLoop& active) {
+            if (active.handle) events_.stop(*active.handle, event_backend(), active.event->loop_fade_out_seconds);
+        });
     lap(audio_trace::Lap::t_toggle_leech);
     arm_droids(snapshot, live);
     // BA-50: one sound per switch, whatever the number of units it carried (a squadron's craft, a group).
@@ -1100,6 +1101,7 @@ void BattleAudio::spawned_ability(const tactical::TacticalInstance& instance, co
     // BA-54: only the successful spawn route owns this effect (including script/AI starts).
     if (status.kind != tactical::AbilityKind::harmonic_bomb && status.kind != tactical::AbilityKind::weaken_enemy
         && status.kind != tactical::AbilityKind::buzz_droids && status.kind != tactical::AbilityKind::self_destruct
+        && status.kind != tactical::AbilityKind::lucky_shot
         && status.kind != tactical::AbilityKind::corrupt_systems && status.kind != tactical::AbilityKind::blast
         && status.kind != tactical::AbilityKind::cluster_bomb && status.kind != tactical::AbilityKind::fow_reveal_ping) return;
     const audio::SfxEvent* found = nullptr;
@@ -1683,6 +1685,7 @@ void BattleAudio::present_combat_audio(const LiveSessionView& live, const LiveSe
             const auto shooter = entity_types_.find(event.shooter);
             tactical::TypeId shooter_type = shooter == entity_types_.end() ? tactical::TypeId{} : shooter->second;
             std::uint32_t weapon_slot = event.weapon;
+            tactical::TypeId holder_type{};
             tactical::ProjectileProfileKind kind = tactical::ProjectileProfileKind::ordinary;
             if (const auto before = live.snapshot_at(event.tick)) {
                 if (const auto hit = live::hit_projectile(before->projectiles(), event)) {
@@ -1692,6 +1695,7 @@ void BattleAudio::present_combat_audio(const LiveSessionView& live, const LiveSe
                             shooter_type = projectile.profile_key->type;
                             weapon_slot = projectile.profile_key->weapon;
                             kind = projectile.profile_key->kind;
+                            holder_type = projectile.profile_key->holder;
                             break;
                         }
                         // WCB-01: spawned real bombs retain their own object terminal cue.
@@ -1714,11 +1718,18 @@ void BattleAudio::present_combat_audio(const LiveSessionView& live, const LiveSe
                 continue;
             }
             const audio::SfxEvent* sound = nullptr;
-            const auto& detonations = kind == tactical::ProjectileProfileKind::ability ? type->second.ability_detonate
+            static const std::map<std::uint32_t, const audio::SfxEvent*> empty;
+            const auto lucky_plain = type->second.lucky_detonate.find(holder_type);
+            const auto lucky_armor = type->second.lucky_detonate_armor.find(holder_type);
+            const auto& detonations = kind == tactical::ProjectileProfileKind::lucky_shot
+                ? (lucky_plain == type->second.lucky_detonate.end() ? empty : lucky_plain->second)
+                : kind == tactical::ProjectileProfileKind::ability ? type->second.ability_detonate
                 : kind == tactical::ProjectileProfileKind::barrage ? type->second.barrage_detonate
                 : kind == tactical::ProjectileProfileKind::charged_blast && type->second.charged_detonate.contains(event.weapon)
                     ? type->second.charged_detonate : type->second.detonate;
-            const auto& armor_detonations = kind == tactical::ProjectileProfileKind::ability ? type->second.ability_detonate_armor
+            const auto& armor_detonations = kind == tactical::ProjectileProfileKind::lucky_shot
+                ? (lucky_armor == type->second.lucky_detonate_armor.end() ? empty : lucky_armor->second)
+                : kind == tactical::ProjectileProfileKind::ability ? type->second.ability_detonate_armor
                 : kind == tactical::ProjectileProfileKind::barrage ? type->second.barrage_detonate_armor
                 : kind == tactical::ProjectileProfileKind::charged_blast && type->second.charged_detonate_armor.contains(event.weapon)
                     ? type->second.charged_detonate_armor : type->second.detonate_armor;

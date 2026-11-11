@@ -115,6 +115,15 @@ public:
     [[nodiscard]] core::Result<void> load_land_checkpoint_state(std::span<const std::uint8_t> bytes);
     [[nodiscard]] const LandMovement* land_movement() const noexcept;
     [[nodiscard]] const LandOccupancy* land_occupancy() const noexcept;
+    // LC-51: the companies of a land battle that are on their way down, ascending landing number (empty outside land).
+    struct LandLandingView {
+        std::uint64_t sequence{};
+        PlayerId owner{};
+        TypeId company{};
+        math::Vec3 position{};
+        std::uint64_t created_frame{}, finalize_frame{};
+    };
+    [[nodiscard]] std::vector<LandLandingView> land_landings() const;
     TacticalSession(TacticalSession&&) noexcept;
     TacticalSession& operator=(TacticalSession&&) noexcept;
     ~TacticalSession();
@@ -328,6 +337,8 @@ public:
     // Every use the object-turn provider issued at the seam, applied or refused, is in `object_turns`, in
     // (tick, unit, sequence) order; the record is empty only when no use was issued.
     [[nodiscard]] TacticalReplay record() const;
+    // The setup and commands from the most recently completed tick, in replay order.
+    [[nodiscard]] TacticalReplay record_last_tick() const;
     // The replay through the next tick (#615): record() with the final tick one past the
     // completed tick and that tick's queued commands. A failed step changes nothing, so after a
     // failure this replays up to and including the failing tick.

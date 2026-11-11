@@ -122,8 +122,12 @@ StageArtifact translate(Session &s, const assets::EffectProgram &program,
     info.option_count = 2;
     checkpoint(s.limits, DiagnosticPhase::stage_compile);
     CompileOutput owner{s.api, info};
+    // Pinned public vkd3d_types.h: VKD3D_ERROR_INVALID_SHADER = -4.
+    // Resource exhaustion and unknown failures must remain retryable.
     require(owner.result == 0, DiagnosticPhase::stage_compile,
-            DiagnosticReason::compiler_failure, "public stage compiler failed");
+            owner.result == -4 ? DiagnosticReason::invalid_shader
+                               : DiagnosticReason::compiler_failure,
+            "public stage compiler failed");
     checkpoint(s.limits, DiagnosticPhase::stage_compile);
     const auto &compiled = owner.code;
     require(compiled.data && compiled.size >= 20 && compiled.size % 4 == 0,

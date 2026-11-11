@@ -43,11 +43,29 @@ struct GalacticLanView {
     std::vector<GalacticLanClockRefusal> clock_refusals; // Latest refusal per seat; UI frames may skip ticks.
     std::optional<net::GalacticRecoveryAnchor> recovery_anchor;
     std::string recovery_refusal;
+    bool recovery_ended{}; // The match ended because recovery quarantined this peer (the refusal is why), not a plain quit.
     bool clock_paused{}; // Current agreed player pause, excluding the child-owned strategic hold.
     std::uint64_t clock_change_tick{};
     sim::SeatId clock_actor{};
     std::string clock_action; // Last executed pause/resume/speed event; presentation only.
 };
+// #5355: a Q24 speed factor as the players read it ("2x", "0.5x", "1.25x"); presentation only.
+[[nodiscard]] inline std::string speed_factor_text(const std::int64_t raw) {
+    constexpr std::int64_t scale = std::int64_t{1} << 24;
+    if (raw <= 0) return "0x";
+    const auto hundredths = (raw * 100 + scale / 2) / scale;
+    std::string text = std::to_string(hundredths / 100);
+    if (const auto fraction = hundredths % 100; fraction != 0) {
+        text += '.';
+        text += static_cast<char>('0' + fraction / 10);
+        if (fraction % 10 != 0) text += static_cast<char>('0' + fraction % 10);
+    }
+    return text + "x";
+}
+// The clock notice's words for an executed speed event (subject 0 strategic, 1 tactical; value the Q24 factor).
+[[nodiscard]] inline std::string speed_action_text(const bool tactical, const std::int64_t raw) {
+    return std::string("set the ") + (tactical ? "battle" : "galactic") + " speed to " + speed_factor_text(raw);
+}
 // Gameplay input is accepted while the match is on (a wait is only a message).
 [[nodiscard]] inline bool galactic_lan_gameplay_enabled(const GalacticLanView& view) {
     return view.phase == GalacticLanPhase::running || view.phase == GalacticLanPhase::waiting_for_peer
@@ -59,7 +77,7 @@ struct GalacticLanOptions {
     // One entry per transport peer, in peer-index order; may_submit false makes a peer an observer.
     std::vector<net::PeerSeat> seats;
     std::uint64_t input_delay{3};
-    std::uint64_t final_tick_count{net::max_session_ticks};
+    std::uint64_t final_tick_count{sim::galactic::galactic_max_ticks};
     std::uint64_t exchange_every{30};          // desync monitor hash exchange period, completed ticks
     std::uint64_t completeness_timeout_ms{30'000};
     std::uint64_t waiting_notice_ms{3000};     // MP-33: show "waiting for <peer>" after this long
@@ -99,6 +117,12 @@ public:
     [[nodiscard]] std::shared_ptr<platform::LiveGameStepDriver> driver();
     // Thread-safe snapshot for the UI.
     [[nodiscard]] GalacticLanView view() const;
+    // #5355: how many human clock events (pause, resume, speed) the view has recorded. Lock-free, so a per-frame
+    // reader takes view() (owner lock and copy) only when this moved.
+    [[nodiscard]] std::uint64_t clock_events() const noexcept;
+    // #6276: changes to the pause notice inputs (agreed pause, actor and gameplay availability), published under
+    // the view mutex. An unchanged revision lets the child HUD keep its cached text without locking or copying.
+    [[nodiscard]] std::uint64_t pause_notice_revision() const noexcept;
     [[nodiscard]] sim::SeatId local_seat() const;
     // Call before handing the driver to the live thread. Empty paths leave the ordinary path untouched.
     void configure_recovery_restore(net::GalacticRecoveryWorker::Restore); // before live handover only

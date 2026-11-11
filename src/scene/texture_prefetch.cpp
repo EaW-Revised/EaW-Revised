@@ -46,11 +46,14 @@ std::string entry_key(const std::string_view text, const TextureProcessing proce
     // '|' is not a legal file name character: a processing suffix never collides with a path.
     if (processing == TextureProcessing::colour_mip_chain) key += "|chain";
     else if (processing == TextureProcessing::normal_mip_chain) key += "|normal-chain";
+    else if (processing == TextureProcessing::compensated_light_mip_chain) key += "|light-chain";
     return key;
 }
 
 assets::ChainKind chain_kind(const TextureProcessing processing) noexcept {
-    return processing == TextureProcessing::normal_mip_chain ? assets::ChainKind::normal : assets::ChainKind::colour;
+    if (processing == TextureProcessing::normal_mip_chain) return assets::ChainKind::normal;
+    if (processing == TextureProcessing::compensated_light_mip_chain) return assets::ChainKind::compensated_light;
+    return assets::ChainKind::colour;
 }
 
 bool wants_chain(const TextureProcessing processing) noexcept { return processing != TextureProcessing::none; }

@@ -493,6 +493,8 @@ public:
     [[nodiscard]] const RegistryTimings& timings() const noexcept { return timings_; }
     // PS-34..PS-37: applies to existing and future effects; caller-thread only.
     [[nodiscard]] core::Result<void> set_detail(ParticleDetail detail);
+    // The detail the registry's instances run with now (the in-battle log reads it back).
+    [[nodiscard]] ParticleDetail detail() const noexcept { return detail_; }
     [[nodiscard]] const RegistryWorkCounts& work() const noexcept;
     // Frees every backend resource of the instance. Releasing twice is a
     // diagnostic, not a crash.

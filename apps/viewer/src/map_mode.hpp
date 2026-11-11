@@ -19,6 +19,7 @@
 #include <vector>
 
 namespace eawr::platform { class TacticalFeed; }
+namespace eawr::presentation::ui { struct SavedGameRequest; }
 namespace eawr::sim::tactical {
 enum class RetreatRefusal : std::uint8_t;
 struct RetreatState;
@@ -29,6 +30,7 @@ namespace eawr::presentation::godot_backend {
 namespace live_session { struct PreparedBattle; }
 
 struct BattleContent;
+struct SavedBattlePreparation;
 class EawrLoadingScreen;
 class GodotShaderCache;
 class LanMatch;
@@ -54,6 +56,8 @@ public:
     [[nodiscard]] bool briefing_queue_empty() const;
     [[nodiscard]] bool campaign_briefing(std::string_view event_name);
     [[nodiscard]] bool command_bar_movie_playing() const;
+    [[nodiscard]] bool battlecam_active() const;
+    [[nodiscard]] bool battlecam_preview() const;
     void write_command_bar_movie_report(std::ostream&) const;
     // The live battle's command bar, for a campaign parent's controls (HCB-15); null without one.
     [[nodiscard]] TacticalHud* tactical_hud() const noexcept;
@@ -138,12 +142,23 @@ public:
         std::vector<std::pair<sim::tactical::PlayerId, std::string>> observer_names;
         std::shared_ptr<const live_session::PreparedBattle> borrowed_battle;
         std::shared_ptr<platform::TacticalFeed> borrowed_feed;
-        std::function<std::string()> shared_pause_notice{};
+        // #6276: borrowed cached text, valid until the next call; unchanged refreshes do no owner read or formatting.
+        std::function<const std::string&()> shared_pause_notice{};
+        // #5355: a LAN GC battle child's shared speed changes. Called with the event identity the HUD last took; returns
+        // the current one, and only when that differs fills the line ("<name> set the battle speed to 2x", or empty for
+        // another clock event). Cheap (no lock, no allocation) while nothing changed. The skirmish LAN view carries its own.
+        std::function<std::uint64_t(std::uint64_t known, std::string& line)> shared_speed_notice{};
         sim::tactical::PlayerId borrowed_player{1};
         std::shared_ptr<LanMatch> lan;
         // MNU-41: a recording the Load Game screen chose; the live session replays it as
         // `--eawr-live-session replay --eawr-live-replay <path>` does.
         std::filesystem::path replay_input;
+        std::filesystem::path battle_save_input;
+        // Camera target x/y/z, zoom and yaw from optional presentation hints.
+        std::optional<std::array<float, 5>> battle_save_camera;
+        std::function<std::string(const presentation::ui::SavedGameRequest&)> battle_load;
+        bool battle_save_keep_inputs{};
+        std::shared_ptr<SavedBattlePreparation> saved_preparation{}; // see live_session::Options::saved_preparation
         // MAT-08 to MAT-12: the main-menu demo attract battle on `map_path`: the map's own forces
         // run by the AI player types `ai` names by editor player index (MAT-09), seen through the
         // map's saved camera. No HUD, no loading screen, no world input, no battle sound.
@@ -180,7 +195,7 @@ public:
     void observe_pointer(const godot::Ref<godot::InputEvent>& event, presentation::ui::InputFocus pointer_focus);
     void focus(bool focused);
     void pointer_left();
-    [[nodiscard]] bool pointer_confine_allowed() const;
+    [[nodiscard]] bool pointer_confine_allowed(bool allow_movie = false) const;
     void set_pointer_blocked(bool blocked);
     void viewport_changed(float width, float height);
 

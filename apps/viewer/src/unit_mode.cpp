@@ -10,12 +10,14 @@
 #include "model_preview.hpp"
 #include "render_profile_viewport.hpp"
 #include "viewer_path.hpp"
+#include "shader_activation_owner.hpp"
 
 #include "eawr/assets/assets.hpp"
 #include "eawr/core/sha256.hpp"
 #include "eawr/core/text.hpp"
 #include "eawr/presentation/animation/animation.hpp"
 #include "eawr/presentation/godot/renderer.hpp"
+#include "eawr/presentation/space/space.hpp"
 #include "eawr/scene/scene.hpp"
 #include "eawr/sim/snapshot.hpp"
 #include "eawr/vfs/vfs.hpp"
@@ -25,6 +27,7 @@
 #include <godot_cpp/classes/viewport.hpp>
 #include <godot_cpp/variant/packed_byte_array.hpp>
 #include <godot_cpp/variant/packed_string_array.hpp>
+#include <godot_cpp/variant/utility_functions.hpp>
 
 #include <algorithm>
 #include <array>
@@ -168,6 +171,7 @@ struct UnitMode::State final {
     FixedCamera camera;
     std::optional<assets::Vec4f> colour;
     std::unique_ptr<GodotRenderer> renderer;
+    std::shared_ptr<const ShaderActivationReceipt> shader_receipt;
     preview::StripLayout layout;
     Ref<Image> strip;
     // The written strip PNG's size, reported beside the layout.
@@ -249,6 +253,21 @@ bool UnitMode::State::plan(Node3D& host) {
     if (!created) return fail(core::format_diagnostic(created.error()));
     player.emplace(std::move(created.value()));
 
+    if (OS::get_singleton()->get_cmdline_user_args().has("--eawr-shader-translation")) {
+        auto shaders = std::make_shared<GodotShaderCache>();
+        ShaderActivationOwner owner;
+        auto started = begin_mod_shaders(owner, *filesystem, roots, profile, host, shaders);
+        if (!started) UtilityFunctions::printerr(String::utf8(core::format_diagnostic(started.error()).c_str()));
+        else {
+            while (!owner.step(1U)) {}
+            shader_receipt = owner.receipt();
+            renderer = std::make_unique<GodotRenderer>(host, std::move(shaders));
+            install_mod_shaders(*renderer, owner.generation(), *filesystem);
+            if (const auto& report = owner.report(); report && report->note)
+                UtilityFunctions::printerr(String::utf8(report->note->text.c_str()));
+        }
+    }
+
     levels = preview::unit_levels(model, options.lod);
     for (const preview::UnitSurface& surface : preview::unit_surfaces(model, levels)) {
         const assets::Mesh& mesh = model.meshes[surface.mesh];
@@ -257,7 +276,8 @@ bool UnitMode::State::plan(Node3D& host) {
             .exists = [this](const std::string_view path) { return static_cast<bool>(filesystem->stat(path)); },
          .model = {}, .sha256 = {}, .particle_system = {}};
         const bool effect_missing = scene::missing_material_effect(effect_access, submesh.shader);
-        if (scene::material_selector(submesh.shader, effect_missing) == nullptr) {
+        if (scene::material_selector(submesh.shader, effect_missing,
+            renderer && !effect_missing && !scene::find_legacy_selector(submesh.shader) && renderer->usable_shader(submesh)) == nullptr) {
             skipped.push_back(mesh.name + "/" + std::to_string(surface.submesh) + " " + submesh.shader
                 + ": no legacy selector");
             continue;
@@ -300,11 +320,18 @@ bool UnitMode::State::plan(Node3D& host) {
         base_camera.width = static_cast<std::uint32_t>(viewport.x);
         base_camera.height = static_cast<std::uint32_t>(viewport.y);
     }
-    const std::array<float, 16> identity{1.0F, 0.0F, 0.0F, 0.0F, 0.0F, 1.0F, 0.0F, 0.0F,
-        0.0F, 0.0F, 1.0F, 0.0F, 0.0F, 0.0F, 0.0F, 1.0F};
-    auto fit = preview::fit_camera(preview::world_bounds(bounds, identity), base_camera, view, 1.15F);
-    if (!fit) return fail(fit.failure);
-    camera = fit.value->camera;
+    if (options.camera) {
+        const auto parsed = space::parse_camera(*options.camera, base_camera.width, base_camera.height);
+        if (parsed.status != space::CameraStatus::valid)
+            return fail("--eawr-unit-camera: " + std::string(space::to_string(parsed.status)));
+        camera = parsed.camera;
+    } else {
+        const std::array<float, 16> identity{1.0F, 0.0F, 0.0F, 0.0F, 0.0F, 1.0F, 0.0F, 0.0F,
+            0.0F, 0.0F, 1.0F, 0.0F, 0.0F, 0.0F, 0.0F, 1.0F};
+        auto fit = preview::fit_camera(preview::world_bounds(bounds, identity), base_camera, view, 1.15F);
+        if (!fit) return fail(fit.failure);
+        camera = fit.value->camera;
+    }
     layout = preview::strip_layout(times.size(), camera.width, camera.height);
     strip = Image::create_empty(static_cast<int32_t>(layout.columns * layout.tile_width),
         static_cast<int32_t>(layout.rows * layout.tile_height), false, Image::FORMAT_RGBA8);
@@ -313,7 +340,7 @@ bool UnitMode::State::plan(Node3D& host) {
     // Every run reads each pose back, so the root viewport is drawn at the
     // camera's size whatever the OS window.
     pin_capture_viewport(*host.get_window(), camera.width, camera.height);
-    renderer = std::make_unique<GodotRenderer>(host);
+    if (!renderer) renderer = std::make_unique<GodotRenderer>(host);
     renderer->set_camera(camera);
     return upload();
 }
@@ -330,7 +357,9 @@ bool UnitMode::State::upload() {
         mesh.submeshes = {source.submeshes[item.surface.submesh]};
         single.meshes.push_back(std::move(mesh));
         const assets::Submesh& submesh = single.meshes.front().submeshes.front();
-        const scene::LegacySelector* selector = scene::material_selector(submesh.shader, item.effect_missing);
+        const scene::LegacySelector* selector = scene::material_selector(submesh.shader, item.effect_missing,
+            !item.effect_missing && !scene::find_legacy_selector(submesh.shader) && renderer->usable_shader(submesh));
+        if (!selector) return false;
 
         assets::Texture texture = placeholder_texture();
         if (!item.effect_missing) for (const assets::MaterialParameter& parameter : submesh.parameters) {
@@ -441,7 +470,10 @@ bool UnitMode::State::write_report() const {
            << ",\n  \"failure\": " << json(failure) << ",\n  \"render_profile\": " << render_profile_report()
            << ",\n  \"profile\": " << json(profile) << ",\n  \"layers\": [";
     for (std::size_t index = 0; index < layers.size(); ++index) output << (index ? ", " : "") << json(layers[index]);
-    output << "],\n  \"model\": {\"logical_path\": " << json(options.model_path) << ", \"sha256\": " << json(model_hash)
+    output << "],\n";
+    write_shader_activation_report(output, shader_receipt.get());
+    write_shader_route_report(output, renderer.get());
+    output << "  \"model\": {\"logical_path\": " << json(options.model_path) << ", \"sha256\": " << json(model_hash)
            << ", \"bones\": " << model.bones.size() << ", \"meshes\": " << model.meshes.size() << "},\n"
            << "  \"animation\": {\"logical_path\": " << json(options.animation_path) << ", \"sha256\": " << json(clip_hash);
     if (clip) {
@@ -455,6 +487,8 @@ bool UnitMode::State::write_report() const {
         const Drawn& item = drawn[index];
         output << (index ? ",\n    " : "\n    ") << "{\"mesh\": " << json(item.mesh) << ", \"submesh\": "
                << item.surface.submesh << ", \"shader\": " << json(item.shader) << ", \"route\": " << json(item.route)
+               << ", \"material_route\": " << json(renderer->translated_asset(item.asset) ? "translated"
+                   : item.effect_missing ? "missing_effect_green" : "hand_adapter_approximation")
                << ", \"effect_missing\": " << (item.effect_missing ? "true" : "false")
                << ", \"bone\": " << item.bone << ", \"texture\": " << json(item.texture) << ", \"asset\": " << item.asset
                << "}";
@@ -463,7 +497,9 @@ bool UnitMode::State::write_report() const {
     for (std::size_t index = 0; index < skipped.size(); ++index) output << (index ? ", " : "") << json(skipped[index]);
     output << "],\n  \"camera\": {\"eye\": [" << camera.eye[0] << ", " << camera.eye[1] << ", " << camera.eye[2]
            << "], \"target\": [" << camera.target[0] << ", " << camera.target[1] << ", " << camera.target[2]
-           << "], \"near\": " << camera.near_plane << ", \"far\": " << camera.far_plane << ", \"width\": "
+           << "], \"up\": [" << camera.up[0] << ", " << camera.up[1] << ", " << camera.up[2]
+           << "], \"vertical_fov_degrees\": " << camera.vertical_fov_degrees
+           << ", \"near\": " << camera.near_plane << ", \"far\": " << camera.far_plane << ", \"width\": "
            << camera.width << ", \"height\": " << camera.height << "},\n  \"asset_bounds\": {\"min\": ["
            << bounds.min[0] << ", " << bounds.min[1] << ", " << bounds.min[2] << "], \"max\": [" << bounds.max[0]
            << ", " << bounds.max[1] << ", " << bounds.max[2] << "]},\n  \"strip\": {\"columns\": " << layout.columns
@@ -510,6 +546,7 @@ UnitMode::Options UnitMode::from_command_line() {
         else if (argument == "--eawr-animation") options.animation_path = value;
         else if (argument == "--eawr-unit-times") options.times = value;
         else if (argument == "--eawr-unit-view") options.view = value;
+        else if (argument == "--eawr-unit-camera") options.camera = value;
         else if (argument == "--eawr-unit-colour") options.colour = value;
         else if (argument == "--eawr-unit-lod") {
             auto parsed = viewer::model_preview::parse_floats(value);

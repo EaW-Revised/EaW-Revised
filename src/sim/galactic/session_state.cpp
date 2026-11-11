@@ -318,6 +318,16 @@ void GalacticSession::Impl::encode_section_into(const StateSection section, std:
         detail::put_u32(bytes, static_cast<std::uint32_t>(encoded.size()));
         detail::put_bytes(bytes, encoded);
         detail::encode_population(bytes, population);
+        const auto usage_count = std::count_if(actor_records.begin(), actor_records.end(), [](const auto& entry) {
+            return entry.second.story_prevent_ai_usage || entry.second.story_prefer_ground;
+        });
+        detail::put_u32(bytes, static_cast<std::uint32_t>(usage_count));
+        for (const auto& [id, actor] : actor_records) {
+            if (!actor.story_prevent_ai_usage && !actor.story_prefer_ground) continue;
+            detail::put_u64(bytes, id);
+            detail::put_u8(bytes, actor.story_prevent_ai_usage ? (*actor.story_prevent_ai_usage ? 2 : 1) : 0);
+            detail::put_u8(bytes, actor.story_prefer_ground ? (*actor.story_prefer_ground ? 2 : 1) : 0);
+        }
         break;
     }
     case StateSection::observer:
@@ -689,7 +699,10 @@ std::shared_ptr<const GalacticSnapshot> GalacticSession::Impl::make_snapshot(std
     InlineExecutor offer_inline_executor;
     const auto& offer_workers = executor ? *executor : static_cast<const PartitionExecutor&>(offer_inline_executor);
     auto offer_inputs = production_offer_inputs(observations_for_offers, live_fleets, current_planets, view_player);
-    if (!published_production_offers || published_offer_inputs != offer_inputs) {
+    std::optional<gc_profile::Scope> offer_step(std::in_place, gc_profile::Phase::off_compare);
+    const bool offers_stale = !published_production_offers || published_offer_inputs != offer_inputs;
+    offer_step.emplace(gc_profile::Phase::off_rebuild);
+    if (offers_stale) {
         published_production_offers = std::make_shared<const std::vector<ObservedProductionOffer>>(
             observed_production_offers(offer_inputs, live_fleets, offer_workers, view_player));
         published_offer_inputs = std::move(offer_inputs);
@@ -697,6 +710,7 @@ std::shared_ptr<const GalacticSnapshot> GalacticSession::Impl::make_snapshot(std
     } else if (verify_cached_hash && *published_production_offers != observed_production_offers(offer_inputs, live_fleets, offer_workers, view_player)) {
         throw std::runtime_error("galactic cached production offers differ from an independent recomputation");
     }
+    offer_step.reset();
     const auto offers = published_production_offers;
     (void)actor_inputs();
     if (!published_production_originals) {
@@ -921,6 +935,14 @@ core::Result<GalacticSession> GalacticSession::create(const GalacticSetup& setup
     impl->native_replayers.emplace(NativeEffectKind::invasion, [](GalacticSession& world, const NativeEffect& effect, const PartitionExecutor&) {
         return world.impl_->replay_native_invasion(world, effect);
     });
+    impl->native_replayers.emplace(NativeEffectKind::story_ai_usage, [](GalacticSession& world, const NativeEffect& effect, const PartitionExecutor&) {
+        sim::detail::Reader in(effect.payload); EntityId actor{}; std::uint8_t prevent{}, prefer{};
+        if (!in.read_u64(actor) || !actor || !in.read_u8(prevent) || prevent > 2 || !in.read_u8(prefer)
+            || prefer > 2 || (!prevent && !prefer) || in.remaining())
+            return fail<void>(diagnostic_codes::invalid_setup, "invalid story AI-usage journal");
+        return world.set_story_ai_usage(actor, prevent ? std::optional<bool>(prevent == 2) : std::nullopt,
+            prefer ? std::optional<bool>(prefer == 2) : std::nullopt);
+    });
     impl->native_replayers.emplace(NativeEffectKind::ability_lifecycle, [](GalacticSession& world, const NativeEffect& effect, const PartitionExecutor&) {
         sim::detail::Reader in(effect.payload); EntityId actor{}; std::uint8_t operation{};
         if (!in.read_u8(operation) || operation > 2 || !in.read_u64(actor) || !actor)
@@ -942,7 +964,7 @@ core::Result<GalacticSession> GalacticSession::create(const GalacticSetup& setup
         }
         std::uint8_t enabled{}, cancelled{}, kind{};
         if (!in.read_u8(enabled) || enabled > 1 || !in.read_u8(cancelled) || cancelled > 1
-            || !in.read_u8(kind) || kind < 1 || kind > 8 || in.remaining())
+            || !in.read_u8(kind) || kind < 1 || kind > 9 || in.remaining())
             return fail<void>(diagnostic_codes::invalid_setup, "invalid ability service journal");
         return world.set_ability_lifecycle(actor, enabled != 0, cancelled != 0, static_cast<AbilityKind>(kind));
     });
@@ -1039,12 +1061,18 @@ core::Result<GalacticSession> GalacticSession::from_replay(const GalacticReplay&
     return created;
 }
 
-std::vector<std::uint8_t> GalacticSession::canonical_state_bytes() const {
+std::vector<std::uint8_t> GalacticSession::canonical_state_bytes() const { return canonical_bytes_with(nullptr); }
+std::vector<std::uint8_t> GalacticSession::canonical_state_bytes(OfferPool& pool) const { return canonical_bytes_with(&pool); }
+
+std::vector<std::uint8_t> GalacticSession::canonical_bytes_with(OfferPool* const pool) const {
     std::vector<std::uint8_t> bytes(detail::state_magic.begin(), detail::state_magic.end());
     detail::put_u32(bytes, detail::state_encoding_version);
     detail::put_u32(bytes, static_cast<std::uint32_t>(impl_->section_count()));
     for (const auto section : impl_->section_ids()) {
-        const auto encoded = impl_->encode_section(static_cast<StateSection>(section));
+        // The production section is the only one that carries offer tables: with a pool they become pool indices.
+        std::vector<std::uint8_t> encoded;
+        if (pool && section == static_cast<std::size_t>(StateSection::production)) detail::encode_production_pooled(encoded, *impl_->production, *pool);
+        else encoded = impl_->encode_section(static_cast<StateSection>(section));
         detail::put_u16(bytes, static_cast<std::uint16_t>(section));
         detail::put_u16(bytes, detail::section_version);
         detail::put_u64(bytes, encoded.size());

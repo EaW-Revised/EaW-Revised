@@ -89,6 +89,57 @@ bool CorruptionParticles::service(const viewer::galactic::CorruptionVisuals& vis
     return true;
 }
 
+bool CorruptionParticles::service_effects(std::span<const viewer::galactic::GalacticEffectFact> effects,
+    const data::Catalog& catalog, const std::size_t layer, const std::uint64_t logical_frame,
+    const FixedCamera& camera, const double elapsed, std::string& failure) {
+    const auto particle_camera = particles::camera_frame_from_render(camera.eye, camera.target, camera.up);
+    const auto age = [&](std::uint64_t born) {
+        return logical_frame >= born ? static_cast<double>(logical_frame - born) / sim::galactic::galactic_frames_per_second : 0.0;
+    };
+    for (const auto& effect : effects) {
+        if (effect.particle_type.empty() || !effect.position || !effect.layer || *effect.layer != layer
+            || one_shots_.contains(effect.sequence)) continue;
+        const auto born = effect.born_frame.value_or(logical_frame);
+        if (effect.lifetime_seconds && age(born) >= *effect.lifetime_seconds) continue;
+        auto [definition, inserted] = systems_.try_emplace(effect.particle_type);
+        if (inserted) definition->second = viewer::galactic::load_galactic_particle(*filesystem_, catalog, effect.particle_type);
+        if (!definition->second) continue;
+        auto spawned = budget_.spawn(*registry_, *definition->second, ++seed_);
+        if (!spawned) { failure = core::format_diagnostic(spawned.error()); return false; }
+        if (!spawned.value()) continue;
+        const auto handle = *spawned.value();
+        particles::EmitterFrame frame;
+        frame.origin = {effect.position->x, effect.position->y, effect.position->z};
+        const auto posed = registry_->set_frame(handle, frame);
+        const auto scaled = registry_->set_dynamic(handle, effect.scale, 1);
+        if (!posed || !scaled) { failure = core::format_diagnostic(!posed ? posed.error() : scaled.error()); return false; }
+        // Catch up once only when the WGP-03 animation clock is advancing.
+        const auto caught_up = viewer::galactic::catch_up_corruption_effect(
+            *registry_, handle, age(born), elapsed, particle_camera);
+        if (!caught_up) { failure = core::format_diagnostic(caught_up.error()); return false; }
+        one_shots_.emplace(effect.sequence, OneShot{handle, born, effect.lifetime_seconds, false});
+        ++one_shots_started_;
+    }
+    for (auto it = one_shots_.begin(); it != one_shots_.end();) {
+        auto& effect = it->second;
+        if (!effect.draining && effect.lifetime && age(effect.born) >= *effect.lifetime) {
+            const auto detached = budget_.detach(*registry_, effect.handle);
+            if (!detached) { failure = core::format_diagnostic(detached.error()); return false; }
+            if (detached.value() == particles::EffectDetachState::released) { it = one_shots_.erase(it); continue; }
+            effect.draining = true;
+        }
+        const auto advanced = registry_->advance(effect.handle, static_cast<float>(std::max(0.0, elapsed)), particle_camera);
+        if (!advanced) { failure = core::format_diagnostic(advanced.error()); return false; }
+        for (const auto& emitter : advanced.value().emitters) particle_count_ += emitter.particles;
+        if (advanced.value().finished || registry_->exhausted(effect.handle)) {
+            const auto released = budget_.release(*registry_, effect.handle);
+            if (!released) { failure = core::format_diagnostic(released.error()); return false; }
+            it = one_shots_.erase(it);
+        } else ++it;
+    }
+    return true;
+}
+
 bool CorruptionParticles::service_lines(const viewer::galactic::CorruptionVisuals& visuals,
     const viewer::galactic::GalaxyView& view, const viewer::galactic::CorruptionStyle& style,
     const particles::SystemDefinition& system, const std::uint64_t logical_frame,

@@ -102,6 +102,11 @@ set(EAWR_SCRIPT_FOC_SOURCES
     "${CMAKE_CURRENT_LIST_DIR}/foc/galactic_ai_execution.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/foc/galactic_ai_actions.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/foc/galactic_ai_economic_replay.cpp"
+    # GFS-A22 / S9b-2: ordered AI intent commit and per-kind refusal handlers.
+    "${CMAKE_CURRENT_LIST_DIR}/foc/galactic_ai_intent_commit.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/foc/galactic_ai_intent_refusal.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/foc/galactic_ai_outbox.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/foc/galactic_ai_outbox_state.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/foc/galactic_ai_freestore.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/foc/galactic_ai_execution_state.cpp"
     # WGA-06/62/65/80 and FT-05/08: copied campaign perception providers.

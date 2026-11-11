@@ -617,6 +617,36 @@ void online_chat_state() {
 
 } // namespace
 
+// #6349: hosting a Campaign room waited for the content digest of every mounted mod (a SHA-256 of every file: minutes for a
+// large mod the first time, nothing shown). Only Load Game compares a save's mod list, so only it waits for the digests.
+void galactic_content_gate_checks() {
+    using Gate = ui::GalacticContentGate;
+    using Press = ui::GalacticPress;
+    // The screen's prefetch asks this one function with the real digest source; a spy shows whether the digests were asked.
+    int asked = 0;
+    const auto unsettled = [&asked] { ++asked; return false; };
+    const auto settled = [&asked] { ++asked; return true; };
+    // A fresh host with the campaign list loaded opens at once, with an unsettled digest, and never even asks for the digests.
+    expect(ui::galactic_press_gate(true, Press::host, unsettled) == Gate::open, "a fresh host opens with an unsettled mod digest");
+    expect(ui::galactic_press_gate(true, Press::host, settled) == Gate::open, "a fresh host opens with settled mod digests");
+    expect(asked == 0, "a fresh host does not ask for the mod digests at all");
+    // Nothing opens before the campaign list is in, for either press, and the digests are not asked before then.
+    expect(ui::galactic_press_gate(false, Press::host, settled) == Gate::loading_content, "a fresh host waits for the campaign list");
+    expect(ui::galactic_press_gate(false, Press::load_game, unsettled) == Gate::loading_content, "Load Game waits for the campaign list first");
+    expect(asked == 0, "the digests are not asked while the campaign list loads");
+    // Load Game also waits for the digests, and says so.
+    expect(ui::galactic_press_gate(true, Press::load_game, unsettled) == Gate::checking_mod_files, "Load Game waits for an unsettled mod digest");
+    expect(ui::galactic_press_gate(true, Press::load_game, settled) == Gate::open, "Load Game opens once the mod digests settled");
+    expect(asked == 2, "Load Game asks for the digests");
+    expect(ui::galactic_content_gate_text(Gate::open, 0, 0).empty(), "an open gate shows no line");
+    expect(ui::galactic_content_gate_text(Gate::loading_content, 0, 0) == "Loading campaign content...", "the list-loading line");
+    expect(ui::galactic_content_gate_text(Gate::checking_mod_files, 0, 0) == "Checking mod files...", "no counts known yet");
+    expect(ui::galactic_content_gate_text(Gate::checking_mod_files, 1200, 36588) == "Checking mod files (1200 of 36588)...",
+        "the mod-file line names how far the check is");
+    expect(ui::galactic_content_gate_text(Gate::checking_mod_files, 40000, 36588) == "Checking mod files (36588 of 36588)...",
+        "the count never runs past the total");
+}
+
 int main() {
     expect(eawr::viewer::campaign_in_tab(false, false) && !eawr::viewer::campaign_in_tab(true, false)
         && eawr::viewer::campaign_in_tab(true, true) && !eawr::viewer::campaign_in_tab(false, true),
@@ -655,6 +685,7 @@ int main() {
         expect(none.multiplayer == 0.0F && none.coop == 0.0F && eawr::viewer::campaign_tab_gap > 0.0F, "no list width, no tabs; a gap sits above the list");
     }
     acceptance_lobby_retries();
+    galactic_content_gate_checks();
     list_and_sort();
     filtering();
     row_text();

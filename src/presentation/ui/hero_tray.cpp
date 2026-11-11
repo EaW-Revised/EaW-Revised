@@ -31,8 +31,14 @@ namespace tactical = sim::tactical;
 }
 
 // Adds `entry` to the side's tray unless it already holds that hero.
-void add(std::vector<HeroEntry>& side, const HeroEntry& entry) {
-    if (std::any_of(side.begin(), side.end(), [&](const HeroEntry& held) { return held.hero == entry.hero; })) return;
+void add(std::vector<HeroEntry>& side, const HeroEntry& entry,
+         const std::map<sim::EntityId, sim::EntityId>* squadron_of) {
+    const auto group = [squadron_of](const sim::EntityId id) {
+        if (squadron_of == nullptr) return id;
+        const auto found = squadron_of->find(id);
+        return found == squadron_of->end() ? id : found->second;
+    };
+    if (std::any_of(side.begin(), side.end(), [&](const HeroEntry& held) { return group(held.hero) == group(entry.hero); })) return;
     side.push_back(entry);
 }
 
@@ -76,14 +82,14 @@ void collect_heroes(const HeroCollectInput& input, const HeroTrayPolicy& policy,
         std::vector<HeroEntry>& side = allied ? out.friendly : out.hostile;
         const float health = health_of(instance, input.durability);
         const bool automatic = automatic_of(instance);
-        if (hero) add(side, {instance.entity_id, instance.entity_id, instance.type_id, instance.owner, health, automatic});
+        if (hero) add(side, {instance.entity_id, instance.entity_id, instance.type_id, instance.owner, health, automatic}, input.squadron_of);
         if (!policy.list_carried_heroes || instance.contained.empty()) continue;
         if (policy.contained_requires_bars && (own == nullptr || !own->contained_bars)) continue;
         walk_riders(instance.contained, [&](const tactical::CarriedObject& rider) {
             // WHE-45: a carried hero's icon uses the carrier's health (its parent container's fraction).
             // A rider has no live ability state of its own, so it is never highlighted (WHE-46).
             if (!listed(input.types->find(rider.type_id), policy)) return;
-            add(side, {rider.entity_id, instance.entity_id, rider.type_id, instance.owner, health, false});
+            add(side, {rider.entity_id, instance.entity_id, rider.type_id, instance.owner, health, false}, input.squadron_of);
         });
     }
     // WHE-72: the newest hero sits next to the screen edge (slot 0) and older ones toward the centre; a side

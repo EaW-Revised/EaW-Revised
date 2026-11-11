@@ -50,7 +50,18 @@ struct Seat {
 inline constexpr std::uint16_t child_log_section_version = 1;
 inline constexpr std::uint16_t child_state_section_version = 8; // Combined campaign and Skirmish continuation with retained squadron hardpoints and the station ship ledger (#3956), section 11
 // Version 9: a formation squad is one collision body (container class, jiggle, own terrain refusal, contact speeds); soldier detours removed.
-inline constexpr std::uint16_t land_state_section_version = 9;
+// Version 10 (Q2 PR2): corner speed and start gate retain the squad's first-corner heading,
+// the splice-anchor flag and the profile's move-start angle and minimum turn speed fraction.
+// Version 11: the sorted ids of the objects the economy created after setup (a pad's construction site and its completed child).
+// Version 12 (formations, LMF-01..LMF-08): each squad retains its formation lead and slot, and the pending formation orders
+// (the centre-path request and slots of a formation whose search has not ended) follow the retained combat state.
+// Version 13: the companies on their way down (landing records), the ids of every squad and member a landing created, and
+// the landing sequence counter (LC-51), after the formation orders.
+// Version 14: the profile's start clip clock for members that start through a clip.
+// Version 15: walking formations retain their shared centre paths and member slots (LMF-09).
+// Version 16 (land garrisons, G-04..G-09): the garrison records after the walking formations: entrant, host, bone, slot cost, phase,
+// fade frames, the host's last pose, and for an occupant its squad roster, path request, held target and live rows.
+inline constexpr std::uint16_t land_state_section_version = 16;
 // The conflict record is the galactic session's (FT-08); the container bounds it only.
 inline constexpr std::size_t max_conflict_record_bytes = 1U * 1024U * 1024U;
 

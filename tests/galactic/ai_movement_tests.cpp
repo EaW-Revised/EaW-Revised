@@ -273,9 +273,17 @@ void invasion_queue_disk() {
             unsigned provider_calls{};
             const auto configure = [&](cp::GameSession& game) {
                 game.set_conflict_service({}, [](const cp::ConflictRecord&) { return eawr::core::Result<eawr::sim::tactical::TacticalContent>::success({}); }, {}, eawr::campaign::ScriptRequirement::none);
-                game.set_native_conflict_service([&, source = fixture_invasion_provider()](const auto& snapshot, const auto& request, auto first_free) {
+                // A land request needs a registered land provider (the admission guard of #5685 refuses it by name otherwise).
+                // The land layer is installed last and carries the native admission itself: installing a layer ends the
+                // assembly phase, so a later set_native_conflict_service would latch a session failure.
+                game.set_conflict_gate([](const auto&) { return false; });
+                cp::GameSession::ConflictLayerServices land;
+                land.content = [](const cp::ConflictRecord&) { return eawr::core::Result<eawr::sim::tactical::TacticalContent>::success({}); };
+                land.script_requirement = cp::ScriptRequirement::none;
+                land.native_admission = [&, source = fixture_invasion_provider()](const auto& snapshot, const auto& request, auto first_free) {
                     ++provider_calls; return source(snapshot, request, first_free);
-                }); game.set_conflict_gate([](const auto&) { return false; });
+                };
+                if (auto installed = game.install_conflict_layer(cp::BattleLayer::land, std::move(land)); !installed) return installed;
                 return game.configure_native_replay_owners([&](auto& owner) { world = &owner; return eawr::core::Result<void>::success(); });
             };
             done(configure(session)); world->set_hash_verification(true);

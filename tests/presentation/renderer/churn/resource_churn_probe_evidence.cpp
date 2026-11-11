@@ -4,8 +4,10 @@
 void EawrResourceChurnProbe::expect_drawn(const std::string& step) {
     const Sample now = sample();
     record(step, now);
-    check(now.objects == static_cast<std::int64_t>(expected_drawn_), "RenderingServer drew "
-        + std::to_string(now.objects) + " objects, expected " + std::to_string(expected_drawn_));
+    const std::int64_t expected = static_cast<std::int64_t>(expected_drawn_) - batch_collapsed();
+    check(now.objects == expected, "RenderingServer drew " + std::to_string(now.objects) + " objects, expected "
+        + std::to_string(expected) + " (" + std::to_string(expected_drawn_) + " instances, "
+        + std::to_string(batch_collapsed()) + " collapsed by instanced hulls)");
     if (!renderer_) return;
     instance_readback_ = renderer_->instance_evidence();
     check(instance_readback_.size() == expected_instances_, "instance read-back size differs from the registry");

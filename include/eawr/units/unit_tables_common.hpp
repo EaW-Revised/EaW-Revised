@@ -31,6 +31,7 @@ struct BonePoint final {
     // set whenever position is. A fixed hardpoint's fire cone opens along Fire_Bone_A's x axis
     // (docs/behaviour/space-weapon-fire.md W-07).
     std::optional<std::array<Vec3, 3>> axes;
+    std::optional<std::uint32_t> owner_bone_index; // BCAM-12: presentation lookup, excluded from content identity.
     bool operator==(const BonePoint&) const = default;
 };
 

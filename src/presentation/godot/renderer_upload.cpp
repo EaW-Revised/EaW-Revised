@@ -192,7 +192,7 @@ std::function<assets::RetainedPayload()> GodotRenderer::recipe_memory_probe() co
     };
 }
 
-[[nodiscard]] core::Result<void> GodotRenderer::Impl::upload(
+[[nodiscard]] core::Result<void> GodotRenderer::Impl::upload_resource(
     const sim::AssetId asset_id,
     const ModelView& model,
     const assets::Texture& texture,

@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <string>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -131,20 +132,42 @@ core::Result<tactical::AbilityTable> ability_table(const UnitTables& tables, std
         if (unit.kind == UnitKind::squadron) {
             tactical::UnitAbilityProfile team;
             team.type_id = assets::object_type_crc(unit.id);
+            team.dispatch_defaults_to_members = true;
             team.special = unit.team_special_abilities;
             for (const auto& ability : unit.team_abilities) {
                 if (allowed != nullptr && !allowed(unit.id, ability.type)) continue;
                 const auto kind = tactical::ability_kind(ability.type);
-                if (kind != tactical::AbilityKind::ion_cannon_shot && kind != tactical::AbilityKind::buzz_droids) continue;
+                if (ability.active_by_default && (kind == tactical::AbilityKind::interdict
+                        || kind == tactical::AbilityKind::replenish_wingmen)) {
+                    tactical::AbilityProfile request;
+                    request.kind = kind;
+                    request.market_purchase_required = ability.market_purchase_required;
+                    request.gui_activated_ability_name = ability.gui_activated_ability_name;
+                    team.default_member_abilities.push_back(std::move(request));
+                }
+                if (kind != tactical::AbilityKind::ion_cannon_shot && kind != tactical::AbilityKind::buzz_droids
+                    && kind != tactical::AbilityKind::lucky_shot) continue;
                 tactical::AbilityProfile entry;
                 entry.kind = kind;
+                entry.market_purchase_required = ability.market_purchase_required;
+                entry.gui_activated_ability_name = ability.gui_activated_ability_name;
                 entry.recharge_frames = frames(ability.recharge_seconds);
                 entry.supports_autofire = ability.supports_autofire;
                 entry.targeting_max_attack_distance = ability.targeting_max_attack_distance;
                 entry.team = true;
+                if (kind == tactical::AbilityKind::ion_cannon_shot)
+                    entry.gui_activated_ability_name = ability.gui_activated_ability_name;
+                if (kind == tactical::AbilityKind::lucky_shot) {
+                    entry.gui_activated_ability_name = ability.gui_activated_ability_name;
+                    for (const auto& modifier : ability.modifiers)
+                        if (iequals(modifier.modifier, "CAUSE_DAMAGE_MULTIPLIER"))
+                            entry.modifiers.cause_damage = modifier.value;
+                }
                 if (kind == tactical::AbilityKind::buzz_droids) {
                     // WAB-70: the team container holds it; without its nested data it is not modelled.
                     if (!unit.team_buzz_droids) continue;
+                    entry.nested_market_purchase_required = unit.team_buzz_droids->market_purchase_required;
+                    entry.nested_market_name = unit.team_buzz_droids->name;
                     auto buzz = buzz_profile(tables, unit.id, *unit.team_buzz_droids, table.beam_damage_type);
                     if (!buzz) return buzz.error();
                     entry.buzz = buzz.value();
@@ -152,13 +175,19 @@ core::Result<tactical::AbilityTable> ability_table(const UnitTables& tables, std
                 team.abilities.push_back(entry);
             }
             keep_last_of_each_kind(team.abilities, unit.id, skipped);
-            if (!team.abilities.empty() || !team.special.empty()) table.profiles.push_back(std::move(team));
+            if (!team.abilities.empty() || !team.special.empty() || !team.default_member_abilities.empty())
+                table.profiles.push_back(std::move(team));
             return std::nullopt;
         }
         tactical::UnitAbilityProfile profile;
+        profile.dispatch_defaults_to_members = unit.ability_team_dispatch;
         profile.stealth_detection_frames = detection_frames;
         profile.type_id = assets::object_type_crc(unit.id);
         profile.special = unit.special_abilities;
+        for (const auto& stream : unit.production.income)
+            profile.income_defaults.emplace(stream.name, stream.initially_enabled);
+        for (const auto& bonus : unit.production.income_bonuses)
+            profile.income_defaults.emplace(bonus.name, bonus.initially_enabled);
         profile.force_sensitive = unit.force_sensitive;
         for (std::size_t index = 0; index < unit.hardpoints.size(); ++index) {
             if (unit.hardpoints[index].type == HardpointType::gravity_well)
@@ -166,15 +195,35 @@ core::Result<tactical::AbilityTable> ability_table(const UnitTables& tables, std
         }
         for (const auto& ability : unit.abilities) {
             if (allowed != nullptr && !allowed(unit.id, ability.type)) continue;
+            if (unit.ability_team_dispatch && ability.active_by_default
+                && tactical::ability_kind(ability.type) == tactical::AbilityKind::interdict) {
+                tactical::AbilityProfile request;
+                request.kind = tactical::AbilityKind::interdict;
+                request.market_purchase_required = ability.market_purchase_required;
+                request.gui_activated_ability_name = ability.gui_activated_ability_name;
+                profile.default_member_abilities.push_back(std::move(request));
+            }
             // WHE-70: keep authored display data, but execute on the owning member.
-            if (unit.replenish_via_members && iequals(ability.type, "REPLENISH_WINGMEN")) continue;
+            if (unit.replenish_via_members && iequals(ability.type, "REPLENISH_WINGMEN")) {
+                if (ability.active_by_default) {
+                    tactical::AbilityProfile request;
+                    request.kind = tactical::AbilityKind::replenish_wingmen;
+                    request.market_purchase_required = ability.market_purchase_required;
+                    request.gui_activated_ability_name = ability.gui_activated_ability_name;
+                    profile.default_member_abilities.push_back(std::move(request));
+                }
+                continue;
+            }
             const auto kind = tactical::ability_kind(ability.type);
             if (kind == tactical::AbilityKind::none) continue; // AB-03: not modelled
             // WAB-70: a squadron's buzz droids belong to its team container (AB-60), not each craft.
             if (kind == tactical::AbilityKind::buzz_droids && (unit.kind == UnitKind::craft || !unit.buzz_droids)) continue;
             tactical::AbilityProfile entry;
             entry.kind = kind;
+            entry.market_purchase_required = ability.market_purchase_required;
+            entry.gui_activated_ability_name = ability.gui_activated_ability_name;
             // WHD-01: a surviving point of the type, not a named beam bone.
+            if (kind == tactical::AbilityKind::deploy_squad) entry.recharge_at_activation = true; // FL-18
             const auto required = kind == tactical::AbilityKind::tractor_beam ? HardpointType::tractor_beam
                 : HardpointType::weapon_special;
             entry.requires_hardpoint = kind == tactical::AbilityKind::tractor_beam
@@ -198,12 +247,20 @@ core::Result<tactical::AbilityTable> ability_table(const UnitTables& tables, std
             entry.supports_autofire = ability.supports_autofire;
             entry.targeting_max_attack_distance = ability.targeting_max_attack_distance;
             entry.disable_movement = ability.disable_movement;
+            entry.stop_when_activated = ability.stop_when_activated;
+            entry.active_by_default = ability.active_by_default && !unit.ability_team_dispatch;
+            if (kind == tactical::AbilityKind::lucky_shot) {
+                entry.gui_activated_ability_name = ability.gui_activated_ability_name;
+                entry.expiration_frames = 0; // WLK-03: matching impact, not duration, spends the shot.
+            }
             if (kind == tactical::AbilityKind::barrage) {
                 entry.barrage_target_type = assets::object_type_crc("Dummy_Barrage_Target");
                 entry.fixed_inaccuracy = ability.fixed_inaccuracy;
                 entry.target_z_offset = ability.target_z_offset.value_or(Fixed{});
             }
             if (kind == tactical::AbilityKind::buzz_droids) {
+                entry.nested_market_purchase_required = unit.buzz_droids->market_purchase_required;
+                entry.nested_market_name = unit.buzz_droids->name;
                 auto buzz = buzz_profile(tables, unit.id, *unit.buzz_droids, table.beam_damage_type);
                 if (!buzz) return buzz.error();
                 entry.buzz = buzz.value();
@@ -307,6 +364,8 @@ core::Result<tactical::AbilityTable> ability_table(const UnitTables& tables, std
                 entry.effective_radius = ability.effective_radius.value_or(Fixed{});
                 entry.gui_activated_ability_name = ability.gui_activated_ability_name;
             }
+            if (kind == tactical::AbilityKind::ion_cannon_shot)
+                entry.gui_activated_ability_name = ability.gui_activated_ability_name;
             if (kind == tactical::AbilityKind::blast) {
                 entry.gui_activated_ability_name = ability.gui_activated_ability_name;
                 const auto handler = std::find_if(unit.special_abilities.begin(), unit.special_abilities.end(),
@@ -317,6 +376,13 @@ core::Result<tactical::AbilityTable> ability_table(const UnitTables& tables, std
                 entry.charged_blast = handler->charged_blast;
                 entry.expiration_frames = 0;
                 entry.recharge_at_activation = true; // WHE-35: independent from charge/shot completion
+            }
+            if (kind == tactical::AbilityKind::sensor_jamming) {
+                // WAB-36: the ordinary row activates its named nested handler.
+                const auto handler = std::find_if(unit.special_abilities.begin(), unit.special_abilities.end(),
+                    [&](const auto& special) { return special.kind == tactical::SpecialAbilityKind::sensor_jamming
+                        && special.name == entry.gui_activated_ability_name; });
+                if (entry.gui_activated_ability_name.empty() || handler == unit.special_abilities.end()) continue;
             }
             if (kind == tactical::AbilityKind::stealth) {
                 // WST-02: the nested handler named by the ability does the work; without one, or
@@ -399,7 +465,8 @@ core::Result<tactical::AbilityTable> ability_table(const UnitTables& tables, std
             profile.abilities.push_back(entry);
         }
         keep_last_of_each_kind(profile.abilities, unit.id, skipped);
-        if (profile.abilities.empty() && profile.special.empty() && !profile.force_sensitive) return std::nullopt;
+        if (profile.abilities.empty() && profile.special.empty() && !profile.force_sensitive
+            && profile.income_defaults.empty() && profile.default_member_abilities.empty()) return std::nullopt;
         // AB-41: the DEFEND stand-in of the PowerToShields object script, for a type with DEFEND.
         profile.defend_script = runs_defend_script(unit)
             && tactical::ability_slot(profile, tactical::AbilityKind::defend).has_value();
@@ -422,6 +489,12 @@ core::Result<tactical::AbilityTable> ability_table(const UnitTables& tables, std
     };
     for (const auto& unit : tables.units) {
         if (!type_selection.keeps(unit)) continue;
+        if (unit.kind == UnitKind::craft) for (const auto& ability : unit.abilities) {
+            const auto kind = tactical::ability_kind(ability.type);
+            if (kind != tactical::AbilityKind::none)
+                table.market_team_members.push_back({assets::object_type_crc(unit.id), kind,
+                    ability.market_purchase_required, ability.gui_activated_ability_name});
+        }
         auto error = build_unit(unit);
         if (!error) continue;
         if (policy == ContentErrors::strict) return Result::failure(std::move(*error));
@@ -465,6 +538,9 @@ core::Result<tactical::AbilityTable> ability_table(const UnitTables& tables, std
     }
     std::sort(table.combat_ratings.begin(), table.combat_ratings.end(),
         [](const auto& left, const auto& right) { return left.first < right.first; });
+    std::stable_sort(table.market_team_members.begin(), table.market_team_members.end(), [](const auto& a, const auto& b) {
+        return std::tie(a.type, a.kind) < std::tie(b.type, b.kind);
+    });
     table.combat_ratings.erase(std::unique(table.combat_ratings.begin(), table.combat_ratings.end(),
         [](const auto& left, const auto& right) { return left.first == right.first; }), table.combat_ratings.end());
     std::sort(table.profiles.begin(), table.profiles.end(),

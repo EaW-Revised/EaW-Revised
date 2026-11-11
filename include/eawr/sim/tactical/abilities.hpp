@@ -26,11 +26,11 @@ namespace eawr::sim::tactical {
 enum class SpecialAbilityKind : std::uint8_t {
     none, combat_bonus, production_price, concentrate_fire, tractor_beam, energy_weapon,
     sensor_jamming, corrupt_systems, blast, stealth, find_weakness, maximum_firepower, laser_defense, leech_shields,
-    redirect_blaster, force_healing = 15, enable_radar = 16, super_laser = 17,
+    redirect_blaster, force_healing = 15, enable_radar = 16, super_laser = 17, lucky_shot = 18, ion_cannon_shot = 19,
 };
 enum class SpecialActivationStyle : std::uint8_t {
     unspecified, space_automatic, ground_automatic, ground_activated, galactic_automatic, user_input,
-    skirmish_automatic = 6,
+    skirmish_automatic = 6, global_automatic = 7, combat_automatic = 8, special_attack = 9,
 };
 enum class SpecialAbilityMode : std::uint8_t { space, ground, galactic };
 // BF-2 (#3779): the ability mode and the always-on activation style a battle domain uses.
@@ -63,6 +63,7 @@ struct SpecialAbilityProfile {
     bool affects_all_allies{}; // WRAD-01: radar recipients, omitted means owner only.
     bool causes_despawn{};
     std::uint32_t service_interval{}; // WHE-09: code interval, not an XML timer
+    std::uint32_t jamming_duration_frames{}; // WJM-01: nested-only initial counter
     SpecialAbilityFilter filter;
     std::optional<ChargedBlastProfile> charged_blast{}; // WHE-35/36: BLAST only
     // WHE-25: target contributions, keyed by source and authored stacking category.
@@ -112,6 +113,7 @@ struct SpecialAbilityProfile {
     std::array<math::Fixed, 3> heal_target_colour{}, heal_owner_colour{};
     std::uint32_t heal_target_light_frames{}, heal_owner_light_frames{};
     std::uint32_t heal_target_light_pulses{1}, heal_owner_light_pulses{1};
+    bool market_purchase_required{}; // WGEP-145
     friend bool operator==(const SpecialAbilityProfile&, const SpecialAbilityProfile&) = default;
 };
 // Projectile_Types_Targeted spellings the space game can fly (WLD-04); other categories are land-only
@@ -130,6 +132,9 @@ struct SpecialActivationContext {
 };
 struct SpecialAbilitySlot {
     bool enabled{}, cancelled{}, despawn_success{};
+    bool jammer_initialized{}, jammer_active{}, jammer_registered{}, jammer_unregistered{};
+    bool jammer_disabled_registration{}; // C1: disable removed an automatic holder
+    std::uint32_t jammer_remaining{};
     std::uint64_t next_service_frame{};
     std::optional<SpecialActivationContext> context{};
     std::vector<EntityId> targets{}; // sorted, unique tracked recipients
@@ -315,6 +320,8 @@ struct AbilityProfile {
     std::optional<ChargedBlastProfile> charged_blast{}; // named nested BLAST handler
     math::Fixed expiration_seconds{}; // WST-03: STEALTH only, Expiration_Seconds as authored for the cloak's own count
     bool disable_movement{}; // WIN-02, WMS-02: the active deployment locks movement
+    bool stop_when_activated{true}; // WSD-02: self-destruct stops and locks movement
+    bool active_by_default{}; // #6517: request activation during creation
     // WHD-01: typed dependency resolved from content, independent of visual bones.
     std::vector<std::uint32_t> required_hardpoints{};
     bool requires_hardpoint{}; // true with an empty list means unavailable
@@ -322,6 +329,9 @@ struct AbilityProfile {
     // Session content, bound by content identity rather than replay/checkpoint slots.
     std::optional<std::string> unresolved_spawn{};
     std::optional<math::Fixed> targeting_max_attack_distance{}; // WRA-03: positive active override
+    bool market_purchase_required{}; // WGEP-145
+    bool nested_market_purchase_required{};
+    std::string nested_market_name{};
     friend bool operator==(const AbilityProfile&, const AbilityProfile&) = default;
 };
 
@@ -340,20 +350,37 @@ struct UnitAbilityProfile {
     bool mc30_script{}; // FS-29: visible CLUSTER_BOMB object-script consumer only.
     std::vector<std::uint32_t> gravity_well_hardpoints{}; // WIN-02: authored hardpoint indices
     std::uint32_t stealth_detection_frames{30}; // WST-09: trunc(GameConstants seconds x 30), default 1 s.
+    // PU-08: income names participate in WHD-05 without allocating timed-handler slots.
+    std::map<std::string, bool> income_defaults{};
+    // FS-52: ordered container declarations dispatch to attached members on creation.
+    std::vector<AbilityProfile> default_member_abilities{};
+    bool dispatch_defaults_to_members{};
     friend bool operator==(const UnitAbilityProfile&, const UnitAbilityProfile&) = default;
 };
 
 // WHD-05: one retained boolean per owner, exact type and case-insensitive name.
 // An explicit unlock remains present after the source object is removed.
-using NamedAbilityLocks = std::map<std::tuple<PlayerId, TypeId, std::string>, bool>;
+using NamedAbilityLocks = std::map<std::tuple<PlayerId, TypeId, std::string>, bool, std::less<>>;
 [[nodiscard]] bool set_named_ability_lock(NamedAbilityLocks&, PlayerId, const UnitAbilityProfile&,
     std::string_view name, bool locked);
 [[nodiscard]] bool named_ability_enabled(const NamedAbilityLocks&, PlayerId, TypeId,
     const SpecialAbilityProfile&);
+[[nodiscard]] bool named_ability_enabled(const NamedAbilityLocks&, PlayerId, TypeId,
+    std::string_view canonical_name, bool initially_enabled);
+// PU-08: nonautomatic trigger dispatch remains a seam (legacy #6266).
+[[nodiscard]] bool automatic_ability_style(std::string_view, BattleDomain, bool multiplayer);
+[[nodiscard]] bool automatic_ability_style(SpecialActivationStyle, BattleDomain, bool multiplayer);
 
 // An empty table binds no abilities, as before #76. `humans` are the players a person commands:
 // the DEFEND stand-in waits for autofire on their units (AB-41). Like the victory rules' human
 // list it is session content, not replay data.
+struct MarketAuthoredAbility {
+    TypeId type{};
+    AbilityKind kind{};
+    bool required{};
+    std::string name{};
+    friend bool operator==(const MarketAuthoredAbility&, const MarketAuthoredAbility&) = default;
+};
 struct AbilityTable {
     std::vector<UnitAbilityProfile> profiles; // strictly increasing type_id
     std::vector<PlayerId> humans;             // strictly increasing
@@ -368,6 +395,7 @@ struct AbilityTable {
     // Krayt script's threat sum; a squadron type holds the sum over its craft. Strictly increasing
     // type IDs, session content like the profiles.
     std::vector<std::pair<TypeId, math::Fixed>> combat_ratings{};
+    std::vector<MarketAuthoredAbility> market_team_members{};
     [[nodiscard]] const UnitAbilityProfile* find(TypeId type_id) const noexcept;
     [[nodiscard]] math::Fixed combat_rating(TypeId type_id) const noexcept;
     [[nodiscard]] bool human(PlayerId player) const noexcept;
@@ -376,7 +404,7 @@ struct AbilityTable {
 };
 
 inline constexpr std::uint32_t max_ability_frames = 30U * 3600U;
-// Every multiplier is in [-64, 64]; delay, interval and speed multipliers are positive.
+// Ordinary mode multipliers are in [-64, 64]; WLK-03's shot-only damage is checked at impact.
 inline constexpr std::int64_t max_ability_multiplier = 64;
 
 // Fails with EAWR-SIM-0305 unless type IDs, humans and creation owners strictly increase,
@@ -400,6 +428,8 @@ struct AbilitySlot {
     EntityId target{};
     std::uint32_t target_hardpoint{0xffffffffU};
     std::optional<math::Vec3> position{}; // WHE-33: consumed marker position, retained for presentation
+    bool lucky_autofire_set{}; // WLK-05: an explicit off overrides the AI default.
+    bool lucky_spent{}; // WLK-03/04: first matching impact consumed the lock; service releases it.
     friend constexpr bool operator==(const AbilitySlot&, const AbilitySlot&) noexcept = default;
 };
 
@@ -498,6 +528,24 @@ void service_charged_blast(std::optional<ChargedBlastState>&, std::uint32_t elig
 
 // What the unit's other systems say about switching an ability on (AB-14, AB-16): DEFEND needs a
 // shield that is online and not in its depletion effect; TURBO and SPOILER_LOCK need engines.
+struct MarketAbilityItem {
+    std::uint32_t item{};
+    std::vector<std::string> abilities;
+    friend bool operator==(const MarketAbilityItem&, const MarketAbilityItem&) = default;
+};
+struct MarketAbilityOwner {
+    PlayerId player{};
+    std::vector<std::uint32_t> purchased;
+    friend bool operator==(const MarketAbilityOwner&, const MarketAbilityOwner&) = default;
+};
+struct MarketAbilityPolicy {
+    std::vector<MarketAbilityItem> items; // registration order determines the first match
+    std::vector<MarketAbilityOwner> owners;
+    friend bool operator==(const MarketAbilityPolicy&, const MarketAbilityPolicy&) = default;
+};
+[[nodiscard]] bool market_ability_available(const MarketAbilityPolicy*, PlayerId, bool required,
+    std::string_view name) noexcept;
+
 struct AbilityGate {
     bool shielded{};
     bool shields_online{};
@@ -510,6 +558,14 @@ struct AbilityGate {
     bool gravity_well_online{true}; // WIN-02: absent hardpoints do not disable structures
     const DurabilityProfile* hardpoint_profile{};
     const DurabilityState* hardpoint_state{};
+    bool deploy_squad_ready{}; // FL-17: latched hangar readiness and a surviving fighter bay
+    const MarketAbilityPolicy* market{};
+    PlayerId market_owner{};
+    const UnitAbilityProfile* market_profile{};
+    const UnitAbilityProfile* market_team_member{};
+    const MarketAuthoredAbility* market_member_abilities{};
+    std::size_t market_member_ability_count{};
+    TypeId market_member_type{};
 };
 
 [[nodiscard]] bool ability_hardpoints_online(const AbilityProfile&, const AbilityGate&) noexcept;

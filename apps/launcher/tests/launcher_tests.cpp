@@ -652,7 +652,7 @@ void test_flow_mods() {
     const std::vector<std::wstring> expected = {L"--path", (f.package / "launcher").wstring(), L"--",
         L"--eawr-mods-service", (f.package / "eawr_mods_service.exe").wstring(), L"--eawr-godot",
         (f.package / "godot" / kGodotExecutableName).wstring(), L"--eawr-game-project",
-        (f.package / "project").wstring(), L"--eawr-game-root", f.game.wstring(),
+        (f.package / "project").wstring(), L"--eawr-game-root", fs::weakly_canonical(f.game).wstring(),
         L"--eawr-launch-loop", (f.user_data / "launcher" / "next-action.json").wstring(),
         L"--eawr-launch-loop-stay-open", (f.user_data / "launcher" / "game-running.json").wstring()};
     CHECK(f.runner.args == expected);
@@ -1590,7 +1590,7 @@ void test_launch_plan_instance_flags() {
     inputs.game_root = L"G";
     inputs.report = L"R";
     const auto plain = godot_arguments(inputs);
-    for (const wchar_t* flag : {L"--eawr-save-dir", L"--eawr-font-cache", L"--eawr-lan-game-port"})
+    for (const wchar_t* flag : {L"--eawr-save-dir", L"--eawr-font-cache", L"--eawr-digest-cache", L"--eawr-lan-game-port"})
         CHECK(std::find(plain.begin(), plain.end(), std::wstring(flag)) == plain.end());   // instance 1 is unchanged
     inputs.mod_profile = fs::path(L"M\\p.json");
     inputs.save_dir = fs::path(L"S\\saves");
@@ -1648,6 +1648,7 @@ void test_flow_instance_two() {
     };
     CHECK(flag_value(L"--eawr-save-dir") == (f.viewer_data / "saves").wstring());
     CHECK(flag_value(L"--eawr-font-cache") == (f.viewer_data / "fonts").wstring());
+    CHECK(flag_value(L"--eawr-digest-cache") == (f.viewer_data / "mods" / "cache" / "content").wstring());
     CHECK(flag_value(L"--eawr-lan-game-port") == L"47626");
     CHECK(fs::path(flag_value(L"--eawr-mod-profile")) == f.user_data / "mods/profiles/sample.json");
     CHECK(flag_value(L"--eawr-report") == (state / "front-end-report.json").wstring());
@@ -1701,7 +1702,7 @@ void test_flow_instance_one_is_unchanged() {
     options.instance = 1;
     f.runner.on_run = [&] {
         CHECK(!f.runner.current_appdata);
-        for (const wchar_t* flag : {L"--eawr-save-dir", L"--eawr-font-cache", L"--eawr-lan-game-port"})
+        for (const wchar_t* flag : {L"--eawr-save-dir", L"--eawr-font-cache", L"--eawr-digest-cache", L"--eawr-lan-game-port"})
             CHECK(std::find(f.runner.args.begin(), f.runner.args.end(), std::wstring(flag)) == f.runner.args.end());
     };
     CHECK(f.run(options) == kExitOk);

@@ -316,7 +316,7 @@ void contracts() {
     expect(!state->restore(damaged), "missing component rejected before publication");
     damaged = saved; damaged.components["unknown"] = {1};
     expect(!state->restore(damaged), "unknown component rejected before publication");
-    damaged = saved; damaged.version = 2;
+    damaged = saved; damaged.version = ga::native_state_version + 1;
     expect(!state->restore(damaged), "unsupported native envelope refused");
     auto incomplete = slots.contributors(); incomplete.execution.reset();
     expect(!cp::ComposedGalacticAiState::create(incomplete), "missing provider cannot remove refusal");

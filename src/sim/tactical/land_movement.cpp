@@ -1,3 +1,4 @@
+#include "land_phase_internal.hpp"
 #include "eawr/sim/tactical/land_movement.hpp"
 #include "eawr/sim/math/trig.hpp"
 #include "eawr/core/tick_profile.hpp"
@@ -44,6 +45,77 @@ Fixed dot(Arithmetic& a, Vec2 x, Vec2 y) { return a.add(a.mul(x.x, y.x), a.mul(x
 Fixed approach(Arithmetic& a, Fixed speed, Fixed desired, const LandLocomotionProfile& p, Fixed dt) {
     if (speed < desired) return std::min(desired, a.add(speed, a.mul(p.acceleration, dt)));
     return std::max(desired, a.sub(speed, a.mul(p.deceleration, dt)));
+}
+// WLPA-90/91: the retail corner and approach rules (see docs/behaviour/walks/land-pathing.md). A turn is 2 pi radians; the
+// deviation clamp is the retail one (20 to 100 world units); a sine or (1 - cosine) below the resolution is a straight
+// continuation (it would divide by zero).
+constexpr auto land_turn_radians = Fixed::from_raw(105414357);
+constexpr auto land_double = Fixed::from_raw(2 * Fixed::scale);
+constexpr auto land_corner_deviation_low = Fixed::from_raw(20 * Fixed::scale);
+constexpr auto land_corner_deviation_high = Fixed::from_raw(100 * Fixed::scale);
+constexpr auto land_corner_resolution = Fixed::from_raw(16);
+constexpr auto land_unlimited = Fixed::from_raw(std::numeric_limits<std::int64_t>::max());
+// A heading vector (unit) of the nearest earlier segment of `nodes` that has length, else the start heading; then the
+// corner fraction onto the segment that leaves `index`. A path end has no corner.
+Fixed path_corner_fraction(std::span<const Vec2> nodes, std::size_t index, Fixed start_heading, const LandTurnLimits& limits);
+// The speed from which a body brakes at `deceleration` to `end_speed` within `distance`: sqrt(end^2 + 2 a d).
+Fixed braking_speed(Fixed end_speed, Fixed deceleration, Fixed distance) {
+    Arithmetic a;
+    const auto squared = a.add(a.mul(end_speed, end_speed), a.mul(a.mul(land_double, deceleration), distance));
+    Fixed result;
+    if (!a.valid || !math::try_sqrt(squared, result)) return land_unlimited;
+    return result;
+}
+// The braking speed, but never one whose step in `seconds` rounds to zero: a body a few raw units from its target arrives in
+// that step instead of stopping short (a tiny authored deceleration would otherwise freeze it).
+Fixed brake_cap(Fixed end_speed, Fixed deceleration, Fixed distance, Fixed seconds, Fixed top) {
+    auto cap = braking_speed(end_speed, deceleration, distance);
+    Arithmetic a;
+    if (a.mul(cap, seconds) <= zero) cap = std::min(top, a.div(distance, seconds));
+    return a.valid ? cap : land_unlimited;
+}
+// The distance `speed` needs to brake to a stop at `deceleration`.
+Fixed stopping_distance(Fixed speed, Fixed deceleration) {
+    Arithmetic a;
+    if (deceleration <= zero) return land_unlimited;
+    const auto distance = a.div(a.mul(speed, speed), a.mul(land_double, deceleration));
+    return a.valid ? distance : land_unlimited;
+}
+// Path length from `from` through nodes[index..], stopping once it exceeds `horizon` (past it nothing slows the body).
+Fixed path_length_ahead(std::span<const Vec2> nodes, Vec2 from, std::size_t index, Fixed horizon) {
+    Arithmetic a;
+    Fixed total;
+    auto at = from;
+    for (auto n = index; n < nodes.size() && total <= horizon; ++n) {
+        total = a.add(total, a.length(a.sub(nodes[n], at)));
+        at = nodes[n];
+    }
+    return a.valid ? total : land_unlimited;
+}
+Fixed path_corner_fraction(std::span<const Vec2> nodes, std::size_t index, Fixed start_heading, const LandTurnLimits& limits) {
+    if (!limits.turns || index + 1 >= nodes.size()) return one;
+    Arithmetic a;
+    auto heading = forward(start_heading);
+    auto earlier = index;
+    while (earlier > 0 && nodes[earlier - 1] == nodes[index]) --earlier;
+    if (earlier > 0) {
+        const auto before = a.sub(nodes[index], nodes[earlier - 1]);
+        const auto length = a.length(before);
+        if (a.valid && length > zero) heading = {a.div(before.x, length), a.div(before.y, length)};
+    }
+    const auto leaving = a.sub(nodes[index + 1], nodes[index]);
+    if (!a.valid) return one;
+    return land_corner_fraction(heading, leaving, limits);
+}
+// LR13-17: the start gate of a Walk_Transition member is open when the published gate says so, or (the adapter read its
+// MOVESTART clip) when it has waited the clip's whole logical frames. The debug build shows that the active
+// frame is at least the frame count minus 2 minus the animation's playback-rate multiplier (frames of the clip, which is one
+// frame of playback whatever the rate); the adapter has already taken that off the wait. A member with no clip has nothing to wait for.
+bool start_gate_open(const LandMovingMember& m) {
+    if (m.gates.start_almost_finished) return true;
+    const auto& p = m.profile;
+    if (!p.start_clock) return false;
+    return m.transition_frame.raw() >= static_cast<std::int64_t>(p.start_clip_ticks) * Fixed::scale;
 }
 bool valid_path(const LandMovingSquad& squad) {
     // A container that a contact pushed to an open spot walks its temporary route with no base path (WLPA-57).
@@ -100,6 +172,54 @@ bool active(LandMoveOrder order) { return order == LandMoveOrder::following || o
 bool follows(const LandMovingSquad& squad) {
     return active(squad.order) || (squad.order == LandMoveOrder::reached && !squad.generic_team);
 }
+}
+
+Fixed land_corner_fraction(Vec2 heading, Vec2 segment, const LandTurnLimits& limits) {
+    if (!limits.turns || limits.maximum_speed <= zero) return one;
+    // A local checker: a corner outside the fixed-point range simply does not limit; it is never a simulation failure.
+    Arithmetic a;
+    const auto length = a.length(segment);
+    if (!a.valid || length <= zero) return one;
+    const Vec2 unit{a.div(segment.x, length), a.div(segment.y, length)};
+    const auto cosine = std::clamp(dot(a, heading, unit), Fixed::from_raw(-Fixed::scale), one);
+    const auto sine = absolute(a.sub(a.mul(heading.x, unit.y), a.mul(heading.y, unit.x)));
+    const auto omega = a.mul(limits.turn_rate, land_turn_radians);
+    auto speed = limits.maximum_speed;
+    if (sine > land_corner_resolution) speed = std::min(speed, a.div(a.mul(omega, length), a.mul(sine, land_double)));
+    const auto bend = a.sub(one, cosine);
+    if (bend > land_corner_resolution) {
+        const auto deviation = std::clamp(a.div(length, land_double), land_corner_deviation_low, land_corner_deviation_high);
+        speed = std::min(speed, a.div(a.mul(deviation, omega), bend));
+    }
+    const auto fraction = a.div(speed, limits.maximum_speed);
+    if (!a.valid) return one;
+    if (fraction < limits.minimum_fraction) return zero;
+    return std::clamp(fraction, zero, one);
+}
+
+LandTurnLimits LandMovement::turn_limits(std::size_t index) const {
+    const auto& s = state_.squads[index];
+    LandTurnLimits limits;
+    limits.maximum_speed = s.maximum_speed;
+    limits.turns = !s.generic_team && s.maximum_speed > zero && !squad_members_[index].empty();
+    bool first = true;
+    for (const auto member : squad_members_[index]) {
+        const auto& profile = state_.members[member].profile;
+        if (profile.turn_rate <= zero) limits.turns = false;
+        if (first || profile.turn_rate < limits.turn_rate) limits.turn_rate = profile.turn_rate;
+        if (profile.deceleration > zero && (limits.deceleration == zero || profile.deceleration < limits.deceleration))
+            limits.deceleration = profile.deceleration;
+        limits.minimum_fraction = std::max(limits.minimum_fraction, profile.min_speed_fraction_for_turn);
+        if (first || profile.close_enough_angle < limits.close_enough) limits.close_enough = profile.close_enough_angle;
+        first = false;
+    }
+    if (limits.deceleration == zero) {
+        // Retail: a team container with no authored deceleration brakes with its maximum speed per frame (a one-frame stop).
+        Arithmetic a;
+        limits.deceleration = a.mul(s.maximum_speed, Fixed::from_raw(static_cast<std::int64_t>(logical_frames_per_second) * Fixed::scale));
+        if (!a.valid) limits.turns = false;
+    }
+    return limits;
 }
 
 std::optional<std::vector<Vec2>> land_rows_layout(std::span<const LandRowsInput> members) {
@@ -179,6 +299,8 @@ std::optional<LandMovement> LandMovement::from_checkpoint(Checkpoint saved) {
     for (const auto& m : saved.members) {
         if (!m.object || m.squad >= saved.squads.size() || m.profile.maximum_speed < zero
             || m.profile.acceleration < zero || m.profile.deceleration < zero || m.profile.turn_rate < zero
+            || m.profile.min_speed_fraction_for_turn < zero || m.profile.min_speed_fraction_for_turn > one
+            || m.profile.close_enough_angle < zero
             || m.profile.radius < zero || m.speed < zero || m.speed > m.profile.maximum_speed
             || m.transition_frame < zero || m.deployment_frame < zero || m.straggler_best_lag < Fixed::from_raw(-1)
             || m.assigned_speed < zero || m.collision_speed < zero
@@ -244,6 +366,7 @@ std::optional<LandMovement> LandMovement::from_checkpoint(Checkpoint saved) {
     }
     result.state_ = std::move(saved);
     result.proposals_.resize(result.state_.members.size());
+    result.member_motion_inputs_.resize(result.state_.members.size());
     result.staged_slot_.resize(result.state_.members.size());
     result.staged_straggler_lag_.resize(result.state_.members.size());
     result.member_visits_.resize(result.state_.members.size());
@@ -426,6 +549,59 @@ Fixed LandMovement::box_overlap(const Body& x, const Body& y) {
     return a.valid ? result : zero;
 }
 
+std::optional<LandMovement::DetachedSquad> LandMovement::detach_squad(const EntityId object) {
+    const auto squad = std::find_if(state_.squads.begin(), state_.squads.end(),
+        [object](const auto& row) { return row.object == object; });
+    if (squad == state_.squads.end()) return std::nullopt;
+    const auto index = static_cast<std::size_t>(squad - state_.squads.begin());
+    DetachedSquad detached{*squad, {}};
+    for (const auto& member : state_.members)
+        if (member.squad == index) detached.members.push_back(member);
+    if (detached.members.empty()) return std::nullopt;
+    // Apply to a copy so an invalid intermediate state cannot lose the original roster.
+    auto next = from_checkpoint(state_);
+    if (!next) return std::nullopt;
+    for (const auto& member : detached.members)
+        if (!next->remove_member(member.object)) return std::nullopt;
+    const bool reference = reference_pair_scans_, repulsion = straggler_repulsion_;
+    *this = std::move(*next);
+    reference_pair_scans_ = reference; straggler_repulsion_ = repulsion;
+    return detached;
+}
+
+bool LandMovement::restore_squad(DetachedSquad detached, const math::Vec2 position) {
+    if (detached.members.empty()) return false;
+    auto saved = state_;
+    auto& squad = detached.squad;
+    math::Fixed dx, dy;
+    if (!math::try_subtract(position.x, squad.position.x, dx)
+        || !math::try_subtract(position.y, squad.position.y, dy)) return false;
+    squad.position = position;
+    squad.path = {}; squad.next_node = 0; squad.order = LandMoveOrder::idle;
+    squad.speed = {}; squad.assigned_speed = {}; squad.collision_speed = {};
+    squad.temporary_path = {}; squad.temporary_next = 0; squad.temporary_first = 0; squad.temporary_second = 0;
+    squad.yielding_to = 0; squad.blocker_progress = 0; squad.formation = 0; squad.formation_slot = {};
+    squad.terrain_blocked = false; squad.terrain_target = {}; squad.turning = false; squad.awaiting_splice = false;
+    const auto index = saved.squads.size();
+    saved.squads.push_back(std::move(squad));
+    for (auto& member : detached.members) {
+        if (!math::try_add(member.position.x, dx, member.position.x)
+            || !math::try_add(member.position.y, dy, member.position.y)) return false;
+        member.squad = index; member.speed = {}; member.stop_velocity = {};
+        member.assigned_speed = {}; member.collision_speed = {}; member.collision_lock = 0;
+        member.state = LandWalkState::stopped; member.next_node = 0; member.temporary_next = 0;
+        member.terrain_blocked = false; member.terrain_target = {};
+        saved.members.push_back(std::move(member));
+    }
+    std::sort(saved.members.begin(), saved.members.end(), [](const auto& a, const auto& b) { return a.object < b.object; });
+    auto rebuilt = from_checkpoint(std::move(saved));
+    if (!rebuilt) return false;
+    const bool reference = reference_pair_scans_, repulsion = straggler_repulsion_;
+    *this = std::move(*rebuilt);
+    reference_pair_scans_ = reference; straggler_repulsion_ = repulsion;
+    return true;
+}
+
 bool LandMovement::remove_member(const EntityId object) {
     const auto member = std::lower_bound(state_.members.begin(), state_.members.end(), object,
         [](const auto& row, EntityId id) { return row.object < id; });
@@ -504,6 +680,7 @@ bool LandMovement::install_path(std::size_t index, LandPath path, std::uint64_t 
     const bool was_moving = active(s.order);
     invalidate_contacts(index);
     s.path = std::move(path); s.next_node = 1; s.following_start = start;
+    s.turn_start_heading = s.facing; s.awaiting_splice = false; // WLPA-90: the first corner is measured from this heading
     s.order = LandMoveOrder::following; s.yielding_to = 0; s.blocker_progress = 0;
     s.straggler_wait_remaining = land_straggler_wait_visits;
     for (const auto member : squad_members_[index]) state_.members[member].straggler_best_lag = Fixed::from_raw(-1);
@@ -516,6 +693,25 @@ bool LandMovement::install_path(std::size_t index, LandPath path, std::uint64_t 
     for (const auto member : squad_members_[index]) can_turn = can_turn && state_.members[member].profile.turn_rate > zero;
     const bool was_turning = s.turning;
     s.turning = !s.generic_team && can_turn && (!was_moving || s.turning);
+    if (s.turning && !was_turning && !s.has_formation) {
+        // WLPA-91: a single object (no team container) walks off at once, rotating as it goes, when its first heading error
+        // is within one frame's turn or within the move-start angle and its first corner keeps some speed. Only the team
+        // container always turns in place first.
+        const auto limits = turn_limits(index);
+        Arithmetic a;
+        for (std::size_t n = 1; n < s.path.nodes.size(); ++n) {
+            const auto delta = a.sub(s.path.nodes[n], s.position);
+            if (delta.x == zero && delta.y == zero) continue;
+            const auto heading = math::atan2_turn(delta.y, delta.x);
+            if (!a.valid || !heading) break;
+            const auto error = absolute(math::wrap_turn(a.sub(heading.value(), s.facing)));
+            const auto frame_turn = a.mul(limits.turn_rate, Fixed::from_ratio(1, logical_frames_per_second).value());
+            const bool within_start_angle = error <= limits.close_enough
+                && path_corner_fraction(s.path.nodes, 0, s.turn_start_heading, limits) > zero;
+            if (a.valid && (error <= frame_turn || within_start_angle)) s.turning = false;
+            break;
+        }
+    }
     if (s.turning) {
         // Logging only: a turn from standing, or a re-order that retargets a turn already under way.
         LandMoveTrace event;
@@ -554,6 +750,7 @@ void LandMovement::cut_splice_anchor(std::size_t index, Vec2 anchor) {
     auto& s = state_.squads[index];
     s.path.nodes.resize(s.next_node + 1);
     s.path.nodes.back() = anchor;
+    s.awaiting_splice = true; // WLPA-90: the cut end is not a destination; the squad does not brake for it
 }
 
 LandMovement::SpliceResult LandMovement::splice_path(std::size_t index, LandPath path) {
@@ -561,32 +758,31 @@ LandMovement::SpliceResult LandMovement::splice_path(std::size_t index, LandPath
     if (!anchor || path.status != LandPathStatus::found || path.nodes.empty() || path.nodes.front() != *anchor)
         return SpliceResult::rejected;
     auto& s = state_.squads[index];
-    // WLPA-89 (interim, until corner rounding): the first corner, at the anchor, is smooth when the squad's slowest
-    // member turns through it within one second. A squad with a non-turning member never turns in place (install_path).
+    // WLPA-89: the corner at the anchor keeps the walk when its turn speed (WLPA-90) is above zero. A single object (no
+    // team container) also needs its heading error within one frame's turn or the move-start angle (WLPA-91). A squad
+    // with a non-turning member never turns in place (install_path) and has no corner limit.
     Arithmetic a;
-    bool can_turn = !squad_members_[index].empty();
-    Fixed budget;
-    bool first = true;
-    for (const auto member : squad_members_[index]) {
-        const auto rate = state_.members[member].profile.turn_rate;
-        can_turn = can_turn && rate > zero;
-        if (first || rate < budget) budget = rate;
-        first = false;
-    }
-    if (can_turn) {
+    const auto limits = turn_limits(index);
+    if (limits.turns) {
         const auto incoming = a.sub(*anchor, s.position);
-        Fixed heading_in = s.facing;
-        if (incoming.x != zero || incoming.y != zero) {
-            const auto h = math::atan2_turn(incoming.y, incoming.x);
-            if (!h) return SpliceResult::rejected;
-            heading_in = h.value();
-        }
+        const auto incoming_length = a.length(incoming);
+        Vec2 heading_in = forward(s.facing);
+        if (a.valid && incoming_length > zero)
+            heading_in = {a.div(incoming.x, incoming_length), a.div(incoming.y, incoming_length)};
         for (std::size_t n = 1; n < path.nodes.size(); ++n) {
             const auto outgoing = a.sub(path.nodes[n], *anchor);
             if (outgoing.x == zero && outgoing.y == zero) continue;
-            const auto h = math::atan2_turn(outgoing.y, outgoing.x);
-            if (!h) return SpliceResult::rejected;
-            if (absolute(math::wrap_turn(a.sub(h.value(), heading_in))) > budget) return SpliceResult::sharp;
+            if (!a.valid) return SpliceResult::rejected;
+            bool smooth = land_corner_fraction(heading_in, outgoing, limits) > zero;
+            if (smooth && !s.has_formation) {
+                // Retail compares the first heading with the object's current facing, not its travel direction.
+                const auto out_angle = math::atan2_turn(outgoing.y, outgoing.x);
+                if (!out_angle) return SpliceResult::rejected;
+                const auto error = absolute(math::wrap_turn(a.sub(out_angle.value(), s.facing)));
+                const auto frame_turn = a.mul(limits.turn_rate, Fixed::from_ratio(1, logical_frames_per_second).value());
+                smooth = a.valid && (error <= frame_turn || error <= limits.close_enough);
+            }
+            if (!smooth) return SpliceResult::sharp;
             break;
         }
         if (!a.valid) return SpliceResult::rejected;
@@ -599,6 +795,7 @@ LandMovement::SpliceResult LandMovement::splice_path(std::size_t index, LandPath
     }
     invalidate_contacts(index);
     s.path = std::move(spliced); s.next_node = 1;
+    s.turn_start_heading = s.facing; s.awaiting_splice = false;
     s.yielding_to = 0; s.blocker_progress = 0;
     s.straggler_wait_remaining = land_straggler_wait_visits;
     for (const auto member : squad_members_[index]) state_.members[member].straggler_best_lag = Fixed::from_raw(-1);
@@ -629,6 +826,11 @@ bool LandMovement::drop_order(std::size_t index) {
     }
     return true;
 }
+bool LandMovement::set_formation(std::size_t index, EntityId lead, Vec2 slot) {
+    if (index >= state_.squads.size()) return false;
+    state_.squads[index].formation = lead; state_.squads[index].formation_slot = lead ? slot : Vec2{};
+    return true;
+}
 bool LandMovement::set_gates(EntityId object, LandMotionGates gates) {
     for (auto& m : state_.members) if (m.object == object) { m.gates = gates; return true; }
     return false;
@@ -647,11 +849,11 @@ bool LandMovement::set_animation_progress(EntityId object, Fixed transition, Fix
 }
 
 core::Result<void> LandMovement::step(LandOccupancy& grid, const PartitionExecutor& executor, Fixed seconds,
-    const bool defer_occupancy) {
+    const bool defer_occupancy, const std::span<const std::optional<Fixed>> formation_speeds) {
     const auto overflow = [] { return core::Result<void>::failure(core::Diagnostic{
         std::string(math::diagnostic_codes::overflow), core::Severity::error,
         "Land movement arithmetic is outside fixed-point range.", {}, {}, {}, {}}); };
-    if (seconds <= zero) return overflow();
+    if (seconds <= zero || (!formation_speeds.empty() && formation_speeds.size() != state_.squads.size())) return overflow();
     refresh_bodies();
     for (const auto& body : bodies_) if (!body.valid) return overflow();
     const auto bodies = bodies_.size();
@@ -705,8 +907,9 @@ core::Result<void> LandMovement::step(LandOccupancy& grid, const PartitionExecut
     }
     // The two barriers use the same named phase. Squads produce immutable parent inputs first;
     // members then propose into disjoint slots, independently of worker traversal order.
-    struct Context { LandOccupancy& grid; Fixed seconds; bool generic_pass{}; } context{grid, seconds};
-    auto run = executor.execute_phase("land-member-proposals", tick_partition_count, [this, &context](std::size_t partition) {
+    struct Context { LandOccupancy& grid; Fixed seconds; bool generic_pass{}; std::span<const std::optional<Fixed>> formation_speeds; bool indexed{}; };
+    Context context{grid, seconds, false, formation_speeds};
+    auto run = land_phase(executor, "land-member-proposals", tick_partition_count, [this, &context](std::size_t partition) {
         const auto range = partition_range(partition, state_.squads.size());
         for (auto i = range.begin; i < range.end; ++i) {
             const auto& s = state_.squads[i];
@@ -726,7 +929,7 @@ core::Result<void> LandMovement::step(LandOccupancy& grid, const PartitionExecut
                     const auto& m = state_.members[member];
                     if ((m.state == LandWalkState::stopped || m.state == LandWalkState::starting)
                         && (m.gates.animation_prevents_movement
-                            || (m.profile.walk_transition && !m.gates.start_almost_finished))) p.start_admitted = false;
+                            || (m.profile.walk_transition && !start_gate_open(m)))) p.start_admitted = false;
                 }
                 continue;
             }
@@ -755,6 +958,7 @@ core::Result<void> LandMovement::step(LandOccupancy& grid, const PartitionExecut
                     const auto yaw = math::wrap_turn(a.sub(*target, s.facing));
                     if (absolute(yaw) > budget) {
                         p.facing = math::wrap_turn(a.add(s.facing, std::clamp(yaw, a.sub(zero, budget), budget)));
+                        ++p.progress; // a turn in place is progress for the contact deadlock and retry tests (LR3-11)
                         p.valid = a.valid;
                         continue;
                     }
@@ -764,7 +968,9 @@ core::Result<void> LandMovement::step(LandOccupancy& grid, const PartitionExecut
                 p.valid = a.valid;
                 continue;
             }
-            auto speed = s.maximum_speed;
+            // LMF-09: the staged cap is computed from the previous committed formation state.
+            auto speed = context.formation_speeds.empty() || !context.formation_speeds[i]
+                ? s.maximum_speed : *context.formation_speeds[i];
             // WLPA-38: the contact rows belong to the container body; a soldier's own position holds none.
             if (const auto body = body_of_squad_[i]; body != no_body) {
                 const auto id = bodies_[body].object;
@@ -800,7 +1006,7 @@ core::Result<void> LandMovement::step(LandOccupancy& grid, const PartitionExecut
                 // LR13-17/19/21: no parent runs away from a member awaiting an admitted gate.
                 if (m.gates.animation_prevents_movement || m.state == LandWalkState::deploying
                     || m.state == LandWalkState::deployed || m.state == LandWalkState::undeploying
-                    || (m.profile.walk_transition && !m.gates.start_almost_finished
+                    || (m.profile.walk_transition && !start_gate_open(m)
                         && (m.state == LandWalkState::stopped || m.state == LandWalkState::starting))) member_gate = true;
             }
             // WLPA-93: count only an otherwise movable leader nearly held by lag.
@@ -820,6 +1026,62 @@ core::Result<void> LandMovement::step(LandOccupancy& grid, const PartitionExecut
             // The speed the deadlock test (LR3-11) reads is the one an object reaches in a single step: a ramp from its last
             // collision-modified speed by the body's acceleration, as a soldier's own speed was. A container held by the pair
             // sweep therefore reads below its acceleration threshold on every visit, and a container moving freely does not.
+            // WLPA-90/91: a squad on its own path turns toward each segment at its slowest member's rate while it walks; until
+            // its heading is within one frame's turn the speed is capped at the corner's turn speed (a corner with no turn
+            // speed stops the walk and turns in place), and the speed never exceeds what brakes to the next corner's turn
+            // speed, or to a stop at the path end, at the squad's deceleration. A contact route keeps the plain walk.
+            bool steered = false, heading_met = true;
+            const auto speed_before_caps = speed;
+            if (s.temporary_first == 0 && s.next_node < s.path.nodes.size()) {
+                const auto limits = turn_limits(i);
+                const std::span<const Vec2> nodes{s.path.nodes};
+                auto ahead = s.next_node;
+                while (ahead < nodes.size() && nodes[ahead] == s.position) ++ahead;
+                if (limits.turns && ahead < nodes.size()) {
+                    const auto delta = a.sub(nodes[ahead], s.position);
+                    const auto heading = math::atan2_turn(delta.y, delta.x);
+                    if (!heading) a.valid = false;
+                    else {
+                        steered = true;
+                        const auto budget = a.mul(limits.turn_rate, context.seconds);
+                        const auto error = math::wrap_turn(a.sub(heading.value(), s.facing));
+                        const bool met = absolute(error) <= budget;
+                        if (!met && ahead > 0) {
+                            const auto turn_fraction = path_corner_fraction(nodes, ahead - 1, s.turn_start_heading, limits);
+                            if (turn_fraction == zero) {
+                                // The corner stops the walk: no speed is assigned, and the straggler wait is not spent.
+                                p.turning = true; p.assigned_speed = zero;
+                                p.straggler_wait_remaining = s.straggler_wait_remaining;
+                                p.valid = a.valid; continue;
+                            }
+                            // WLPA-90: the position stays on the path, so the speed is also scaled by the cosine of the heading
+                            // error (zero at a quarter turn or more): the body never runs along the path against its facing.
+                            const auto turn_cosine = std::max(zero, math::sin_cos_turn(error).cosine);
+                            speed = std::min(speed, a.mul(a.mul(turn_fraction, limits.maximum_speed), turn_cosine));
+                        }
+                        const auto onto = a.mul(path_corner_fraction(nodes, ahead, s.turn_start_heading, limits), limits.maximum_speed);
+                        if (onto < speed)
+                            speed = std::min(speed, brake_cap(onto, limits.deceleration, a.length(delta), context.seconds, limits.maximum_speed));
+                        if (!s.awaiting_splice) {
+                            const auto horizon = stopping_distance(limits.maximum_speed, limits.deceleration);
+                            const auto left = path_length_ahead(nodes, s.position, ahead, horizon);
+                            if (left <= horizon)
+                                speed = std::min(speed, brake_cap(zero, limits.deceleration, left, context.seconds, limits.maximum_speed));
+                        }
+                        // Rotate every visit, also at zero speed: a cosine cap of zero would otherwise hold the heading error.
+                        p.facing = met ? heading.value()
+                            : math::wrap_turn(a.add(s.facing, std::clamp(error, a.sub(zero, budget), budget)));
+                        // WLPA-84 maps the rows once the squad's facing has caught up with the path heading, so a slow swing
+                        // through a corner is one re-map, not one per eighth of a turn.
+                        heading_met = math::sin_cos_turn(math::wrap_turn(a.sub(heading.value(), p.facing))).cosine
+                            > Fixed::from_ratio(99, 100).value();
+                    }
+                }
+            }
+            // WLPA-93: a corner or cosine cap that zeroes a speed the straggler gate had admitted spends no wait.
+            if (speed_before_caps > zero && speed == zero) p.straggler_wait_remaining = s.straggler_wait_remaining;
+            // LR3-11: the contact layer reads the speed after the corner and braking caps (retail applies them before the
+            // collision modifier): a ramp from the last collision-modified speed by the body's acceleration.
             p.assigned_speed = speed;
             if (const auto body = body_of_squad_[i]; body != no_body && bodies_[body].acceleration > zero)
                 p.assigned_speed = std::min(speed, a.add(s.collision_speed, a.mul(bodies_[body].acceleration, context.seconds)));
@@ -841,7 +1103,7 @@ core::Result<void> LandMovement::step(LandOccupancy& grid, const PartitionExecut
                 if (remaining <= zero) break;
                 const auto heading = math::atan2_turn(delta.y, delta.x);
                 if (!heading) { a.valid = false; break; }
-                p.facing = heading.value();
+                if (!steered) p.facing = heading.value();
                 const auto travel = std::min(distance, remaining);
                 const auto next = travel == distance ? route.nodes[tracker]
                     : a.add(p.position, a.mul(delta, a.div(travel, distance)));
@@ -854,10 +1116,16 @@ core::Result<void> LandMovement::step(LandOccupancy& grid, const PartitionExecut
             }
             p.valid = a.valid;
             if (p.position != s.position) {
-                p.speed = speed; ++p.progress;
+                p.speed = speed;
+                // Progress is a real displacement: a rounding-sized step of a degenerate route is none (WLPA-96, #6115).
+                Arithmetic moved;
+                if (moved.length(moved.sub(p.position, s.position)) >= Fixed::from_raw(Fixed::scale / 256) || !moved.valid) ++p.progress;
+            } else if (steered && p.facing != s.facing) {
+                ++p.progress; // rotating at zero speed (the cosine cap) is progress, so it is no deadlock (LR3-11)
             }
             // WLPA-84 (retail Map_Team_Members): when the path heading leaves the last mapped axis by more than dot 0.99,
-            // or the slots were never mapped, the members are re-assigned to rows behind the container. The new slots
+            // or the slots were never mapped, the members are re-assigned to rows behind the container once the facing has
+            // caught up with the heading (the remake's facing lags it). The new slots
             // go to staged_slot_ (this squad's members only); nothing shared is written from the partition.
             if (p.position != s.position && s.has_formation && squad_members_[i].size() > 1) {
                 bool extents = true;
@@ -865,7 +1133,7 @@ core::Result<void> LandMovement::step(LandOccupancy& grid, const PartitionExecut
                 const auto next_axis = forward(p.facing);
                 const bool stale = !s.has_mapped
                     || dot(a, next_axis, forward(s.mapped_axis)) <= Fixed::from_ratio(99, 100).value();
-                if (extents && stale && a.valid) {
+                if (extents && stale && heading_met && a.valid) {
                     const auto side_axis = side(next_axis);
                     std::vector<LandRowsInput> inputs;
                     inputs.reserve(squad_members_[i].size());
@@ -902,6 +1170,7 @@ core::Result<void> LandMovement::step(LandOccupancy& grid, const PartitionExecut
             const auto& parent = squad_proposals_[m.squad];
             auto& p = proposals_[i];
             p = {true, false, m.position, m.facing, m.speed, m.stop_velocity, m.state};
+            p.transition_frame = m.transition_frame;
             // WLPA-36/69: only a generic-team member has a terrain record of its own.
             if (s.generic_team) { p.terrain_blocked = parent.terrain_blocked; p.terrain_target = parent.terrain_target; }
             member_visits_[i] = 0;
@@ -991,6 +1260,8 @@ core::Result<void> LandMovement::step(LandOccupancy& grid, const PartitionExecut
             // facing through the rate clamp but never zeroes speed.
             const bool turning = !s.generic_team && parent.turning;
             p.facing = math::wrap_turn(a.add(m.facing, std::clamp(yaw, a.sub(zero, turn), turn)));
+            p.motion_input.heading_error = yaw;
+            p.motion_input.valid = true;
             bool allowed = follows(s) && state_.tick >= s.following_start;
             if (s.generic_team) {
                 if (allowed && distance > zero && p.state == LandWalkState::stopped && m.profile.walk_transition)
@@ -1006,9 +1277,14 @@ core::Result<void> LandMovement::step(LandOccupancy& grid, const PartitionExecut
             if (allowed && (distance > zero || s.next_node < s.path.nodes.size()) && p.state == LandWalkState::stopped)
                 p.state = m.profile.walk_transition ? LandWalkState::starting : LandWalkState::moving;
             if (p.state == LandWalkState::starting) {
-                if (m.gates.start_almost_finished) p.state = LandWalkState::moving;
-                else allowed = false;
+                if (start_gate_open(m)) p.state = LandWalkState::moving;
+                else {
+                    allowed = false;
+                    // LR13-17: the MOVESTART clip plays from its first frame while the member waits.
+                    p.transition_frame = a.add(m.transition_frame, one);
+                }
             }
+            if (p.state != LandWalkState::starting) p.transition_frame = zero;
             if (p.state == LandWalkState::turning && !m.gates.turn_almost_finished) allowed = false;
             Fixed desired;
             if (allowed && distance > zero) {
@@ -1050,6 +1326,10 @@ core::Result<void> LandMovement::step(LandOccupancy& grid, const PartitionExecut
                 else if (a.valid && admitted(context.grid, m.position, next, m.profile.radius, m.mask)) p.position = next;
                 else { p.speed = zero; p.state = LandWalkState::stopping; p.terrain_blocked = true; p.terrain_target = next; }
             }
+            // LR13-24: the ordinary moving path consumes a turn budget.
+            p.motion_input.turn_fraction_valid = s.generic_team;
+            if (s.generic_team && allowed && !turning && distance > zero && p.speed > zero && turn > zero)
+                p.motion_input.turn_fraction = a.div(std::min(absolute(yaw), turn), turn);
             p.valid = a.valid;
             p.at_slot = p.position == target;
             if (s.generic_team && p.at_slot) {
@@ -1061,7 +1341,7 @@ core::Result<void> LandMovement::step(LandOccupancy& grid, const PartitionExecut
         }
     };
     context.generic_pass = true;
-    run = executor.execute_phase("land-member-proposals", tick_partition_count, member_pass);
+    run = land_phase(executor, "land-member-proposals", tick_partition_count, member_pass);
     if (!run) return run;
     // The body positions the pair sweep reads: the container's proposed position, or a generic member's own.
     const auto proposed_position = [this](const Body& body) {
@@ -1069,7 +1349,7 @@ core::Result<void> LandMovement::step(LandOccupancy& grid, const PartitionExecut
     };
     if (!reference_pair_scans_) {
         core::tick_profile::Scope phase("land-movement-index");
-        run = executor.execute_phase("land-member-proposals", tick_partition_count, [this, &proposed_position](std::size_t partition) {
+        run = land_phase(executor, "land-member-proposals", tick_partition_count, [this, &proposed_position](std::size_t partition) {
             const auto range = partition_range(partition, bodies_.size());
             for (auto b = range.begin; b < range.end; ++b) {
                 const auto& body = bodies_[b];
@@ -1084,9 +1364,10 @@ core::Result<void> LandMovement::step(LandOccupancy& grid, const PartitionExecut
         for (std::size_t b = 0; b < bodies_.size(); ++b) body_proposed_[b] = proposed_position(bodies_[b]);
     }
     const bool indexed = !reference_pair_scans_ && neighbours_.safe();
+    context.indexed = indexed;
     // Swept pair checks read immutable proposals and write disjoint flags. The subsequent ordered
     // reduction stops blocked bodies without cross-body writes from worker threads.
-    run = executor.execute_phase("land-member-proposals", tick_partition_count, [this, indexed](std::size_t partition) {
+    run = land_phase(executor, "land-member-proposals", tick_partition_count, [this, &context](std::size_t partition) {
         const auto range = partition_range(partition, bodies_.size());
         for (auto b = range.begin; b < range.end; ++b) {
             const auto& body = bodies_[b];
@@ -1096,11 +1377,11 @@ core::Result<void> LandMovement::step(LandOccupancy& grid, const PartitionExecut
             Arithmetic a;
             const auto proposed = body_proposed_[b];
             auto& candidates = neighbour_candidates_[b];
-            if (indexed) neighbours_.query(b, candidates);
-            const auto count = indexed ? candidates.size() : bodies_.size();
+            if (context.indexed) neighbours_.query(b, candidates);
+            const auto count = context.indexed ? candidates.size() : bodies_.size();
             pair_visits_[b] = static_cast<std::uint32_t>(count);
             for (std::size_t candidate = 0; candidate < count; ++candidate) {
-                const auto j = indexed ? candidates[candidate] : candidate;
+                const auto j = context.indexed ? candidates[candidate] : candidate;
                 const auto& other = bodies_[j];
                 if (body.squad == other.squad || other.radius <= zero) continue;
                 const auto radius = a.add(body.radius, other.radius);
@@ -1117,6 +1398,15 @@ core::Result<void> LandMovement::step(LandOccupancy& grid, const PartitionExecut
                     if (soft_opposed(body, other, straggler_repulsion_)) continue;
                     // Same direction: the container ahead keeps moving; only the one behind is held by the pair.
                     if (leads(body, other, straggler_repulsion_)) continue;
+                    // A formation speed cap can bring hard vehicles into the swept guard together. Let the leading
+                    // member move away from the other's committed position; the trailing member still takes the veto.
+                    // The positive dot product makes separation increase throughout this linear step.
+                    if (!context.formation_speeds.empty() && body.container && other.container && body.active && other.active
+                        && context.formation_speeds[body.squad] && context.formation_speeds[other.squad]
+                        && state_.squads[body.squad].formation != 0
+                        && state_.squads[body.squad].formation == state_.squads[other.squad].formation
+                        && same_heading(body.facing, other.facing) && ahead_of(body, other)
+                        && dot(a, offset, a.sub(proposed, body.position)) > zero) continue;
                     // WLPA-57/82: a moving soft body against an idle soft body is no hard pair either; the moving/stopped
                     // contact decides (repulsion, or truncate / path-around / push when the move ends on the idle body).
                     if (straggler_repulsion_ && body.active && !other.active
@@ -1144,10 +1434,11 @@ core::Result<void> LandMovement::step(LandOccupancy& grid, const PartitionExecut
         }
         auto& p = proposals_[body.member]; const auto& m = state_.members[body.member];
         p.position = m.position; p.speed = zero; p.state = LandWalkState::stopping;
+        p.motion_input.turn_fraction = zero; // the member does not move: no turn budget was consumed
         p.next_node = m.next_node; p.temporary_next = m.temporary_next; p.at_slot = false;
     }
     context.generic_pass = false;
-    run = executor.execute_phase("land-member-proposals", tick_partition_count, member_pass);
+    run = land_phase(executor, "land-member-proposals", tick_partition_count, member_pass);
     if (!run) return run;
     for (const auto& p : proposals_) if (!p.valid) return overflow();
     // Build a complete snapshot while preserving scenery. Retain cell-vector capacity at high water.
@@ -1181,9 +1472,11 @@ core::Result<void> LandMovement::step(LandOccupancy& grid, const PartitionExecut
     }
     for (const auto i : member_order_) {
         auto& m = state_.members[i]; const auto& p = proposals_[i];
+        member_motion_inputs_[i] = p.motion_input;
         if (m.position != p.position) ++m.progress;
         m.position = p.position; m.facing = p.facing; m.speed = p.speed;
         m.stop_velocity = p.stop_velocity; m.state = p.state;
+        if (m.profile.start_clock) m.transition_frame = p.transition_frame;
         m.assigned_speed = p.assigned_speed; m.collision_speed = p.speed; m.terrain_blocked = p.terrain_blocked;
         m.terrain_target = p.terrain_target;
         m.next_node = p.next_node; m.temporary_next = p.temporary_next;

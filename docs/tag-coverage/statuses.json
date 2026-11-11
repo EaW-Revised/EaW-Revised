@@ -3,6 +3,7 @@
   "shards": ["statuses-ai.json", "statuses-combat.json", "statuses-data.json", "statuses-economy.json", "statuses-fighters.json", "statuses-galactic.json", "statuses-movement.json", "statuses-presentation.json"],
   "evidence": {
     "AB-15": "debug build: non-team squadron ability commands act through each craft using its own ability data; the squadron-authored Mod_Multiplier does not supply those multipliers (docs/behaviour/space-abilities.md AB-15, AB-R09)",
+    "APD-01": "debug build and retail capture; docs/behaviour/space-abilities.md APD-01",
     "AV-21": "debug build: both moving and stationary space layers default to no layer; the object layer lookup keeps those defaults unless the type authors a layer or uses the multiple-locomotor exception (docs/behaviour/space-movement.md AV-21, R850-01 to R850-03); FoC fighter data authors neither layer nor that exception",
     "BY-DESIGN-PATHING": "PC-10 (docs/behaviour/space-movement.md): our collision queries go through the tracking layers, so the remake has no culling grid of collidable objects and reads neither grid cull size",
     "CHECK-842": "PR #842 reassessment at 9f432079 (merged as f074ddc5), coordinator verdicts on #850-#853: 9000-tick M2 perturbations, matching 1/4-worker baseline hashes; a changed structural table without a battle change leaves application unproven by this scenario, not disproven",

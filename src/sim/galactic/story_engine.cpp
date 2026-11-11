@@ -77,7 +77,7 @@ constexpr std::string_view known_rewards[] = {
     "TUTORIAL_PLAYER", "SET_ADVISOR", "PAUSE_GAME", "PAUSE_GALACTIC", "UNPAUSE_GALACTIC", "PAUSE_GALACTIC_GAME",
     "SWITCH_SIDES", "SWITCH_CONTROL", "TRIGGER_AI", "SET_WEATHER", "INFORMATION", "ENABLE_EVENT", "DISABLE_EVENT"};
 
-enum class Kind : std::uint8_t { trigger, elapsed, flag, tech, click, tactical, pending };
+enum class Kind : std::uint8_t { trigger, elapsed, flag, tech, click, ai_notification, tactical, pending };
 
 Kind kind_of(std::string_view type) noexcept {
     if (type == "STORY_TRIGGER") return Kind::trigger;
@@ -85,6 +85,7 @@ Kind kind_of(std::string_view type) noexcept {
     if (type == "STORY_FLAG") return Kind::flag;
     if (type == "STORY_TECH_LEVEL") return Kind::tech;
     if (type == "STORY_CLICK_GUI") return Kind::click; // WST-37
+    if (type == "STORY_AI_NOTIFICATION") return Kind::ai_notification; // WST-37, WST-55
     if (tactical_event_type(type)) return Kind::tactical;
     return Kind::pending;
 }
@@ -229,6 +230,7 @@ struct Engine::Impl {
     core::Result<void> dispatch_elapsed(Fixed time, bool paused);
     core::Result<void> dispatch_tech(std::optional<Player> player, std::int64_t level);
     core::Result<void> dispatch_click(std::optional<Player> player, std::string_view component);
+    core::Result<void> dispatch_ai_notification(std::optional<Player> player, const TextNotice& notice);
     core::Result<void> poll(Fixed time);
 };
 
@@ -377,6 +379,26 @@ core::Result<void> Engine::Impl::graph_reward(std::size_t s, std::size_t e, int 
         open_subplot(*target);
         return ok();
     }
+    if (type == "TRIGGER_AI") { // the debug build's TRIGGER_AI reward (WST-49): parameter 1 the trigger, 2 the faction, 3 the planet (both optional here)
+        const auto name = upper(first(p[0]));
+        if (name.empty()) { diagnose(s, e, type, "names no trigger"); return ok(); } // the original needs parameters 1 and 2
+        Player target = defs[s].owner;
+        if (const auto faction = upper(first(p[1])); !faction.empty()) {
+            const auto at = config.factions.find(faction);
+            if (at == config.factions.end()) { diagnose(s, e, type, "no player of faction " + first(p[1])); return ok(); }
+            target = at->second;
+        }
+        std::uint64_t planet{};
+        if (const auto wanted = upper(first(p[2])); !wanted.empty()) {
+            const auto at = config.planets.find(wanted);
+            if (at == config.planets.end()) { diagnose(s, e, type, "unknown planet " + first(p[2])); return ok(); }
+            planet = at->second;
+        }
+        const AiFlag flag{target, planet, name};
+        const auto where = std::lower_bound(state.ai_flags.begin(), state.ai_flags.end(), flag);
+        if (where == state.ai_flags.end() || *where != flag) state.ai_flags.insert(where, flag);
+        return ok();
+    }
     handled = false; // everything else belongs to the owning service (part 2)
     return ok();
 }
@@ -430,6 +452,29 @@ core::Result<void> Engine::Impl::dispatch_click(std::optional<Player> player, st
             if (index[s][e].kind != Kind::click || !eligible(s, e)) continue;
             const auto& names = defs[s].events[e].params[0];
             if (std::none_of(names.begin(), names.end(), [&](const std::string& name) { return upper(name) == wanted; })) continue;
+            if (auto done = trigger(s, e, false, 0); !done) return done;
+        }
+    }
+    return ok();
+}
+
+// WST-37/55: Lua Story_Event(name[, planet]) reaches every active sub-plot's STORY_AI_NOTIFICATION events (the debug
+// build walks the sub-plots and dispatches synchronously, WST-55). Parameter 1 is the planet list;
+// parameters 2..7 are all notification strings. With a planet the list must be non-empty and name it, without one empty.
+core::Result<void> Engine::Impl::dispatch_ai_notification(std::optional<Player> player, const TextNotice& notice) {
+    for (std::size_t s = 0; s < defs.size(); ++s) {
+        if (!state.subplots[s].active || (player && defs[s].owner != *player)) continue; // WST-14
+        for (std::size_t e = 0; e < defs[s].events.size(); ++e) {
+            if (index[s][e].kind != Kind::ai_notification || !eligible(s, e)) continue;
+            const auto& params = defs[s].events[e].params;
+            std::vector<std::string> planets, texts;
+            for (const auto& name : params[0]) planets.push_back(upper(name));
+            for (std::size_t slot = 1; slot < token_slots_event; ++slot)
+                for (const auto& text : params[slot]) texts.push_back(upper(text));
+            TextNotice wanted = notice;
+            wanted.text = upper(notice.text);
+            if (wanted.planet) wanted.planet = upper(*wanted.planet);
+            if (!matches_ai(wanted, planets, texts)) continue;
             if (auto done = trigger(s, e, false, 0); !done) return done;
         }
     }
@@ -508,7 +553,7 @@ core::Result<Engine> Engine::create(Config config, std::vector<PlotRecord> plots
                 impl->unavailable.push_back({defs[s].owner, defs[s].name, def.name, def.type, std::string(land_battle_refusal)});
             else if (index.kind == Kind::pending)
                 impl->unavailable.push_back({defs[s].owner, defs[s].name, def.name, def.type,
-                    "no evaluator yet (the story engine evaluates STORY_TRIGGER, STORY_ELAPSED, STORY_FLAG, STORY_TECH_LEVEL and STORY_CLICK_GUI)"});
+                    "no evaluator yet (the story engine evaluates STORY_TRIGGER, STORY_ELAPSED, STORY_FLAG, STORY_TECH_LEVEL, STORY_CLICK_GUI and STORY_AI_NOTIFICATION)"});
             if (tactical_reward_type(def.reward_type))
                 impl->unavailable.push_back({defs[s].owner, defs[s].name, def.name, def.reward_type, std::string(land_battle_refusal)});
             else if (!def.reward_type.empty() && std::find(std::begin(known_rewards), std::end(known_rewards), def.reward_type) == std::end(known_rewards))
@@ -529,6 +574,8 @@ core::Result<void> Engine::notify(std::optional<Player> player, const Payload& p
         return impl_->dispatch_tech(player, economy->value);
     if (const auto* text = std::get_if<TextNotice>(&payload); text && text->kind == Text::click_gui) // WST-37
         return impl_->dispatch_click(player, text->text);
+    if (const auto* text = std::get_if<TextNotice>(&payload); text && text->kind == Text::ai_notification) // WST-37, WST-55
+        return impl_->dispatch_ai_notification(player, *text);
     return ok(); // WST-31..39 evaluators arrive with the next parts; the walk names each seam
 }
 
@@ -630,6 +677,10 @@ core::Result<void> Engine::restore(State saved) {
                 return invalid("saved event " + row.events[e].name + " differs from the loaded plots");
     }
     for (const auto& [name, value] : saved.flags) if (name != upper(name)) return invalid("saved flag name is not upper-case");
+    if (!std::is_sorted(saved.ai_flags.begin(), saved.ai_flags.end()) ||
+        std::adjacent_find(saved.ai_flags.begin(), saved.ai_flags.end()) != saved.ai_flags.end())
+        return invalid("saved AI flags are not sorted and unique");
+    for (const auto& flag : saved.ai_flags) if (flag.name != upper(flag.name)) return invalid("saved AI flag name is not upper-case");
     // Lua edits: the loaded definitions first, then the saved rows over them.
     // Transactional: a failing row puts the definitions, the originals and the edit rows back as they were.
     auto defs_backup = impl.defs;
@@ -663,7 +714,8 @@ const std::string& Engine::digest() const {
         Writer out;
         constexpr std::string_view domain = "eawr-story-engine-v1";
         out(std::string(domain), kept);
-        if (!kept.edits.empty()) out(kept.edits); // an unedited game keeps its old digest
+        if (!kept.edits.empty() || !kept.ai_flags.empty()) out(kept.edits); // an unedited game keeps its old digest
+        if (!kept.ai_flags.empty()) out(kept.ai_flags);
         impl_->digest_cache = core::sha256_hex(out.bytes);
         impl_->digest_dirty = false;
     }
@@ -683,6 +735,18 @@ bool Engine::active(std::string_view subplot, std::string_view event) const {
         if (const auto at = impl_->find_event(s, event)) return impl_->state.subplots[s].events[*at].active;
     }
     return false;
+}
+bool Engine::ai_flag(Player player, std::uint64_t planet, std::string_view name) const {
+    const AiFlag key{player, planet, upper(name)};
+    return std::binary_search(impl_->state.ai_flags.begin(), impl_->state.ai_flags.end(), key);
+}
+void Engine::clear_ai_flag(Player player, std::uint64_t planet, std::string_view name) {
+    const AiFlag key{player, planet, upper(name)};
+    auto& flags = impl_->state.ai_flags;
+    const auto at = std::lower_bound(flags.begin(), flags.end(), key);
+    if (at == flags.end() || *at != key) return;
+    flags.erase(at);
+    impl_->touch();
 }
 std::optional<std::int64_t> Engine::flag(std::string_view name) const {
     const auto at = impl_->state.flags.find(upper(name));

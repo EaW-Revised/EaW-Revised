@@ -25,6 +25,7 @@ bool ground_ability_enabled(const GalacticAbilityProfile& p, const AbilityActorS
         || (!listed_implicitly && std::find(p.ground_activated.begin(), p.ground_activated.end(), kind) == p.ground_activated.end())) return false;
     switch (kind) {
     case AbilityKind::system_spy: return p.spy && s.spy_enabled && !s.spy_cancelled;
+    case AbilityKind::remove_corruption: return p.removal && s.removal_enabled && !s.removal_cancelled;
     case AbilityKind::black_market: return p.has_market && s.enabled && !s.cancelled;
     case AbilityKind::technology_theft: return p.theft && s.theft_enabled && !s.theft_cancelled;
     case AbilityKind::corruption: return p.corruption && s.corruption_enabled && !s.corruption_cancelled;
@@ -36,7 +37,7 @@ bool ground_ability_enabled(const GalacticAbilityProfile& p, const AbilityActorS
     return false;
 }
 void GalacticSession::Impl::dispatch_ground_ability(EntityId supplied, PlanetId target, SeatId producer,
-    std::uint64_t sequence, std::uint64_t tick, std::vector<GalacticEvent>& events) {
+    std::uint64_t sequence, std::uint64_t tick, std::vector<GalacticEvent>& events, const bool explicit_use) {
     if (!ability_host || !setup.ability_host || !planets.contains(target)) return;
     const auto* issuer = seat(producer);
     if (!issuer || !issuer->active) return;
@@ -70,6 +71,9 @@ void GalacticSession::Impl::dispatch_ground_ability(EntityId supplied, PlanetId 
         if (ai_slicer) kinds.push_back(AbilityKind::technology_theft);
         for (const auto kind : kinds) {
             if (!ground_ability_enabled(*profile, *service, kind, ai_slicer && kind == AbilityKind::technology_theft)) continue;
+            // #6120: neutralization is ground-activated for every seat (WGCH-187), but the AI has no chooser for its menu yet,
+            // so an AI landing never prepares it; a human's drop or landing does.
+            if (kind == AbilityKind::hero_neutralization && ai_purchaser && !ai_purchaser->human) continue;
             if (kind == AbilityKind::technology_theft || kind == AbilityKind::system_spy) {
                 const auto* planet = control ? find(control->planets, target, [](const auto& row) { return row.planet; }) : nullptr;
                 if (!planet) continue;
@@ -100,11 +104,14 @@ void GalacticSession::Impl::dispatch_ground_ability(EntityId supplied, PlanetId 
                     if (!available) continue;
                 }
             }
+            const bool was_qualified = qualified;
             qualified = true;
             const CommandOrderKey key{tick, producer, sequence};
             const auto begin = events.size();
             if (kind == AbilityKind::system_spy) {
                 execute_spy({key, DeployGroundAbility{supplied, target}}, at->second, *profile, target, tick, events);
+            } else if (kind == AbilityKind::remove_corruption) {
+                execute_removal({key, DeployGroundAbility{supplied, target}}, at->second, *profile, target, tick, events);
             } else if (kind == AbilityKind::planet_destruction) {
                 // Bind the qualified live bearer; re-scanning the transport could select another child.
                 PreparedAbility request; request.actor = id; request.planet = target; request.kind = kind;
@@ -113,6 +120,9 @@ void GalacticSession::Impl::dispatch_ground_ability(EntityId supplied, PlanetId 
             if (std::any_of(events.begin() + static_cast<std::ptrdiff_t>(begin), events.end(), [](const auto& e) {
                 return e.kind == GalacticEventKind::ability_prepared || e.kind == GalacticEventKind::ability_settled;
             })) return;
+            // #6120: a landing that finds no hero to neutralize says nothing (only a seat's own drop is refused), and does not
+            // take the submission away from the next ability or bearer.
+            if (!explicit_use && kind == AbilityKind::hero_neutralization) { events.erase(events.begin() + static_cast<std::ptrdiff_t>(begin), events.end()); qualified = was_qualified; }
         }
         if (qualified) return; // first qualified contained object owns the submission, including refusal
     }
@@ -131,15 +141,20 @@ core::Result<void> validate_ability_host(const GalacticSetup& setup) {
         if (market.buyer || market.owner || !market.present || market.opposing_planet
             || market.despawn_requested || market.prepared_absence.raw()
             || (!profile.has_market && !profile.theft && !profile.corruption && !profile.lifecycle_only && !profile.hack && !profile.destruction
-            && !profile.sabotage && !profile.neutralize && !profile.spy && profile.auto_spies.empty()) || !profile.type || profile.type <= previous || market.price_modifier.raw() < 0
+            && !profile.sabotage && !profile.neutralize && !profile.spy && !profile.removal && profile.auto_spies.empty()) || !profile.type || profile.type <= previous || market.price_modifier.raw() < 0
             || market.absence_min.size() != market.absence_max.size()
             || (!market.absence_min.empty() && market.absence_min.size() != 5)
             || std::none_of(setup.census->types.begin(), setup.census->types.end(),
                 [&](const auto& row) { return row.type == profile.type; })) return bad();
-        if (profile.ground_activated.size() > 8) return bad();
+        if (profile.ground_activated.size() > 9) return bad();
         std::set<AbilityKind> group;
         for (const auto kind : profile.ground_activated)
-            if (static_cast<unsigned>(kind) < 1 || static_cast<unsigned>(kind) > 8 || !group.insert(kind).second) return bad();
+            if (static_cast<unsigned>(kind) < 1 || static_cast<unsigned>(kind) > 9 || !group.insert(kind).second) return bad();
+        if (profile.removal && (!setup.control || profile.removal->name.empty()
+            || profile.removal->name.size() > 4096 || profile.removal->name.find('\0') != std::string::npos
+            || profile.removal->text_identity.size() > 1024 || profile.removal->text_identity.find('\0') != std::string::npos
+            || profile.removal->activation_sfx.size() > 4096 || profile.removal->activation_sfx.find('\0') != std::string::npos
+            || profile.removal->cost_multiplier < math::Fixed{} || profile.removal->seconds <= math::Fixed{})) return bad();
         if (profile.spy && (!setup.observer || !setup.control || !profile.spy->identity
             || profile.spy->name.empty() || profile.spy->name.size() > 4096 || profile.spy->name.find('\0') != std::string::npos
             || profile.spy->text_identity.size() > 1024 || profile.spy->text_identity.find('\0') != std::string::npos
@@ -223,6 +238,9 @@ core::Result<void> validate_ability_host(const GalacticSetup& setup) {
         if (name.empty() || name.size() > 4096 || name.find('\0') != std::string::npos) return bad();
     for (const auto& p : host.profiles) if (p.hack && (p.hack->name.empty() || p.hack->name.size() > 4096
         || p.hack->name.find('\0') != std::string::npos || !setup.control || !setup.production)) return bad();
+    if (host.activated_removal_abilities.size() > galactic_max_objects) return bad();
+    for (const auto& name : host.activated_removal_abilities)
+        if (name.empty() || name.size() > 4096 || name.find('\0') != std::string::npos) return bad();
     if (host.activated_spy_abilities.size() > galactic_max_objects) return bad();
     for (const auto& name : host.activated_spy_abilities)
         if (name.empty() || name.size() > 4096 || name.find('\0') != std::string::npos) return bad();
@@ -325,7 +343,8 @@ void GalacticSession::Impl::refresh_ability_actor(const CensusObject& row) {
             profile->destruction && profile->destruction->initially_enabled, false,
             profile->sabotage && profile->sabotage->initially_enabled, false,
             profile->neutralize && profile->neutralize->initially_enabled, false,
-            profile->spy && profile->spy->initially_enabled, false, {}, false}, [](const auto& a) { return a.actor; });
+            profile->spy && profile->spy->initially_enabled, false, {}, false,
+            profile->removal && profile->removal->initially_enabled, false}, [](const auto& a) { return a.actor; });
         touch_abilities();
     }
     const auto* before = find(economy_corruption->buyers, row.id, [](const auto& p) { return p.buyer; });
@@ -613,6 +632,7 @@ core::Result<void> GalacticSession::set_ability_lifecycle(EntityId actor, bool e
     if (!profile || (kind == AbilityKind::black_market ? !profile->has_market : kind == AbilityKind::technology_theft ? !profile->theft
         : kind == AbilityKind::superweapon_hack ? !profile->hack : kind == AbilityKind::planet_destruction ? !profile->destruction
         : kind == AbilityKind::system_spy ? !profile->spy
+        : kind == AbilityKind::remove_corruption ? !profile->removal
         : kind == AbilityKind::structure_sabotage ? !profile->sabotage : kind == AbilityKind::hero_neutralization ? !profile->neutralize
         : kind != AbilityKind::corruption || !profile->corruption))
         return core::Result<void>::failure(detail::diagnostic(diagnostic_codes::invalid_command, "ability lifecycle requires a live bound kind"));
@@ -623,6 +643,7 @@ core::Result<void> GalacticSession::set_ability_lifecycle(EntityId actor, bool e
     }
     if (kind == AbilityKind::black_market) { state->enabled = enabled; state->cancelled = cancelled; }
     else if (kind == AbilityKind::system_spy) { state->spy_enabled = enabled; state->spy_cancelled = cancelled; }
+    else if (kind == AbilityKind::remove_corruption) { state->removal_enabled = enabled; state->removal_cancelled = cancelled; }
     else if (kind == AbilityKind::technology_theft) { state->theft_enabled = enabled; state->theft_cancelled = cancelled; }
     else if (kind == AbilityKind::superweapon_hack) { state->hack_enabled = enabled; state->hack_cancelled = cancelled; }
     else if (kind == AbilityKind::planet_destruction) { state->destruction_enabled = enabled; state->destruction_cancelled = cancelled; }

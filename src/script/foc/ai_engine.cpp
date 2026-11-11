@@ -164,7 +164,17 @@ bool Engine::reserved(sim::EntityId object) const {
 std::optional<authoritative::Value> Engine::global_value(const std::string& name) const {
     const auto found = globals_.find(name);
     if (found == globals_.end()) return std::nullopt;
-    return std::visit([](const auto& value) { return authoritative::Value{value}; }, found->second);
+    return global_value_of(found->second);
+}
+authoritative::Value Engine::global_value_of(const GlobalScalar& scalar) {
+    return std::visit([](const auto& value) { return authoritative::Value{value}; }, scalar);
+}
+void Engine::replace_globals(GlobalValues values) {
+    if (values == globals_) return;
+    const auto native_record_write = native_record_scope();
+    native_records_changed(0, {27});
+    mark_native_state_changed();
+    globals_ = std::move(values);
 }
 
 void Engine::freeze_galactic_decision_reads() {

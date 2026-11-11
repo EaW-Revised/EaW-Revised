@@ -184,7 +184,8 @@ void TacticalSession::Impl::bind_squadrons(const std::vector<LiveUnit>& live) {
         }
         for (const auto& unit : live) {
             const auto* profile = table.find_spawner(unit.state.type_id, unit.state.owner);
-            if (profile != nullptr && (!profile->entries.empty() || (!setup.free_garrisons.empty() && profile->starbase))) {
+            if (profile != nullptr && (!profile->entries.empty() || table.tech_spawners.contains(unit.state.type_id)
+                    || (!setup.free_garrisons.empty() && profile->starbase))) {
                 spawners.emplace(unit.state.entity_id, initial_spawner(setup.seed, 1, unit.state.entity_id));
             }
         }

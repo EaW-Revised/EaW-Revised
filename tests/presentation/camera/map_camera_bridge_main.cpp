@@ -1,3 +1,4 @@
+#include "../../support/runtime_path.hpp"
 // CPU contracts for the viewer's MapCameraBridge in land and space context.
 //
 // The tactical XML below is synthetic test data from
@@ -65,7 +66,7 @@ void orbit_about_focus(const camera::TacticalFrame& before, const camera::Tactic
 }
 
 [[nodiscard]] std::string read(const std::string_view name) {
-    std::ifstream file(std::string(EAWR_VIEWER_CONFIG_DIR) + "/" + std::string(name), std::ios::binary);
+    std::ifstream file((eawr::testing::runtime_path("EAWR_TEST_SOURCE_ROOT", "apps/viewer/project/config", EAWR_VIEWER_CONFIG_DIR) / std::string(name)).string(), std::ios::binary);
     expect(static_cast<bool>(file), "committed config fixture is readable");
     return {std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>()};
 }
@@ -102,9 +103,9 @@ input::RawEvent middle(const bool pressed) {
     event.kind = input::RawKind::mouse_button;
     event.code = input::mouse_code::middle;
     event.pressed = pressed;
-    event.position_x = 640.0F;
-    event.position_y = 360.0F;
-    event.has_position = true;
+    // No position: these drags inject relative motion at a fixed point, which a
+    // held pointer (#5990, position-based) would read as no motion at all. The
+    // hold itself is covered in camera_bindings_tests.
     return event;
 }
 input::RawEvent motion(const float x, const float y, const float relative_x) {
@@ -177,6 +178,32 @@ void activate_land(Land& land, const std::string_view overrides,
 
 int main() {
     using namespace eawr_map_camera_test;
+    {
+        const auto config = space_config(read("space-map-camera.xml"));
+        const auto constants = load(camera::Mode::space);
+        expect(config.has_value() && constants.has_value(), "battlecam bridge fixture loads");
+        if (config && constants) {
+            Space space;
+            const auto bindings = read("space-live-camera-bindings.json");
+            auto active = space.bridge.activate(*config, constants->constants, bindings, 1280, 720, std::nullopt);
+            expect(active.has_value(), "battlecam bridge activates");
+            if (active) {
+                using Action = eawr::viewer::camera_input::Action;
+                expect(space.bridge.cinematic_key(key("Space", true), Action::battlecam)
+                    && space.bridge.cinematic_key(key("Space", false), Action::battlecam),
+                    "committed Space binding reaches the bridge on press and release");
+                expect(!space.bridge.cinematic_key(key("C", true), Action::battlecam), "preview key does not trigger battlecam");
+                expect(space.bridge.cinematic_key(key("C", true), Action::unit_preview), "committed C binding reaches preview");
+            }
+            Space remapped;
+            const auto changed = replaced(bindings, "\"control\": \"Space\"", "\"control\": \"B\"");
+            active = remapped.bridge.activate(*config, constants->constants, changed, 1280, 720, std::nullopt);
+            expect(active.has_value()
+                && remapped.bridge.cinematic_key(key("B", true), eawr::viewer::camera_input::Action::battlecam)
+                && !remapped.bridge.cinematic_key(key("Space", true), eawr::viewer::camera_input::Action::battlecam),
+                "bridge respects a remapped battlecam key");
+        }
+    }
     {
         eawr::assets::Map map;
         map.declared_extents = eawr::assets::DeclaredExtents{0x10, 10000, 0x11, 8000, 0, 0};

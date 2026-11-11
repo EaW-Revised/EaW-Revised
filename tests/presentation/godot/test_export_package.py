@@ -72,6 +72,14 @@ class ExportPackageGuardTests(unittest.TestCase):
         self.assertEqual(identity, MODULE.PINNED_GODOT_IDENTITY)
         self.assertEqual(version, MODULE.PINNED_GODOT_VERSION)
 
+    def test_runner_probes_the_requested_engine(self):
+        completed = subprocess.CompletedProcess([], 0, stdout=MODULE.PINNED_GODOT_IDENTITY, stderr="")
+        with patch.dict(MODULE.os.environ, {"EAWR_GODOT_RUNNER": "/runner with spaces"}), \
+                patch.object(MODULE.subprocess, "run", return_value=completed) as run:
+            MODULE.validate_godot_identity(MODULE_PATH)
+        self.assertEqual(run.call_args.args[0], ["/runner with spaces", str(MODULE_PATH), "--version"])
+        self.assertEqual(run.call_args.kwargs["timeout"], MODULE.GODOT_RUNNER_VERSION_TIMEOUT_SECONDS)
+
     def test_wrong_engine_identity_is_rejected_by_bounded_probe(self):
         wrong_output = "4.7.1.stable.official.deadbeef0\n"
         completed = subprocess.CompletedProcess(

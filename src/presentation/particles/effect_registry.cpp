@@ -1083,25 +1083,25 @@ core::Result<void> EffectRegistry::run_batch(const std::function<void(std::size_
     // The commit overlaps the builds only when the executor has threads to build with and the
     // backend can take an update while it prepares other resources.
     const bool pipelined = executor_->participants() > 1 && backend_->overlapped_commit_safe();
+    // The executor joins before returning, so it can refer to these stack callbacks.  Wrapping
+    // them by reference avoids allocating a std::function for their three-pointer captures.
+    const auto build_slice = [this, &task, &slice_range](const std::size_t slice) {
+        Measure caller_timer(measure_&&std::this_thread::get_id()==measurement_caller_?&caller_work_ms_:nullptr);
+        const auto [first, last] = slice_range(slice);
+        for (std::size_t index = first; index < last; ++index) task(index);
+    };
     bool ran = false;
     if (pipelined) {
-        ran = executor_->run_ordered(tasks, [this, &task, &slice_range](const std::size_t slice) {
-            Measure caller_timer(measure_&&std::this_thread::get_id()==measurement_caller_?&caller_work_ms_:nullptr);
-            const auto [first, last] = slice_range(slice);
-            for (std::size_t index = first; index < last; ++index) task(index);
-        }, [this, &consume, &slice_range](const std::size_t slice) {
+        const auto consume_slice = [this, &consume, &slice_range](const std::size_t slice) {
             // The commits run on the caller: they are its work, not waiting for the pool.
             Measure caller_timer(measure_&&std::this_thread::get_id()==measurement_caller_?&caller_work_ms_:nullptr);
             const auto [first, last] = slice_range(slice);
             for (std::size_t index = first; index < last; ++index) consume(index);
-        });
+        };
+        ran = executor_->run_ordered(tasks, std::cref(build_slice), std::cref(consume_slice));
         if (ran) ++work_.pipelined_batches;
     } else {
-        ran = executor_->run(tasks, [this, &task, &slice_range](const std::size_t slice) {
-            Measure caller_timer(measure_&&std::this_thread::get_id()==measurement_caller_?&caller_work_ms_:nullptr);
-            const auto [first, last] = slice_range(slice);
-            for (std::size_t index = first; index < last; ++index) task(index);
-        });
+        ran = executor_->run(tasks, std::cref(build_slice));
     }
     if(measure_){
         const double elapsed=std::chrono::duration<double,std::milli>(TimingClock::now()-start).count();

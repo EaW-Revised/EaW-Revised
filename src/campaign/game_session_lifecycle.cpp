@@ -1393,11 +1393,11 @@ core::Result<GameSession> GameSession::from_recording(const GameRecording& recor
     }
     return created;
 }
-core::Result<std::vector<std::uint8_t>> GameSession::save_checkpoint_state() const {
+core::Result<std::vector<std::uint8_t>> GameSession::save_checkpoint_state(galactic::OfferPool* const pool) const {
     using namespace galactic::checkpoint_detail;
     try {
         if (impl_->failure || impl_->restoring_child) throw Invalid("game is not at a healthy save barrier");
-        auto world = impl_->world().save_checkpoint_state();
+        auto world = impl_->world().save_checkpoint_state(pool);
         if (!world) return core::Result<std::vector<std::uint8_t>>::failure(world.error());
         const auto child = [](auto& owner) -> std::optional<ChildOwner> {
             if (!owner) return {};
@@ -1428,12 +1428,14 @@ core::Result<std::vector<std::uint8_t>> GameSession::save_checkpoint_state() con
         for (const auto& [owner, held] : impl_->story_goals) goals.push_back({owner, held.state()});
         out(goals);
         // WST-56: Lua edits of plot events, a tail that exists only when something was edited (old bytes otherwise).
-        if (story && !story->edits.empty()) out(story->edits);
+        // TRIGGER_AI flags follow it in a second tail; the edit list is then written even when empty.
+        if (story && (!story->edits.empty() || !story->ai_flags.empty())) out(story->edits);
+        if (story && !story->ai_flags.empty()) out(story->ai_flags);
         return core::Result<std::vector<std::uint8_t>>::success(std::move(out.bytes));
     } catch (const Invalid& error) { return fail<std::vector<std::uint8_t>>(error.what()); }
 }
 
-core::Result<void> GameSession::load_checkpoint_state(std::span<const std::uint8_t> bytes) {
+core::Result<void> GameSession::load_checkpoint_state(std::span<const std::uint8_t> bytes, galactic::OfferPool* const pool) {
     using namespace galactic::checkpoint_detail;
     try {
         if (impl_->tick || impl_->failure || impl_->scripts || impl_->child || impl_->staged)
@@ -1442,7 +1444,7 @@ core::Result<void> GameSession::load_checkpoint_state(std::span<const std::uint8
         std::uint32_t version{}; in(version);
         if (version != 6) throw Invalid("unsupported campaign owner format");
         in(world);
-        if (auto restored = impl_->world().load_checkpoint_state(world); !restored) return restored;
+        if (auto restored = impl_->world().load_checkpoint_state(world, pool); !restored) return restored;
         const auto recorded_base = impl_->history;
         const auto recorded_vote_timeout = impl_->multiplayer_vote_timeout;
         checkpoint_game_owner(in, *impl_);
@@ -1473,6 +1475,7 @@ core::Result<void> GameSession::load_checkpoint_state(std::span<const std::uint8
             catch (const std::invalid_argument& error) { throw Invalid(error.what()); }
         }
         if (story && in.remaining()) in(story->edits); // the optional Lua-edit tail (WST-56)
+        if (story && in.remaining()) in(story->ai_flags); // and the optional TRIGGER_AI flag tail
         if (story) if (auto restored = impl_->story_engine->restore(std::move(*story)); !restored) return restored;
         if (in.remaining() || impl_->tick > galactic::galactic_max_ticks || impl_->world().completed_tick() > impl_->tick
             || (!child && impl_->world().completed_tick() != impl_->tick)
@@ -1584,7 +1587,7 @@ core::Result<void> GameSession::load_checkpoint_state(std::span<const std::uint8
             if (!impl_->auto_state_reader || !auto_resolve_needs_service()) throw Invalid("missing saved auto-resolve owner");
             if (auto restored = impl_->auto_state_reader(*resolver, impl_->admission->conflict, *impl_->world().snapshot()); !restored) return restored;
         }
-        auto canonical = save_checkpoint_state();
+        auto canonical = save_checkpoint_state(pool);
         if (!canonical || !std::equal(bytes.begin(), bytes.end(), canonical.value().begin(), canonical.value().end()))
             throw Invalid("noncanonical direct game barrier");
         return core::Result<void>::success();

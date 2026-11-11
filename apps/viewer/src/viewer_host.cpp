@@ -1,4 +1,6 @@
 #include "viewer_host_internal.hpp"
+#include "renderer_prewarm_arrays.hpp"
+#include <godot_cpp/core/class_db.hpp>
 #include "eawr/core/text.hpp"
 #include "audio_output.hpp"
 #include "startup_trace.hpp"
@@ -42,7 +44,17 @@ ViewerHost::~ViewerHost() {
     shutdown_trace::mark("viewer host freed (members follow)");
 }
 
-void ViewerHost::_bind_methods() {}
+void ViewerHost::_bind_methods() {
+    godot::ClassDB::bind_static_method("ViewerHost", godot::D_METHOD("prewarm_mesh_layout", "skinned"),
+        &ViewerHost::prewarm_mesh_layout);
+}
+
+godot::Dictionary ViewerHost::prewarm_mesh_layout(const bool skinned) {
+    godot::Dictionary result;
+    result["arrays"] = prewarm_mesh_arrays(skinned);
+    result["format"] = static_cast<int64_t>(prewarm_mesh_format());
+    return result;
+}
 
 void ViewerHost::on_battle_frame_drawn() {
     if (startup_trace.pending()) gpu_memory_trace.sample("battle_first_frame");

@@ -380,6 +380,28 @@ void measured_associations(CompilerSession& session) {
             << " semantic_index=" << control.index << " reflected_location=" << *found->location << " mask=15\n";
     }
 }
+int forced_compile_status{};
+int fail_compile(const abi::Compile*, abi::Code*, char**) { return forced_compile_status; }
+void compiler_statuses(CompilerSession& session) {
+    auto& api = StageSessionAccess::get(session).api;
+    const auto original = api.vkd3d_shader_compile;
+    struct Restore {
+        decltype(api.vkd3d_shader_compile)& target;
+        decltype(api.vkd3d_shader_compile) value;
+        ~Restore() { target = value; }
+    } restore{api.vkd3d_shader_compile, original};
+    api.vkd3d_shader_compile = fail_compile;
+    const auto bytes = vertex();
+    const auto program = eawr::assets::read_shader_program(bytes);
+    check(bool(program), "compiler status control has valid framing");
+    for (const auto status : {-4, -2, -1, -3, -5, -999, 1}) {
+        forced_compile_status = status;
+        const auto result = translate_stage(session, program.value(), options());
+        check(!result.artifact, "a nonzero public compiler status never admits an artifact");
+        expect_error(result.diagnostics, DiagnosticPhase::stage_compile,
+            status == -4 ? DiagnosticReason::invalid_shader : DiagnosticReason::compiler_failure);
+    }
+}
 void real(const std::filesystem::path &path) {
     StageArtifact retained;
     const auto late_failure =
@@ -440,6 +462,7 @@ void real(const std::filesystem::path &path) {
         CompilerSession session(std::move(runtime));
         if (i == 0U) {
             measured_associations(session);
+            compiler_statuses(session);
             const auto invalid_program =
                 eawr::assets::read_shader_program(late_failure);
             check(bool(invalid_program),
@@ -450,7 +473,7 @@ void real(const std::filesystem::path &path) {
                 check(!failed.artifact,
                       "late public translation failure refuses");
                 expect_error(failed.diagnostics, DiagnosticPhase::stage_compile,
-                             DiagnosticReason::compiler_failure);
+                             DiagnosticReason::invalid_shader);
             }
         }
         const auto program = eawr::assets::read_shader_program(controls[i]);

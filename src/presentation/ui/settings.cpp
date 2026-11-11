@@ -91,6 +91,7 @@ const IntField fields[] = {
     EAWR_SETTINGS_FIELD("gameplay.absolute_scrolling", gameplay.absolute_scrolling, 0, 1),
     EAWR_SETTINGS_FIELD("gameplay.delay_tooltips", gameplay.delay_tooltips, 0, 1),
     EAWR_SETTINGS_FIELD("gameplay.reinforcement_areas_only_while_placing", gameplay.reinforcement_areas_only_while_placing, 0, 1),
+    EAWR_SETTINGS_FIELD("gameplay.fit_radar_to_galaxy", gameplay.fit_radar_to_galaxy, 0, 1),
     EAWR_SETTINGS_FIELD("gameplay.animated_loading_background", gameplay.animated_loading_background, 0, 1),
     EAWR_SETTINGS_FIELD("gameplay.hover_owner_names", gameplay.hover_owner_names, -1, 1),
     EAWR_SETTINGS_FIELD("gameplay.right_button_scroll", gameplay.right_button_scroll, 0, 1),
@@ -195,7 +196,7 @@ constexpr OptionStatus statuses[] = {
     refused_option("IDC_HARDWARE_MOUSE", "The cursor kind is not selectable yet."),
     refused_option("IDC_AUTO_DETECT", reason_detail),
     // Advanced video.
-    refused_option("IDC_PARTICLE_DETAIL_SLIDER", reason_detail),
+    honoured_option("IDC_PARTICLE_DETAIL_SLIDER"), // #6560: applies at the next battle start
     refused_option("IDC_MESH_DETAIL_SLIDER", reason_detail),
     refused_option("IDC_TEXTURE_MIP_DETAIL_SLIDER", reason_detail),
     refused_option("IDC_WATER_DETAIL_SLIDER", reason_detail),
@@ -203,7 +204,7 @@ constexpr OptionStatus statuses[] = {
     refused_option("IDC_SHADOW_DETAIL_SLIDER", reason_detail),
     refused_option("IDC_ENVIRONMENT_DETAIL_SLIDER", reason_detail),
     refused_option("IDC_SOFT_SHADOWS", reason_detail),
-    refused_option("IDC_HEAT_DISTORTIONS", reason_detail),
+    honoured_option("IDC_HEAT_DISTORTIONS"), // #6560: applies at the next battle start
     refused_option("IDC_BLOOM", reason_detail),
     // Gameplay (ST-G1 to ST-G3).
     honoured_option("IDC_GAME_SPEED_SLIDER"),

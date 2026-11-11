@@ -24,7 +24,11 @@ namespace eawr::checkpoint {
 // sha256(previous digest || replay window bytes), never a digest of the window alone.
 // v48 (#2044): the owner tail ends with the holocron story goals and objectives per plot owner, after the plot state.
 // v49: agreed resume metadata, producer continuation and complete policy site archives.
-inline constexpr std::uint16_t galaxy_section_version = 52;
+// v53: authored corruption-removal profiles, planet costs and live enabled/cancelled service state.
+// v54: ordered market-item ability identities.
+// v56: the production offer tables are stored once, in the required offer-pool section; the session recording, the
+// production state and the owner barrier carry one table index per planet (docs/checkpoint-format.md, Offer pool).
+inline constexpr std::uint16_t galaxy_section_version = 56;
 inline constexpr std::uint16_t mod_list_section_version = 1;
 
 // Transport starts a fresh epoch at completed_tick. Both cursors denote the first
@@ -42,6 +46,9 @@ struct GameResumeMetadata {
 // Original recording setup for private mounted-service preparation, without a restore.
 [[nodiscard]] core::Result<sim::galactic::GalacticSetup> inspect_game_setup(const Checkpoint&);
 [[nodiscard]] core::Result<mods::ModDescription> inspect_game_mods(const Checkpoint&);
+// The battle-vote timeout a multiplayer save recorded, in galactic ticks (#6156); empty for a game without voting. Read
+// from the session section's prologue, without restoring anything.
+[[nodiscard]] core::Result<std::optional<std::uint64_t>> inspect_game_vote_timeout(const Checkpoint&);
 
 [[nodiscard]] Identities game_identities(const sim::galactic::GalacticSetup& setup);
 [[nodiscard]] core::Result<std::vector<std::uint8_t>> save_game_checkpoint(
@@ -83,7 +90,7 @@ struct GameLoadOptions {
     // callback must not initialize goals or step the AI; restore follows it.
     std::function<core::Result<void>(campaign::GameSession&)> configure_native_ai;
     // Saved session length bound, independent of the byte budget; direct restore never steps.
-    std::uint64_t max_restore_ticks{1'000'000};
+    std::uint64_t max_restore_ticks{sim::galactic::galactic_max_ticks};
     bool player_load{}; // false for exact runtime/resync restoration
     bool reserved_autosave{}; // WGS-64 presentation recovery, only for a player load
 };

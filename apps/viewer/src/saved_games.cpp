@@ -165,6 +165,7 @@ std::vector<SavedGameFile> DirectorySavedGameStore::files(std::string& problem) 
     files.reserve(count);
     for (std::size_t index = 0; index < count; ++index) {
         const platform::LiveSaveSlot& slot = slots.value()[index];
+        if (slot.skirmish && filter_ == SavedGameFilter::multiplayer) continue;
         // WGS-161: multiplayer saves are not in the single-player Load list.
         if (slot.campaign && filter_ != SavedGameFilter::all
             && slot.campaign->multiplayer != (filter_ == SavedGameFilter::multiplayer)) continue;
@@ -178,9 +179,7 @@ std::vector<SavedGameFile> DirectorySavedGameStore::files(std::string& problem) 
         file.child = slot.child;
         file.skirmish = slot.skirmish;
         if (slot.diagnostic) file.problem = slot.diagnostic->message;
-        // #3989: listed so the player sees it; loading a skirmish battle save is the next step of the feature.
-        else if (slot.skirmish) file.problem = "This skirmish battle save cannot be loaded in this build yet.";
-        else if (filter_ != SavedGameFilter::all && !slot.campaign) file.problem = "This save records no campaign.";
+        else if (filter_ != SavedGameFilter::all && !slot.campaign && !slot.skirmish) file.problem = "This save records no campaign.";
         files.push_back(std::move(file));
     }
     return files;
@@ -224,6 +223,40 @@ std::optional<mods::ModDescription> saved_game_mod_description(std::span<const s
     // Version 1 is the mod-description section this viewer understands.
     if (!section || section->version != 1) return {};
     return mods::decode_description(section->bytes);
+}
+
+core::Result<std::string> saved_game_mod_prompt(const ui::SavedGameRequest& request, const mods::ModDescription& mounted) {
+    using Result = core::Result<std::string>;
+    const auto directory = request.directory.generic_u8string();
+    auto bytes = platform::read_saved_game_bytes(std::string(directory.begin(), directory.end()), request.name);
+    if (!bytes) return Result::failure(bytes.error());
+    auto saved = checkpoint::parse_checkpoint(bytes.value());
+    if (!saved) return Result::failure(saved.error());
+    // Tactical saves use their own load path and do not carry a galactic mod section.
+    if (saved.value().find(checkpoint::SectionId::tactical_host)) return Result::success({});
+    const auto* section = saved.value().find(checkpoint::SectionId::mod_list);
+    auto description = section && section->required && section->version == 1 ? mods::decode_description(section->bytes) : std::nullopt;
+    if (!description) {
+        core::Diagnostic error; error.code = "EAWR-CKP-0116"; error.message = "The saved mod description is missing, malformed or unsupported.";
+        return Result::failure(std::move(error));
+    }
+    if (!mods::description_needs_confirmation(*description, mounted)) return Result::success({});
+    std::string prompt = "This save used different mods or mod content.\n";
+    for (const auto& finding : mods::compare_descriptions(*description, mounted))
+        prompt += mods::describe_finding(finding) + '\n';
+    prompt += "Load with your current mods?";
+    return Result::success(std::move(prompt));
+}
+
+std::string saved_game_restore_refusal(const core::Diagnostic& diagnostic, const SavedGameRestoreStage stage) {
+    constexpr std::string_view message = "The saved game could not be restored with the current content. Check its mods.\n";
+    const auto text = core::format_diagnostic(diagnostic);
+    const bool content = diagnostic.code == checkpoint::diagnostic_codes::other_build
+        && diagnostic.message == "saved by another build: the content identity differs";
+    const bool restore = stage == SavedGameRestoreStage::reconstruction
+        || diagnostic.code == checkpoint::diagnostic_codes::restore_failed || diagnostic.code == checkpoint::diagnostic_codes::inconsistent;
+    const bool start_content = stage == SavedGameRestoreStage::owner_start && diagnostic.code == "EAWR-SIM-0501";
+    return content || restore || start_content ? std::string(message) + text : text;
 }
 
 std::string saved_game_mod_details(std::span<const std::uint8_t> bytes, const mods::ModDescription& mounted) {

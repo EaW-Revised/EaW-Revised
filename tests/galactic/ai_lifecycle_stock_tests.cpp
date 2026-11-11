@@ -312,6 +312,56 @@ void cadence() {
     suppressed.step(5, 1, {a::Mode::galactic, true, false});
     expect(suppressed.services->native_landing_services == 1, "ordinary admitted due execution services the native landing owner after suppression ends");
 }
+// A2.0: the async schedule's arithmetic and the virtual-tick service window.
+void virtual_window() {
+    static_assert(a::synchronous_reference_schedule == a::AsyncSchedule{1, 0});
+    static_assert(a::standard_async_schedule == a::AsyncSchedule{15, 30});
+    const auto ref = a::synchronous_reference_schedule;
+    const auto standard = a::standard_async_schedule;
+    expect(a::virtual_clocks({10, 7}, 1) == a::Clocks{10, 7} && a::virtual_clocks({10, 7}, 4) == a::Clocks{13, 10},
+        "virtual tick 1 is the snapshot itself and later ticks advance both clocks by one");
+    expect(a::apply_tick(ref, 100, 1) == 100 && a::stream_phase(ref, 0, 2) == 0 && a::stream_phase(ref, 1, 2) == 0,
+        "the synchronous reference applies in the snapshot tick and has no stream phase");
+    expect(a::apply_tick(standard, 100, 1) == 130 && a::apply_tick(standard, 100, 15) == 144,
+        "standard schedule: slice j applies at snapshot + D + j - 1, latency D .. D+K-1 ticks");
+    expect(a::stream_phase(standard, 0, 1) == 0 && a::stream_phase(standard, 0, 2) == 0 && a::stream_phase(standard, 1, 2) == 7
+        && a::stream_phase(standard, 1, 3) == 5 && a::stream_phase(standard, 2, 3) == 10 && a::stream_phase(standard, 0, 0) == 0,
+        "player streams spread over the K ticks by rank");
+    // A window of four virtual ticks over one frozen copy equals four sequential one-tick services.
+    Rig sequential;
+    for (std::uint64_t tick = 10; tick < 14; ++tick) sequential.step(tick, tick);
+    Rig windowed;
+    windowed.queries->world.clocks = {10, 10};
+    const std::vector<a::Admission> four(4);
+    must(windowed.manager->service_window({10, 10}, four, windowed.scripts));
+    expect(windowed.manager->trace() == sequential.manager->trace() && windowed.manager->trace().size() == 14,
+        "window and sequential services run the same services at the same virtual clocks");
+    expect(windowed.manager->lifecycle() == sequential.manager->lifecycle(), "window and sequential services leave the same lifecycle state");
+    expect(windowed.manager->trace().back().clocks == a::Clocks{13, 13}, "the last virtual tick of the window is snapshot + 3");
+    // The frozen copy is the snapshot's: a copy at another clock is refused, and so is an empty window.
+    Rig stale;
+    stale.queries->world.clocks = {11, 11};
+    expect(!stale.manager->service_window({10, 10}, four, stale.scripts), "the world copy must be at the snapshot clocks");
+    Rig empty;
+    expect(!empty.manager->service_window({0, 0}, {}, empty.scripts), "an empty window is refused");
+    // A non-galactic virtual tick consumes nothing and does not stop the window.
+    Rig mixed;
+    mixed.queries->world.clocks = {10, 10};
+    const std::vector<a::Admission> mixed_admissions{{}, {a::Mode::space, true, false}, {}};
+    must(mixed.manager->service_window({10, 10}, mixed_admissions, mixed.scripts));
+    expect(mixed.manager->trace().size() == 6 + 2 && mixed.manager->trace().back().clocks == a::Clocks{12, 12},
+        "a held virtual tick is skipped while the next one still runs on its own clocks");
+    // The schedule is a constant of the build: K must be positive, and only the reference runs inside the barrier yet.
+    auto bad = fixture();
+    bad.schedule = a::AsyncSchedule{0, 0};
+    expect(!a::Manager::create(std::move(bad), {std::make_shared<Queries>(), {}, {}, std::make_shared<Services>(), {}, {}, {}}),
+        "a zero-tick batch is refused");
+    auto batched = fixture();
+    batched.schedule = a::standard_async_schedule;
+    Rig batch_rig(std::move(batched));
+    expect(batch_rig.manager->schedule() == a::standard_async_schedule && Rig().manager->schedule() == a::synchronous_reference_schedule,
+        "the schedule is kept as configured and defaults to the synchronous reference");
+}
 void phase_rollback() {
     struct FaultServices final : Services {
         bool armed{}, throws{};
@@ -658,7 +708,7 @@ void contributor_state() {
     const auto reject = [&](a::NativeState bad, std::string_view why) {
         expect(!resumed.manager->restore(bad) && resumed.manager->lifecycle() == before, why);
     };
-    auto bad = saved; bad.version = 2; reject(bad, "unsupported native schema rejected atomically");
+    auto bad = saved; bad.version = a::native_state_version + 1; reject(bad, "unsupported native schema rejected atomically");
     bad = saved; bad.components.clear(); reject(bad, "missing owned component rejected atomically");
     bad = saved; bad.components.at(std::string(a::lifecycle_component)).pop_back(); reject(bad, "truncated component rejected atomically");
     bad = saved; bad.components.at(std::string(a::lifecycle_component)).push_back(0); reject(bad, "trailing component bytes rejected atomically");
@@ -894,7 +944,7 @@ void installed_loading() {
 } // namespace
 
 int main(int argc, char** argv) {
-    try { if (argc > 1 && std::string_view(argv[1]) == "--bounded") bounded_diagnostics(argc > 2 ? static_cast<std::size_t>(std::stoul(argv[2])) : 1); else if (argc > 1 && std::string_view(argv[1]) == "--state") contributor_state(); else if (argc > 1) installed_loading(); else { mounted_equation_files(); mounted_space_equation_and_unresolved_entries(); mounted_properties_equation(); mounted_template_files(); mounted_validation_work(); category_width(); cadence(); phase_rollback(); native_retirement_state(); configured_cadence(); templates(); template_failure_consumers(); restore(); reversal_funding(); equal_funding_write(); worker_equality(); } }
+    try { if (argc > 1 && std::string_view(argv[1]) == "--bounded") bounded_diagnostics(argc > 2 ? static_cast<std::size_t>(std::stoul(argv[2])) : 1); else if (argc > 1 && std::string_view(argv[1]) == "--state") contributor_state(); else if (argc > 1) installed_loading(); else { mounted_equation_files(); mounted_space_equation_and_unresolved_entries(); mounted_properties_equation(); mounted_template_files(); mounted_validation_work(); category_width(); cadence(); virtual_window(); phase_rollback(); native_retirement_state(); configured_cadence(); templates(); template_failure_consumers(); restore(); reversal_funding(); equal_funding_write(); worker_equality(); } }
     catch (const std::exception& error) { ++failures; std::cerr << error.what() << '\n'; }
     return failures ? 1 : 0;
 }

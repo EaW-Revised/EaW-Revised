@@ -33,6 +33,11 @@ struct LiveAi {
     std::shared_ptr<const BattleScoring> scoring = {},
     std::shared_ptr<script::foc::AiJournal> journal = {}, bool trace_proposals = false);
 
+// Checks the mounted AI closure before replacing an existing battle with a save.
+[[nodiscard]] core::Result<void> validate_live_ai_save(const skirmish::SkirmishStart& start,
+    const skirmish::StartInputs& inputs, const units::UnitTables& tables, const vfs::Vfs& files,
+    std::span<const std::uint8_t> bytes);
+
 // #3207 G1-b: the same for a land start (skirmish::land_ai_setup). The scripted session wraps the land
 // TacticalSession exactly as it wraps a space one; land stays behind EAWR_ENABLE_LAND_SKIRMISH in the viewer.
 [[nodiscard]] core::Result<LiveAi> live_land_ai(const skirmish::LandStart& start, const skirmish::LandStartInputs& inputs,

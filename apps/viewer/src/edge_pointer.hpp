@@ -12,6 +12,11 @@ enum class PointerWindowMode { windowed, fullscreen, exclusive_fullscreen };
     return mode != PointerWindowMode::windowed && focused && !minimized && !blocked;
 }
 
+[[nodiscard]] inline bool preview_pointer_captured(const bool preview, const bool focused,
+    const bool minimized, const bool blocked) noexcept {
+    return preview && focused && !minimized && !blocked;
+}
+
 [[nodiscard]] inline bool map_pointer_feed_allowed(const presentation::ui::PointerFeedState& feed,
     const bool focused, const bool menu_open, const bool blocked) noexcept {
     return focused && !menu_open && !blocked && presentation::ui::world_feeds_pointer_position(feed);

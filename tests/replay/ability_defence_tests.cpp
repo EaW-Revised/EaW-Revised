@@ -490,6 +490,121 @@ void test_projectile_defence_producers() {
     using Kind = tactical::AbilityKind;
     expect(tactical::ability_kind("MISSILE_SHIELD") == Kind::missile_shield, "WPJ-17: shield kind binds");
     expect(tactical::ability_kind("sensor_jamming") == Kind::sensor_jamming, "WHE-32: jammer kind binds");
+    // FD-75/76: a flying missile sees automatic service on the start and stop frames.
+    for (const auto workers : {1U, 8U}) {
+      for (const bool nebula_start : {false, true}) {
+        tactical::AbilityProfile ordinary;
+        ordinary.kind = Kind::sensor_jamming;
+        ordinary.gui_activated_ability_name = "Boundary_Jammer";
+        ordinary.expiration_frames = 40;
+        ordinary.effective_radius = units(200);
+        tactical::SpecialAbilityProfile handler;
+        handler.name = "Boundary_Jammer";
+        handler.kind = tactical::SpecialAbilityKind::sensor_jamming;
+        handler.style = nebula_start ? tactical::SpecialActivationStyle::combat_automatic
+                                    : tactical::SpecialActivationStyle::space_automatic;
+        handler.initially_enabled = true;
+        handler.service_interval = 1;
+        tactical::AbilityTable table;
+        table.profiles = {{crusader_type, {ordinary}, false, {handler}}};
+        tactical::MotionTable movement;
+        movement.rules = {units(15), units(300)};
+        movement.profiles = {{missile_shooter_type, units(1), decimal("0.2"), decimal("0.2"), units(3), units(1)},
+            {crusader_type, units(2), decimal("0.2"), decimal("0.2"), units(3), units(1)}};
+        auto setup = laser_defence_setup(800);
+        if (nebula_start) {
+            movement.avoidance = tactical::AvoidanceRules{units(24), decimal("0.2"), units(100), decimal("0.8"), units(15),
+                decimal("0.66"), decimal("1.2"), decimal("0.25"), decimal("1.7"), decimal("0.5"), decimal("0.5"),
+                3500, 6, 90, 45, units(50)};
+            tactical::Footprint volume;
+            volume.type_id = 999; volume.layer = tactical::SpaceLayer::static_object;
+            volume.radius = volume.x_extent = volume.y_extent = units(65);
+            volume.obstacle = volume.nebula = true;
+            movement.footprints = {volume};
+            movement.nebula_service_types = {crusader_type};
+            movement.nebula_disable_seconds = decimal("0.1");
+            setup.units.push_back({4, 999, 2, at(800, 0), math::identity_quat(), {}});
+        }
+        auto created = tactical::TacticalSession::create(setup, laser_defence_sensors(),
+            laser_defence_durability(), movement, std::nullopt, laser_defence_combat(true), {}, table);
+        expect(static_cast<bool>(created), "FD-75: jammer boundary session creates");
+        if (!created) continue;
+        auto session = std::move(created).value();
+        const std::vector<tactical::PlayerCommand> commands{
+            command(0, 1, 0, 1, tactical::AttackPayload{2}),
+            command(0, 2, 0, 2, tactical::MovePayload{at(800, 1000)})};
+        for (const auto& entry : commands) expect(static_cast<bool>(session.submit(entry)), "FD-75: command accepted");
+        std::optional<Fixed> previous_yaw;
+        std::optional<std::uint64_t> first;
+        bool previous_active = false, observed_boundary = false;
+        const eawr::platform::ThreadWorkerAdapter executor(workers);
+        for (std::size_t frame = 0; frame < 110; ++frame) {
+            const auto step = session.step(executor);
+            expect(static_cast<bool>(step), "FD-75: jammer boundary frame advances");
+            if (!step) break;
+            std::optional<Fixed> yaw;
+            for (const auto& projectile : session.projectiles()) {
+                if (projectile.shooter != 1) continue;
+                if (!first) first = projectile.id;
+                if (projectile.id == *first) yaw = projectile.yaw;
+            }
+            const auto state = session.ability_state(2);
+            const bool active = state && state->special.slots[0].jammer_active;
+            if (yaw && previous_yaw && (nebula_start ? !previous_active && active : previous_active && !active)) {
+                observed_boundary = true;
+                expect(nebula_start ? *yaw == *previous_yaw : *yaw != *previous_yaw,
+                    nebula_start ? "FD-75: the missile stops steering on the first automatic service after nebula exit"
+                                 : "FD-75: the missile resumes steering on the automatic expiry frame");
+            }
+            previous_active = active;
+            previous_yaw = yaw;
+        }
+        expect(observed_boundary, "FD-75: a flying missile spans the automatic jammer boundary");
+      }
+    }
+    // C1: a named hardpoint disable removes an automatic holder; a subsequent
+    // creation unlock reapplies it, including after a checkpoint while disabled.
+    for (const auto workers : {1U, 8U}) {
+        auto setup = laser_defence_setup(800);
+        auto health = laser_defence_durability();
+        for (auto& row : health.profiles) if (row.type_id == crusader_type) {
+            row.max_shields = {}; row.shield_refresh = {};
+            tactical::HardpointProfile point;
+            point.destroyable = true; point.max_health = units(50); point.special_ability_name = "C1_Jammer";
+            row.hardpoints = {point};
+        }
+        tactical::SpecialAbilityProfile handler;
+        handler.name = "C1_Jammer"; handler.kind = tactical::SpecialAbilityKind::sensor_jamming;
+        handler.style = tactical::SpecialActivationStyle::combat_automatic; handler.initially_enabled = true;
+        handler.service_interval = 1; handler.jamming_duration_frames = 60;
+        tactical::AbilityTable abilities;
+        abilities.profiles = {{crusader_type, {}, false, {handler}}};
+        auto made = tactical::TacticalSession::create(setup, laser_defence_sensors(), health, motion(),
+            std::nullopt, laser_defence_combat(true), {}, abilities);
+        expect(static_cast<bool>(made), "C1: automatic jammer session creates");
+        if (!made) continue;
+        auto session = std::move(made).value();
+        const eawr::platform::ThreadWorkerAdapter executor(workers);
+        expect(static_cast<bool>(session.step(executor)), "C1: initial jammer frame advances");
+        auto state = session.ability_state(2);
+        expect(state && state->special.slots[0].jammer_registered, "C1: automatic holder initially registers");
+        expect(static_cast<bool>(session.submit(command(session.completed_tick(), 2, 0, 2,
+            tactical::DamagePayload{units(50), 0}))), "C1: hardpoint damage submits");
+        expect(static_cast<bool>(session.step(executor)) && static_cast<bool>(session.step(executor)),
+            "C1: hardpoint lock and disable are serviced");
+        state = session.ability_state(2);
+        expect(state && !state->special.slots[0].jammer_registered && state->special.slots[0].jammer_unregistered,
+            "C1: hardpoint disable removes the holder");
+        const auto saved = session.save_checkpoint_state();
+        expect(static_cast<bool>(saved), "C1: disabled holder checkpoints");
+        if (saved) expect(static_cast<bool>(session.load_checkpoint_state(saved.value())), "C1: disabled holder restores");
+        const auto born = session.stage_spawn({0, crusader_type, 2, at(1000, 200), math::identity_quat(), {}});
+        expect(static_cast<bool>(born), "C1: new hardpoint unlocks the named handler");
+        expect(static_cast<bool>(session.step(executor)), "C1: re-enabled jammer frame advances");
+        state = session.ability_state(2);
+        expect(state && state->special.slots[0].jammer_registered && !state->special.slots[0].jammer_unregistered,
+            "C1: re-enabling restores the automatic projectile-defence holder");
+    }
     tactical::CombatProfile profile; profile.type_id = 1;
     tactical::CombatProfile passive = profile; passive.passive_missile_shield_radius = units(7);
     passive.ranged_target_z_adjust = units(2);
@@ -549,6 +664,35 @@ void test_projectile_defence_producers() {
             "WHE-32: deactivation clears every current-frame stamp");
         expect(previous.size() == 3 && previous[0].sensor_jammed && previous[1].active_shield,
             "WPJ-17: published records are immutable copies of activation state");
+        inputs[2].active_jamming = true;
+        inputs[2].jammer_registration_explicit = true;
+        prepared = detail::prepare_projectile_defences(world, inputs, executor);
+        expect(prepared && world.units[3].sensor_jammed
+            && std::none_of(world.projectile_defences.sources.begin(), world.projectile_defences.sources.end(),
+                [](const auto& source) { return source.id == 3; }),
+            "WJM-03: an unregistered jammer still stamps recipients but supplies no holder");
+        world.units[2].profile = &passive;
+        inputs[2].active_shield = true;
+        inputs[2].shield_radius = units(8);
+        prepared = detail::prepare_projectile_defences(world, inputs, executor);
+        expect(prepared && std::any_of(world.projectile_defences.sources.begin(), world.projectile_defences.sources.end(),
+            [](const auto& source) { return source.id == 3 && source.passive_shield && source.active_shield; })
+            && std::find(world.static_projectile_defences.begin(), world.static_projectile_defences.end(), 3)
+                != world.static_projectile_defences.end(),
+            "WJM-03: jammer unregistration preserves passive and active shield sources");
+        world.units[2].profile = &profile;
+        inputs[2].active_shield = false;
+        inputs[2].shield_radius.reset();
+        inputs[2].active_jamming = false;
+        inputs[2].jammer_registration_explicit = true;
+        inputs[2].jammer_registered = true;
+        prepared = detail::prepare_projectile_defences(world, inputs, executor);
+        expect(prepared && !world.units[3].sensor_jammed
+            && std::any_of(world.projectile_defences.sources.begin(), world.projectile_defences.sources.end(),
+                [](const auto& source) { return source.id == 3; }),
+            "WJM-01: a zero-duration activation registers a holder without recipient stamps");
+        inputs[2].jammer_registration_explicit = false;
+        inputs[2].jammer_registered = false;
         inputs[2].active_jamming = true; world.units[2].in_nebula = true;
         prepared = detail::prepare_projectile_defences(world, inputs, executor);
         expect(prepared && !world.units[0].sensor_jammed && !world.units[2].sensor_jammed,
@@ -602,6 +746,129 @@ void test_projectile_defence_transaction() {
         for (std::uint64_t i = 0; i < count; ++i) order.push_back(read());
         return order;
     };
+    // A nebula may unregister one automatic handler without suppressing a later GUI holder.
+    for (const auto workers : {1U, 8U}) {
+        tactical::AbilityProfile ordinary;
+        ordinary.kind = Kind::sensor_jamming;
+        ordinary.gui_activated_ability_name = "Mixed_Manual";
+        ordinary.expiration_frames = 120; ordinary.effective_radius = units(200);
+        tactical::SpecialAbilityProfile automatic;
+        automatic.name = "Mixed_Auto"; automatic.kind = tactical::SpecialAbilityKind::sensor_jamming;
+        automatic.style = tactical::SpecialActivationStyle::combat_automatic; automatic.initially_enabled = true;
+        automatic.service_interval = 1;
+        auto manual = automatic;
+        manual.name = "Mixed_Manual"; manual.style = tactical::SpecialActivationStyle::user_input;
+        tactical::AbilityTable table;
+        table.profiles = {{crusader_type, {ordinary}, false, {automatic, manual}}};
+        tactical::MotionTable movement;
+        movement.rules = {units(15), units(300)};
+        movement.profiles = {{missile_shooter_type, units(1), decimal("0.2"), decimal("0.2"), units(3), units(1)},
+            {crusader_type, units(2), decimal("0.2"), decimal("0.2"), units(3), units(1)}};
+        movement.avoidance = tactical::AvoidanceRules{units(24), decimal("0.2"), units(100), decimal("0.8"), units(15),
+            decimal("0.66"), decimal("1.2"), decimal("0.25"), decimal("1.7"), decimal("0.5"), decimal("0.5"),
+            3500, 6, 90, 45, units(50)};
+        tactical::Footprint volume;
+        volume.type_id = 999; volume.layer = tactical::SpaceLayer::static_object;
+        volume.radius = volume.x_extent = volume.y_extent = units(65);
+        volume.obstacle = volume.nebula = true;
+        movement.footprints = {volume}; movement.nebula_service_types = {crusader_type};
+        movement.nebula_disable_seconds = decimal("0.1");
+        auto setup = laser_defence_setup(800);
+        setup.units.push_back({4, 999, 2, at(800, 0), math::identity_quat(), {}});
+        auto made = tactical::TacticalSession::create(setup, laser_defence_sensors(), laser_defence_durability(),
+            movement, std::nullopt, laser_defence_combat(true), {}, table);
+        expect(static_cast<bool>(made), "mixed jammer: session creates");
+        if (!made) continue;
+        auto session = std::move(made).value();
+        const eawr::platform::ThreadWorkerAdapter executor(workers);
+        expect(static_cast<bool>(session.submit(command(0, 2, 0, 2, tactical::MovePayload{at(800, 1000)}))),
+            "mixed jammer: move out of nebula submits");
+        bool exited = false;
+        for (unsigned frame = 0; frame < 110; ++frame) {
+            if (!session.step(executor)) break;
+            const auto state = session.ability_state(2);
+            if (state && state->special.slots[0].jammer_unregistered && state->special.slots[0].jammer_active) {
+                exited = true; break;
+            }
+        }
+        expect(exited, "mixed jammer: automatic holder remains unregistered after nebula exit");
+        if (!exited) continue;
+        const auto saved = session.save_checkpoint_state();
+        expect(static_cast<bool>(saved), "mixed jammer: independent state checkpoints");
+        if (saved) expect(static_cast<bool>(session.load_checkpoint_state(saved.value())), "mixed jammer: checkpoint restores");
+        expect(static_cast<bool>(session.submit(command(session.completed_tick(), 2, 0, 2,
+            tactical::AbilityPayload{Kind::sensor_jamming, tactical::AbilityAction::activate}))),
+            "mixed jammer: manual activation submits");
+        expect(static_cast<bool>(session.step(executor)), "mixed jammer: activation frame advances");
+        const auto state = session.ability_state(2);
+        expect(state && state->special.slots[0].jammer_unregistered && state->special.slots[1].jammer_registered,
+            "mixed jammer: each handler retains its own registration");
+        const auto active_saved = session.save_checkpoint_state();
+        expect(static_cast<bool>(active_saved), "mixed jammer: active holders checkpoint");
+        if (active_saved) expect(static_cast<bool>(session.load_checkpoint_state(active_saved.value())),
+            "mixed jammer: active holders restore");
+        const auto restored = session.ability_state(2);
+        expect(restored && restored->special.slots[0].jammer_unregistered
+            && restored->special.slots[1].jammer_registered, "mixed jammer: independent registration survives restore");
+        const auto order = order_of(session);
+        expect(std::find(order.begin(), order.end(), 2) != order.end(),
+            "mixed jammer: manual holder survives automatic unregistration");
+    }
+    // An unnamed ordinary row does not create a holder when nested handlers own registration.
+    for (const auto workers : {1U, 8U}) for (const bool nebula : {false, true}) {
+        tactical::AbilityProfile ordinary;
+        ordinary.kind = Kind::sensor_jamming; ordinary.expiration_frames = 120; ordinary.effective_radius = units(200);
+        tactical::SpecialAbilityProfile automatic;
+        automatic.name = "Explicit_Auto"; automatic.kind = tactical::SpecialAbilityKind::sensor_jamming;
+        automatic.style = tactical::SpecialActivationStyle::combat_automatic;
+        automatic.initially_enabled = nebula; automatic.service_interval = 1;
+        tactical::AbilityTable table;
+        table.profiles = {{crusader_type, {ordinary}, false, {automatic}}};
+        tactical::MotionTable movement;
+        movement.rules = {units(15), units(300)};
+        movement.profiles = {{missile_shooter_type, units(1), decimal("0.2"), decimal("0.2"), units(3), units(1)},
+            {crusader_type, units(2), decimal("0.2"), decimal("0.2"), units(3), units(1)}};
+        auto setup = laser_defence_setup(800);
+        if (nebula) {
+            movement.avoidance = tactical::AvoidanceRules{units(24), decimal("0.2"), units(100), decimal("0.8"), units(15),
+                decimal("0.66"), decimal("1.2"), decimal("0.25"), decimal("1.7"), decimal("0.5"), decimal("0.5"),
+                3500, 6, 90, 45, units(50)};
+            tactical::Footprint volume;
+            volume.type_id = 999; volume.layer = tactical::SpaceLayer::static_object;
+            volume.radius = volume.x_extent = volume.y_extent = units(65);
+            volume.obstacle = volume.nebula = true;
+            movement.footprints = {volume}; movement.nebula_service_types = {crusader_type};
+            movement.nebula_disable_seconds = decimal("0.1");
+            setup.units.push_back({4, 999, 2, at(800, 0), math::identity_quat(), {}});
+        }
+        auto made = tactical::TacticalSession::create(setup, laser_defence_sensors(), laser_defence_durability(),
+            movement, std::nullopt, laser_defence_combat(true), {}, table);
+        expect(static_cast<bool>(made), "explicit jammer: session creates");
+        if (!made) continue;
+        auto session = std::move(made).value();
+        const eawr::platform::ThreadWorkerAdapter executor(workers);
+        if (nebula) expect(static_cast<bool>(session.submit(command(0, 2, 0, 2, tactical::MovePayload{at(800, 1000)}))),
+            "explicit jammer: move out of nebula submits");
+        bool ready = false;
+        for (unsigned frame = 0; frame < 110; ++frame) {
+            if (!session.step(executor)) break;
+            const auto state = session.ability_state(2);
+            if (state && (nebula ? state->special.slots[0].jammer_unregistered && state->special.slots[0].jammer_active
+                                 : !state->special.slots[0].jammer_registered)) { ready = true; break; }
+        }
+        expect(ready, "explicit jammer: nested handler is unregistered");
+        if (!ready) continue;
+        expect(static_cast<bool>(session.submit(command(session.completed_tick(), 2, 0, 2,
+            tactical::AbilityPayload{Kind::sensor_jamming, tactical::AbilityAction::activate}))),
+            "explicit jammer: ordinary activation submits");
+        expect(static_cast<bool>(session.step(executor)), "explicit jammer: activation frame advances");
+        const auto state = session.ability_state(2);
+        expect(state && state->slots[0].active && !state->special.slots[0].jammer_registered,
+            "explicit jammer: ordinary active while nested handler remains unregistered");
+        const auto order = order_of(session);
+        expect(std::find(order.begin(), order.end(), 2) == order.end(),
+            "explicit jammer: unnamed ordinary row does not create nested holder");
+    }
     class FailVisibility final : public eawr::sim::PartitionExecutor {
     public:
         std::size_t worker_count() const noexcept override { return 1; }
@@ -1328,6 +1595,154 @@ void test_self_destruct_projectile_order() {
 }
 
 
+// WAB-84, WSD-12: GUI_Activated_Ability_Name is no handler selector for FULL_SALVO or SELF_DESTRUCT. A cleared,
+// authored or unrelated name leaves the ordinary effect byte-identical. The name's uses are the black-market key
+// and the market gate of a same-named nested special (abilities.cpp, inert here: no nested special authors these
+// names). The fixtures with no nested special guard only the non-empty-name branch; the nested-name fixtures show a
+// same-named nested special changes the market gate but never the effect. Nested-name autofire matching, a mod hook
+// of the original, is not modelled and not covered.
+void test_gui_name_is_no_handler_selector() {
+    const std::array<std::string, 3> names{"", "Interceptor_Full_Salvo", "No_Such_Handler"};
+    const std::string nested_name = "Nested_Hook";
+    // A nested special of a kind that is idle until a matching ability activates it, named like the ability.
+    const auto idle_nested = [&] {
+        tactical::SpecialAbilityProfile handler;
+        handler.name = nested_name;
+        handler.kind = tactical::SpecialAbilityKind::stealth;
+        handler.style = tactical::SpecialActivationStyle::user_input;
+        return handler;
+    };
+
+    // FULL_SALVO: the missile hardpoint's volley cadence and every tick hash.
+    const auto salvo_run = [&](const std::string& name, const bool nested) {
+        tactical::AbilityProfile salvo;
+        salvo.kind = tactical::AbilityKind::full_salvo;
+        salvo.expiration_frames = 210;
+        salvo.recharge_frames = 1350;
+        salvo.gui_activated_ability_name = name;
+        auto holder = unit_of(corvette_type, salvo);
+        if (nested) holder.special.push_back(idle_nested());
+        const tactical::AbilityTable ability_data{{holder}, {1}};
+        tactical::CombatTable combat;
+        tactical::CombatProfile ship;
+        ship.type_id = corvette_type; ship.category_bits = 1;
+        ship.hardpoints = {{0, at(5, 0), true}};
+        tactical::ShotProfile shot;
+        shot.damage = units(1); shot.damage_type = 0; shot.speed = units(40); shot.max_travel = units(1500);
+        tactical::WeaponProfile missile;
+        missile.hardpoint = 0; missile.range = units(1500);
+        missile.min_recharge_hundredths = 400; missile.max_recharge_hundredths = 500;
+        missile.pulse_count = 6; missile.pulse_delay_frames = 15;
+        missile.fire_a = at(5, 2); missile.fire_b = at(5, 2);
+        missile.full_salvo_delay = decimal("0.18");
+        missile.cone_width = units(90); missile.cone_height = units(90);
+        missile.opportunity_when_idle = true; missile.opportunity_when_targeting = true;
+        missile.shot = shot;
+        ship.weapons = {missile};
+        ship.max_attack_distance = units(1500);
+        tactical::CombatProfile target;
+        target.type_id = plain_type; target.category_bits = 1;
+        combat.profiles = {ship, target};
+        auto start = setup();
+        start.units[0].position = at(0, 0);
+        start.units[2].position = at(800, 0);
+        const std::vector<tactical::SensorProfile> sensors{{corvette_type, units(2000)}};
+        std::pair<std::vector<std::uint64_t>, std::vector<std::string>> result;
+        auto created = tactical::TacticalSession::create(start, sensors, durability(), motion(), std::nullopt,
+            combat, {}, ability_data);
+        expect(static_cast<bool>(created), "WAB-84: the session binds with name '" + name + "'");
+        if (!created) return result;
+        auto session = std::move(created).value();
+        static_cast<void>(session.submit(command(0, 1, 1, 1, tactical::AttackPayload{3})));
+        static_cast<void>(session.submit(command(0, 1, 2, 1,
+            tactical::AbilityPayload{tactical::AbilityKind::full_salvo, tactical::AbilityAction::activate})));
+        const eawr::platform::ThreadWorkerAdapter executor(2);
+        for (std::uint64_t tick = 0; tick < 260; ++tick) {
+            auto stepped = session.step(executor);
+            if (!stepped) { expect(false, "WAB-84: a step succeeds"); return result; }
+            result.second.push_back(stepped.value().state_sha256);
+            for (const auto& event : stepped.value().snapshot->combat_events()) {
+                if (event.kind == tactical::CombatEventKind::weapon_fired && event.shooter == 1) result.first.push_back(event.tick);
+            }
+        }
+        return result;
+    };
+    const auto salvo_reference = salvo_run(names[0], false);
+    expect(salvo_reference.first.size() >= 6, "WAB-84: FULL_SALVO fires its volleys with no name authored");
+    for (const auto& name : names) {
+        const auto again = salvo_run(name, false);
+        expect(again == salvo_reference, "WAB-84: FULL_SALVO ignores GUI_Activated_Ability_Name '" + name + "'");
+    }
+    // A nested special is part of the state, so it has its own reference; naming it after the ability changes nothing.
+    const auto salvo_nested_reference = salvo_run(names[0], true);
+    expect(salvo_nested_reference.first == salvo_reference.first, "WAB-84: an idle nested special leaves the volleys alone");
+    for (const auto& name : {nested_name, names[2]}) {
+        const auto again = salvo_run(name, true);
+        expect(again == salvo_nested_reference, "WAB-84: FULL_SALVO ignores a same-named nested special '" + name + "'");
+    }
+
+    // SELF_DESTRUCT: the countdown, the kill, the blast and every tick hash.
+    const std::vector<tactical::PlayerCommand> activate{command(0, 1, 0, 1,
+        tactical::AbilityPayload{tactical::AbilityKind::self_destruct, tactical::AbilityAction::activate})};
+    const auto destruct_run = [&](const std::string& name, const bool nested) {
+        auto world = self_destruct_world(false, {1});
+        world.table.profiles.front().abilities.front().gui_activated_ability_name = name;
+        if (nested) world.table.profiles.front().special.push_back(idle_nested());
+        return run_self_destruct(world, activate, 1, 130);
+    };
+    const auto destruct_reference = destruct_run(names[0], false);
+    expect(destruct_reference.hashes.size() == 130 && !destruct_reference.alive[105]
+        && destruct_reference.enemy[129] == units(2700), "WSD-12: SELF_DESTRUCT ends the unit and blasts with no name authored");
+    for (const auto& name : names) {
+        const auto again = destruct_run(name, false);
+        expect(again.hashes == destruct_reference.hashes && again.alive == destruct_reference.alive
+            && again.enemy == destruct_reference.enemy, "WSD-12: SELF_DESTRUCT ignores GUI_Activated_Ability_Name '" + name + "'");
+    }
+    const auto destruct_nested_reference = destruct_run(names[0], true);
+    expect(destruct_nested_reference.alive == destruct_reference.alive && destruct_nested_reference.enemy == destruct_reference.enemy,
+        "WSD-12: an idle nested special leaves the countdown, kill and blast alone");
+    for (const auto& name : {nested_name, names[2]}) {
+        const auto again = destruct_run(name, true);
+        expect(again.hashes == destruct_nested_reference.hashes && again.alive == destruct_nested_reference.alive
+            && again.enemy == destruct_nested_reference.enemy, "WSD-12: SELF_DESTRUCT ignores a same-named nested special '" + name + "'");
+    }
+
+    // The name's uses are the black-market key (WGEP-145) and the market gate of a same-named nested special.
+    tactical::MarketAbilityPolicy market{{{10, {"Interceptor_Full_Salvo"}}, {20, {"Krayt_Self_Destruct", "Vengeance_Self_Destruct"}},
+        {30, {nested_name}}}, {{1, {10, 20}}, {2, {}}}};
+    tactical::AbilityGate gate;
+    gate.market = &market;
+    for (const auto kind : {tactical::AbilityKind::full_salvo, tactical::AbilityKind::self_destruct}) {
+        tactical::AbilityProfile profile;
+        profile.kind = kind;
+        profile.market_purchase_required = true;
+        profile.gui_activated_ability_name = kind == tactical::AbilityKind::full_salvo ? "interceptor_full_salvo" : "Krayt_Self_Destruct";
+        gate.market_owner = 1;
+        expect(tactical::ability_ready(profile, {}, gate, 0), "WAB-84: the buyer may use the market-gated ability by its name");
+        gate.market_owner = 2;
+        expect(!tactical::ability_ready(profile, {}, gate, 0), "WAB-84: a player who has not bought it is refused, case-insensitively");
+        profile.gui_activated_ability_name = names[2];
+        expect(tactical::ability_ready(profile, {}, gate, 0), "WAB-84: an unmatched name leaves the gate open");
+        // A same-named nested special applies its own market gate; the ability's own flag stays off here.
+        tactical::UnitAbilityProfile nested_unit;
+        auto handler = idle_nested();
+        handler.market_purchase_required = true;
+        nested_unit.special.push_back(handler);
+        profile.market_purchase_required = false;
+        profile.gui_activated_ability_name = nested_name;
+        gate.market_profile = &nested_unit;
+        gate.market_owner = 1;
+        expect(!tactical::ability_ready(profile, {}, gate, 0), "WAB-84: a same-named nested special gates the ability on its own purchase");
+        market.owners[0].purchased.push_back(30);
+        expect(tactical::ability_ready(profile, {}, gate, 0), "WAB-84: buying the nested special's item opens the gate");
+        market.owners[0].purchased.pop_back();
+        profile.gui_activated_ability_name = names[2];
+        expect(tactical::ability_ready(profile, {}, gate, 0), "WAB-84: a nested special of another name does not gate it");
+        gate.market_profile = nullptr;
+    }
+}
+
+
 void test_self_destruct() {
     using K = tactical::AbilityKind;
     expect(tactical::ability_kind("self_destruct") == K::self_destruct && tactical::to_string(K::self_destruct) == "SELF_DESTRUCT"
@@ -1337,6 +1752,90 @@ void test_self_destruct() {
 
     // WSD-03..07: the countdown, the kill, the blast.
     const auto world = self_destruct_world(false, {1});
+    // FSC-89: a default-on source is visible to enemy retreat admission before the first step.
+    for (const bool enabled : {false, true}) {
+        auto fixture = self_destruct_world(false, {1});
+        auto& profile = fixture.table.profiles.front();
+        profile.abilities.clear();
+        tactical::AbilityProfile well;
+        well.kind = K::interdict;
+        well.active_by_default = enabled;
+        profile.abilities.push_back(well);
+        auto created = tactical::TacticalSession::create(fixture.start, fixture.sensors, fixture.health, {}, std::nullopt,
+            fixture.combat, {}, fixture.table);
+        expect(static_cast<bool>(created), "FSC-89: default interdict fixture creates");
+        if (!created) continue;
+        auto session = std::move(created).value();
+        tactical::RetreatConfig retreat;
+        retreat.rules.campaign = true;
+        retreat.rules.players = {{1, 2, true}, {2, 2, true}};
+        retreat.prevention = {{1, 0, {2}}};
+        expect(static_cast<bool>(session.configure_retreat(retreat)), "FSC-89: retreat source is configured");
+        const auto views = session.retreat_views();
+        const auto enemy = std::find_if(views.begin(), views.end(), [](const auto& view) { return view.player == 2; });
+        expect(enemy != views.end() && (enemy->refusal == tactical::RetreatRefusal::prevention) == enabled,
+            "FSC-89: creation request controls enemy retreat before service");
+    }
+    // WSD-02: authored stop also applies to script activation, with ordered commits.
+    for (const bool scripted_path : {false, true}) for (const bool stops : {false, true}) {
+        std::vector<std::string> reference;
+        for (const auto workers : {1U, 2U, 4U, 8U}) {
+            auto fixture = self_destruct_world(scripted_path, {});
+            fixture.table.profiles.front().abilities.front().stop_when_activated = stops;
+            fixture.table.combat_ratings = {{frigate_type, units(2000)}};
+            for (auto& row : fixture.health.profiles) if (row.type_id == plain_type) row.max_hull = units(100);
+            auto movement = motion();
+            auto moving_profile = movement.profiles.front();
+            moving_profile.type_id = plain_type;
+            moving_profile.max_speed = decimal("0.2");
+            movement.profiles.push_back(moving_profile);
+            if (scripted_path) for (auto& profile : fixture.combat.profiles) {
+                if (profile.type_id != frigate_type) continue;
+                profile.max_attack_distance = units(1000);
+                tactical::WeaponProfile weapon;
+                weapon.range = units(1000); weapon.pulse_count = 1;
+                weapon.min_recharge_hundredths = 2000; weapon.max_recharge_hundredths = 2000;
+                weapon.cone_width = units(360); weapon.cone_height = units(160);
+                weapon.shot = tactical::ShotProfile{units(60), 0, units(40), units(1000), true, true, {}};
+                profile.weapons = {weapon};
+            }
+            auto created = tactical::TacticalSession::create(fixture.start, fixture.sensors, fixture.health, movement,
+                std::nullopt, fixture.combat, {}, fixture.table);
+            expect(static_cast<bool>(created), "WSD-02: stop fixture creates");
+            if (!created) continue;
+            auto session = std::move(created).value();
+            expect(static_cast<bool>(session.submit(command(0, 1, 0, 1, tactical::MovePayload{at(0, 1000)}))),
+                "WSD-02: move admitted");
+            if (scripted_path) {
+                expect(static_cast<bool>(session.submit(command(0, 2, 0, 2, tactical::AttackPayload{1}))),
+                    "WSD-02: script trigger attack admitted");
+            } else {
+                expect(static_cast<bool>(session.submit(command(2, 1, 1, 1,
+                    tactical::AbilityPayload{K::self_destruct, tactical::AbilityAction::activate}))),
+                    "WSD-02: activation admitted");
+            }
+            const eawr::platform::ThreadWorkerAdapter executor(workers);
+            std::vector<std::string> hashes;
+            bool observed = false;
+            for (unsigned tick = 0; tick < 700; ++tick) {
+                const auto step = session.step(executor);
+                expect(static_cast<bool>(step), "WSD-02: stop fixture steps");
+                if (!step) break;
+                hashes.push_back(step.value().state_sha256);
+                const auto state = session.ability_state(1);
+                if (!state || !state->slots.front().active) continue;
+                const auto live = session.units();
+                const auto holder = std::find_if(live.begin(), live.end(), [](const auto& unit) { return unit.entity_id == 1; });
+                expect(holder != live.end() && holder->order.kind == (stops ? tactical::OrderKind::stop : tactical::OrderKind::move),
+                    "WSD-02: authored stop controls the current move");
+                observed = true;
+                break;
+            }
+            expect(observed, "WSD-02: the requested activation occurred");
+            if (workers == 1) reference = hashes;
+            else expect(hashes == reference, "WSD-02: stop paths match at 1/2/4/8 workers");
+        }
+    }
     const auto first = run_self_destruct(world, activate, 1, 130);
     expect(first.hashes.size() == 130, "WSD-03: the battle runs");
     if (first.hashes.size() == 130) {

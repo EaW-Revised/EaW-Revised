@@ -8,11 +8,19 @@
 #include <algorithm>
 #include <cstdlib>
 #include <map>
+#include <optional>
 #include <sstream>
 
 namespace eawr::campaign {
 namespace ga = script::foc::galactic_ai;
 namespace {
+// #6378: a world script's AI-usage write alone on a `changed` notification. It changes no world row, so the AI reads no fresh
+// facts for it: it applies the write to the facts it already holds.
+bool ai_usage_only(const sim::galactic::GalacticSession::NativeActorChange& change) {
+    using Change = sim::galactic::GalacticSession::NativeActorChange;
+    return change.kind == Change::Kind::changed && (change.prevent_ai_usage || change.prefer_ground)
+        && !change.source && !change.dead && !change.deleting && !change.death_clone;
+}
 template<class T> core::Result<T> absent(std::string_view name) {
     core::Diagnostic error; error.code = "EAWR-GCAI-RUNTIME-0001";
     error.message = "galactic AI stock provider absent: " + std::string(name);
@@ -159,17 +167,49 @@ core::Result<ga::NativeActions::FreestorePathInput> copy_galactic_ai_freestore_p
 }
 void bind_galactic_ai_actor_changes(ga::NativeActions& actions,
     GalacticAiSnapshotActorFactsReader actor_facts, std::function<const sim::PartitionExecutor*()> executor) {
-    actions.bind_actor_changes([actor_facts, executor]
-        (ga::NativeActions& native, const sim::galactic::GalacticSnapshot& snapshot,
-            std::span<const sim::galactic::GalacticSession::NativeActorChange> changes) {
+    using Change = sim::galactic::GalacticSession::NativeActorChange;
+    // The facts are read from the delivery's snapshot in change order (the first failing read is the delivery's error, as when the
+    // owner read them itself); the owner applies them now or at the next async window start.
+    auto read = [actor_facts, executor](const sim::galactic::GalacticSnapshot& snapshot, std::span<const Change> changes)
+        -> core::Result<ga::NativeActions::ActorFacts> {
+        using Result = core::Result<ga::NativeActions::ActorFacts>;
+        const auto* workers = executor();
+        if (!workers || !actor_facts) return absent<ga::NativeActions::ActorFacts>("sparse actor facts/retained pool/admitted workers");
+        std::vector<sim::EntityId> actors;
+        for (const auto& change : changes) if (change.kind != Change::Kind::lost && !ai_usage_only(change)) actors.push_back(change.actor);
+        std::sort(actors.begin(), actors.end()); actors.erase(std::unique(actors.begin(), actors.end()), actors.end());
+        std::vector<std::optional<ga::FreestoreFacts>> rows(actors.size());
+        std::vector<std::optional<core::Diagnostic>> errors(actors.size());
+        auto staged = workers->execute_phase("galactic-ai-actor-facts", sim::tick_partition_count, [&](std::size_t partition) {
+            const auto range = sim::partition_range(partition, actors.size());
+            for (auto i = range.begin; i < range.end; ++i) {
+                auto read_one = actor_facts(snapshot, actors[i]);
+                if (read_one) rows[i] = std::move(read_one).value(); else errors[i] = read_one.error();
+            }
+        });
+        if (!staged) return Result::failure(staged.error());
+        for (const auto& change : changes) {
+            if (change.kind == Change::Kind::lost || ai_usage_only(change)) continue;
+            const auto at = static_cast<std::size_t>(std::lower_bound(actors.begin(), actors.end(), change.actor) - actors.begin());
+            if (errors[at]) return Result::failure(*errors[at]);
+        }
+        ga::NativeActions::ActorFacts facts; facts.reserve(actors.size());
+        for (std::size_t i = 0; i < actors.size(); ++i) facts.emplace_back(actors[i], std::move(*rows[i]));
+        return Result::success(std::move(facts));
+    };
+    actions.bind_actor_changes(std::move(read), [executor]
+        (ga::NativeActions& native, std::span<const Change> changes, const ga::NativeActions::ActorFacts& facts) {
         if (changes.empty()) return core::Result<void>::success();
         const auto* workers = executor();
-        if (!workers || !actor_facts)
-            return absent<void>("sparse actor facts/retained pool/admitted workers");
+        if (!workers) return absent<void>("sparse actor facts/retained pool/admitted workers");
         auto& retained = native.qualified_freestore();
         auto staged = retained.clone();
-        if (auto prepared = apply_galactic_ai_actor_changes(staged, changes,
-            [&snapshot, actor_facts](auto actor) { return actor_facts(snapshot, actor); }, *workers); !prepared) return prepared;
+        const auto prepared_facts = [&facts](sim::EntityId actor) -> core::Result<ga::FreestoreFacts> {
+            const auto at = std::lower_bound(facts.begin(), facts.end(), actor, [](const auto& row, auto id) { return row.first < id; });
+            if (at == facts.end() || at->first != actor) return absent<ga::FreestoreFacts>("delivered actor facts");
+            return core::Result<ga::FreestoreFacts>::success(at->second);
+        };
+        if (auto prepared = apply_galactic_ai_actor_changes(staged, changes, prepared_facts, *workers); !prepared) return prepared;
         // WGA-307/163: unregister while the old selected-actor facts
         // still exist, before publishing owner/loss/deletion changes.
         for (const auto& change : changes) {
@@ -186,6 +226,30 @@ void bind_galactic_ai_actor_changes(ga::NativeActions& actions,
         return core::Result<void>::success();
     });
 }
+core::Result<void> initialize_freestore_with_world_usage(ga::QualifiedFreestore& owner,
+    sim::galactic::PlayerId player, std::span<const sim::EntityId> offers,
+    std::span<const sim::galactic::CensusObject> actors) {
+    for (const auto& actor : actors) {
+        if (actor.owner != player || (!actor.story_prevent_ai_usage && !actor.story_prefer_ground)) continue;
+        const auto* fact = owner.facts(actor.id);
+        if (!fact || fact->object.owner != player)
+            return absent<void>("world AI-usage actor missing or owned differently at pool initialization");
+    }
+    if (auto initialized = owner.initialize(player, offers); !initialized) return initialized;
+    for (const auto& actor : actors) {
+        if (actor.owner != player) continue;
+        const auto* fact = owner.facts(actor.id);
+        if (!fact) continue;
+        if (actor.story_prevent_ai_usage) {
+            if (auto applied = owner.prevent_ai_usage(player, actor.id, *actor.story_prevent_ai_usage); !applied) return applied;
+        }
+        fact = owner.facts(actor.id);
+        if (actor.story_prefer_ground && fact && fact->unit_ai && !fact->dead && !fact->deleting) {
+            if (auto applied = owner.set_prefer_ground(actor.id, *actor.story_prefer_ground); !applied) return applied;
+        }
+    }
+    return core::Result<void>::success();
+}
 core::Result<void> apply_galactic_ai_actor_changes(ga::QualifiedFreestore& owner,
     std::span<const sim::galactic::GalacticSession::NativeActorChange> changes,
     const GalacticAiActorFactsReader& read, const sim::PartitionExecutor& executor) {
@@ -198,7 +262,7 @@ core::Result<void> apply_galactic_ai_actor_changes(ga::QualifiedFreestore& owner
         [&](std::size_t partition) {
             const auto range = sim::partition_range(partition, changes.size());
             for (auto i = range.begin; i < range.end; ++i) {
-                if (changes[i].kind == Change::Kind::lost) continue;
+                if (changes[i].kind == Change::Kind::lost || ai_usage_only(changes[i])) continue;
                 auto facts = read(changes[i].actor);
                 if (facts) prepared[i] = std::move(facts).value();
                 else errors[i] = facts.error();
@@ -212,9 +276,26 @@ core::Result<void> apply_galactic_ai_actor_changes(ga::QualifiedFreestore& owner
         if (!change.actor || static_cast<unsigned>(change.kind) > static_cast<unsigned>(Change::Kind::lost))
             return absent<void>("valid sparse actor change identity/kind");
         if (change.kind == Change::Kind::lost) {
-            if (change.source || change.dead || change.deleting || change.death_clone)
+            if (change.source || change.dead || change.deleting || change.death_clone || change.prevent_ai_usage || change.prefer_ground)
                 return absent<void>("loss notification without unrelated actor mutations");
             staged.lost(change.actor); continue;
+        }
+        if (ai_usage_only(change)) {
+            // The world retains the fact even when no pool exists yet. Pool initialization seeds it from the
+            // world snapshot; a live pool takes the ordered notification immediately.
+            const auto* current = staged.facts(change.actor);
+            if (!current) continue;
+            const auto owner_id = current->object.owner;
+            if (change.prevent_ai_usage && staged.initialized(owner_id)) {
+                auto prevented = staged.prevent_ai_usage(owner_id, change.actor, *change.prevent_ai_usage);
+                if (!prevented) return prevented;
+            }
+            current = staged.facts(change.actor);
+            if (change.prefer_ground && current && current->unit_ai && !current->dead && !current->deleting) {
+                auto preferred = staged.set_prefer_ground(change.actor, *change.prefer_ground);
+                if (!preferred) return preferred;
+            }
+            continue;
         }
         auto row = std::move(*prepared[i]);
         if (row.object.id != change.actor || !row.qualified)
@@ -333,16 +414,20 @@ core::Result<GalacticAiRuntimeProviderFactory> stock_galactic_ai_providers(
         if (!query.freestore_actor_facts) query.freestore_actor_facts = [content = setup->content, members = query.freestore_members]
             (const auto& snapshot, auto actor) { return stock_actor_facts(*content, members, snapshot, actor); };
         if (!query.freestore_references) query.freestore_references = [reader = query.freestore_actor_facts]
-            (const auto& snapshot, const ga::QualifiedFreestore& retained) {
+            (const auto& snapshot, const ga::QualifiedFreestore& retained, sim::EntityId lane_floor) {
             for (const auto& [actor, saved] : retained.inventory()) {
+                if (lane_floor && actor >= lane_floor && !snapshot.current_type(actor)) continue; // decided, not applied yet
                 auto actual = reader(snapshot, actor);
                 if (!actual) return core::Result<void>::failure(actual.error());
                 const auto& row = actual.value();
+                // Async AI: while slices are pending the freestore holds the lane's view (owner, parent, lifecycle written by
+                // decided-but-not-applied intents), so only what no intent can change is compared.
+                const bool lane_view = lane_floor != 0;
                 if (saved.object.type != row.object.type || saved.current_type != row.current_type
-                    || saved.object.owner != row.object.owner || saved.parent != row.parent
-                    || saved.parent_is_planet != row.parent_is_planet || saved.current_type_member != row.current_type_member
-                    || saved.unit_ai != row.unit_ai
-                    || saved.hero != row.hero || saved.dead != row.dead || saved.deleting != row.deleting)
+                    || saved.unit_ai != row.unit_ai || saved.hero != row.hero
+                    || (!lane_view && (saved.object.owner != row.object.owner || saved.parent != row.parent
+                        || saved.parent_is_planet != row.parent_is_planet || saved.current_type_member != row.current_type_member
+                        || saved.dead != row.dead || saved.deleting != row.deleting)))
                     return absent<void>("saved freestore actor references match completed world facts");
             }
             return core::Result<void>::success();
@@ -371,14 +456,15 @@ core::Result<GalacticAiRuntimeProviderFactory> stock_galactic_ai_providers(
             using Change = sim::galactic::GalacticSession::NativeActorChange;
             std::vector<Change> births; births.reserve(snapshot.actor_records().size());
             for (const auto& actor : snapshot.actor_records())
-                births.push_back({Change::Kind::created, actor.id, actor.generated_source, actor.dead, actor.delete_pending, {}});
+                births.push_back({Change::Kind::created, actor.id, actor.generated_source, actor.dead, actor.delete_pending, {}, {}, {}});
             if (births.empty()) return absent<void>("fresh full typed world actor records");
             return apply_galactic_ai_actor_changes(actions.qualified_freestore(), births,
                 [&snapshot, reader](auto actor) { return reader(snapshot, actor); }, executor);
         };
         out.initialize_freestore = [](auto player, auto& actions, const auto& snapshot, const auto&) {
             auto offers = ga::initial_freestore_offers(snapshot, actions.qualified_freestore());
-            return offers ? actions.qualified_freestore().initialize(player, offers.value()) : core::Result<void>::failure(offers.error());
+            return offers ? initialize_freestore_with_world_usage(actions.qualified_freestore(), player, offers.value(), snapshot.actor_records())
+                : core::Result<void>::failure(offers.error());
         };
         // WGA-438: Lua's planet predicate takes no player. The shared provider evaluates exactly that
         // predicate for any AI seat, so the first prepared AI seat answers it; none leaves it unbound.
@@ -425,11 +511,11 @@ core::Result<GalacticAiRuntimeProviderFactory> stock_galactic_ai_providers(
                     [&snapshot, &shadow, content, members](auto actor) { return stock_actor_facts(*content, members, snapshot, actor, &shadow); }, workers);
             });
             bind_galactic_ai_actor_changes(actions, actor_facts, executor);
-            actions.bind_freestore_validation([parent = &galaxy, owner, references](const ga::QualifiedFreestore& decoded) {
+            actions.bind_freestore_validation([parent = &galaxy, native = &actions, owner, references](const ga::QualifiedFreestore& decoded) {
                 auto engine = owner.lock();
                 if (!engine || !references) return absent<void>("qualified freestore actor/current/original/parent/lifecycle references");
                 const auto snapshot = parent->snapshot();
-                if (auto checked = references(*snapshot, decoded); !checked) return checked;
+                if (auto checked = references(*snapshot, decoded, native->lane_floor()); !checked) return checked;
                 for (const auto& player : snapshot->players()) if (const auto* held = decoded.reservations(player.player_id))
                     for (const auto& reservation : *held)
                         if (!engine->galactic_reservation_valid(player.player_id, reservation.first, reservation.second))
@@ -470,14 +556,11 @@ core::Result<GalacticAiRuntimeProviderFactory> stock_galactic_ai_providers(
             return core::Result<GalacticAiRuntimeProviders::ChildScripts>::success(
                 {std::move(parent_queries)});
         };
-        out.prepare_battle = [observe_battle](auto actions, auto engine, auto scheduler) {
-            auto native = ga::retained_movement_battle_listener(std::move(actions), std::move(engine), std::move(scheduler));
-            return GalacticAiRuntimeProviders::BattleListener([native = std::move(native), observe_battle](const auto& notice) {
-                auto delivered = native(notice); if (!delivered) return delivered;
-                if (observe_battle) observe_battle(notice);
-                return core::Result<void>::success();
-            });
+        out.prepare_battle = [](auto actions, auto engine, auto scheduler) {
+            return GalacticAiRuntimeProviders::BattleListener(
+                ga::retained_movement_battle_listener(std::move(actions), std::move(engine), std::move(scheduler)));
         };
+        out.observe_battle = observe_battle;
         for (const auto& [id, type] : setup->content->types) {
             const auto* original = type.original.get();
             if (!original) return absent<GalacticAiRuntimeProviders>("original freestore trait identity");

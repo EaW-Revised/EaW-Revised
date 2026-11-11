@@ -11,6 +11,7 @@
 // an unreadable file as a slot with its diagnostic, exactly as LiveGameSession::save_slots does.
 
 #include "eawr/platform/live_game_session.hpp"
+#include "eawr/sim/tactical/replay.hpp"
 
 #include <cstdint>
 #include <filesystem>
@@ -23,6 +24,8 @@ namespace eawr::platform {
 
 // A missing directory lists no saves; a directory that cannot be read, or more than 1024 saves, fails.
 [[nodiscard]] core::Result<std::vector<LiveSaveSlot>> list_saved_games(const std::filesystem::path& directory);
+// Extracts the recorded tick-zero skirmish setup without starting or re-simulating the battle.
+[[nodiscard]] core::Result<sim::tactical::TacticalSetup> skirmish_save_setup(std::span<const std::uint8_t> bytes);
 // #3989: writes a battle save (LiveSession::request_save's checkpoint) by its stored name as
 // `<directory>/<name>.eawrsave` (created when missing), with `hints` as its presentation-hints section
 // (0x8000) when not empty, as the live session's disk worker writes a campaign save: an unreadable

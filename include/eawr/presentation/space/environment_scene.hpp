@@ -97,6 +97,8 @@ enum class SceneRoute : std::uint8_t {
     unsupported,
 };
 [[nodiscard]] std::string_view to_string(SceneRoute route) noexcept;
+// Existing hand-adapter qualification, shared with activation reporting.
+[[nodiscard]] bool has_environment_adapter(std::string_view shader) noexcept;
 
 struct SceneSurface final {
     std::size_t mesh_index{};
@@ -109,6 +111,9 @@ struct SceneSurface final {
     std::int32_t mesh_bone{-1};
     // Empty when the surface can be drawn; otherwise why it is not.
     std::string problem;
+    // Geometry qualified independently of legacy material requirements.
+    // Native activation currently admits plain rigid surfaces only.
+    bool native_geometry{};
     // A drawable surface's authored part that is not drawn (a Skydome.fx cloud
     // layer); empty when nothing is skipped.
     std::string skipped;
@@ -128,7 +133,8 @@ struct SceneSurface final {
 // Every submesh of every visible mesh, in mesh-then-submesh order. Hidden
 // meshes are skipped.
 [[nodiscard]] std::vector<SceneSurface> scene_surfaces(const assets::Model& model,
-    const std::function<bool(std::string_view)>& effect_missing = {});
+    const std::function<bool(std::string_view)>& effect_missing = {},
+    const std::function<bool(const assets::Submesh&)>& native = {});
 // The largest distance from the model origin of a drawable non-billboard
 // vertex; 0 when there is none.
 [[nodiscard]] float surface_radius(std::span<const SceneSurface> surfaces) noexcept;

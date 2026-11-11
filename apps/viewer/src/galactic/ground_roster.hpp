@@ -28,6 +28,9 @@ struct GroundStructure {
 };
 struct GroundRoster {
     bool accessible{}, contents_known{}, count_known{}, allied{};
+    // The focused organize shell's "Base Layout" text (debug build, Update_Organization_Display): a destroyed planet
+    // hides it; otherwise a second line reads UNKNOWN while the local player cannot see the ground force size.
+    bool destroyed{}, size_known{};
     std::optional<std::size_t> count;
     std::vector<GroundCompany> companies;
     // GHUD-S68: the planet's current land special-structure capacity, whether the local player
@@ -36,6 +39,15 @@ struct GroundRoster {
     bool structures_known{};
     std::vector<GroundStructure> structures;
 };
+// The two text lines of the focused shell's `Text_Land_Fleet` component. Retail sets the first text to TEXT_BASE_LAYOUT
+// and the second to TEXT_UNKNOWN or nothing; a destroyed planet (alternate index 8) hides the whole component.
+struct BaseLayoutText {
+    bool caption{}, unknown{};
+    friend bool operator==(const BaseLayoutText&, const BaseLayoutText&) = default;
+};
+[[nodiscard]] inline BaseLayoutText base_layout_text(const GroundRoster& roster) noexcept {
+    return roster.destroyed ? BaseLayoutText{} : BaseLayoutText{true, !roster.size_known};
+}
 // GHUD-S69: pad slot placement of landed companies, after the debug build's planet slot cleanup.
 // `layout[slot]` is the company (index into the roster) shown on that pad. A company keeps its
 // preferred slot when that is valid and not claimed earlier; every other company takes the first
@@ -117,6 +129,8 @@ inline GroundRoster ground_roster(const sim::galactic::GalacticSnapshot& snapsho
                 }
         }
     }
+    result.destroyed = presence->destroyed;
+    result.size_known = knowledge->knowledge.ground_count || knowledge->knowledge.ground_contents;
     result.accessible = presence->surface_accessible && !presence->destroyed;
     if (!result.accessible) return result;
     const auto allied = [](const auto& players, PlayerId a, PlayerId b) {

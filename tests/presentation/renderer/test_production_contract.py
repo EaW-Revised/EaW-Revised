@@ -18,7 +18,96 @@ def renderer_source() -> str:
     return combined_source(*(f"src/presentation/godot/{name}" for name in RENDERER_SOURCES))
 
 
+def production_hover_sources():
+    return {name: source_text(path) for name, path in {
+        "panel_header": "src/presentation/godot/ui/production_view.hpp",
+        "panel": "src/presentation/godot/ui/production_view.cpp",
+        "map": "apps/viewer/src/map_mode_hud.cpp",
+        "hud_header": "src/presentation/godot/ui/tactical_hud.hpp",
+        "hud": "src/presentation/godot/ui/tactical_hud_resources.cpp",
+    }.items()}
+
+
+def production_hover_polling_violations(sources):
+    """Bind the allocation-tested cache to the actual three viewer adapters.
+
+    These deliberately constrain the borrowing API, direct handoff and ordering,
+    rather than counting cache publications (which cannot see a caller's copy).
+    """
+    def compact(source):
+        return re.sub(r"\s+", "", re.sub(r"//[^\n]*|/\*.*?\*/", "", source, flags=re.S))
+
+    text = {key: compact(value) for key, value in sources.items()}
+    violations = []
+    if "constHover*hovered_entry()const;" not in text["panel_header"]:
+        violations.append("panel return must borrow the retained hover")
+    getter = text["panel"].split("EawrProductionPanel::hovered_entry()const{", 1)[1].split("}", 1)[0]
+    if getter != "return!dragging_pool_&&is_visible_in_tree()?hover_.get():nullptr;":
+        violations.append("panel getter must directly borrow the allocation-tested cache")
+    handoff = text["map"].split("voidMapMode::State::sync_cards(){", 1)[1].split("if(live_session)", 1)[0]
+    if handoff != ("if(!hud||!battle)return;constauto*production_hover="
+                   "hud->shell_shown()&&hud->production()?hud->production()->hovered_entry():nullptr;"
+                   "hud->set_production_hover(production_hover);"):
+        violations.append("MapMode must pass the borrowed pointer without an owning local")
+    parameter = "set_production_hover(constEawrProductionPanel::Hover*hovered)"
+    if parameter + ";" not in text["hud_header"] or "TacticalHud::" + parameter + "{" not in text["hud"]:
+        violations.append("HUD parameter must borrow the panel hover")
+    hud = text["hud"].split("TacticalHud::set_production_hover(", 1)[1].split("{", 1)[1]
+    guard = "if(state.production_hover?hovered&&*state.production_hover==*hovered:!hovered)return;"
+    if guard not in hud or hud.split(guard, 1)[0] != "State&state=*state_;if(!state.cards)return;":
+        violations.append("HUD unchanged guard must precede owned storage and content resolution")
+    return violations
+
+
 class ProductionRendererContract(unittest.TestCase):
+    def test_production_hover_polling_borrows_through_panel_map_and_hud(self):
+        self.assertEqual(production_hover_polling_violations(production_hover_sources()), [])
+
+    def test_production_hover_contract_rejects_old_owning_polling(self):
+        # Keep ProductionHoverCache intact: restore only the old adapter ownership.
+        # This must fail for the original string-copy path, not a missing cache API.
+        sources = production_hover_sources()
+        sources["panel_header"] = sources["panel_header"].replace(
+            "const Hover* hovered_entry() const;", "std::optional<Hover> hovered_entry() const;")
+        sources["panel"] = sources["panel"].replace(
+            "const EawrProductionPanel::Hover* EawrProductionPanel::hovered_entry() const {\n"
+            "    return !dragging_pool_ && is_visible_in_tree() ? hover_.get() : nullptr;\n}",
+            "std::optional<EawrProductionPanel::Hover> EawrProductionPanel::hovered_entry() const {\n"
+            "    const auto* retained = !dragging_pool_ && is_visible_in_tree() ? hover_.get() : nullptr;\n"
+            "    return retained ? std::optional(*retained) : std::nullopt;\n}")
+        sources["map"] = sources["map"].replace(
+            "const auto* production_hover = hud->shell_shown() && hud->production()\n"
+            "        ? hud->production()->hovered_entry() : nullptr;",
+            "const auto production_hover = hud->shell_shown() && hud->production()\n"
+            "        ? hud->production()->hovered_entry() : std::nullopt;")
+        for key in ("hud_header", "hud"):
+            sources[key] = sources[key].replace(
+                "set_production_hover(const EawrProductionPanel::Hover* hovered)",
+                "set_production_hover(const std::optional<EawrProductionPanel::Hover>& hovered)")
+        sources["hud"] = sources["hud"].replace(
+            "if (state.production_hover ? hovered && *state.production_hover == *hovered : !hovered) return;",
+            "if (state.production_hover == hovered) return;").replace(
+                "state.production_hover = hovered ? std::optional(*hovered) : std::nullopt;",
+                "state.production_hover = hovered;")
+        original = production_hover_sources()
+        for key in sources:
+            self.assertNotEqual(sources[key], original[key], key)
+        violations = production_hover_polling_violations(sources)
+        self.assertIn("panel return must borrow the retained hover", violations)
+        self.assertIn("MapMode must pass the borrowed pointer without an owning local", violations)
+        self.assertIn("HUD parameter must borrow the panel hover", violations)
+        self.assertIn("HUD unchanged guard must precede owned storage and content resolution", violations)
+
+    def test_production_hover_contract_rejects_copy_between_borrowed_apis(self):
+        sources = production_hover_sources()
+        # Even unchanged pointer APIs must not allow MapMode to copy the pointee.
+        sources["map"] = sources["map"].replace(
+            "hud->set_production_hover(production_hover);",
+            "const auto owned = production_hover ? std::optional(*production_hover) : std::nullopt;\n"
+            "    hud->set_production_hover(owned ? &*owned : nullptr);")
+        self.assertIn("MapMode must pass the borrowed pointer without an owning local",
+                      production_hover_polling_violations(sources))
+
     def test_frozen_scene_is_unchanged(self):
         scene = ROOT / "prototypes/common/scene.json"
         self.assertEqual(hashlib.sha256(scene.read_bytes()).hexdigest(), SCENE_HASH)

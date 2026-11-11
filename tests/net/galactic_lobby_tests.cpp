@@ -7,6 +7,7 @@
 #include "fake_transport.hpp"
 
 #include "galactic_lobby_backend.hpp"
+#include "match_transport.hpp"
 #include "galactic_lan_match.hpp"
 #include "lan_match.hpp"
 #include "galactic_launch_options.hpp"
@@ -26,6 +27,9 @@
 #include "eawr/sim/tactical/replay.hpp"
 #include "eawr/sim/world.hpp"
 #include "eawr/skirmish/start.hpp"
+#include "eawr/scene/scene.hpp"
+#include "eawr/core/load_profile.hpp"
+#include "eawr/core/sha256.hpp"
 #include "eawr/data/xml.hpp"
 #include "eawr/mods/save_description.hpp"
 #include "eawr/platform/sim_workers.hpp"
@@ -59,10 +63,86 @@
 
 namespace {
 using namespace setup_test;
+using eawr::core::Result;
 namespace cp = eawr::campaign;
 namespace gc = eawr::sim::galactic;
 namespace dg = eawr::data::galactic;
 namespace viewer = eawr::presentation::godot_backend;
+
+void checkpoint_buffered_departure() {
+    using namespace std::chrono_literals;
+    net::TcpOptions options; options.build_identity = "checkpoint-buffered-departure";
+    auto listening = require(net::TcpTransport::host("127.0.0.1", 0, options));
+    auto connected = require(net::TcpTransport::connect("127.0.0.1", listening->port(), options));
+    auto* raw_guest = connected.get();
+    viewer::MatchTransport host(std::move(listening)), guest(std::move(connected));
+    auto host_worker = std::make_shared<net::GalacticCheckpointWorker>();
+    auto guest_worker = std::make_shared<net::GalacticCheckpointWorker>();
+    host.start_checkpoint(host_worker); guest.start_checkpoint(guest_worker);
+    const auto wait = [&](const auto& ready) {
+        const auto deadline = std::chrono::steady_clock::now() + 5s;
+        while (!ready()) {
+            expect(std::chrono::steady_clock::now() < deadline, "buffered departure reaches its native boundary");
+            std::this_thread::sleep_for(1ms);
+        }
+    };
+    wait([&] { return host.link(1) == net::LinkState::open && guest.link(0) == net::LinkState::open; });
+    const std::vector<std::uint8_t> ordinary{17, 42, 23};
+    require(host.send(1, ordinary));
+    wait([&] { return guest_worker->pending_from(0); });
+    require(host.close_peer(1));
+    wait([&] {
+        const std::lock_guard lock(net::checkpoint_io_mutex());
+        return raw_guest->link(0) == net::LinkState::closed;
+    });
+    expect(guest.link(0) == net::LinkState::open,
+        "queued foreground traffic remains readable before publishing native departure");
+    const auto last = guest.poll();
+    expect(last && last->from == 0 && last->frame == ordinary,
+        "the last foreground frame survives native peer departure exactly once");
+    expect(guest.link(0) == net::LinkState::closed && !guest.poll(),
+        "departure becomes visible immediately after the foreground queue drains");
+    host.stop_checkpoint(); guest.stop_checkpoint();
+}
+
+void checkpoint_failure_stays_visible() {
+    using namespace std::chrono_literals;
+    net::TcpOptions options; options.build_identity = "checkpoint-sticky-failure";
+    viewer::MatchTransport host(require(net::TcpTransport::host("127.0.0.1", 0, options)));
+    auto guest = require(net::TcpTransport::connect("127.0.0.1", host.port(), options));
+    const auto connected = std::chrono::steady_clock::now() + 5s;
+    while (host.link(1) != net::LinkState::open || guest->link(0) != net::LinkState::open) {
+        static_cast<void>(host.poll()); static_cast<void>(guest->poll());
+        expect(std::chrono::steady_clock::now() < connected, "sticky failure pair connects");
+        std::this_thread::sleep_for(1ms);
+    }
+    auto worker = std::make_shared<net::GalacticCheckpointWorker>();
+    {
+        const std::lock_guard lock(net::checkpoint_io_mutex());
+        host.start_checkpoint(worker);
+        // Native polling is blocked by this gate. At most one bounded command batch can drain,
+        // so bounded repeated enqueueing deterministically reaches the fatal queue limit.
+        for (unsigned attempt = 0; attempt < 256 && !worker->failure(); ++attempt)
+            worker->cancel(host, "queue_limit_test");
+        expect(worker->failure().has_value(), "command overflow publishes a fatal worker error");
+    }
+    host.stop_checkpoint();
+    host.start_checkpoint(worker); // the lobby makes this automatic call before checking failure()
+    expect(!worker->running() && worker->failure().has_value() && host.diagnostic().has_value(),
+        "automatic staging attachment preserves a stopped worker failure for the lobby");
+    const std::vector<std::uint8_t> checkpoint{net::save_manifest_kind, 0};
+    const std::vector<std::uint8_t> ordinary{17, 23, 42};
+    require(guest->send(0, checkpoint)); require(guest->send(0, ordinary));
+    const auto delivered = std::chrono::steady_clock::now() + 5s;
+    std::optional<net::Received> frame;
+    while (!(frame = host.poll())) {
+        static_cast<void>(guest->poll());
+        expect(std::chrono::steady_clock::now() < delivered, "ordinary traffic drains after fatal checkpoint failure");
+        std::this_thread::sleep_for(1ms);
+    }
+    expect(frame->frame == ordinary && !host.poll() && host.diagnostic().has_value(),
+        "fatal checkpoint frames never escape to the lobby and ordinary frames arrive exactly once");
+}
 using Fixed = eawr::sim::math::Fixed;
 using Digest = std::array<std::uint8_t, 32>;
 
@@ -141,8 +221,8 @@ void codec_and_mode() {
     expect(game.map == "Multiplayer", "the campaign is the room's map string");
     const std::string text(game.options.begin(), game.options.end());
     // The agreed bytes, pinned: any change to this text is a new version.
-    expect(text == "gc1 3 4242 2 0 0 0 0 1 \"Normal_Default\" 4 1 1 0 \"REBEL\" 1 2 2 2 0 \"EMPIRE\" 1 2 3 3 0 \"UNDERWORLD\" 0 2 4 4 0 \"NEUTRAL\" 0 2",
-        "gc1 options bytes: " + text);
+    expect(text == "gc2 3 4242 2 15 0 0 0 0 1 \"Normal_Default\" 4 1 1 0 \"REBEL\" 1 2 2 2 0 \"EMPIRE\" 1 2 3 3 0 \"UNDERWORLD\" 0 2 4 4 0 \"NEUTRAL\" 0 2",
+        "gc2 options bytes: " + text);
     expect(net::lobby_game_mode(game) == net::LobbyGameMode::galactic, "the tag makes it a Galactic Conquest room");
     expect(require(net::decode_galactic_lobby_game(game)) == options, "options round trip");
     expect(require(net::encode_galactic_lobby_game(require(net::decode_galactic_lobby_game(game)))) == game, "re-encoding keeps the bytes");
@@ -150,7 +230,31 @@ void codec_and_mode() {
     auto custom = options;
     custom.custom = true; custom.credits = 12000; custom.starting_tech = 2; custom.maximum_tech = 4; custom.allow_heroes = false;
     custom.auto_resolve = 3; custom.rows[1].dropout = gc::FactionControl::passive; custom.seed = 0xFFFFFFFFULL;
+    custom.vote_timeout = 45;
     expect(require(net::decode_galactic_lobby_game(require(net::encode_galactic_lobby_game(custom)))) == custom, "custom options round trip");
+    {   // #6156: the battle-vote timeout is a host setting. It defaults to the retail 15 s, follows the campaign's own constant
+        // when the data states one (clamped to the host range 5..120), and rides the agreed bytes.
+        expect(options.vote_timeout == net::galactic_lobby_default_vote_timeout && net::galactic_lobby_default_vote_timeout == 15,
+            "a new room offers the retail 15 s");
+        expect(net::galactic_lobby_clamp_vote_timeout(-3) == 5 && net::galactic_lobby_clamp_vote_timeout(0) == 5
+            && net::galactic_lobby_clamp_vote_timeout(4) == 5 && net::galactic_lobby_clamp_vote_timeout(5) == 5
+            && net::galactic_lobby_clamp_vote_timeout(60) == 60 && net::galactic_lobby_clamp_vote_timeout(120) == 120
+            && net::galactic_lobby_clamp_vote_timeout(121) == 120 && net::galactic_lobby_clamp_vote_timeout(100000) == 120,
+            "the host range is 5 to 120 seconds");
+        const auto offered = [&](std::optional<std::int64_t> authored) {
+            auto campaign = local.catalog().front(); campaign.vote_timeout_seconds = authored;
+            return require(net::default_galactic_lobby_options(campaign, difficulty, match_seed)).vote_timeout;
+        };
+        expect(offered(std::nullopt) == 15 && offered(30) == 30 && offered(2) == 5 && offered(900) == 120 && offered(0) == 5,
+            "the campaign's own constant is the room's default, clamped to the host range");
+        auto codec = options; codec.vote_timeout = 120;
+        const auto bytes = require(net::encode_galactic_lobby_game(codec));
+        expect(std::string(bytes.options.begin(), bytes.options.end()).find(" 2 120 0 ") != std::string::npos,
+            "the timeout is in the agreed bytes after the auto-resolve value");
+        expect(require(net::decode_galactic_lobby_game(bytes)).vote_timeout == 120, "the timeout round trips");
+        codec.vote_timeout = gc::mp_roster_max_vote_timeout_seconds + 1U;
+        expect(!net::encode_galactic_lobby_game(codec), "a timeout beyond the campaign's lifetime is refused");
+    }
 
     // The AI perception seed is 32-bit: a wider seed is refused by name on every entry point.
     auto wide = options;
@@ -169,9 +273,14 @@ void codec_and_mode() {
 
     // Versioning: a newer tag is refused by name, never read as the current one.
     auto future = game;
-    future.options[2] = '2';
+    future.options[2] = '3';
     const auto refused = net::decode_galactic_lobby_game(future);
-    expect(!refused && refused.error().message.find("version 2") != std::string::npos, "an unknown version is refused by name");
+    expect(!refused && refused.error().message.find("version 3") != std::string::npos, "an unknown version is refused by name");
+    auto previous = game;
+    previous.options[2] = '1';
+    const auto old_refused = net::decode_galactic_lobby_game(previous);
+    expect(!old_refused && old_refused.error().message.find("version 1") != std::string::npos,
+        "the previous version, which has no vote timeout, is refused by name");
     expect(net::lobby_game_mode(future) == net::LobbyGameMode::galactic, "a future GC version is still a GC room");
     auto zero = game;
     zero.options[2] = '0';
@@ -671,6 +780,12 @@ void roster_draft() {
     const auto two = two_side_options(local);
     const auto draft = require(net::galactic_roster_draft(snapshot_of(two, {seat_of(0, 1, two, 1, "host"), seat_of(1, 2, two, 2, "guest")}), catalog));
     expect(draft.campaign == "Multiplayer" && draft.difficulty == difficulty && !draft.custom && draft.allow_heroes, "campaign and difficulty carried");
+    expect(draft.vote_timeout_seconds == 15, "the room's vote timeout is the roster's (#6156)");
+    {
+        auto edited = two; edited.vote_timeout = 90;
+        const auto timed = require(net::galactic_roster_draft(snapshot_of(edited, {seat_of(0, 1, edited, 1, "host"), seat_of(1, 2, edited, 2, "guest")}), catalog));
+        expect(timed.vote_timeout_seconds == 90, "a host's edited timeout reaches the agreed roster");
+    }
     expect(draft.players.size() == 4 && draft.players[0].faction == "REBEL" && draft.players[3].faction == "NEUTRAL"
         && draft.players[1].dropout == net::galactic_lobby_default_dropout && draft.players[0].ai_configuration.empty(),
         "every campaign faction is a player; claims are filled in at sealing");
@@ -702,6 +817,7 @@ void roster_draft() {
 class TickZeroAdapter final : public net::SessionAdapter {
 public:
     explicit TickZeroAdapter(std::shared_ptr<cp::GameSession> session) : session_(std::move(session)) {}
+    std::uint64_t tick_limit() const override { return sim::galactic::galactic_max_ticks; }
     std::uint64_t completed_tick() const override { return 0; }
     std::string state_hash() const override { return session_->state_sha256(); }
     Bytes canonical_state() const override { const auto hash = state_hash(); return Bytes(hash.begin(), hash.end()); }
@@ -756,8 +872,8 @@ struct MonitorOwner {
 
 class GcRoom {
 public:
-    GcRoom(std::vector<std::shared_ptr<Local>> locals, const net::GalacticLobbyOptions& options, std::uint32_t host_row, std::uint32_t capacity = 0)
-        : network(static_cast<std::uint32_t>(locals.size())) {
+    GcRoom(std::vector<std::shared_ptr<Local>> locals, const net::GalacticLobbyOptions& options, std::uint32_t host_row, std::uint32_t capacity = 0, bool concurrent = false)
+        : concurrent_prepare(concurrent), network(static_cast<std::uint32_t>(locals.size())) {
         const auto count = static_cast<unsigned>(locals.size());
         monitors.resize(count);
         for (unsigned peer = 0; peer < count; ++peer) {
@@ -822,6 +938,18 @@ public:
     }
     net::LobbyHooks hooks(unsigned peer) {
         net::LobbyHooks value;
+        if (concurrent_prepare) {
+            value.preparation_inputs = [this, peer](const auto& snapshot, const auto& seats) {
+                return peers[peer].backend->preparation_inputs(snapshot, seats);
+            };
+            value.preparation_domains = [this, peer](const auto& offer) {
+                return peers[peer].backend->preparation_domains(offer);
+            };
+            value.preparation_mounts = [this, peer](const auto& snapshot, const auto* offer) {
+                return peers[peer].backend->preparation_mounts(snapshot, offer);
+            };
+            value.discard_preparation = [this, peer] { peers[peer].backend->abandon_prepare(); };
+        }
         value.bind_setup_seats = [this, peer](const auto& snapshot, const auto& seats) {
             return peers[peer].backend->bind_setup_seats(snapshot, seats);
         };
@@ -835,6 +963,10 @@ public:
             const bool changed = epoch != observed_epochs[peer]; observed_epochs[peer] = epoch; return changed;
         };
         value.validate = [this, peer](const net::LobbySnapshot& snapshot, bool starting) { return peers[peer].backend->validate(snapshot, starting); };
+        value.follow_choice = [this, peer](const net::LobbySnapshot& before, net::LobbySnapshot& candidate, net::PeerIndex who) {
+            if (peers[peer].backend->checkpoint_view()) return eawr::core::Result<void>::success();
+            return net::follow_galactic_choice(before, candidate, who, peers[peer].backend->campaigns());
+        };
         value.offer = [this, peer](const net::LobbySnapshot& snapshot, const std::vector<net::SetupSeat>& seats) {
             return peers[peer].backend->offer(snapshot, seats);
         };
@@ -857,6 +989,7 @@ public:
         value.remove_peer = [](auto, auto) {};
         return value;
     }
+    bool concurrent_prepare;
     eawr::testing::FakeNetwork network;
     sim::InlineExecutor executor;
     std::shared_ptr<eawr::platform::ThreadWorkerAdapter> resumed_workers;
@@ -1147,6 +1280,18 @@ void recover_resumed_child(GcRoom& room, std::vector<net::LobbyResult> results,
     for (auto& driver : drivers) driver->session_ended();
 }
 
+// The guest restores a received save on its own thread (#6130), so "agreed" arrives in real time, not in lobby frames:
+// keep the frames going, a millisecond apart, until the condition holds or the deadline passes.
+template <class Condition>
+bool frames_until(GcRoom& room, Condition done, unsigned seconds = 120) {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(seconds);
+    while (!done() && std::chrono::steady_clock::now() < deadline) {
+        room.round();
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    return done();
+}
+
 void production_file_resume(unsigned workers, bool single_player_rules, bool pending_battle = false) {
     using Live = eawr::platform::LiveGameSession;
     using namespace std::chrono_literals;
@@ -1186,6 +1331,9 @@ void production_file_resume(unsigned workers, bool single_player_rules, bool pen
     terms.command_quota = static_cast<std::uint32_t>(net::max_batch_commands);
     terms.byte_quota = static_cast<std::uint32_t>(net::max_batch_bytes);
     auto agreed = require(cp::seal_mp_agreement(locals[0]->content, roster, terms));
+    // #6156: every peer's plan carries the roster's agreed vote timeout; the live vote setup arms its tick count from it.
+    expect(agreed.plan->vote_timeout_seconds() == std::optional<std::uint32_t>{roster.vote_timeout_seconds},
+        "the agreed roster's vote timeout reaches the setup plan");
     std::shared_ptr<eawr::platform::CampaignServiceConfiguration> pending_services;
     if (pending_battle) {
         const auto initial = agreed.plan->galaxy();
@@ -1304,7 +1452,7 @@ void production_file_resume(unsigned workers, bool single_player_rules, bool pen
         "refused mappings never publish a partial restored owner");
     for (auto& peer : room.peers) peer.backend->acceptance_final_tick(pending_battle ? 300 : horizon);
     require(room.peers[0].backend->select_checkpoint(room.host().snapshot(), candidate.original_roster, bindings, bytes, 1));
-    for (unsigned i = 0; i < 1000 && !room.peers[0].backend->checkpoint_progress().agreed; ++i) room.round();
+    frames_until(room, [&] { return room.peers[0].backend->checkpoint_progress().agreed; });
     expect(room.peers[0].backend->checkpoint_progress().agreed, "both peers accept the transferred file");
     room.all_ready();
     require(room.host().start(room.revision())); room.rounds(3);
@@ -1401,6 +1549,10 @@ std::string checkpoint_room_resume(unsigned workers, unsigned count, bool relay,
             "saved MP setup cannot be restored as the SP entry");
     }
     candidate.original_roster.tick_zero = roster.tick_zero;
+    // #6156: this fixture arms no vote service, so its save recorded no vote timeout and the inspected roster carries none.
+    expect(candidate.original_roster.vote_timeout_seconds == 0 && roster.vote_timeout_seconds == 15,
+        "a save without a vote service recorded no timeout; the room's roster has the default");
+    candidate.original_roster.vote_timeout_seconds = roster.vote_timeout_seconds;
     expect(candidate.original_roster == roster && candidate.seed == match_seed, "UI inspection recovers original saved roster and seed without new-game placement");
     expect(candidate.original_roster.players.size() == 4
         && candidate.original_roster.players[2].faction == "UNDERWORLD"
@@ -1440,7 +1592,7 @@ std::string checkpoint_room_resume(unsigned workers, unsigned count, bool relay,
     if (workers == 1 && !relay) {
         auto prepared = require(room.peers[0].backend->prepare_checkpoint(room.host().snapshot(), roster, bindings, bytes, 1));
         auto display_only = room.host().snapshot();
-        display_only.mounted_mods = {1, 1, 0, 0, 0, 0};
+        display_only.mounted_mods = {3, 1, 0, 0, 0, 0};
         const auto with_mods = require(room.peers[0].backend->prepare_checkpoint(display_only, roster, bindings, bytes, 1));
         expect(with_mods.manifest.offer.setup == prepared.manifest.offer.setup
             && with_mods.manifest.offer.identity.build == prepared.manifest.offer.identity.build
@@ -1465,7 +1617,7 @@ std::string checkpoint_room_resume(unsigned workers, unsigned count, bool relay,
     }
     if (relay) room.network.emulate(eawr::testing::wan_profiles[1]);
     if (lobby_failure != 2) {
-        for (unsigned round = 0; round < 1000 && !room.peers[0].backend->checkpoint_progress().agreed; ++round) room.round();
+        frames_until(room, [&] { return room.peers[0].backend->checkpoint_progress().agreed; });
         expect(room.peers[0].backend->checkpoint_progress().agreed, "all restored proofs agree before Start");
     }
     if (lobby_failure) {
@@ -1554,6 +1706,247 @@ std::string checkpoint_room_resume(unsigned workers, unsigned count, bool relay,
     return source.session->state_sha256();
 }
 
+
+// The guest's restore of a received save runs on its own thread (#6130): the lobby frame never waits for it, a selection
+// cleared or replaced while it runs leaves nothing of the old one, and only the newest selection is installed. The restore
+// callback of the guest blocks on a gate the test opens, so the thread is provably still running while the frames go on.
+struct RestoreGate {
+    std::mutex mutex;
+    std::condition_variable condition;
+    bool open{};
+    std::atomic<int> entered{};
+    void wait() {
+        std::unique_lock lock(mutex);
+        condition.wait_for(lock, std::chrono::seconds(30), [&] { return open; }); // a regression times out, it does not hang
+    }
+    void release() {
+        { const std::lock_guard lock(mutex); open = true; }
+        condition.notify_all();
+    }
+};
+
+void guest_restore_runs_off_the_ui_thread() {
+    const auto gate = std::make_shared<RestoreGate>();
+    auto locals = locals_of(2);
+    // A held or dropped restore thread keeps raw pointers into these peers' data until it ends: keep them for the process.
+    static std::vector<std::vector<std::shared_ptr<Local>>> kept_alive;
+    kept_alive.push_back(locals);
+    locals[1]->content.restore_session = [gate](const cp::CampaignSetupPlan& plan, std::string_view,
+        std::span<const std::uint8_t> saved) -> eawr::core::Result<cp::MpPreparedSession> {
+        ++gate->entered; gate->wait();
+        eawr::checkpoint::GameLoadOptions load; load.script_requirement = cp::ScriptRequirement::none;
+        const sim::InlineExecutor executor;
+        auto restored = eawr::checkpoint::load_game_checkpoint(saved, eawr::checkpoint::game_identities(plan.galaxy()), load, executor);
+        if (!restored) return eawr::core::Result<cp::MpPreparedSession>::failure(restored.error());
+        return eawr::core::Result<cp::MpPreparedSession>::success({
+            std::make_shared<cp::GameSession>(std::move(restored).value().session), {}, {}});
+    };
+    GcRoom room(locals, coop_options(*locals[0]), 1);
+    room.resumed_workers = std::make_shared<eawr::platform::ThreadWorkerAdapter>(1);
+    room.resumed_clock_policy = net::GalacticClockPolicy::limited;
+    room.admit(1, 1, "guest");
+    auto roster = require(net::galactic_roster_draft(room.host().snapshot(), locals[0]->catalog()));
+    for (auto& seat : roster.seats) seat.seat_id.value += 10;
+    for (auto& team : roster.teams) team.lead.value += 10;
+    cp::MpSessionTerms terms; terms.seed = match_seed;
+    terms.command_quota = static_cast<std::uint32_t>(net::max_batch_commands); terms.byte_quota = static_cast<std::uint32_t>(net::max_batch_bytes);
+    auto source = require(cp::seal_mp_agreement(locals[0]->content, roster, terms));
+    net::GalacticAdapterOptions clock_options; clock_options.clock_policy = net::GalacticClockPolicy::limited;
+    net::GalacticSessionAdapter source_adapter(*source.session, *room.resumed_workers, clock_options);
+    for (std::uint64_t tick = 0; tick < 7; ++tick) require(source_adapter.step());
+    auto sequences = source.session->producer_sequences();
+    std::vector<net::SetupSeat> bindings;
+    for (unsigned peer = 0; peer < 2; ++peer) {
+        const sim::SeatId seat{peer + 11}; sequences[seat] = 100 + peer;
+        bindings.push_back({peer, seat, 1});
+    }
+    require(source.session->retain_network_producer_sequences(sequences));
+    require(source.session->retain_network_resume_state(source_adapter.checkpoint_network_state()));
+    auto saved = require(eawr::checkpoint::parse_checkpoint(require(eawr::checkpoint::save_game_checkpoint(*source.session,
+        eawr::checkpoint::game_identities(source.session->galaxy().setup())))));
+    eawr::platform::LiveSaveCampaign description;
+    description.campaign = roster.campaign; description.difficulty = roster.difficulty; description.multiplayer = true;
+    description.faction = roster.players.front().faction; description.seat = bindings.front().seat.value;
+    saved.sections.push_back(eawr::platform::save_detail::encode_campaign(description));
+    const auto bytes = std::make_shared<const Bytes>(require(eawr::checkpoint::write_checkpoint(saved)));
+    room.all_ready();
+    const auto wait_for_entries = [&](int count) {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(20);
+        while (gate->entered < count && std::chrono::steady_clock::now() < deadline) room.round();
+        return gate->entered >= count;
+    };
+    const auto guest = [&]() -> viewer::GalacticLobbyBackend& { return *room.peers[1].backend; };
+    const auto host = [&]() -> viewer::GalacticLobbyBackend& { return *room.peers[0].backend; };
+
+    // 1. The restore is blocked: the frames go on, nothing is restored or agreed, and the wait is on the thread, not the frame.
+    require(host().select_checkpoint(room.host().snapshot(), roster, bindings, bytes, 1));
+    expect(wait_for_entries(1), "the guest's restore starts on its own thread");
+    const auto before = std::chrono::steady_clock::now();
+    room.rounds(60);
+    const auto blocked_ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - before).count();
+    expect(blocked_ms < 5000, "lobby frames do not wait for a running restore (60 frames took " + std::to_string(blocked_ms) + " ms)");
+    expect(!guest().checkpoint_progress().restored && guest().initial_tick() == 0, "the guest is not restored while its restore runs");
+    expect(!host().checkpoint_progress().agreed, "the host does not see agreement while the guest's restore runs");
+
+    // 2. The selection is cleared while the restore runs: the finished restore leaves no selection behind.
+    host().clear_checkpoint();
+    room.rounds(6);
+    gate->release();
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    room.rounds(30);
+    expect(!guest().checkpoint_manifest() && !guest().checkpoint_view() && guest().initial_tick() == 0,
+        "a selection cleared while the restore ran installs nothing when the restore finishes");
+    expect(!host().checkpoint_progress().agreed, "no agreement survives a cleared selection");
+
+    // 2b. A failure that persists across frames is traced once, not once per frame: the room changes under a selection, and
+    // the host keeps refusing its binding.
+    {
+        std::vector<std::string> cancels;
+        host().set_checkpoint_trace([&](std::string_view event, const std::string& detail) {
+            if (event == "cancel" || event == "select-failed") cancels.push_back(std::string(event) + " " + detail);
+        });
+        require(host().select_checkpoint(room.host().snapshot(), roster, bindings, bytes, host().selection_epoch() + 1));
+        frames_until(room, [&] { return host().checkpoint_progress().agreed; });
+        expect(host().checkpoint_progress().agreed, "the reselected checkpoint is agreed before the room changes");
+        require(room.host().kick(1, room.revision())); room.drop_last();
+        for (unsigned frame = 0; frame < 60; ++frame) room.round();
+        expect(cancels.size() <= 1, "a binding refusal that persists is traced once, not once per frame (" + std::to_string(cancels.size()) + " lines)");
+        host().set_checkpoint_trace({});
+    }
+
+    // 3. A second selection replaces the first while the first restore still runs: only the newer epoch is installed.
+    {
+        const auto replace_gate = std::make_shared<RestoreGate>();
+        auto fresh = locals_of(2);
+        kept_alive.push_back(fresh);
+        fresh[1]->content.restore_session = [replace_gate](const cp::CampaignSetupPlan& plan, std::string_view,
+            std::span<const std::uint8_t> data) -> eawr::core::Result<cp::MpPreparedSession> {
+            const int entry = ++replace_gate->entered;
+            if (entry == 1) replace_gate->wait(); // only the first (older) restore is held; the newer one runs straight through
+            eawr::checkpoint::GameLoadOptions load; load.script_requirement = cp::ScriptRequirement::none;
+            const sim::InlineExecutor executor;
+            auto restored = eawr::checkpoint::load_game_checkpoint(data, eawr::checkpoint::game_identities(plan.galaxy()), load, executor);
+            if (!restored) return eawr::core::Result<cp::MpPreparedSession>::failure(restored.error());
+            return eawr::core::Result<cp::MpPreparedSession>::success({
+                std::make_shared<cp::GameSession>(std::move(restored).value().session), {}, {}});
+        };
+        GcRoom second(fresh, coop_options(*fresh[0]), 1);
+        second.resumed_workers = std::make_shared<eawr::platform::ThreadWorkerAdapter>(1);
+        second.resumed_clock_policy = net::GalacticClockPolicy::limited;
+        second.admit(1, 1, "guest");
+        second.all_ready();
+        require(second.peers[0].backend->select_checkpoint(second.host().snapshot(), roster, bindings, bytes, 1));
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(20);
+        while (replace_gate->entered < 1 && std::chrono::steady_clock::now() < deadline) second.round();
+        expect(replace_gate->entered >= 1, "the first selection's restore is running");
+        second.all_ready();
+        require(second.peers[0].backend->select_checkpoint(second.host().snapshot(), roster, bindings, bytes, 2));
+        frames_until(second, [&] { return second.peers[0].backend->checkpoint_progress().agreed; });
+        expect(second.peers[0].backend->checkpoint_progress().agreed, "the newer selection restores while the older restore is still held");
+        const auto manifest = second.peers[1].backend->checkpoint_manifest();
+        expect(manifest && manifest->epoch == 2, "the guest holds the newer selection");
+        replace_gate->release();
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        second.rounds(30);
+        const auto after = second.peers[1].backend->checkpoint_manifest();
+        expect(after && after->epoch == 2 && second.peers[0].backend->checkpoint_progress().agreed,
+            "the older restore finishing late does not replace the newer selection");
+    }
+}
+
+// ---- #6134: a guest picks any free playable faction, still two human sides ----
+
+void free_faction_choice() {
+    Local three_factions;
+    three_factions.data.factions[2].is_playable = true; // REBEL, EMPIRE and UNDERWORLD are all playable
+    const auto catalog = three_factions.catalog();
+    const auto& campaign = catalog.front();
+    const auto options = require(net::default_galactic_lobby_options(campaign, difficulty, match_seed));
+    expect(options.rows[0].human && options.rows[1].human && !options.rows[2].human, "the room plans the first two playable factions");
+    const auto before = snapshot_of(options, {seat_of(0, 1, options, 1, "host"), seat_of(1, 2, options, 2, "guest")});
+    // The pure rule.
+    const auto moved = net::galactic_lobby_options_with_seat_on(options, campaign, before, 1, 3);
+    expect(moved.has_value() && moved->rows[0].human && !moved->rows[1].human && moved->rows[2].human,
+        "the guest moving to the free faction opens it and closes the row it leaves");
+    expect(net::galactic_lobby_options_with_seat_on(options, campaign, before, 1, 2) == options, "a planned row stays as it is");
+    expect(!net::galactic_lobby_options_with_seat_on(options, campaign, before, 1, 4).has_value(), "a neutral faction cannot be taken");
+    expect(!net::galactic_lobby_options_with_seat_on(options, campaign, before, 1, 9).has_value(), "an unknown row cannot be taken");
+    const auto shared = snapshot_of(options, {seat_of(0, 1, options, 2, "host"), seat_of(1, 2, options, 2, "guest")});
+    expect(!net::galactic_lobby_options_with_seat_on(options, campaign, shared, 1, 3).has_value(),
+        "a move that would plan a third human side is refused (the other seat still holds the row it leaves)");
+    Local two_playable;
+    expect(!net::galactic_lobby_options_with_seat_on(options, two_playable.catalog().front(), before, 1, 3).has_value(),
+        "a faction the campaign does not let a player hold cannot be taken");
+    // The choice hook rewrites the room.
+    auto candidate = before;
+    candidate.seats[1].selection.slot = 3; candidate.seats[1].selection.faction = "UNDERWORLD"; candidate.seats[1].selection.team = 0;
+    expect(net::follow_galactic_choice(before, candidate, 1, catalog).has_value(), "the choice hook accepts a free faction");
+    const auto planned = require(net::decode_galactic_lobby_game(candidate.game));
+    expect(planned.rows[0].human && !planned.rows[1].human && planned.rows[2].human, "the hook reshapes the rows");
+    expect(candidate.seats[0].selection.team == 1 && candidate.seats[1].selection.team == 2 && candidate.seats[1].selection.faction == "UNDERWORLD",
+        "every seat's side and faction follow its row");
+    expect(net::validate_galactic_lobby(candidate, false, catalog).has_value(), "the reshaped room validates");
+    auto crowded = shared;
+    crowded.seats[1].selection.slot = 3; crowded.seats[1].selection.faction = "UNDERWORLD";
+    const auto refusal = net::follow_galactic_choice(shared, crowded, 1, catalog);
+    expect(!refusal && refusal.error().message.find("at most two human sides") != std::string::npos,
+        "a third side is refused with the reason");
+    // The faction dropdown offers the same rows the hook accepts.
+    const auto offered = eawr::viewer::galactic::faction_choices(options, eawr::data::Catalog{}, nullptr, campaign, before, 1);
+    expect(offered.size() == 3 && offered[2].row == 2, "the guest's dropdown lists the free playable faction");
+    const auto host_offered = eawr::viewer::galactic::faction_choices(options, eawr::data::Catalog{}, nullptr, campaign, shared, 1);
+    expect(host_offered.size() == 2, "a faction that would make a third side is not listed");
+    expect(eawr::viewer::galactic::faction_choice_player(options, 2, campaign) == std::optional<gc::PlayerId>{3}
+        && !eawr::viewer::galactic::faction_choice_player(options, 3, campaign).has_value(),
+        "the free faction maps to its player, a neutral row to none");
+
+    // A live room: the guest picks the free faction through the lobby, the host's session reshapes the room.
+    std::vector<std::shared_ptr<Local>> locals;
+    for (int i = 0; i < 2; ++i) { locals.push_back(std::make_shared<Local>()); locals.back()->data.factions[2].is_playable = true; }
+    GcRoom room(locals, require(net::default_galactic_lobby_options(locals[0]->catalog().front(), difficulty, match_seed)), 1, 0, true);
+    room.admit(1, 2, "guest");
+    expect(room.host().snapshot().seats.size() == 2, "the guest holds the Empire row");
+    // The host opens its options modal now: it keeps a copy of the options, rows included.
+    const auto opened = require(net::decode_galactic_lobby_game(room.host().snapshot().game));
+    auto choice = room.sessions[1].snapshot().seats[1].selection;
+    choice.slot = 3; choice.faction = "UNDERWORLD"; choice.team = 0;
+    require(room.sessions[1].request(net::LobbyAction::select, room.revision(), choice));
+    room.rounds(6);
+    const auto live = require(net::decode_galactic_lobby_game(room.host().snapshot().game));
+    expect(live.rows[0].human && !live.rows[1].human && live.rows[2].human, "the host's room plans the guest's new faction");
+    const auto guest_view = require(net::decode_galactic_lobby_game(room.sessions[1].snapshot().game));
+    expect(guest_view == live, "the guest sees the same rows");
+    for (const auto& seat : room.host().snapshot().seats)
+        expect(seat.selection.team == (seat.selection.slot == 1 ? 1U : 2U), "each seat is on the side of its row");
+    expect(net::validate_galactic_lobby(room.host().snapshot(), false, locals[0]->catalog()).has_value(), "the live room validates");
+    // The host presses OK in the modal it opened before the guest moved: its copy has the old rows (the guest's new row not planned).
+    auto edited = opened;
+    edited.auto_resolve = opened.auto_resolve == 1 ? 2U : 1U;
+    const auto stale = room.host().configure_game(require(net::encode_galactic_lobby_game(edited)), room.host().snapshot().seats, room.revision());
+    expect(!stale, "the modal's stale rows are refused (the guest's new row would be AI)");
+    edited.rows = live.rows; // what the screen now does on accept: the rows come from the room as it is
+    require(room.host().configure_game(require(net::encode_galactic_lobby_game(edited)), room.host().snapshot().seats, room.revision()));
+    const auto after_ok = require(net::decode_galactic_lobby_game(room.host().snapshot().game));
+    expect(after_ok.auto_resolve == edited.auto_resolve && after_ok.rows == live.rows,
+        "OK after a guest reshape succeeds: the modal's setting is applied and the guest's row stays planned");
+    const auto guest = room.host().snapshot().seats[1];
+    require(room.host().assign(guest.peer, guest.selection, guest.selection.slot, room.revision()));
+    room.rounds(3);
+    room.propose();
+    const auto frozen = room.host().snapshot();
+    expect(frozen.start_attempt != net::LobbyDigest{} && require(net::decode_galactic_lobby_game(frozen.game)).rows == live.rows,
+        "the concurrent preparation manifest freezes the guest's normalized free-faction choice");
+    expect(!room.sessions[1].request(net::LobbyAction::select, room.revision(), before.seats[1].selection),
+        "a guest cannot reshape the faction rows after the preparation manifest freezes");
+    require(room.sessions[1].accept_setup());
+    room.rounds(20);
+    for (auto& session : room.sessions) {
+        auto result = require(session.take_result());
+        const auto& offer = result.setup().offer();
+        expect(offer.seats.size() == 2 && offer.seats[0].player == 1 && offer.seats[1].player == 3,
+            "the unanimous Start and setup retain the reshaped normalized human seats");
+    }
+}
 
 void check_committed(GcRoom& room, const std::string& label, std::size_t humans, std::uint64_t seed = match_seed) {
     std::vector<net::LobbyResult> results;
@@ -1970,6 +2363,173 @@ void preparation_attempt_lifetime() {
         "changed AI claim independently derives a differing identity");
 }
 
+// #6045: the derivation runs on a worker thread and the caller keeps polling. Pending while it runs, one derivation for equal
+// inputs (a different revision or readiness does not restart it), another request waits for it, and the result is the one a
+// synchronous offer() would have cached.
+void asynchronous_offer() {
+    Local local;
+    std::mutex gate_mutex;
+    std::condition_variable gate_changed;
+    bool open = false;
+    std::atomic<unsigned> preparations{};
+    std::atomic<bool> off_thread{};
+    const auto caller = std::this_thread::get_id();
+    local.content.prepare_session = [&](const cp::CampaignSetupPlan& plan, std::string_view)
+        -> eawr::core::Result<cp::MpPreparedSession> {
+        ++preparations;
+        if (std::this_thread::get_id() != caller) off_thread = true;
+        std::unique_lock lock(gate_mutex);
+        gate_changed.wait(lock, [&] { return open; });
+        return eawr::core::Result<cp::MpPreparedSession>::success({
+            std::make_shared<cp::GameSession>(require(cp::GameSession::create(plan.galaxy()))), {}});
+    };
+    auto backend = std::make_shared<viewer::GalacticLobbyBackend>(local.content);
+    auto options = two_side_options(local);
+    auto snapshot = snapshot_of(options, {seat_of(0, 1, options, 1, "Host"), seat_of(1, 2, options, 2, "Guest")});
+    const std::vector<net::SetupSeat> seats{{0, {1}, 1}, {1, {2}, 2}};
+    const auto pending = [](const eawr::core::Result<net::SetupOffer>& answer) { return !answer && net::is_start_pending(answer.error()); };
+    const auto wait_for = [](const auto& condition) {
+        for (unsigned i = 0; i < 3000 && !condition(); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        return condition();
+    };
+
+    expect(viewer::GalacticLobbyBackend::PrepareProgress{}.state == viewer::GalacticLobbyBackend::PrepareProgress::State::idle
+        && backend->prepare_progress().state == viewer::GalacticLobbyBackend::PrepareProgress::State::idle,
+        "#6045 nothing is being prepared before the first request");
+    expect(pending(viewer::GalacticLobbyBackend::offer_async(backend, snapshot, seats)), "#6045 the first request answers pending at once");
+    expect(wait_for([&] { return preparations.load() == 1; }), "#6045 the worker started the derivation");
+    expect(off_thread.load(), "#6045 the derivation does not run on the calling thread");
+    expect(backend->prepare_progress().state == viewer::GalacticLobbyBackend::PrepareProgress::State::running,
+        "#6045 progress reads running while the derivation runs");
+
+    // The room moved on (revision, readiness) without changing what is derived: the running derivation serves it.
+    auto later = snapshot; later.revision += 3; later.frozen_revision = later.revision;
+    for (auto& seat : later.seats) seat.ready = !seat.ready;
+    for (unsigned i = 0; i < 5; ++i)
+        expect(pending(viewer::GalacticLobbyBackend::offer_async(backend, later, seats)), "#6045 an equal request stays pending");
+    expect(preparations.load() == 1, "#6045 equal inputs never start a second derivation");
+
+    // Different inputs (another seed) wait for the running derivation to end and say so.
+    auto other_options = options; other_options.seed += 7;
+    const auto other = snapshot_of(other_options, {seat_of(0, 1, other_options, 1, "Host"), seat_of(1, 2, other_options, 2, "Guest")});
+    expect(pending(viewer::GalacticLobbyBackend::offer_async(backend, other, seats)), "#6045 a different request answers pending");
+    expect(backend->prepare_progress().state == viewer::GalacticLobbyBackend::PrepareProgress::State::waiting_for_earlier
+        && preparations.load() == 1, "#6045 a different request waits for the earlier derivation and says so, no second derivation runs");
+
+    // A second backend in the same process waits too: one derivation at a time.
+    auto sibling = std::make_shared<viewer::GalacticLobbyBackend>(local.content);
+    expect(pending(viewer::GalacticLobbyBackend::offer_async(sibling, snapshot, seats))
+        && sibling->prepare_progress().state == viewer::GalacticLobbyBackend::PrepareProgress::State::waiting_for_earlier
+        && preparations.load() == 1, "#6045 another backend waits for the running derivation");
+    sibling->abandon_prepare();
+
+    { const std::lock_guard lock(gate_mutex); open = true; }
+    gate_changed.notify_all();
+    // Back to the first request: it gets the result of the derivation that ran, once.
+    auto answered = viewer::GalacticLobbyBackend::offer_async(backend, later, seats);
+    expect(wait_for([&] { answered = viewer::GalacticLobbyBackend::offer_async(backend, later, seats); return !pending(answered); }),
+        "#6045 the finished derivation answers");
+    const auto offer = require(std::move(answered));
+    expect(preparations.load() == 1, "#6045 the answer is the one derivation, not a new one");
+    expect(backend->prepare_progress().state == viewer::GalacticLobbyBackend::PrepareProgress::State::idle,
+        "#6045 progress reads idle once the answer is taken");
+    require(backend->identify(offer));
+    expect(preparations.load() == 1 && backend->agreement(), "#6045 identify reuses the asynchronous preparation");
+    const auto repeated = viewer::GalacticLobbyBackend::offer_async(backend, later, seats);
+    expect(repeated && repeated.value().setup == offer.setup, "#6045 a repeated request is answered from the cache");
+
+    // The different request now gets its own derivation (the earlier one ended, its result was for other inputs).
+    expect(wait_for([&] { return !pending(viewer::GalacticLobbyBackend::offer_async(backend, other, seats)); }),
+        "#6045 the different request is derived after the earlier one ended");
+    expect(preparations.load() == 2, "#6045 exactly one more derivation ran for the different inputs");
+    backend->release_prepare();
+    sibling->release_prepare();
+}
+
+// #6117 review: the previous preparation (a whole prepared campaign session) is freed before the next derivation starts, so a retry
+// after an aborted attempt never holds two sessions at the derivation's peak.
+void asynchronous_offer_frees_the_previous_preparation() {
+    Local local;
+    std::mutex gate_mutex;
+    std::condition_variable gate_changed;
+    bool second_may_finish = false;
+    std::mutex sessions_mutex;
+    std::vector<std::weak_ptr<cp::GameSession>> sessions;
+    local.content.prepare_session = [&](const cp::CampaignSetupPlan& plan, std::string_view)
+        -> eawr::core::Result<cp::MpPreparedSession> {
+        auto session = std::make_shared<cp::GameSession>(require(cp::GameSession::create(plan.galaxy())));
+        std::size_t index{};
+        { const std::lock_guard lock(sessions_mutex); sessions.push_back(session); index = sessions.size(); }
+        if (index > 1) {
+            std::unique_lock lock(gate_mutex);
+            gate_changed.wait(lock, [&] { return second_may_finish; });
+        }
+        return eawr::core::Result<cp::MpPreparedSession>::success({std::move(session), {}});
+    };
+    auto backend = std::make_shared<viewer::GalacticLobbyBackend>(local.content);
+    const auto options = two_side_options(local);
+    const auto first = snapshot_of(options, {seat_of(0, 1, options, 1, "Host"), seat_of(1, 2, options, 2, "Guest")});
+    const std::vector<net::SetupSeat> seats{{0, {1}, 1}, {1, {2}, 2}};
+    const auto wait_for = [](const auto& condition) {
+        for (unsigned i = 0; i < 3000 && !condition(); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        return condition();
+    };
+    eawr::core::Result<net::SetupOffer> answer = viewer::GalacticLobbyBackend::offer_async(backend, first, seats);
+    expect(wait_for([&] {
+        answer = viewer::GalacticLobbyBackend::offer_async(backend, first, seats);
+        return answer || !net::is_start_pending(answer.error());
+    }) && answer, "#6045 the first derivation answers");
+    std::weak_ptr<cp::GameSession> first_session;
+    { const std::lock_guard lock(sessions_mutex); expect(sessions.size() == 1, "one session was built"); first_session = sessions.front(); }
+    expect(!first_session.expired(), "#6045 the answered preparation holds its session for the identify that follows");
+    // A retry with other inputs (the room changed after an aborted attempt): the old session is gone before the new derivation finishes.
+    auto changed = options; changed.seed += 11;
+    const auto second = snapshot_of(changed, {seat_of(0, 1, changed, 1, "Host"), seat_of(1, 2, changed, 2, "Guest")});
+    const auto pending = viewer::GalacticLobbyBackend::offer_async(backend, second, seats);
+    expect(!pending && net::is_start_pending(pending.error()), "#6045 the retry derives again");
+    expect(first_session.expired(), "#6045 the previous preparation's session is freed before the new derivation runs");
+    { const std::lock_guard lock(gate_mutex); second_may_finish = true; }
+    gate_changed.notify_all();
+    expect(wait_for([&] {
+        const auto result = viewer::GalacticLobbyBackend::offer_async(backend, second, seats);
+        return result || !net::is_start_pending(result.error());
+    }), "#6045 the retry's derivation finishes");
+    backend->release_prepare();
+}
+
+// #6045: a failing derivation answers its failure once, then a retry derives again.
+void asynchronous_offer_failure() {
+    Local local;
+    std::atomic<unsigned> attempts{};
+    local.content.prepare_session = [&](const cp::CampaignSetupPlan& plan, std::string_view)
+        -> eawr::core::Result<cp::MpPreparedSession> {
+        if (++attempts == 1) return eawr::core::Result<cp::MpPreparedSession>::failure(
+            net::lobby_diagnostic(net::LobbyReason::setup_failed, "synthetic derivation failure"));
+        return eawr::core::Result<cp::MpPreparedSession>::success({
+            std::make_shared<cp::GameSession>(require(cp::GameSession::create(plan.galaxy()))), {}});
+    };
+    auto backend = std::make_shared<viewer::GalacticLobbyBackend>(local.content);
+    const auto options = two_side_options(local);
+    const auto snapshot = snapshot_of(options, {seat_of(0, 1, options, 1, "Host"), seat_of(1, 2, options, 2, "Guest")});
+    const std::vector<net::SetupSeat> seats{{0, {1}, 1}, {1, {2}, 2}};
+    std::optional<eawr::core::Result<net::SetupOffer>> answer;
+    for (unsigned i = 0; i < 3000; ++i) {
+        answer = viewer::GalacticLobbyBackend::offer_async(backend, snapshot, seats);
+        if (!(!*answer && net::is_start_pending(answer->error()))) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    expect(answer && !*answer && !net::is_start_pending(answer->error())
+        && answer->error().message.find("synthetic derivation failure") != std::string::npos,
+        "#6045 a failed derivation answers its own failure, not pending");
+    for (unsigned i = 0; i < 3000; ++i) {
+        answer = viewer::GalacticLobbyBackend::offer_async(backend, snapshot, seats);
+        if (!(!*answer && net::is_start_pending(answer->error()))) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    expect(answer && *answer && attempts.load() == 2, "#6045 a retry after the failure derives again and succeeds");
+    backend->release_prepare();
+}
+
 void wire_identity_and_preparation_keys() {
     Local local;
     unsigned preparations = 0;
@@ -2012,8 +2572,8 @@ void wire_identity_and_preparation_keys() {
     misses([](auto& value) { value.domain += "-other"; }, "changed domain independently derives");
 
     const auto payload = require(net::decode_galactic_setup(offer.setup));
-    // GCSU v1: magic/version, two length-prefixed texts, custom, three i64 options, heroes, then two u32 quotas.
-    const auto quota_offset = 8U + 4U + payload.roster.campaign.size() + 4U + payload.roster.difficulty.size() + 1U + 24U + 1U;
+    // GCSU v3: magic/version, two length-prefixed texts, custom, three i64 options, heroes, the u32 vote timeout, then two u32 quotas.
+    const auto quota_offset = 8U + 4U + payload.roster.campaign.size() + 4U + payload.roster.difficulty.size() + 1U + 24U + 1U + 4U;
     for (const auto offset : {quota_offset, quota_offset + 4U}) {
         auto changed = offer;
         changed.setup.at(offset) ^= 1U; // Invalid quotas cannot be produced by the canonical encoder.
@@ -2060,14 +2620,351 @@ void reoffer_keeps_agreed_services() {
 // #4554: the scripted GC LAN acceptance (--eawr-gc-lan-final-tick) shortens host and joiner alike. The backend exposes
 // the value so the lobby's setup hook can apply it to the session limit that setup.cpp checks against the offer;
 // a real game never sets it and keeps the default cap.
+void preparation_content_manifest() {
+    const auto root = std::filesystem::temp_directory_path() / ("eawr-prepare-content-"
+        + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    struct Cleanup { std::filesystem::path root; ~Cleanup() { eawr::testing::remove_temp_directory(root); } } cleanup{root};
+    for (const auto* folder : {"base/xml", "base/scripts", "base/custom", "leaf/scripts", "parent/scripts"}) std::filesystem::create_directories(root / folder);
+    const auto write = [&](const auto& path, std::string_view bytes) {
+        std::ofstream output(root / path); output << bytes;
+        if (!output) throw std::runtime_error("could not write preparation content fixture");
+    };
+    write("base/xml/factionfiles.xml", "<Faction_Files><File>factions.xml</File></Faction_Files>");
+    write("base/xml/factions.xml", "<Factions><Faction Name=\"SYNTHETIC\"/></Factions>");
+    write("base/xml/traderoutefiles.xml", "<Trade_Route_Files><File>data/custom/routes.xml</File></Trade_Route_Files>");
+    write("base/custom/routes.xml", "<Trade_Routes/>");
+    write("base/xml/gameconstants.xml", "<Game_Constants/>");
+    write("base/scripts/test.lua", "return 1");
+    write("leaf/scripts/leaf.lua", "return 3");
+    write("parent/scripts/parent.lua", "return 4");
+    std::filesystem::create_directories(root / "relocated");
+    for (const auto* folder : {"base", "leaf", "parent"})
+        std::filesystem::copy(root / folder, root / "relocated" / folder, std::filesystem::copy_options::recursive);
+    const auto relocated_xml = root / "relocated/base/xml/factions.xml";
+    std::filesystem::last_write_time(relocated_xml, std::filesystem::last_write_time(relocated_xml) + std::chrono::hours(1));
+    // Per-install caches are outside the mounted data roots and never enter the content commitment.
+    std::filesystem::create_directories(root / "shader-cache");
+    std::filesystem::create_directories(root / "model-cache");
+    write("shader-cache/cache.bin", "local shader cache");
+    write("model-cache/cache.bin", "local model cache");
+    const auto load = [&](bool reverse, bool aliases = false, bool relocated = false) {
+        const auto mounted = relocated ? root / "relocated" : root;
+        std::vector<eawr::vfs::MountSpec> mounts{{aliases ? "workshop:123" : "leaf", mounted / "leaf", "data", {}},
+            {aliases ? "path:manual-parent" : "parent", mounted / "parent", "data", {}}, {"base", mounted / "base", "data", {}}};
+        if (reverse) std::swap(mounts[0], mounts[1]);
+        auto files = std::make_shared<const eawr::vfs::Vfs>(require(eawr::vfs::Vfs::mount(mounts)));
+        const auto catalog = require(eawr::data::load_catalog(*files, eawr::data::Profile::foc));
+        std::vector<eawr::units::InputFile> receipts;
+        const auto legacy = require(eawr::skirmish::read_data_identity(*files));
+        // Pre-receipt encoding at 8e18b90e9100309ed4a401dbf1cb323d29af887b, independently derived from these
+        // synthetic bytes. Comparing the two current overloads alone would miss a shared encoding regression.
+        expect(legacy.script_manifest_digest == "e1ed62965b438d0f1358926dbfc905b489482af3419c64ecdbec6f731df3c56e"
+            && legacy.ai_data_digest == "5d8f3c58a624c5a021eee7f6d5889e42e492f61ffbf9c1d5284c82710fc188e0",
+            "the original overload preserves its pre-receipt Lua and XML identity bytes");
+        const auto collected = require(eawr::skirmish::read_data_identity(*files, &receipts));
+        expect(legacy.script_manifest_digest == collected.script_manifest_digest && legacy.ai_data_digest == collected.ai_data_digest
+            && !receipts.empty(), "consumed-byte receipts preserve existing XML/Lua identity bytes");
+        return require(viewer::load_galactic_lobby_content(*files, catalog.catalog, files));
+    };
+    auto first = load(false), second = load(true);
+    expect(first.local.xml_digest == second.local.xml_digest
+        && first.local.script_manifest_digest == second.local.script_manifest_digest
+        && first.local.mounted_chain_digest != second.local.mounted_chain_digest,
+        "mount order is explicit even when effective XML/Lua bytes happen to match");
+    const auto renamed = load(false, true), moved = load(false, true, true);
+    expect(first.local.mounted_chain_digest == renamed.local.mounted_chain_digest
+        && first.local.mounted_chain_digest == moved.local.mounted_chain_digest,
+        "identical mounted content agrees across workshop/manual keys, installation locations and file timestamps");
+    require(first.local.verify_preparation_content());
+    write("base/scripts/test.lua", "return 2");
+    expect(!first.local.verify_preparation_content(), "a changed Lua module invalidates the verified preparation inputs");
+    write("base/scripts/test.lua", "return 1"); require(first.local.verify_preparation_content());
+    write("base/custom/routes.xml", "<Trade_Routes><!--same world, changed consumed input--></Trade_Routes>");
+    expect(!first.local.verify_preparation_content(), "world registry includes outside data/xml are reverified");
+    expect(load(false).local.mounted_chain_digest != first.local.mounted_chain_digest,
+        "per-layer checksums cover actual world inputs outside the conventional closure");
+    write("base/custom/routes.xml", "<Trade_Routes/>"); require(first.local.verify_preparation_content());
+    write("base/xml/factions.xml", "<Factions><Faction Name=\"CHANGED\"/></Factions>");
+    expect(!first.local.verify_preparation_content(), "changed XML invalidates earlier loaded catalog inputs");
+}
+
+void late_preparation_content_reads() {
+    const auto root = std::filesystem::temp_directory_path() / ("eawr-late-content-"
+        + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    struct Cleanup { std::filesystem::path root; ~Cleanup() { eawr::testing::remove_temp_directory(root); } } cleanup{root};
+    std::filesystem::create_directories(root / "scripts"); std::filesystem::create_directories(root / "custom");
+    const auto write = [&](std::string_view path, std::string_view bytes) {
+        std::ofstream output(root / path); output << bytes;
+        if (!output) throw std::runtime_error("cannot write late-read fixture");
+    };
+    write("scripts/lazy.lua", "return 1");
+    write("custom/late-story.txt", "unagreed story input");
+    write("custom/unused-hint.bin", "speculative bytes");
+    write("custom/consumed.bin", "prepared bytes");
+    std::filesystem::create_directories(root / "art/models");
+    // The shared decoder's minimal synthetic model fixture: no retail bytes or geometry.
+    const std::array<std::uint32_t, 11> words{
+        0x200, 0x8000000cU, 0x201, 4, 0, 0x600, 0x80000014U, 0x601, 12, 0x00000401, 0x04040000};
+    std::vector<std::byte> model_bytes;
+    for (const auto word : words) for (unsigned shift = 0; shift < 32; shift += 8)
+        model_bytes.push_back(static_cast<std::byte>((word >> shift) & 0xffU));
+    model_bytes.insert(model_bytes.end(), 4, std::byte{});
+    {
+        std::ofstream output(root / "art/models/unlisted.alo", std::ios::binary);
+        output.write(reinterpret_cast<const char*>(model_bytes.data()), static_cast<std::streamsize>(model_bytes.size()));
+        if (!output) throw std::runtime_error("cannot write cached-model fixture");
+    }
+    const std::array mounts{eawr::vfs::MountSpec{"fixture", root, "data", {}}};
+    auto original = std::make_shared<const eawr::vfs::Vfs>(require(eawr::vfs::Vfs::mount(mounts)));
+    eawr::scene::VfsAssetCache cached(*original);
+    const auto* unlisted_model = cached.model("data/art/models/unlisted.alo");
+    expect(unlisted_model != nullptr, "unlisted model is already decoded in the shared presentation cache");
+    std::vector<eawr::units::InputFile> scripts;
+    require(eawr::skirmish::read_data_identity(*original, &scripts));
+    std::vector<eawr::core::ContentInputReceipt> known;
+    for (const auto& script : scripts) known.push_back({script.logical_path, script.layer_id, script.sha256});
+    auto view = require(eawr::vfs::Vfs::preparation_view(original, known));
+    expect(!original->has_content_contract() && view.has_content_contract(),
+        "only the private new-MP preparation view enables the content contract");
+    require(view.open("data/custom/consumed.bin"));
+    require(view.open_for_prefetch("data/custom/unused-hint.bin"));
+    const auto closure = require(view.seal_content());
+    expect(closure.size() == known.size() + 1, "only consumed preparation inputs enter the sealed closure");
+    require(view.open("data/scripts/lazy.lua")); // The module may first execute after Start; its bytes were agreed.
+    const auto late = view.open("data/custom/late-story.txt");
+    expect(!late && late.error().code == eawr::vfs::diagnostic_codes::content_unagreed,
+        "late story input outside the Start-time closure is explicitly refused before bytes escape");
+    require(original->open("data/custom/late-story.txt"));
+    eawr::scene::VfsAssetCache checked_cache(view);
+    expect(checked_cache.model("data/art/models/unlisted.alo") == nullptr
+        && cached.model("data/art/models/unlisted.alo") == unlisted_model,
+        "a previously decoded unlisted model cannot bypass the sealed view through the shared cache");
+    expect(!view.stat("data/custom/late-story.txt") && !view.candidates("data/custom/late-story.txt")
+        && !view.open_for_prefetch("data/custom/unused-hint.bin"), "late metadata and prefetch cannot bypass the agreed set");
+    const auto listed = require(view.enumerate("data/custom/"));
+    expect(listed.size() == 1 && listed.front().canonical_path == "data/custom/consumed.bin",
+        "sealed enumeration excludes unagreed inputs while the original presentation view remains unrestricted");
+    expect(require(original->enumerate("data/custom/")).size() == 3
+        && require(original->open_for_prefetch("data/custom/unused-hint.bin"))
+            == require(original->open("data/custom/unused-hint.bin")),
+        "the shared unrestricted VFS keeps its original enumeration and decode-ahead access after MP seals");
+    const auto candidate = require(original->stat("data/custom/late-story.txt"));
+    std::array<std::byte, 3> buffer{};
+    unsigned delivered{};
+    expect(!view.open(candidate) && !view.open_prefix(candidate.canonical_path, 3)
+        && !view.read_chunks(candidate, buffer, [&](auto) { ++delivered; }) && delivered == 0,
+        "exact-candidate, prefix and chunk reads expose no unagreed bytes");
+    const auto raw_bytes = require(original->open(candidate));
+    expect(require(original->open_prefix(candidate.canonical_path, 3))
+        == std::vector<std::byte>(raw_bytes.begin(), raw_bytes.begin() + 3),
+        "unrestricted SP/skirmish/checkpoint/presentation reads keep the existing prefix behavior");
+    std::vector<std::byte> raw_chunks;
+    require(original->read_chunks(candidate, buffer, [&](const auto bytes) {
+        raw_chunks.insert(raw_chunks.end(), bytes.begin(), bytes.end());
+    }));
+    expect(raw_chunks == raw_bytes,
+        "unrestricted streaming still reads an input excluded from the separate MP closure");
+    write("scripts/lazy.lua", "return 2"); // Same prefix/length: only checking a requested prefix would miss this.
+    const auto script = require(original->stat("data/scripts/lazy.lua"));
+    expect(original->read_location(script).has_value() && !view.read_location(script),
+        "the checked view cannot expose a native-file bypass even for an agreed path");
+    expect(!view.open(script) && !view.open_prefix(script.canonical_path, 3)
+        && !view.read_chunks(script, buffer, [&](auto) { ++delivered; }) && delivered == 0,
+        "every late-read API verifies the complete agreed bytes before delivery, including unchanged prefixes");
+    const auto changed_bytes = require(original->open(script));
+    expect(changed_bytes.size() == 8 && changed_bytes.back() == static_cast<std::byte>('2'),
+        "unrestricted reads still expose current bytes rather than applying the MP agreement check");
+    write("scripts/lazy.lua", "return 1"); require(view.open(script));
+    auto failed = require(eawr::vfs::Vfs::preparation_view(original, known));
+    write("scripts/lazy.lua", "return 2"); expect(!failed.open(script), "changed preparation input is refused");
+    write("scripts/lazy.lua", "return 1");
+    expect(!failed.seal_content(), "an ignored content verification failure cannot publish a prepared claim");
+}
+
+void cached_model_content_refresh() {
+    const auto root = std::filesystem::temp_directory_path() / ("eawr-mp-model-refresh-"
+        + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    struct Cleanup { std::filesystem::path root; ~Cleanup() { eawr::testing::remove_temp_directory(root); } } cleanup{root};
+    std::filesystem::create_directories(root / "art/models");
+    // Empty skeleton/connections with an ignored extension mini-field: both same-size variants are valid models.
+    const std::array<std::uint32_t, 11> words{
+        0x200, 0x8000000cU, 0x201, 4, 0, 0x600, 0x8000001aU, 0x601, 18, 0x00000401, 0x04040000};
+    std::vector<std::byte> bytes;
+    for (const auto word : words) for (unsigned shift = 0; shift < 32; shift += 8)
+        bytes.push_back(static_cast<std::byte>((word >> shift) & 0xffU));
+    bytes.insert(bytes.end(), 4, std::byte{});
+    bytes.push_back(std::byte{0x7f}); bytes.push_back(std::byte{4}); bytes.insert(bytes.end(), 4, std::byte{});
+    const auto write = [&](std::string_view name, const auto& data) {
+        std::ofstream file(root / "art/models" / name, std::ios::binary);
+        file.write(reinterpret_cast<const char*>(data.data()), static_cast<std::streamsize>(data.size()));
+        if (!file) throw std::runtime_error("cannot write MP cached-model fixture");
+    };
+    write("refresh.alo", bytes); write("unused.alo", bytes);
+    const std::vector<std::byte> empty; write("invalid.alo", empty);
+    const std::array mounts{eawr::vfs::MountSpec{"fixture", root, "data", {}}};
+    auto source = std::make_shared<const eawr::vfs::Vfs>(require(eawr::vfs::Vfs::mount(mounts)));
+    eawr::scene::VfsAssetCache raw(*source);
+    raw.end_model_load(std::numeric_limits<std::uint64_t>::max());
+    eawr::core::load_profile::Recording ordinary;
+    eawr::core::load_profile::active = &ordinary;
+    const auto* old = raw.model("data/art/models/refresh.alo");
+    eawr::core::load_profile::active = nullptr;
+    expect(old && ordinary.counters[static_cast<std::size_t>(eawr::core::load_profile::Counter::sha_reused_bytes)] == 0,
+        "unrestricted gameplay keeps its original no-hash decode behavior");
+    const auto initial_decodes = raw.model_stats().unique_loads;
+    bytes.back() = std::byte{1}; write("refresh.alo", bytes);
+    const auto expected = eawr::core::sha256_hex(std::span(reinterpret_cast<const std::uint8_t*>(bytes.data()), bytes.size()));
+    auto view = require(eawr::vfs::Vfs::preparation_view(source, {}));
+    eawr::scene::VfsAssetCache first(view), second(view);
+    auto unproven_ahead = require(first.shared_model_ahead("data/art/models/refresh.alo"));
+    expect(unproven_ahead.get() == old && view.model_refresh_cost().entries == 0,
+        "an unused hint does not refresh or publish an unproven cached model");
+    auto unused = require(first.shared_model_ahead("data/art/models/unused.alo"));
+    expect(unused != nullptr, "the unused speculative model was decoded successfully");
+    std::promise<void> start; const auto ready = start.get_future().share();
+    auto a = std::async(std::launch::async, [&] { ready.wait(); return first.shared_model("data/art/models/refresh.alo"); });
+    auto b = std::async(std::launch::async, [&] { ready.wait(); return second.shared_model("data/art/models/refresh.alo"); });
+    start.set_value();
+    auto refreshed = require(a.get()), same = require(b.get());
+    expect(refreshed.get() == same.get() && refreshed.get() != old && old->bones.empty(),
+        "racing MP consumers share one fresh decode while the old raw owner remains valid");
+    expect(raw.model_stats().unique_loads == initial_decodes + 2 && view.model_refresh_cost().entries == 1,
+        "one unused decode-ahead and exactly one required refresh were decoded");
+    eawr::core::load_profile::Recording memo;
+    eawr::core::load_profile::active = &memo;
+    const auto digest = first.sha256("data/art/models/refresh.alo");
+    const auto other_digest = second.sha256("data/art/models/refresh.alo");
+    eawr::core::load_profile::active = nullptr;
+    expect(digest == expected && other_digest == expected
+        && memo.counters[static_cast<std::size_t>(eawr::core::load_profile::Counter::sha_bytes)] == 0,
+        "the consumed fresh decode supplies its SHA to both getters without rereading current bytes");
+    expect(!first.shared_model_ahead("data/art/models/invalid.alo") && !first.shared_model("data/art/models/invalid.alo"),
+        "parse refusal is stable through the ordered consumer");
+    const auto closure = require(view.seal_content());
+    expect(closure.size() == 2 && std::none_of(closure.begin(), closure.end(), [](const auto& input) {
+        return input.logical_path.find("unused") != std::string::npos;
+    }), "only consumed model/refusal bytes enter the closure; unused successful hints do not");
+    expect(!first.shared_model("data/art/models/unused.alo"), "an unused decoded hint cannot bypass the sealed agreement");
+    bytes.back() = std::byte{2}; write("refresh.alo", bytes);
+    expect(first.sha256("data/art/models/refresh.alo") == expected && !view.open("data/art/models/refresh.alo"),
+        "cached immutable model bytes keep their own identity while a changed late file read is refused");
+    require(source->open("data/art/models/refresh.alo"));
+
+    // #6288 review: a verified view's refused read stays out of the store the unrestricted presentation cache shares.
+    write("view_failure.alo", bytes);
+    auto failing_source = std::make_shared<const eawr::vfs::Vfs>(require(eawr::vfs::Vfs::mount(mounts)));
+    auto failing_view = require(eawr::vfs::Vfs::preparation_view(failing_source, {}));
+    require(failing_view.open("data/art/models/view_failure.alo"));
+    static_cast<void>(require(failing_view.seal_content()));
+    bytes.back() = std::byte{3}; write("view_failure.alo", bytes);
+    eawr::scene::VfsAssetCache failing_viewer(failing_view), presentation(*failing_source);
+    expect(!failing_viewer.shared_model("data/art/models/view_failure.alo"),
+        "an agreed file that changed after sealing is refused through the verified view");
+    expect(static_cast<bool>(presentation.shared_model("data/art/models/view_failure.alo")),
+        "the unrestricted presentation cache is not served the view's cached refusal");
+
+    // A concurrent service consumer must not spend the ordered provider's incoming-entry protection on a refresh.
+    auto protected_source = std::make_shared<const eawr::vfs::Vfs>(require(eawr::vfs::Vfs::mount(mounts)));
+    eawr::scene::VfsAssetCache incoming(*protected_source);
+    incoming.end_model_load(std::numeric_limits<std::uint64_t>::max());
+    expect(incoming.model("data/art/models/refresh.alo") != nullptr, "incoming gameplay model has an unproven decode");
+    incoming.begin_galactic_preparation();
+    auto protected_view = require(eawr::vfs::Vfs::preparation_view(protected_source, {}));
+    eawr::scene::VfsAssetCache::ModelPreparationScope preparation(protected_view, 0);
+    expect(preparation.active(), "incoming entries permit a bounded preparation window");
+    eawr::scene::VfsAssetCache service(protected_view), owner(protected_view);
+    auto service_model = require(service.shared_model("data/art/models/refresh.alo"));
+    std::weak_ptr<const eawr::assets::Model> protected_refresh = service_model;
+    service_model.reset();
+    expect(!protected_refresh.expired(), "a non-owning refresh retains the ordered provider's incoming protection at zero budget");
+    const auto refreshed_loads = incoming.model_stats().unique_loads;
+    std::string owner_digest;
+    auto consumed = require(owner.shared_model("data/art/models/refresh.alo", owner_digest, &preparation));
+    expect(!owner_digest.empty() && incoming.model_stats().unique_loads == refreshed_loads,
+        "the ordered owner consumes the same protected refresh without another decode");
+    consumed.reset();
+    expect(protected_refresh.expired(), "ordered consumption releases the transferred protection and applies the zero budget");
+}
+
+void nonce_bound_preparation() {
+    const auto wait_for = [](const auto& condition) {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+        while (!condition()) {
+            if (std::chrono::steady_clock::now() >= deadline) return false;
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        return true;
+    };
+    struct Gate {
+        std::mutex mutex;
+        std::condition_variable changed;
+        bool entered{}, open{};
+        std::atomic<unsigned> builds{};
+        std::weak_ptr<cp::GameSession> abandoned;
+    };
+    auto gate = std::make_shared<Gate>();
+    struct OpenOnExit {
+        std::shared_ptr<Gate> gate;
+        ~OpenOnExit() { { const std::lock_guard lock(gate->mutex); gate->open = true; } gate->changed.notify_all(); }
+    } unblock{gate};
+    auto local = std::make_shared<Local>(); auto content = local->content;
+    content.prepare_session = [local, gate](const cp::CampaignSetupPlan& plan, std::string_view) -> Result<cp::MpPreparedSession> {
+        static_cast<void>(local);
+        const auto number = ++gate->builds;
+        auto game = std::make_shared<cp::GameSession>(require(cp::GameSession::create(plan.galaxy())));
+        if (number == 1) {
+            std::unique_lock lock(gate->mutex); gate->abandoned = game; gate->entered = true;
+            gate->changed.wait(lock, [&] { return gate->open; });
+        }
+        return Result<cp::MpPreparedSession>::success({game, {}, {}, sim::identity_domain("provider", "immutable fixture").digest});
+    };
+    auto backend = std::make_shared<viewer::GalacticLobbyBackend>(content);
+    const auto options = two_side_options(*local);
+    auto snapshot = snapshot_of(options, {seat_of(0, 1, options, 1, "Host"), seat_of(1, 2, options, 2, "Guest")});
+    snapshot.start_attempt[0] = 1;
+    const std::vector<net::SetupSeat> seats{{0, {1}, 1}, {1, {2}, 2}};
+    const auto pending = [](const auto& result) { return !result && net::is_start_pending(result.error()); };
+    expect(pending(viewer::GalacticLobbyBackend::offer_async(backend, snapshot, seats)), "first nonce-bound preparation starts asynchronously");
+    expect(wait_for([&] { const std::lock_guard lock(gate->mutex); return gate->entered; }), "first attempt owns a running candidate");
+    backend->abandon_prepare(); snapshot.start_attempt[0] = 2;
+    expect(pending(viewer::GalacticLobbyBackend::offer_async(backend, snapshot, seats)), "retry waits for an uninterruptible old worker without reusing it");
+    { const std::lock_guard lock(gate->mutex); gate->open = true; } gate->changed.notify_all();
+    std::optional<net::SetupOffer> offered;
+    expect(wait_for([&] {
+        auto result = viewer::GalacticLobbyBackend::offer_async(backend, snapshot, seats);
+        if (pending(result)) return false;
+        offered = require(std::move(result)); return true;
+    }), "fresh attempt completes after discarding the old result");
+    expect(gate->builds == 2 && gate->abandoned.expired(), "old nonce result is freed and equal choices derive anew exactly once");
+    const auto domains = require(backend->preparation_domains(*offered));
+    expect(std::any_of(domains.begin(), domains.end(), [](const auto& domain) { return domain.name == "gc-prepared-owner"; })
+        && std::any_of(domains.begin(), domains.end(), [](const auto& domain) { return domain.name == "gc-prepared-provider"; }),
+        "prepared claim supplements all ordinary identities with owner archives and provider content");
+    require(backend->identify(*offered));
+    expect(gate->builds == 2, "sealing and final identify retain the exact same candidate");
+    std::weak_ptr<cp::GameSession> accepted = backend->agreement()->session;
+    backend->abandon_prepare();
+    expect(!backend->agreement() && accepted.expired(), "cancelling an identified attempt releases its owner and services");
+
+    Local plain;
+    auto draft = require(net::galactic_roster_draft(snapshot, plain.catalog()));
+    const cp::MpSessionTerms terms{options.seed, plain.content.command_quota, plain.content.byte_quota};
+    auto agreement = require(cp::seal_mp_agreement(plain.content, draft, terms));
+    const auto before = require(cp::prepared_mp_domains(agreement));
+    agreement.provider_identity.digest[0] = 7;
+    expect(require(cp::prepared_mp_domains(agreement)) != before, "provider input mismatch is visible even with an equal galaxy hash");
+    agreement.provider_identity = {}; agreement.provider_identity_required = true;
+    expect(!cp::prepared_mp_domains(agreement), "an opaque custom runtime without an input identity fails closed");
+}
+
 void acceptance_final_tick_agrees() {
     auto local = std::make_shared<Local>();
     viewer::GalacticLobbyBackend backend(local->content);
     auto options = two_side_options(*local);
     const auto snapshot = snapshot_of(options, {seat_of(0, 1, options, 1, "Host"), seat_of(1, 2, options, 2, "Guest")});
     const std::vector<net::SetupSeat> seats{{0, {1}, 1}, {1, {2}, 2}};
-    expect(backend.final_tick_count() == net::max_session_ticks, "a real game carries no acceptance tick limit");
-    expect(require(backend.offer(snapshot, seats)).final_tick_count == net::max_session_ticks, "the ordinary offer keeps the default cap");
+    expect(backend.final_tick_count() == sim::galactic::galactic_max_ticks, "a real game carries no acceptance tick limit");
+    expect(require(backend.offer(snapshot, seats)).final_tick_count == sim::galactic::galactic_max_ticks, "the ordinary offer keeps the default cap");
     backend.acceptance_final_tick(3900);
     expect(backend.final_tick_count() == 3900, "the acceptance limit is readable by the setup hook");
     expect(require(backend.offer(snapshot, seats)).final_tick_count == 3900, "host and joiner offers carry the same acceptance limit");
@@ -2170,43 +3067,39 @@ void mod_text_the_room_cannot_carry() {
     expect(bytes && !net::valid_lobby_mod_description(*bytes), "the room codec check refuses it, so the host falls back to an empty list");
     expect(net::valid_lobby_mod_description({}), "an empty list is always carried");
     if (fine && !fine->empty()) {
+        auto old = *fine;
+        old[0] = 1;
+        expect(!net::valid_lobby_mod_description(old), "the previous mod-description format is refused");
         const std::vector<std::uint8_t> truncated(fine->begin(), fine->end() - 1);
         expect(!net::valid_lobby_mod_description(truncated), "a truncated list is refused");
     }
 }
 
 // slow_load: every peer's session build takes this long, as a Remake campaign build does for minutes. With it the
-// link and setup timeouts are cut to a fraction of the build, so the room only starts if (1) the stream is serviced
-// through each build (while_pumping in the offer, identify and build hooks) and (2) the host does not time the
-// guest's preview wait while the guest derives (SetupOptions::untimed_preview_wait). Removing either one fails the
-// room. One thread drives both peers, so the fake build services the other seat, as its own UI thread would.
+// link and setup timeouts are cut to a fraction of the build, so the room only starts if (1) the room is serviced
+// through each build (#6045: the derivation runs on a worker thread and the offer hook answers pending, so this
+// thread keeps pumping both peers; #6042's while_pumping still covers the identify and build hooks) and (2) the host
+// does not time the guest's preview wait while the guest derives (SetupOptions::untimed_preview_wait). Removing
+// either one fails the room. With `slow_load` the host's Start must also return at once and show a pending Start
+// with its progress text, and a worker-side derivation never touches the peers (it only sleeps).
 void viewer_staging_room(std::uint64_t final_tick_count = 0, bool resume = false,
     std::chrono::milliseconds slow_load = std::chrono::milliseconds::zero(), bool decline = false, bool host_leaves = false,
     bool uncheckable = false) {
     Local host_content, guest_content;
-    viewer::LanMatch* host_seat = nullptr;
-    viewer::LanMatch* guest_seat = nullptr;
-    const auto slow_build = [slow_load](viewer::LanMatch*& other) {
-        const eawr::skirmish::FixtureOptions idle{};
-        const auto until = std::chrono::steady_clock::now() + slow_load;
-        while (std::chrono::steady_clock::now() < until) {
-            if (other) other->pump_setup(idle);
-            std::this_thread::sleep_for(std::chrono::milliseconds(5));
-        }
+    std::atomic<unsigned> slow_builds{};
+    const auto slow_build = [slow_load, &slow_builds] {
+        ++slow_builds;
+        std::this_thread::sleep_for(slow_load);
     };
     if (slow_load.count() > 0) {
-        host_content.content.prepare_session = [&, slow_build](const cp::CampaignSetupPlan& plan, std::string_view)
-            -> eawr::core::Result<cp::MpPreparedSession> {
-            slow_build(guest_seat);
-            return eawr::core::Result<cp::MpPreparedSession>::success({
-                std::make_shared<cp::GameSession>(require(cp::GameSession::create(plan.galaxy()))), {}});
-        };
-        guest_content.content.prepare_session = [&, slow_build](const cp::CampaignSetupPlan& plan, std::string_view)
-            -> eawr::core::Result<cp::MpPreparedSession> {
-            slow_build(host_seat);
-            return eawr::core::Result<cp::MpPreparedSession>::success({
-                std::make_shared<cp::GameSession>(require(cp::GameSession::create(plan.galaxy()))), {}});
-        };
+        for (auto* local : {&host_content, &guest_content})
+            local->content.prepare_session = [slow_build](const cp::CampaignSetupPlan& plan, std::string_view)
+                -> eawr::core::Result<cp::MpPreparedSession> {
+                slow_build();
+                return eawr::core::Result<cp::MpPreparedSession>::success({
+                    std::make_shared<cp::GameSession>(require(cp::GameSession::create(plan.galaxy()))), {}, {},
+                    sim::identity_domain("synthetic-runtime", "no external services").digest});
+            };
     }
     for (auto* local : {&host_content, &guest_content}) {
         auto solo = local->data.campaigns.front();
@@ -2217,9 +3110,9 @@ void viewer_staging_room(std::uint64_t final_tick_count = 0, bool resume = false
     auto guest_backend = std::make_shared<viewer::GalacticLobbyBackend>(guest_content.content);
     // An uncheckable list is what the host sends when its mod text cannot travel: no bytes, and the room still opens.
     if (uncheckable) host_backend->set_mounted_mods({});
-    else host_backend->set_mounted_mods({1, 1, 0, 0, 0, 0});
-    expect(host_backend->final_tick_count() == net::max_session_ticks
-        && guest_backend->final_tick_count() == net::max_session_ticks, "ordinary GC keeps the default session cap");
+    else host_backend->set_mounted_mods({3, 1, 0, 0, 0, 0});
+    expect(host_backend->final_tick_count() == sim::galactic::galactic_max_ticks
+        && guest_backend->final_tick_count() == sim::galactic::galactic_max_ticks, "ordinary GC keeps the default session cap");
     if (final_tick_count) {
         host_backend->acceptance_final_tick(final_tick_count);
         guest_backend->acceptance_final_tick(final_tick_count);
@@ -2232,7 +3125,6 @@ void viewer_staging_room(std::uint64_t final_tick_count = 0, bool resume = false
     host->configure_seats({1, 2}); guest->configure_seats({1, 2});
     host->configure_lobby("Host", 0, {}, builder); guest->configure_lobby("Guest", 1, {}, builder);
     host->configure_galactic(host_backend); guest->configure_galactic(guest_backend);
-    host_seat = host.get(); guest_seat = guest.get();
     if (slow_load.count() > 0) {
         const std::chrono::milliseconds cut = slow_load * 4 / 9; // each timeout is under half of a build
         host->set_timeouts_for_test(cut, cut); guest->set_timeouts_for_test(cut, cut);
@@ -2291,7 +3183,7 @@ void viewer_staging_room(std::uint64_t final_tick_count = 0, bool resume = false
             && !guest_state->identity_pending && !host_state->identity_pending;
     };
     wait([&] { return guest->view().mod_review_pending; });
-    expect(guest->view().host_mod_description == (uncheckable ? Bytes{} : Bytes({1, 1, 0, 0, 0, 0})),
+    expect(guest->view().host_mod_description == (uncheckable ? Bytes{} : Bytes({3, 1, 0, 0, 0, 0})),
         "guest review receives the host's description before staging");
     for (unsigned i = 0; i < 10; ++i) { host->pump_setup(none); guest->pump_setup(none); }
     expect(guest->view().mod_review_pending && !guest->lobby_state()
@@ -2383,7 +3275,7 @@ void viewer_staging_room(std::uint64_t final_tick_count = 0, bool resume = false
     // A host edit of the options is one shared revision.
     auto changed = options;
     changed.custom = true; changed.credits = 6500; changed.starting_tech = 2; changed.maximum_tech = 4;
-    changed.allow_heroes = false; changed.difficulty = "Hard_Default"; changed.auto_resolve = 3;
+    changed.allow_heroes = false; changed.difficulty = "Hard_Default"; changed.auto_resolve = 3; changed.vote_timeout = 45;
     expect(host->lobby_galactic_game(changed), "the host edits the campaign options");
     milestone = "option edit";
     wait([&] { return synchronized() && require(net::decode_galactic_lobby_game(guest->lobby_state()->snapshot.game)) == changed; });
@@ -2434,15 +3326,67 @@ void viewer_staging_room(std::uint64_t final_tick_count = 0, bool resume = false
             && saved_view->peers[1] == guest->view().seat, "joiner reads the checkpoint tick and authenticated saved-seat mapping");
     }
 
+    if (resume) {
+        // #6128: the real handshake: only the host ever sees `agreed`, and the lobby's gate must let the guest Accept on its own restore
+        // (it blocked the guest for ever, so no saved co-op game could start). From here the guest is present, restored and accepts.
+        const auto guest_view = guest_backend->checkpoint_progress(), host_view = host_backend->checkpoint_progress();
+        expect(guest_view.restored && !guest_view.agreed && host_view.agreed,
+            "#6128 after the restore handshake only the host has agreed; the guest has restored");
+        expect(!eawr::viewer::checkpoint_start_blocked(false, false, false, true, guest_view),
+            "#6128 the guest's Accept is not blocked after its own restore");
+        expect(!eawr::viewer::checkpoint_start_blocked(true, false, false, true, host_view), "#6128 the host's Start is not blocked once every guest restored");
+    }
     expect(host->lobby_ready(true) && guest->lobby_ready(true), "both players ready the campaign setup");
     milestone = "ready";
     wait([&] { return host->lobby_state()->snapshot.seats[0].ready && host->lobby_state()->snapshot.seats[1].ready; });
     expect(host_backend->can_start() && !host->galactic_start(), "production adapter is installed, but no launch precedes Start");
     milestone = "Start enabled";
     wait([&] { return host->lobby_state()->start_enabled; });
+    const auto start_pressed = std::chrono::steady_clock::now();
     host->start(none);
+    const auto start_returned = std::chrono::steady_clock::now() - start_pressed;
+    const bool slow = slow_load.count() > 0 && !resume;
+    if (slow) {
+        // #6045: Start returns at once; the host shows a pending Start, locked, with a progress line the player can read.
+        const auto pending = host->lobby_state();
+        expect(start_returned < slow_load / 2, "#6045 the host's Start returns at once: the derivation is not on the calling thread");
+        expect(pending && pending->start_preparing && !pending->start_enabled && !pending->ready_enabled
+            && pending->prepare_status.find("Preparing the campaign for all players") != std::string::npos && !host->galactic_start(),
+            "the host shows pending preparation with a progress line before setup is published");
+        expect(pending && pending->snapshot.phase == net::LobbyPhase::starting, "the manifest freezes inputs before the host prepares");
+        wait([&] { return guest->lobby_state()->snapshot.phase == net::LobbyPhase::starting
+            && !guest->lobby_state()->prepare_status.empty(); });
+        const auto old_attempt = pending->snapshot.start_attempt;
+        // A second press is refused. Cancel invalidates all candidates and a retry requires explicit readiness.
+        host->start(none);
+        host->cancel_galactic_start();
+        expect(!host->lobby_state()->start_preparing, "#6045 Cancel stops waiting");
+        wait([&] { return host->lobby_state()->snapshot.phase == net::LobbyPhase::staging
+            && guest->lobby_state()->snapshot.phase == net::LobbyPhase::staging; });
+        // The earlier faction moves and Ready used the guest's four-request window. This new attempt needs a new
+        // explicit Ready; keep pumping until that window expires rather than treating throttled transport as ready.
+        milestone = "retry readiness window";
+        const auto retry_after = std::chrono::steady_clock::now() + std::chrono::milliseconds(net::LobbyLimits{}.chat_window_ms);
+        wait([&] { return std::chrono::steady_clock::now() >= retry_after; });
+        expect(host->lobby_ready(true) && guest->lobby_ready(true), "retry explicitly readies both peers again");
+        milestone = "retry Start enabled";
+        wait([&] { return host->lobby_state()->start_enabled; });
+        host->start(none);
+        expect(host->lobby_state()->start_preparing && host->lobby_state()->snapshot.start_attempt != old_attempt,
+            "retry waits on a fresh attempt and cannot reuse the abandoned candidate");
+    }
     milestone = "Start frozen";
-    wait([&] { return host->galactic_start() && guest->galactic_start() && guest->lobby_state()->snapshot.phase == net::LobbyPhase::starting; });
+    bool guest_status_seen = false, host_waited_visibly = false;
+    wait([&] {
+        if (const auto guest_state = guest->lobby_state(); guest_state && guest_state->prepare_status.find("Preparing your copy") != std::string::npos)
+            guest_status_seen = true;
+        if (const auto host_state = host->lobby_state(); host_state && host_state->start_preparing) host_waited_visibly = true;
+        return host->galactic_start() && guest->galactic_start() && guest->lobby_state()->snapshot.phase == net::LobbyPhase::starting;
+    });
+    if (slow) {
+        expect(host_waited_visibly && guest_status_seen, "#6045 both seats showed their own progress line while their derivation ran");
+        expect(slow_builds.load() >= 3 && slow_builds.load() <= 4, "retry derives both peers anew after the abandoned attempt");
+    }
     const auto host_start = *host->galactic_start(), guest_start = *guest->galactic_start();
     expect(host_start.options == changed && host_start.options == guest_start.options && host_start.room && guest_start.room,
         "both peers hold the frozen room and the agreed options at the seam");
@@ -2483,8 +3427,13 @@ void viewer_many_seat_launch(std::size_t count, bool lose_during_load = false) {
     const eawr::skirmish::FixtureOptions none{};
     peers[0]->pump_setup(none);
     for (std::size_t i = 1; i < count; ++i) peers[i]->join("127.0.0.1:" + std::to_string(peers[0]->view().port));
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(60);
-    const auto wait = [&](const auto& predicate) {
+    // #6503: every wait ends on its own event, never on a wall-clock budget. Eight seats deriving their campaigns on load
+    // workers took 40-96 s on a busy host, and a Ready sent from a stale room revision is not retried by anyone. A refused or
+    // ended peer still fails at once; a true hang is ended by this test's ctest TIMEOUT, and a phase that has made no progress
+    // for two minutes prints the per-seat state once so the log says what it waited on.
+    const auto wait = [&](const char* phase, const auto& predicate) {
+        const auto entered = std::chrono::steady_clock::now();
+        bool described = false;
         while (true) {
             for (const auto& peer : peers) {
                 peer->pump_setup(none);
@@ -2493,11 +3442,25 @@ void viewer_many_seat_launch(std::size_t count, bool lose_during_load = false) {
             if (predicate()) return;
             for (const auto& peer : peers) expect(peer->view().phase != viewer::LanPhase::ended,
                 "nine-seat campaign connection refused: " + peer->view().message);
-            expect(std::chrono::steady_clock::now() < deadline, "nine-seat GC launch deadline");
+            if (!described && std::chrono::steady_clock::now() - entered > std::chrono::minutes(2)) {
+                described = true;
+                std::cerr << "nine-seat GC launch still waiting in '" << phase << "' after two minutes\n";
+                for (std::size_t i = 0; i < peers.size(); ++i) {
+                    const auto state = peers[i]->lobby_state();
+                    std::cerr << "  seat " << i << " phase=" << static_cast<int>(peers[i]->view().phase);
+                    if (state) {
+                        std::cerr << " revision=" << state->snapshot.revision << " seats=" << state->snapshot.seats.size()
+                                  << " local_ready=" << state->local_ready << " identity_pending=" << state->identity_pending
+                                  << " start_enabled=" << state->start_enabled << " preparing=" << state->start_preparing
+                                  << " status='" << state->prepare_status << "' start_reason='" << state->start_reason << "'";
+                    }
+                    std::cerr << "\n";
+                }
+            }
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
     };
-    wait([&] {
+    wait("roster", [&] {
         for (const auto& peer : peers) {
             const auto state = peer->lobby_state();
             if (!state || state->snapshot.seats.size() != count || state->identity_pending) return false;
@@ -2536,11 +3499,27 @@ void viewer_many_seat_launch(std::size_t count, bool lose_during_load = false) {
         for (const auto& peer : peers) peer->cancel();
         return;
     }
+    // Ready carries the room revision its seat last saw, and every seat's name edit advances that revision. Send Ready only
+    // once each seat holds the host's final roster; otherwise a slow seat's Ready is answered "room revision changed" and the
+    // host never reaches Start (#6503). Nothing after this point changes the revision until Start.
+    wait("settled roster", [&] {
+        std::set<std::string> expected;
+        for (std::size_t i = 1; i <= count; ++i) expected.insert("Player " + std::to_string(i));
+        const auto host_revision = peers[0]->lobby_state()->snapshot.revision;
+        for (const auto& peer : peers) {
+            const auto state = peer->lobby_state();
+            if (!state || state->snapshot.revision != host_revision) return false;
+            std::set<std::string> names;
+            for (const auto& seat : state->snapshot.seats) names.insert(seat.selection.name);
+            if (names != expected) return false;
+        }
+        return true;
+    });
     for (const auto& peer : peers) expect(peer->lobby_ready(true), "multi-seat ready");
-    wait([&] { return peers[0]->lobby_state()->start_enabled; });
+    wait("start enabled", [&] { return peers[0]->lobby_state()->start_enabled; });
     peers[0]->start(none);
     std::vector<std::shared_ptr<viewer::GalacticLaunch>> launches(count);
-    wait([&] {
+    wait("launches", [&] {
         bool all = true;
         for (std::size_t i = 0; i < count; ++i) {
             if (!launches[i]) launches[i] = peers[i]->take_galactic_launch();
@@ -2596,6 +3575,7 @@ void installed_stock_native_ai_agreement(const cp::MpLocalContent& local,
     const auto first = backend.agreement();
     expect(first && first->session && first->session->native_ai_installed(),
         "stock MP campaign prepares native AI through the real lobby loader: " + campaign.name);
+    const auto prepared_domains = require(cp::prepared_mp_domains(*first));
     std::vector<std::string> baseline;
     std::vector<std::shared_ptr<const gc::GalacticSnapshot>> baseline_views;
     // Two independent peers per stock map, reusing the host's actual preparation.
@@ -2609,6 +3589,8 @@ void installed_stock_native_ai_agreement(const cp::MpLocalContent& local,
             agreement = peer.agreement();
         }
         expect(agreement && agreement->tick_zero == first->tick_zero, "stock peers agree tick-zero digest");
+        expect(require(cp::prepared_mp_domains(*agreement)) == prepared_domains,
+            "stock peers agree complete owner/provider preparation before 1/8-worker continuation");
         auto& session = *agreement->session;
         expect(session.native_ai_installed(), "each stock peer installs native AI before tick zero");
         const auto native = require(session.save_galactic_ai());
@@ -2782,6 +3764,7 @@ void installed_observer_agreement(bool stock_only = false) {
     const auto first = host.agreement();
     expect(first && first->session->native_ai_installed() && first->runtime_services,
         "real prepared lobby path installs native AI before tick zero");
+    const auto prepared_domains = require(cp::prepared_mp_domains(*first));
     expect(std::any_of(first->plan->galaxy().seats.begin(), first->plan->galaxy().seats.end(),
         [](const auto& row) { return row.active && row.kind == gc::SeatKind::ai; }),
         "installed observer campaign retains an active AI faction alongside the two humans");
@@ -2794,6 +3777,8 @@ void installed_observer_agreement(bool stock_only = false) {
         expect(require(peer.identify(offer)).content == identity.content, "prepared peers agree all content domains");
         const auto agreement = peer.agreement();
         expect(agreement->tick_zero == first->tick_zero, "prepared peers agree tick-zero digest");
+        expect(require(cp::prepared_mp_domains(*agreement)) == prepared_domains,
+            "authored mod overlay agrees complete owner/provider preparation across worker/view continuations");
         auto& session = *agreement->session;
         const auto player = humans.at(seat - 1);
         const auto view = session.galaxy().view_snapshot({player});
@@ -2905,12 +3890,16 @@ int main(int argc, char** argv) {
             return 0;
         }
         if (argc != 1) throw std::runtime_error("usage: net_galactic_lobby_tests [--stock-ai]");
+        checkpoint_buffered_departure();
+        checkpoint_failure_stays_visible();
         for (const auto workers : {1U, 2U, 4U, 8U})
             for (const bool sp : {false, true}) production_file_resume(workers, sp);
         for (const auto workers : {1U, 2U, 4U, 8U}) production_file_resume(workers, false, true);
         static_cast<void>(checkpoint_room_resume(1, 2, false, false, 1));
         static_cast<void>(checkpoint_room_resume(1, 2, false, false, 2));
         static_cast<void>(checkpoint_room_resume(1, 3, false, false, 3));
+        guest_restore_runs_off_the_ui_thread();
+        free_faction_choice();
         std::string resume_reference;
         for (const auto workers : {1U, 2U, 4U, 8U}) for (const auto count : {2U, 3U}) for (const bool relay : {false, true}) {
             const auto hash = checkpoint_room_resume(workers, count, relay);
@@ -2952,8 +3941,15 @@ int main(int argc, char** argv) {
         start_summary_compares_peers();
         combined_agreement_identity();
         preparation_attempt_lifetime();
+        asynchronous_offer();
+        asynchronous_offer_failure();
+        asynchronous_offer_frees_the_previous_preparation();
         wire_identity_and_preparation_keys();
         reoffer_keeps_agreed_services();
+        nonce_bound_preparation();
+        preparation_content_manifest();
+        late_preparation_content_reads();
+        cached_model_content_refresh();
         acceptance_final_tick_agrees();
         viewer_staging_room();
         viewer_staging_room(0, false, {}, true);
@@ -2968,7 +3964,7 @@ int main(int argc, char** argv) {
         viewer_many_seat_launch(3, true);
         installed_observer_agreement();
         viewer::shutdown_lan_drains();
-        std::cout << "galactic lobby contracts passed: gc1 codec and versioning, campaign list, staging refusals, two-peer and nine-seat rooms, skirmish bytes pinned\n";
+        std::cout << "galactic lobby contracts passed: gc2 codec and versioning, campaign list, staging refusals, two-peer and nine-seat rooms, skirmish bytes pinned\n";
         return 0;
     } catch (const std::exception& error) {
         viewer::shutdown_lan_drains();

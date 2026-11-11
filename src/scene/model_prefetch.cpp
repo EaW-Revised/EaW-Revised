@@ -54,7 +54,19 @@ ModelPrefetch::ModelPrefetch(const vfs::Vfs& filesystem, ModelPrefetchOptions op
         : policy_readers(options_.solid_state, std::thread::hardware_concurrency());
     stats_.readers = count;
     threads_.reserve(count);
-    for (unsigned i = 0; i < count; ++i) threads_.emplace_back([this] { reader(); });
+    try {
+        for (unsigned i = 0; i < count; ++i) threads_.emplace_back([this] { reader(); });
+    } catch (...) {
+        // A failed thread start must not leave joinable threads to a vector destructor (terminate): stop and join those started.
+        {
+            std::lock_guard lock(mutex_);
+            stopping_ = true;
+        }
+        changed_.notify_all();
+        for (auto& thread : threads_) if (thread.joinable()) thread.join();
+        threads_.clear();
+        throw;
+    }
 }
 
 ModelPrefetch::~ModelPrefetch() { finish(); }

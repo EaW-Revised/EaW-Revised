@@ -65,6 +65,7 @@ public:
         executor_ = &executor;
         if (owned_executor_.get() != &executor) owned_executor_.reset();
     }
+    std::uint64_t tick_limit() const override { return sim::galactic::galactic_max_ticks; }
     std::uint64_t completed_tick() const override;
     [[nodiscard]] std::optional<sim::SeatId> pause_actor() const { return pause_actor_; }
     std::string state_hash() const override;

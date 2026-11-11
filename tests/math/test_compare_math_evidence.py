@@ -13,7 +13,6 @@ from pathlib import Path
 
 
 TARGETS = (
-    "windows-msvc",
     "windows-clang",
     "linux-x64-gcc",
     "linux-x64-clang",
@@ -71,10 +70,10 @@ class ComparatorContracts(unittest.TestCase):
         result = self.compare(*extra)
         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
 
-    def test_exact_five_target_set_passes(self) -> None:
+    def test_exact_four_target_set_passes(self) -> None:
         result = self.compare()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("accepted 5 targets", result.stdout)
+        self.assertIn("accepted 4 targets", result.stdout)
 
     def test_missing_target_is_rejected(self) -> None:
         shutil.rmtree(self.evidence / "math-evidence-linux-arm64-gcc")
@@ -97,16 +96,16 @@ class ComparatorContracts(unittest.TestCase):
 
     def test_duplicate_alias_is_rejected(self) -> None:
         shutil.copytree(
-            self.evidence / "math-evidence-windows-msvc",
-            self.evidence / "windows-msvc",
+            self.evidence / "math-evidence-windows-clang",
+            self.evidence / "windows-clang",
         )
         self.assert_rejected()
 
     def test_nested_duplicate_payload_is_rejected(self) -> None:
-        nested = self.evidence / "math-evidence-windows-msvc/duplicate"
+        nested = self.evidence / "math-evidence-windows-clang/duplicate"
         nested.mkdir()
-        shutil.copy2(self.evidence / "math-evidence-windows-msvc/digest.txt", nested)
-        shutil.copy2(self.evidence / "math-evidence-windows-msvc/vectors.csv", nested)
+        shutil.copy2(self.evidence / "math-evidence-windows-clang/digest.txt", nested)
+        shutil.copy2(self.evidence / "math-evidence-windows-clang/vectors.csv", nested)
         self.assert_rejected()
 
     def test_digest_mismatch_is_rejected(self) -> None:

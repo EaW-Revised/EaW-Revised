@@ -7,7 +7,10 @@
 #include "ui/kit.hpp"
 #include "ui/battle_overlay.hpp"
 #include "viewer_path.hpp"
+#include "viewer_mounted_mods.hpp"
+#include "saved_games.hpp"
 #include "eawr/core/diagnostic.hpp"
+#include "eawr/checkpoint/checkpoint.hpp"
 #include <godot_cpp/classes/base_button.hpp>
 #include <godot_cpp/classes/canvas_layer.hpp>
 #include <godot_cpp/classes/item_list.hpp>
@@ -27,6 +30,7 @@
 #include <sstream>
 #include <limits>
 #include <map>
+#include <utility>
 
 using namespace godot;
 namespace eawr::presentation::godot_backend {
@@ -45,13 +49,17 @@ void configure_save_repository(platform::LiveGameSession::Options& live, const G
     // The CLI mount path does not convey launcher record identities. Do not
     // derive a portable identity or a display string from the local path.
     if (options.mounted_mods) live.saves.mounted_mods = *options.mounted_mods;
-    else live.saves.mounted_mods = {};
+    else {
+        live.saves.mounted_mods_snapshot = [] { return mounted_mod_description().value_or(mods::ModDescription{}); };
+        live.saves.mounted_mods = live.saves.mounted_mods_snapshot();
+    }
 }
 GalacticSaveControls::GalacticSaveControls(GalacticMode::State& state) : state_(state) {}
 GalacticSaveControls::~GalacticSaveControls() {
     // Async readers retain the old live pointer until they finish; join before its teardown.
     if (listing_.valid()) listing_.wait();
     if (loading_.valid()) loading_.wait();
+    if (mod_check_.valid()) mod_check_.wait();
     if (options_ != nullptr && UtilityFunctions::is_instance_id_valid(options_id_)) {
         if (Node* parent = options_->get_parent()) parent->remove_child(options_);
         memdelete(options_);
@@ -183,7 +191,7 @@ void GalacticSaveControls::publish_save() {
     if (!state_.interactive) state_.game->advance_to(state_.game->completed_tick() + 1);
 }
 void GalacticSaveControls::load(std::string name) {
-    if (!state_.game || token_ || loading_.valid() || listing_.valid() || pending_loaded_child_ || modal_ != Modal::none) return;
+    if (!state_.game || token_ || loading_.valid() || mod_check_.valid() || listing_.valid() || pending_loaded_child_ || modal_ != Modal::none) return;
     if (name.empty()) {
         if (!admission().load || screen_ != Screen::load) return;
         name = selected();
@@ -204,7 +212,7 @@ bool GalacticSaveControls::refuse_load(std::string text, const bool at_start) {
 bool GalacticSaveControls::restore_at_start(const std::string& name) {
     if (!state_.game || !state_.galaxy) return refuse_load("The campaign for this save did not start.", true);
     auto loaded = state_.game->prepare_load(name);
-    if (!loaded) return refuse_load(core::format_diagnostic(loaded.error()), true);
+    if (!loaded) return refuse_load(viewer::saved_game_restore_refusal(loaded.error()), true);
     if (!accept_loaded(std::move(loaded).value(), true)) return false;
     started_from_save_ = true;
     return true;
@@ -222,7 +230,7 @@ bool GalacticSaveControls::accept_loaded(std::unique_ptr<platform::PreparedLiveR
     std::shared_ptr<const platform::LiveAutoResolveOutcome> saved_summary;
     if (!hints.automatic_summary.empty()) {
         auto decoded = viewer::galactic::decode_auto_summary_hint(hints.automatic_summary);
-        if (!decoded) return refuse_load(core::format_diagnostic(decoded.error()), at_start);
+        if (!decoded) return refuse_load(viewer::saved_game_restore_refusal(decoded.error(), viewer::SavedGameRestoreStage::reconstruction), at_start);
         saved_summary = std::move(decoded).value();
     }
     options.pacing = state_.interactive ? platform::LiveGameSession::Pacing::real_time : platform::LiveGameSession::Pacing::driven;
@@ -230,11 +238,16 @@ bool GalacticSaveControls::accept_loaded(std::unique_ptr<platform::PreparedLiveR
     // The recorded interactive seat is retained by the restored owner.
 
     auto started = platform::LiveGameSession::start(std::move(prepared), options);
-    if (!started) return refuse_load(started.error().message, at_start);
+    if (!started) return refuse_load(viewer::saved_game_restore_refusal(started.error(), viewer::SavedGameRestoreStage::owner_start), at_start);
+    const auto reconstruction_failure = [this, at_start](std::string text) {
+        core::Diagnostic error; error.code = checkpoint::diagnostic_codes::restore_failed;
+        error.message = std::move(text);
+        return refuse_load(viewer::saved_game_restore_refusal(error), at_start);
+    };
     const auto first = started.value()->frame();
-    if (!first.latest) return refuse_load("The restored galaxy is unavailable.", at_start);
+    if (!first.latest) return reconstruction_failure("The restored galaxy is unavailable.");
     auto observer = galactic_view::build_live_view(*first.latest, state_.metadata, seat.value, state_.neutral_owner, state_.scene_objects);
-    if (!observer.view) return refuse_load(observer.failure, at_start);
+    if (!observer.view) return reconstruction_failure(observer.failure);
     restored_hash_ = restored_hash; restored_tick_ = first.session_tick; restored_conflict_ = first.conflict ? first.conflict->id : 0;
     restored_child_tick_ = first.battle ? first.battle->completed_tick() : 0;
     observe_world_selection();
@@ -248,8 +261,8 @@ bool GalacticSaveControls::accept_loaded(std::unique_ptr<platform::PreparedLiveR
     state_.briefing_conflict = hints.briefing; state_.briefing_done = hints.briefing_done;
     state_.fleet_gui_indices = hints.fleet_indices; state_.fleet_layout_dirty = true;
     state_.map_input.selected = hints.selected; state_.selected_planet = hints.selected; state_.selected_hud = {};
-    state_.held.clear(); state_.orbiting = false; state_.scrolling = false; state_.pointer_warp.reset();
-    state_.displayed_snapshot.reset(); state_.published_snapshot.reset(); state_.snapshot_events.clear(); state_.pause_guard = {};
+    state_.held.clear(); state_.orbiting = false; state_.scrolling = false; state_.scroll_hold.end();
+    state_.displayed_snapshot.reset(); state_.published_snapshot.reset(); state_.snapshot_events.clear(); state_.pause_guard = {}; state_.speed_guard.reset();
     state_.corruption_visuals.reset(); state_.corruption_publication.reset();
     for (auto& particles : state_.corruption_particles) particles.reset();
     state_.corruption_lines.reset(); state_.corruption_paths.reset(); state_.corruption_path_quads = 0;
@@ -267,9 +280,16 @@ bool GalacticSaveControls::accept_loaded(std::unique_ptr<platform::PreparedLiveR
     }
     return true;
 }
+void GalacticSaveControls::prepare_reviewed_load(presentation::ui::SavedGameRequest request) {
+    approved_load_ = std::move(request);
+    show_modal(Modal::progress_load, localized("TEXT_SAVELOAD_LOADING_MSG"));
+}
 void GalacticSaveControls::service() {
     using namespace std::chrono_literals;
     if (visible()) { centre_dialogs(); observe_world_selection(); position_dates(); }
+    if (visible() && modal_ == Modal::checking_mods && !state_.options.mounted_mods && !mounted_mods_ready()) {
+        if (!digest_wait_) digest_wait_ = mods::ContentDigests::screen_wait_lease();
+    } else digest_wait_.reset();
     if (listing_.valid() && listing_.wait_for(0s) == std::future_status::ready) {
         auto loaded = listing_.get();
         if (!loaded) show_modal(Modal::acknowledgement, loaded.error().message);
@@ -277,13 +297,32 @@ void GalacticSaveControls::service() {
             listed_ = std::move(loaded).value(); populate_slots();
         }
     }
-    if (visible() && (modal_ == Modal::progress_save || modal_ == Modal::progress_load)
+    if (visible() && !mod_check_.valid() && !loading_.valid()
+        && (modal_ == Modal::progress_save || modal_ == Modal::progress_load || modal_ == Modal::checking_mods)
+        && (modal_ != Modal::checking_mods || state_.options.mounted_mods || mounted_mods_ready())
         && fade_.is_valid() && !fade_->is_running() && modal_dialog_->frame->get_modulate().a >= 1.0F) {
         fade_.unref(); ++requests_after_fade_;
         if (modal_ == Modal::progress_save) publish_save();
+        else if (approved_load_) {
+            // Only the explicit yes/no result (or equal mods) reaches restore,
+            // after the progress dialog has faded in.
+            auto* owner = state_.game.get();
+            const auto request = *std::exchange(approved_load_, std::nullopt);
+            loading_ = std::async(std::launch::async, [owner, name = request.name] { return owner->prepare_load(name); });
+        }
         else {
-            auto* owner = state_.game.get(); const auto name = pending_name_;
-            loading_ = std::async(std::launch::async, [owner, name] { return owner->prepare_load(name); });
+            const auto mounted = state_.options.mounted_mods.value_or(mounted_mod_description().value_or(mods::ModDescription{}));
+            const presentation::ui::SavedGameRequest request{save_directory(state_.options), pending_name_};
+            mod_check_ = std::async(std::launch::async, [request, mounted] { return viewer::saved_game_mod_prompt(request, mounted); });
+        }
+    }
+    if (mod_check_.valid() && mod_check_.wait_for(0s) == std::future_status::ready) {
+        auto checked = mod_check_.get();
+        if (!mod_review_.waiting()) { /* Cancel discarded this check; keep the list and owner. */ }
+        else if (!checked) { static_cast<void>(mod_review_.answer(false)); (void)refuse_load(core::format_diagnostic(checked.error()), false); }
+        else if (mod_review_.complete(std::move(checked).value())) {
+            if (auto request = mod_review_.proceed()) prepare_reviewed_load(std::move(*request));
+            else show_modal(Modal::mod_confirmation, mod_review_.prompt());
         }
     }
     if (queued_quick_load_ && modal_ == Modal::none && !loading_.valid() && !token_ && !pending_loaded_child_) {
@@ -308,7 +347,7 @@ void GalacticSaveControls::service() {
     }
     if (loading_.valid() && loading_.wait_for(0s) == std::future_status::ready) {
         auto loaded = loading_.get();
-        if (!loaded) show_modal(Modal::acknowledgement, loaded.error().message);
+        if (!loaded) (void)refuse_load(viewer::saved_game_restore_refusal(loaded.error()), false);
         else (void)accept_loaded(std::move(loaded).value());
     }
     if (pending_loaded_child_ && state_.game && state_.tactical && state_.game->battle_is_ready(pending_loaded_child_)) {

@@ -19,6 +19,7 @@ core::Result<bool> refused() { return core::Result<bool>::success(false); }
 }
 
 Fixed GalacticSession::Impl::planet_base_credits(const std::size_t index) const {
+    if (index < lane_base_credits.size()) return lane_base_credits[index];
     const auto& base = setup.fiscal->planets[index];
     if (!control || !setup.ability_host) return base.credits;
     const auto* surface = find(control->planets, base.planet, [](const auto& r) { return r.planet; });

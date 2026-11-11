@@ -1,0 +1,3 @@
+# Mod content digest
+
+Mounted mods are digested in the background at startup. Lobby join and save loading wait for the digest when comparison is needed. A per-file cache reuses hashes keyed by path, size and modification time; a same-size replacement with the same timestamp (including an edit within a coarse timestamp tick, such as on exFAT or some network shares) can therefore retain a stale digest. A forged cache with matching keys can likewise be trusted: this cache is not an integrity or anti-cheat check. Files whose names differ only by ASCII case cannot be represented unambiguously and cause the digest to fail.

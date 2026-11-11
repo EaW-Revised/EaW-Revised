@@ -97,6 +97,8 @@ bool MapMode::campaign_briefing(const std::string_view event_name) {
     return true;
 }
 bool MapMode::command_bar_movie_playing() const { return state_->hud && state_->hud->command_bar_movie_playing(); }
+bool MapMode::battlecam_active() const { return state_->space && state_->space->live_camera_movie(); }
+bool MapMode::battlecam_preview() const { return battlecam_active() && state_->movie_preview; }
 void MapMode::write_command_bar_movie_report(std::ostream& output) const {
     if (state_->hud) state_->hud->write_command_bar_movie_report(output); else output << "null";
 }

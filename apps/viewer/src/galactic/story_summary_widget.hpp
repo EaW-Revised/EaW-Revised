@@ -9,7 +9,7 @@
 #include <memory>
 #include <string>
 
-namespace godot { class Button; class Control; class Label; class PanelContainer; }
+namespace godot { class Button; class Control; class Label; class PanelContainer; class ScrollContainer; }
 
 namespace eawr::presentation::godot_backend {
 class EawrOverlayButton;
@@ -20,12 +20,15 @@ class EawrOverlayButton;
 class StorySummaryWidget final {
 public:
     void service(GalacticMode::State&);
+    void open(GalacticMode::State&);
+    [[nodiscard]] bool has_goals() const noexcept { return !goals_.empty(); }
     [[nodiscard]] const presentation::ui::StorySummary& model() const noexcept { return model_; }
 
 private:
     void feed(GalacticMode::State&);
     void build(GalacticMode::State&);
     void redraw(GalacticMode::State&);
+    void relayout();
     presentation::ui::StorySummary model_;
     std::map<std::string, sim::galactic::story::Goal> goals_; // by tag, from the feed's goal rows
     std::uint64_t cursor_{}, drawn_{};
@@ -34,6 +37,7 @@ private:
     godot::PanelContainer* panel_{};
     godot::Label* title_{};
     godot::Label* body_{};
+    godot::ScrollContainer* scroll_{};
     godot::Button* close_{};
     EawrOverlayButton* relay_{};
 };

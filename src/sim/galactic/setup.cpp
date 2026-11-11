@@ -331,6 +331,7 @@ std::string_view to_string(const GalacticEventKind kind) noexcept {
     case GalacticEventKind::black_market_purchased: return "black_market_purchased";
     case GalacticEventKind::ability_prepared: return "ability_prepared";
     case GalacticEventKind::ability_settled: return "ability_settled";
+    case GalacticEventKind::corruption_removal_started: return "corruption_removal_started";
     case GalacticEventKind::ability_cancelled: return "ability_cancelled";
     case GalacticEventKind::command_rejected: return "command_rejected";
     case GalacticEventKind::planet_owner_changed: return "planet_owner_changed";
@@ -392,6 +393,10 @@ std::string_view to_string(const GalacticRejectReason reason) noexcept {
     case GalacticRejectReason::not_paused: return "not_paused";
     case GalacticRejectReason::victory_unavailable: return "victory_unavailable";
     case GalacticRejectReason::observer_input: return "observer_input";
+    case GalacticRejectReason::neutralize_unavailable: return "neutralize_unavailable";
+    case GalacticRejectReason::neutralize_no_hero: return "neutralize_no_hero";
+    case GalacticRejectReason::neutralize_allied_hero: return "neutralize_allied_hero";
+    case GalacticRejectReason::neutralize_not_targetable: return "neutralize_not_targetable";
     case GalacticRejectReason::insufficient_credits: return "insufficient_credits";
     case GalacticRejectReason::production_admission: return "production_admission";
     }

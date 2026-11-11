@@ -7,6 +7,7 @@
 #include "eawr/net/galactic_adapter.hpp"
 #include "eawr/net/galactic_recovery.hpp"
 #include "eawr/checkpoint/game.hpp"
+#include "../../src/sim/galactic/checkpoint_fields_internal.hpp"
 #include <thread>
 #include <chrono>
 #include "eawr/platform/sim_workers.hpp"
@@ -130,6 +131,36 @@ std::optional<galactic::CommandPayload> intent(const galactic::GalacticSetup& se
     return std::nullopt;
 }
 
+// Synthetic direct barrier: skip historical work while retaining ordinary production
+// checkpoint decoding and all live lockstep/save paths. Only the two owner clocks and
+// the galaxy session clock change; the simulation source has no test clock setter.
+GameSession at_tick(const galactic::GalacticSetup& setup, std::uint64_t tick) {
+    namespace archive = galactic::checkpoint_detail;
+    auto fresh = require(GameSession::create(setup));
+    if (tick == 0) return fresh;
+    auto bytes = require(fresh.save_checkpoint_state());
+    archive::Reader owner(bytes);
+    std::uint32_t version{}; Bytes world; owner(version, world);
+    const auto owner_tick_offset = bytes.size() - owner.remaining();
+    archive::Reader galaxy(world);
+    std::vector<galactic::Planet> planets; std::vector<galactic::Route> routes;
+    std::vector<galactic::Fleet> fleets; galaxy(planets, routes, fleets);
+    const auto world_tick_offset = world.size() - galaxy.remaining();
+    const auto put_tick = [tick](Bytes& target, std::size_t offset) {
+        for (unsigned byte = 0; byte < 8; ++byte)
+            target[offset + byte] = static_cast<std::uint8_t>(tick >> (8U * byte));
+    };
+    put_tick(world, world_tick_offset);
+    // completed tick:u64, next entity ID:u64, then GalacticClock::session_tick:u64.
+    put_tick(world, world_tick_offset + 16);
+    archive::Writer rewritten; rewritten(version, world);
+    rewritten.bytes.insert(rewritten.bytes.end(), bytes.begin() + static_cast<std::ptrdiff_t>(owner_tick_offset), bytes.end());
+    put_tick(rewritten.bytes, owner_tick_offset);
+    auto result = require(GameSession::create(setup));
+    require(result.load_checkpoint_state(rewritten.bytes));
+    return result;
+}
+
 struct Rig {
     struct Options {
         std::uint64_t delay{3}, final_tick{60};
@@ -140,6 +171,7 @@ struct Rig {
         bool monitor{true};
         bool departures{false};
         std::size_t observers{0}; // trailing peers are observers on AI seats
+        std::uint64_t initial_tick{};
     };
     Rig(galactic::GalacticSetup initial, const Options rig_options)
         : setup(std::move(initial)), options(rig_options), humans(human_seats(setup)),
@@ -153,7 +185,7 @@ struct Rig {
         }
         for (net::PeerIndex peer = 0; peer < peers; ++peer) {
             executors.push_back(std::make_unique<eawr::platform::ThreadWorkerAdapter>(options.workers[peer % options.workers.size()]));
-            games.push_back(std::make_unique<GameSession>(require(GameSession::create(setup))));
+            games.push_back(std::make_unique<GameSession>(at_tick(setup, options.initial_tick)));
             if (peer != 0) games.back()->set_state_hasher(std::make_shared<eawr::platform::ThreadStateHasher>());
             net::GalacticAdapterOptions adapter_options;
             adapter_options.clock_policy = options.clock_policy;
@@ -162,12 +194,14 @@ struct Rig {
             net::DesyncMonitor* monitor = nullptr;
             if (options.monitor) {
                 net::DesyncOptions monitor_options;
+                monitor_options.initial_tick = options.initial_tick;
                 monitor_options.input_delay = options.delay;
                 monitor_options.exchange_every = 10;
                 monitors.push_back(std::make_unique<net::DesyncMonitor>(*transports.back(), monitor_options));
                 monitor = monitors.back().get();
             }
             net::SessionOptions session_options;
+            session_options.initial_tick = options.initial_tick;
             session_options.input_delay = options.delay;
             session_options.final_tick_count = options.final_tick;
             session_options.completeness_timeout_ms = options.completeness_timeout_ms;
@@ -432,8 +466,10 @@ void unavailable_battle_callback_coop() {
                 move.target = fleet->orbit; move.members = {fleet->members.front().id}; move.taskforce = move.plan = move.block = 1;
                 expect(require(actions->admit(move)).admitted, "AI TaskForce has a native movement listener before the co-op battle");
                 cp::GalacticAiServices services; services.state = actions;
-                services.battle = ga::retained_movement_battle_listener(actions, {},
-                    std::function<auth::ScriptScheduler*()>{[] { return nullptr; }});
+                // The production listener reads the notice's owned facts, as the runtime hands them over (A2.1).
+                services.battle = [listener = ga::retained_movement_battle_listener(actions, {},
+                    std::function<auth::ScriptScheduler*()>{[] { return nullptr; }})]
+                    (const eawr::campaign::GalacticAiBattleNotice& notice) { return listener(eawr::campaign::galactic_ai_battle_facts(notice)); };
                 return eawr::core::Result<cp::GalacticAiServices>::success(std::move(services));
             }));
             // Retained forces need no deployed tactical object for this boundary test.
@@ -507,14 +543,18 @@ void shared_clock_limit_at_execution() {
             return require(rig.sessions[peer].submit([&](auto key) { return net::encode_galactic_input(key, payload); }));
         };
         const auto pause = send(0, galactic::PauseGalaxy{});
-        // #4574: six speed changes per 45 session seconds; the pause above does not spend any of them.
-        auto speed = send(0, galactic::SetSpeed{false, math::Fixed::from_raw(math::Fixed::scale / 2)});
+        // #4574/#5355: the per-seat speed budget (2 per 10 session seconds); the pause above does not spend any of it.
+        // The shared 2x (the multiplayer maximum) applies; a repeat of the same value still spends a slot.
+        const auto shared = math::Fixed::from_raw(galactic::multiplayer_speed_max_raw);
+        auto speed = send(0, galactic::SetSpeed{false, shared});
         for (std::size_t extra = 1; extra < net::ClockThrottle::speed_changes_per_window; ++extra)
-            speed = send(0, galactic::SetSpeed{false, math::Fixed::from_raw(math::Fixed::scale / 2)});
-        const auto refused_speed = send(0, galactic::SetSpeed{false, math::Fixed::from_raw(2 * math::Fixed::scale)});
+            speed = send(0, galactic::SetSpeed{false, shared});
+        const auto refused_speed = send(0, galactic::SetSpeed{false, math::Fixed::from_raw(math::Fixed::scale / 2)});
         const auto other_resume = send(1, galactic::ResumeGalaxy{});
-        expect(pause.tick == speed.tick && speed.tick == refused_speed.tick && other_resume.tick == pause.tick,
-            "pause/speed requests are stamped at the same agreed frontier");
+        // The other human's budget admits 2.5x; the sim refuses it (above 2x with two humans) on both peers.
+        const auto too_fast = send(1, galactic::SetSpeed{false, math::Fixed::from_raw(5 * math::Fixed::scale / 2)});
+        expect(pause.tick == speed.tick && speed.tick == refused_speed.tick && other_resume.tick == pause.tick
+            && too_fast.tick == pause.tick, "pause/speed requests are stamped at the same agreed frontier");
         std::array<bool, 2> observed{};
         for (std::uint64_t round = 0; round < 20'000; ++round) {
             rig.network.round = round;
@@ -534,10 +574,15 @@ void shared_clock_limit_at_execution() {
                     observed[peer] = true;
                     expect(rig.games[peer]->galaxy().clock().pause_depth == 0,
                         "another human may resume at the agreed tick with its own budget");
-                    expect(rig.games[peer]->galaxy().clock().strategic_speed.raw() == math::Fixed::scale / 2,
-                        "strategic speed applies on the same completed tick on both peers");
+                    expect(rig.games[peer]->galaxy().clock().strategic_speed.raw() == galactic::multiplayer_speed_max_raw,
+                        "the shared 2x applies on the same completed tick on both peers");
+                    const auto& events = published->galaxy->events();
+                    expect(std::count_if(events.begin(), events.end(), [&](const galactic::GalacticEvent& event) {
+                        return event.kind == galactic::GalacticEventKind::command_rejected && event.producer == rig.humans[1]
+                            && event.reason == galactic::GalacticRejectReason::not_authorized; }) == 1,
+                        "the other human's 2.5x is refused by the sim at the same completed tick on both peers");
                     expect(rig.adapters[peer]->refused().size() == 1,
-                        "seventh speed change is refused during execution, not while receiving");
+                        "the speed change past the budget is refused during execution, not while receiving");
                     const eawr::sim::SeatCommandKey probe{20, rig.humans[0], 99};
                     expect(bool(rig.adapters[peer]->validate({probe, require(net::encode_galactic_input(probe, galactic::PauseGalaxy{}))})),
                         "wire admission does not depend on the already exhausted execution budget");
@@ -551,9 +596,9 @@ void shared_clock_limit_at_execution() {
             "clock acceptance/refusal produces equal digests and canonical input on 1/2/4/8 workers");
         expect(rig.adapters[0]->refused().size() == 1 && rig.adapters[1]->refused().size() == 1
             && rig.adapters[0]->refused()[0].message == rig.adapters[1]->refused()[0].message
-            && rig.adapters[0]->refused()[0].message.find("speed changes are limited to 6 per 45 session seconds") != std::string::npos
-            && rig.adapters[0]->refused()[0].message.find("next is allowed in 45 s") != std::string::npos,
-            "the seventh speed change is refused identically on both peers, naming the limit and the wait");
+            && rig.adapters[0]->refused()[0].message.find("speed changes are limited to 2 per 10 session seconds") != std::string::npos
+            && rig.adapters[0]->refused()[0].message.find("next is allowed in 10 s") != std::string::npos,
+            "the speed change past the budget is refused identically on both peers, naming the limit and the wait");
         const net::GalacticSessionAdapter unrestricted(*rig.games[0], *rig.executors[0]);
         expect(unrestricted.state_hash() != rig.adapters[0]->state_hash(),
             "the named clock policy/history participate in the agreed state hash");
@@ -1295,8 +1340,110 @@ void exchange_encode_after_checkpoint_load() {
     }
 }
 
+// #5355: a multiplayer save's clock continuation written under the older shared-clock constants (6 speed changes per
+// 1,350 session ticks, #4574) still resumes. Its speed history is dropped; policy, pause actor and debounce stay, and the
+// adapter writes the current constants from then on. Malformed or over-long rows stay refused.
+void legacy_clock_continuation() {
+    const auto put = [](Bytes& bytes, std::uint64_t value, unsigned width) {
+        for (unsigned i = 0; i < width; ++i) bytes.push_back(static_cast<std::uint8_t>(value >> (8U * i)));
+    };
+    struct Row { std::uint32_t seat; std::vector<std::uint64_t> ticks; };
+    const auto continuation = [&](std::uint64_t window, std::uint64_t limit, const std::vector<Row>& history,
+                                  std::uint32_t toggle_seat, std::uint64_t toggle_tick) {
+        Bytes bytes;
+        put(bytes, static_cast<std::uint8_t>(net::GalacticClockPolicy::limited), 1);
+        put(bytes, window, 8); put(bytes, limit, 4);
+        put(bytes, 1, 1); put(bytes, 1, 4); // pause actor: seat 1
+        put(bytes, history.size(), 4);
+        for (const auto& row : history) {
+            put(bytes, row.seat, 4); put(bytes, row.ticks.size(), 4);
+            for (const auto tick : row.ticks) put(bytes, tick, 8);
+        }
+        put(bytes, 1, 4); put(bytes, toggle_seat, 4); put(bytes, toggle_tick, 8);
+        return bytes;
+    };
+    const auto setup = coop_policy_setup(2);
+    const eawr::platform::ThreadWorkerAdapter executor(1);
+    auto game = require(GameSession::create(setup));
+    net::GalacticAdapterOptions options; options.clock_policy = net::GalacticClockPolicy::limited;
+    {
+        net::GalacticSessionAdapter stepping(game, executor, options);
+        for (unsigned tick = 0; tick < 10; ++tick) require(stepping.step());
+    }
+    const auto current = continuation(net::ClockThrottle::window_ticks, net::ClockThrottle::speed_changes_per_window, {}, 1, 5);
+    const auto old = continuation(1350, 6, {{1, {2, 3, 4}}, {2, {6}}}, 1, 5);
+    net::GalacticSessionAdapter resumed(game, executor, options);
+    expect(bool(resumed.restore_network_state(old)), "a continuation saved under the 6 per 1,350-tick budget resumes");
+    expect(resumed.checkpoint_network_state() == current,
+        "the old speed history is dropped; policy, pause actor and debounce are kept under the current constants");
+    net::GalacticSessionAdapter same(game, executor, options);
+    expect(bool(same.restore_network_state(current)) && same.checkpoint_network_state() == current,
+        "a current continuation still round-trips byte for byte");
+    net::GalacticSessionAdapter refused(game, executor, options);
+    expect(!refused.restore_network_state(continuation(1350, 2, {{1, {2, 3, 4}}}, 1, 5)),
+        "a row longer than its own saved limit is refused");
+    expect(!refused.restore_network_state(continuation(net::ClockThrottle::window_ticks, net::ClockThrottle::speed_changes_per_window,
+        {{1, {2, 3, 4}}}, 1, 5)), "a current-constant row longer than the current limit is refused");
+    expect(!refused.restore_network_state(continuation(0, 6, {}, 1, 5)), "a zero window is refused");
+    expect(!refused.restore_network_state(continuation(1350, 6, {{1, {2, 30}}}, 1, 5)),
+        "an old row with a tick at or after the saved frontier is refused");
+    auto trailing = old; trailing.push_back(0);
+    expect(!refused.restore_network_state(trailing), "trailing bytes are refused");
+}
+
+void long_campaign_session_and_save() {
+    namespace checkpoint = eawr::checkpoint;
+    constexpr std::uint64_t start = net::max_session_ticks - 2, end = net::max_session_ticks + 6;
+    std::vector<std::string> reference;
+    for (const auto workers : {1U, 2U, 4U, 8U}) {
+        Rig::Options options; options.workers = {workers}; options.initial_tick = start; options.final_tick = end;
+        Rig rig(versus_setup(), options);
+        rig.run();
+        expect(!rig.failure && rig.games[0]->completed_tick() == end && rig.games[1]->completed_tick() == end,
+            "both GC peers cross the tactical tick cap and reach the agreed end");
+        expect(rig.hashes[0] == rig.hashes[1] && rig.hashes[0].size() == end - start,
+            "long-session peers exchange matching hashes for every completed tick");
+        if (reference.empty()) reference = rig.hashes[0];
+        else expect(reference == rig.hashes[0], "long-session hashes match on 1/2/4/8 workers");
+        const auto identities = checkpoint::game_identities(rig.setup);
+        const auto bytes = require(checkpoint::save_game_checkpoint(*rig.games[0], identities));
+        const auto parsed = require(checkpoint::parse_checkpoint(bytes));
+        expect(parsed.header.completed_tick == end, "saved checkpoint retains the tick beyond one million");
+        static_assert(sizeof(decltype(net::SealedBatch::tick)) == 8);
+        static_assert(sizeof(decltype(net::RecoverySessionFrontier::completed_tick)) == 8);
+        static_assert(sizeof(decltype(net::GalacticRecoveryAnchor::completed_tick)) == 8);
+        static_assert(sizeof(decltype(checkpoint::Header::completed_tick)) == 8);
+        net::GalacticRecoveryAnchor anchor; anchor.epoch = 1; anchor.completed_tick = end;
+        anchor.lineage.fill(1); anchor.state = recovery_digest(rig.adapters[0]->state_hash());
+        net::GalacticRecoveryRequest request; request.anchor = anchor; request.seat = {1}; request.transfer_epoch = 1;
+        expect(require(net::decode_galactic_recovery_request(require(net::encode_galactic_recovery_request(request)))).anchor == anchor,
+            "long checkpoint recovery request retains its full tick");
+        net::GalacticRecoveryControl control; control.transfer_epoch = 1; control.barrier = end;
+        control.target = 1; control.frontier = anchor;
+        expect(require(net::decode_galactic_recovery_control(require(net::encode_galactic_recovery_control(control)))).barrier == end,
+            "long recovery control retains its publication barrier");
+        net::GalacticRecoveryLog log;
+        expect(log.checkpoint(anchor, std::make_shared<const Bytes>(bytes), {{{1}, true}, {{2}, true}})
+            == net::GalacticRecoveryRefusal::none, "long checkpoint anchors the bounded recovery log");
+        expect(log.append(end, {}, anchor.state) == net::GalacticRecoveryRefusal::none,
+            "recovery log appends beyond the tactical tick cap");
+        auto restored = require(checkpoint::load_game_checkpoint(bytes, identities, {}, *rig.executors[0]));
+        expect(restored.work.resimulated_ticks == 0 && restored.session.completed_tick() == end
+            && restored.session.state_sha256() == rig.games[0]->state_sha256(),
+            "default campaign restore accepts the long session and restores the exact hash without historical work");
+        expect(require(restored.session.step(*rig.executors[0])).state_hash.get()
+            == require(rig.games[0]->step(*rig.executors[0])).state_hash.get(),
+            "restored long session continues with the same next hash");
+        checkpoint::GameLoadOptions bounded; bounded.max_restore_ticks = net::max_session_ticks;
+        expect(!checkpoint::load_game_checkpoint(bytes, identities, bounded, *rig.executors[0]),
+            "an explicit smaller restore budget remains enforced");
+    }
+}
+
 int main() {
     try {
+        long_campaign_session_and_save();
+        legacy_clock_continuation();
         exchange_encode_equals_serial();
         exchange_encode_after_checkpoint_load();
         forced_mismatch_bundles();

@@ -194,7 +194,7 @@ std::span<const GalacticEvent> GalacticSnapshot::events() const noexcept {
 
 std::vector<std::uint8_t> GalacticSnapshot::canonical_bytes() const {
     std::vector<std::uint8_t> bytes(detail::snapshot_magic.begin(), detail::snapshot_magic.end());
-    detail::put_u32(bytes, 9); // Transport is independent of campaign balance.
+    detail::put_u32(bytes, 10); // WGEP-145: extension 15 market items include ability names.
     detail::put_u8(bytes, multiplayer() ? 1U : 0U);
     detail::put_u64(bytes, completed_tick());
     detail::put_u64(bytes, clock().session_tick);

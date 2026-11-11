@@ -25,6 +25,16 @@ int main(int argc, char* argv[]) {
         std::cerr << "FAIL: shared check/require self-test\n";
         return 1;
     }
+    if (argc == 2 && std::string_view(argv[1]) == "--beams") {
+        test_hero_beams();
+        test_super_laser();
+        test_leech_shields();
+        test_beam_autofire();
+        test_arriving_beam_autofire();
+        if (failures != 0) return EXIT_FAILURE;
+        std::cout << "beam lifecycle contracts accepted\n";
+        return EXIT_SUCCESS;
+    }
     if (argc == 2 && std::string_view(argv[1]) == "--stealth") {
         test_stealth_session();
         test_stealth_duration_modifiers();
@@ -53,6 +63,7 @@ int main(int argc, char* argv[]) {
     test_lure();
     test_self_destruct_projectile_order();
     test_self_destruct();
+    test_gui_name_is_no_handler_selector();
     test_corrupt_scatter();
     test_corrupt_systems();
     test_full_salvo();

@@ -249,7 +249,7 @@ std::optional<ui::UnitAbilityState> LiveSessionView::Abilities::state(const sim:
     // container holds itself (#561, AB-60; WAB-70 for BUZZ_DROIDS).
     const auto squadron = view_.squadron_members_.find(unit);
     if (squadron != view_.squadron_members_.end() && kind != tactical::AbilityKind::ion_cannon_shot
-        && kind != tactical::AbilityKind::buzz_droids) {
+        && kind != tactical::AbilityKind::buzz_droids && kind != tactical::AbilityKind::lucky_shot) {
         holders = squadron->second;
     }
     bool has = false;

@@ -495,6 +495,22 @@ void generation_is_deterministic() {
     expect(same, "the same texture always gives the same chain");
 }
 
+void compensated_light_chain() {
+    Texture plain = bc3_texture(64, 64, light_image(64, 64));
+    Texture adjusted = plain;
+    expect(extend_mip_chain(plain, ChainKind::colour), "plain light chain generated");
+    expect(extend_mip_chain(adjusted, ChainKind::compensated_light), "compensated light chain generated");
+    expect(plain.mips.size() == adjusted.mips.size(), "compensation keeps chain length");
+    expect(plain.mips[0].bytes == adjusted.mips[0].bytes && plain.mips[1].bytes == adjusted.mips[1].bytes,
+        "compensation leaves top and first mip unchanged");
+    expect(plain.mips[2].bytes != adjusted.mips[2].bytes, "compensation affects the next filtered level");
+    Texture partial = plain;
+    partial.mips.resize(2);
+    const auto saved = partial.mips[1].bytes;
+    expect(!extend_mip_chain(partial, ChainKind::compensated_light) && partial.mips.size() == 2 && partial.mips[1].bytes == saved,
+        "authored partial light chains stay untouched");
+}
+
 } // namespace
 
 int main() {
@@ -508,6 +524,7 @@ int main() {
     other_textures_are_untouched();
     odd_sizes_get_floor_halved_levels();
     generation_is_deterministic();
+    compensated_light_chain();
     other_block_formats_get_chains();
     uncompressed_formats_get_exact_chains();
     normal_chain_follows_the_renormalise_switch();

@@ -31,11 +31,13 @@ struct Ability final {
     std::vector<ModMultiplier> modifiers;
     std::vector<ModFlag> modifier_flags;
     bool supports_autofire{};
+    bool active_by_default{}; // #6517: request activation during creation
     // #561: the projectile the ability fires instead of the weapons' own (Projectile_Types_Override),
     // resolved to its index in the projectile table.
     std::string projectile_override;
     std::uint32_t projectile_index{no_index};
     std::optional<Fixed> effective_radius;
+    std::optional<Fixed> area_effect_decal_distance;
     std::string gui_activated_ability_name;
     std::optional<Fixed> fixed_inaccuracy{};
     std::optional<Fixed> target_z_offset{};
@@ -53,7 +55,9 @@ struct Ability final {
     std::optional<bool> is_pulsing;
     std::string lure_particle;
     bool disable_movement{}; // WIN-02, WMS-02: authored movement lock while deployed
+    bool stop_when_activated{true}; // WSD-02: self-destruct's authored stop and lock
     std::optional<Fixed> targeting_max_attack_distance; // WRA-03: active targeting reach
+    bool market_purchase_required{}; // WGEP-145
     bool operator==(const Ability&) const = default;
 };
 
@@ -65,6 +69,7 @@ struct BuzzDroids final {
     std::optional<Fixed> enemy_damage_per_second, own_damage_per_second, activation_seconds;
     std::string object_type;
     std::string activate_sfx; // presentation: the droids' own arming cue (WAB-75)
+    bool market_purchase_required{};
     bool operator==(const BuzzDroids&) const = default;
 };
 

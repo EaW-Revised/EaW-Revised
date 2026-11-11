@@ -821,7 +821,7 @@ invisible, and recorded on the fidelity list.
 
 | Check | What | Per PR | GC integration batch / nightly |
 |---|---|---|---|
-| Unit and contract tests | galactic rules, commands, encodings | root CTest (Linux GCC and Clang, MSVC) | all four compilers nightly |
+| Unit and contract tests | galactic rules, commands, encodings | root CTest (Linux GCC and Clang, clang-cl) | three compilers nightly; MSVC nightly compile-only watch |
 | GC replay corpus | synthetic campaigns, pinned per-tick hashes | 1/2/4/8 workers, in the Linux job, for any galactic or campaign C++ | five targets |
 | Lockstep loopback | two in-process peers, same sealed command batches, input delay, hash compare every N ticks, peer B with 4 workers and scrambled storage; a coop scenario where each peer drives one seat of the same faction | for galactic, campaign and command changes | |
 | Restore and continue | checkpoint at sampled ticks (also inside a child battle), restore, continue, compare with the uninterrupted run | once the checkpoint container exists, for any stateful change | the full corpus |

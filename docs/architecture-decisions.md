@@ -265,9 +265,9 @@ this identity. At final GC battle entry, the authoritative active seat roster en
 the policy whenever either participating faction has at least two human seats; there
 is no lobby switch. Solo, one-human-per-side and no-human battles leave the policy
 absent, and ordinary skirmish keeps its existing faction command model. Deployment splits
-mobile roots by descending loaded population, stable entity-ID ties and round-robin seats.
-Seeded stable ties from the accepted plan remain follow-up
-(legacy EAWR-5319).
+mobile roots by descending loaded population, then a stateless seeded rank of the setup seed
+and entity ID (it never advances the battle RNG; entity ID breaks a rank tie), and round-robin seats
+(legacy EAWR-5374).
 Reinforcements follow their authenticated caller. Selected-root gifts and agreed
 departures transfer temporary control within the tactical side, never faction ownership.
 The same rule applies to both human sides and against AI. See the defaults and acceptance

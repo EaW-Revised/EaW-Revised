@@ -154,6 +154,110 @@ void test_replacement_projectiles() {
     expect(replacement != 0 && retained != after.end() && retained->target == replacement && retained->locked,
         "WPR-53: the same homing projectile remains locked on the replacement");
 }
+void test_hangar_tech_setup() {
+    auto initial = setup();
+    std::erase_if(initial.units, [](const auto& unit) { return unit.entity_id != 1 && unit.entity_id != 3; });
+    auto health = durability();
+    auto craft_health = health.profiles.front(); craft_health.type_id = 20;
+    health.profiles.insert(health.profiles.begin() + 1, craft_health);
+    t::MotionTable motion;
+    t::CraftProfile craft;
+    craft.type_id = 20; craft.max_speed = whole(5); craft.min_speed = whole(1);
+    craft.rate_of_turn = whole(6); craft.lift = whole(6); craft.thrust = decimal("0.2");
+    craft.roll_rate = whole(6); craft.bank_angle = whole(70); craft.strafe_distance = whole(200);
+    motion.squadrons.craft = {craft};
+    motion.squadrons.squadrons = {{30, {20}, {m::Vec3{}}, whole(1000), whole(200), whole(300), whole(20)},
+        {31, {20}, {m::Vec3{}}, whole(1000), whole(200), whole(300), whole(20)}};
+    t::SpawnerProfile base; base.type_id = 10; base.mobile = true;
+    base.entries = {{30, 1, 1}}; base.bays = {{0, {}, {whole(1), {}, {}}}};
+    motion.squadrons.spawners = {base};
+    std::array<t::SpawnerProfile, 7> tiers;
+    for (auto& tier : tiers) tier = base;
+    for (unsigned tier = 2; tier < 6; ++tier) tiers[tier].entries = {{31, 1, 0}};
+    tiers[6].entries.clear();
+    motion.squadrons.tech_spawners.emplace(10, tiers);
+    bool witnessed = false;
+    for (std::uint64_t seed = 1; seed <= 200 && !witnessed; ++seed) {
+        initial.seed = seed;
+        const auto due = t::initial_spawner(seed, 1, 3).next_service_frame;
+        if (due < 4 || due > 9) continue;
+        auto made = t::TacticalSession::create(initial, {}, health, motion, std::nullopt, {}, {}, {}, economy());
+        expect(static_cast<bool>(made), "FC-28 tech setup fixture creates"); if (!made) return;
+        auto world = std::move(made).value();
+        expect(static_cast<bool>(world.submit(buy(0, 1, 0, 1, 91))), "FC-28 tech upgrade submits");
+        eawr::sim::InlineExecutor executor;
+        for (std::uint64_t tick = 0; tick < 12; ++tick) {
+            const auto step = world.step(executor);
+            expect(static_cast<bool>(step), "FC-28 tech setup steps"); if (!step) return;
+            const bool replaced = std::any_of(step.value().snapshot->events().begin(), step.value().snapshot->events().end(),
+                [](const auto& event) { return event.kind == t::EventKind::station_replaced; });
+            if (!replaced || world.squadrons().empty()) continue;
+            const auto mind = world.squadron_state(world.squadrons().front().container);
+            if (mind && mind->spawner == 3 && due == tick + 1) {
+                witnessed = true;
+                expect(mind->squadron_type == 31 && account(world, 1).tech_level == 2,
+                    "FC-28: same-frame staged tech is sampled at first setup");
+                auto checkpoint = world.save_checkpoint_state();
+                auto copy = t::TacticalSession::create(initial, {}, health, motion, std::nullopt, {}, {}, {}, economy());
+                if (copy) expect(static_cast<bool>(copy.value().submit(buy(0, 1, 0, 1, 91))),
+                    "FC-28: restored session has the same command log");
+                expect(checkpoint && copy && copy.value().load_checkpoint_state(checkpoint.value()),
+                    "FC-28: selected tier survives checkpoint load");
+                if (checkpoint && copy) {
+                    const auto next = world.step(executor);
+                    const auto restored = copy.value().step(executor);
+                    expect(next && restored && next.value().state_sha256 == restored.value().state_sha256,
+                        "FC-28: restored hangar continues with its selected tier");
+                }
+                break;
+            }
+        }
+    }
+    expect(witnessed, "FC-28: fixture exercises an upgrade and first service in the same frame");
+    {
+        auto retry_motion = motion;
+        retry_motion.squadrons.spawners.front().entries.clear();
+        retry_motion.squadrons.tech_spawners.at(10)[0].entries.clear();
+        const auto* zero = retry_motion.squadrons.find_spawner_at_tech(10, 1, 0);
+        const auto* one = retry_motion.squadrons.find_spawner_at_tech(10, 1, 1);
+        expect(zero && zero->entries.empty() && one && !one->entries.empty(),
+            "WSL-11 tech zero selects an empty profile and tech one selects an authored profile");
+        auto rules = economy();
+        rules.players[0].start_tech = 0;
+        initial.seed = 540;
+        auto empty = t::TacticalSession::create(initial, {}, health, retry_motion, std::nullopt, {}, {}, {}, rules);
+        expect(static_cast<bool>(empty), "WSL-11 empty tier fixture creates");
+        if (!empty) return;
+        auto retry = std::move(empty).value();
+        through(retry, 40);
+        expect(retry.squadrons().empty(), "WSL-11 tech zero has no authored squadron");
+        expect(static_cast<bool>(retry.submit(buy(40, 1, 0, 1, 91))), "WSL-11 empty tier upgrade submits");
+        through(retry, 100);
+        expect(account(retry, 1).tech_level > 0 && retry.squadrons().size() == 1,
+            "WSL-11 empty setup retries and launches after tech-up");
+    }
+    initial.seed = 540;
+    auto made = t::TacticalSession::create(initial, {}, health, motion, std::nullopt, {}, {}, {}, economy());
+    expect(static_cast<bool>(made), "WSL-11 retained tier fixture creates");
+    if (!made) return;
+    auto world = std::move(made).value();
+    through(world, 40);
+    expect(world.squadrons().size() == 1, "WSL-11 low-tech carrier launched");
+    if (world.squadrons().empty()) return;
+    expect(static_cast<bool>(world.submit(buy(40, 1, 0, 1, 91))), "WSL-11 later upgrade submits");
+    through(world, 80);
+    expect(account(world, 1).tech_level == 2, "WSL-11 later upgrade advances tech");
+    const auto old = world.squadrons().front();
+    expect(static_cast<bool>(world.submit({{80, 1, 1}, old.members, t::DamagePayload{whole(10000)}})),
+        "WSL-11 launched squadron can be destroyed");
+    through(world, 160);
+    expect(world.squadrons().size() == 1, "WSL-11 selected reserve replaces the lost squadron");
+    if (!world.squadrons().empty()) {
+        const auto mind = world.squadron_state(world.squadrons().front().container);
+        expect(mind && mind->squadron_type == 30, "WSL-11 retains the tier selected before the upgrade");
+    }
+}
+
 void test_hangar_replacement() {
     for (const bool disabled : {false, true}) for (const bool reordered : {false, true}) for (const auto reserve : {-1, 0, 2}) {
       std::vector<std::string> hashes;

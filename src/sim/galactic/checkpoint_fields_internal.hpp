@@ -28,7 +28,7 @@ template <> struct Fields<::eawr::sim::SeatId> {
 
 template <> struct Fields<::eawr::sim::galactic::AbilityActorState> {
     template <class A, class T> static void apply(A& a, T& v) {
-        a(v.actor, v.type, v.enabled, v.cancelled, v.theft_enabled, v.theft_cancelled, v.corruption_enabled, v.corruption_cancelled, v.hack_enabled, v.hack_cancelled, v.destruction_enabled, v.destruction_cancelled, v.sabotage_enabled, v.sabotage_cancelled, v.neutralize_enabled, v.neutralize_cancelled, v.spy_enabled, v.spy_cancelled, v.spy_targets, v.contested_check_disabled);
+        a(v.actor, v.type, v.enabled, v.cancelled, v.theft_enabled, v.theft_cancelled, v.corruption_enabled, v.corruption_cancelled, v.hack_enabled, v.hack_cancelled, v.destruction_enabled, v.destruction_cancelled, v.sabotage_enabled, v.sabotage_cancelled, v.neutralize_enabled, v.neutralize_cancelled, v.spy_enabled, v.spy_cancelled, v.spy_targets, v.contested_check_disabled, v.removal_enabled, v.removal_cancelled);
     }
 };
 
@@ -100,7 +100,7 @@ template <> struct Fields<::eawr::sim::galactic::CapturedPlanetType> {
 
 template <> struct Fields<::eawr::sim::galactic::CensusObject> {
     template <class A, class T> static void apply(A& a, T& v) {
-        a(v.id, v.original_type, v.owner, v.planet, v.container, v.dead, v.delete_pending, v.current_type, v.generated_source, v.combat_role, v.abilities, v.garrison, v.paid_cost);
+        a(v.id, v.original_type, v.owner, v.planet, v.container, v.dead, v.delete_pending, v.current_type, v.generated_source, v.combat_role, v.abilities, v.garrison, v.paid_cost, v.story_prevent_ai_usage, v.story_prefer_ground);
     }
 };
 
@@ -316,7 +316,7 @@ template <> struct Fields<::eawr::sim::galactic::GalacticPlayerEconomy> {
 
 template <> struct Fields<::eawr::sim::galactic::GalacticSession::NativeActorChange> {
     template <class A, class T> static void apply(A& a, T& v) {
-        a(v.kind, v.actor, v.source, v.dead, v.deleting, v.death_clone);
+        a(v.kind, v.actor, v.source, v.dead, v.deleting, v.death_clone, v.prevent_ai_usage, v.prefer_ground);
     }
 };
 
@@ -744,7 +744,7 @@ template <> struct Fields<::eawr::sim::galactic::VictoryType> {
 
 template <> struct Fields<::eawr::sim::galactic::corruption_fixture::MarketItem> {
     template <class A, class T> static void apply(A& a, T& v) {
-        a(v.id, v.faction, v.tech, v.tutorial_tech, v.base_cost, v.tutorial_base_cost, v.uncommon_multiplier);
+        a(v.id, v.faction, v.tech, v.tutorial_tech, v.base_cost, v.tutorial_base_cost, v.uncommon_multiplier, v.ability_names);
     }
 };
 
@@ -781,6 +781,12 @@ template <> struct Fields<::eawr::sim::galactic::story::EventState> {
 template <> struct Fields<::eawr::sim::galactic::story::EventEdit> {
     template <class A, class T> static void apply(A& a, T& v) {
         a(v.subplot, v.event, v.event_params, v.reward_params, v.reward_type, v.dialog, v.dialog_text);
+    }
+};
+
+template <> struct Fields<::eawr::sim::galactic::story::AiFlag> {
+    template <class A, class T> static void apply(A& a, T& v) {
+        a(v.player, v.planet, v.name);
     }
 };
 

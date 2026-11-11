@@ -245,7 +245,9 @@ struct SpawnerState {
     bool ready{};                       // the first service built the entries (FL-02)
     std::vector<SpawnEntryState> entries;
     std::vector<SpawnedShip> ships;     // single ships of ship entries alive now, ascending ID
+    std::optional<std::uint32_t> selected_tech; // WSL-11: retained from first hangar setup
     std::uint64_t controller_output_ordinal{}; // ADR-020: successful shared-producer output rotation.
+    bool ready_to_deploy{};             // FL-17: an eligible human hangar waits for its ability
     friend bool operator==(const SpawnerState&, const SpawnerState&) = default;
 };
 
@@ -264,7 +266,8 @@ struct SpawnDecision {
 // service frame change nothing.
 [[nodiscard]] std::optional<SpawnDecision> service_spawner(const SpawnerProfile& profile, SpawnerState& state,
     std::uint64_t seed, std::uint64_t frame, EntityId unit, const std::vector<bool>& bay_intact,
-    bool suspended = false);
+    bool suspended = false, bool manual = false, std::optional<std::uint64_t> deploy_deadline = std::nullopt,
+    bool garrison_enabled = true);
 
 // FL-14: use the ordinary bay draw without changing authored reserve/alive counters.
 [[nodiscard]] std::optional<std::uint32_t> free_garrison_bay(const SpawnerProfile& profile,

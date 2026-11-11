@@ -32,6 +32,8 @@ namespace eawr::data {
 class Catalog;
 }
 
+namespace eawr::presentation { struct FixedCamera; }
+
 namespace eawr::presentation::ui {
 
 namespace diagnostic_codes {
@@ -227,6 +229,10 @@ struct MinimapHazard {
 // WHZ-72: one shared ellipse mask, two edge orientations and Gaussian fill/border coverage.
 [[nodiscard]] std::vector<std::uint8_t> minimap_hazards(std::span<const MinimapHazard> hazards,
     const MinimapExtents& extents, const MinimapSettings& settings, std::uint32_t width, std::uint32_t height);
+
+// Shared perspective footprint in source XY, with the existing near/far-face cuts.
+[[nodiscard]] std::optional<std::array<std::array<double, 2>, 4>> minimap_ground_corners(
+    const FixedCamera& camera, double height);
 
 // MM-09: the camera's view on the minimap. `ground` holds where the rays through the viewport's
 // top-left, top-right, bottom-right and bottom-left corners meet the reference plane (world X/Y).

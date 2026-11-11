@@ -68,6 +68,10 @@ struct LanView {
     std::optional<sim::SeatId> pause_actor;
     std::string pause_name;
     std::uint64_t options_tick{};
+    // #5355: who last changed the shared speed ("You", a lobby name or "Player N") and the session tick it applied at.
+    std::optional<sim::SeatId> options_actor;
+    std::string options_name;
+    std::uint64_t options_change_tick{};
     bool reconnect_enabled{}, rejoin_enabled{};
     bool credential_provider_available{};
     std::string reconnect_unavailable{"Reconnect requires a confidential credential provider."};
@@ -287,6 +291,11 @@ struct LanLobbyState {
     std::string ready_reason, start_reason;
     bool connections_pending{};
     bool preparing{}, local_ready{}, ready_enabled{}, start_enabled{}, identity_pending{};
+    // #6045: a Galactic Conquest campaign is being derived on a worker thread. `start_preparing` is the host's pending Start
+    // (the screen offers Cancel and the room is locked); `prepare_status` is the line the player reads, for the host and for
+    // a guest preparing its own copy. Empty when nothing is being prepared. It changes once per minute.
+    bool start_preparing{};
+    std::string prepare_status;
 };
 // Setup calls belong to the Godot main thread. driver() transfers transport ownership
 // between polls to the simulation thread; thereafter only view() is read by the UI.
@@ -325,6 +334,9 @@ public:
     // Whether the live room is in GC mode, and the Start seam once it froze (host after Start, guests when the host started).
     virtual bool galactic_room() const { return false; }
     virtual std::optional<GalacticLobbyStart> galactic_start() const { return {}; }
+    // Host: stop waiting for the pending campaign preparation (#6045). The derivation itself cannot be interrupted; it runs
+    // on and its result is kept for a Start with unchanged choices.
+    virtual void cancel_galactic_start() {}
     // Available once the local tick-zero barrier and host commitment both complete. Taken once.
     virtual std::shared_ptr<GalacticLaunch> take_galactic_launch() { return {}; }
     // Stable transport seat order; shared entries control the same faction owner.

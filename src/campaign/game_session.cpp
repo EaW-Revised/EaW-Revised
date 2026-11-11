@@ -192,29 +192,43 @@ core::Result<void> GameSession::Impl::apply_story_rewards() {
         auto batch = story_engine->take_triggered();
         if (batch.empty()) return core::Result<void>::success();
         const bool replaying = world().replaying_native_effects();
-        for (auto& record : batch) {
-            bool declined = false;
-            if (record.engine_applied) record.outcome = "applied by the engine";
-            else if (!record.refusal.empty()) record.outcome = "refused: " + record.refusal; // already diagnosed by the engine
-            else if (record.reward_type.empty()) record.outcome = "no reward";
-            else if (replaying) record.outcome = "replayed from the native journal";
-            else if (record.reward_type == "FORCE_CLICK_GUI") declined = !force_click_request(record); // WST-75: the HUD owns the click
-            else if (!story_rewards || !executor) { record.outcome = "refused: no reward provider is bound"; declined = true; }
-            else {
-                world().note_native_output_published();
-                auto applied = story_rewards(world(), record, *executor);
-                if (!applied) return core::Result<void>::failure(applied.error());
-                record.outcome = applied.value().applied ? "applied" : "refused: " + applied.value().note;
-                declined = !applied.value().applied;
+        bool lock_batch = false;
+        const auto finish_locks = [&] {
+            if (lock_batch) { lock_batch = false; world().end_production_lock_batch(); }
+        };
+        try {
+            for (auto& record : batch) {
+                const bool lock_reward = !record.engine_applied && record.refusal.empty() && !replaying
+                    && (record.reward_type == "LOCK_UNIT" || record.reward_type == "BUILDABLE_UNIT") && story_rewards && executor;
+                if (lock_reward && !lock_batch) { world().begin_production_lock_batch(); lock_batch = true; }
+                else if (!lock_reward) finish_locks();
+                bool declined = false;
+                if (record.engine_applied) record.outcome = "applied by the engine";
+                else if (!record.refusal.empty()) record.outcome = "refused: " + record.refusal; // already diagnosed by the engine
+                else if (record.reward_type.empty()) record.outcome = "no reward";
+                else if (replaying) record.outcome = "replayed from the native journal";
+                else if (record.reward_type == "FORCE_CLICK_GUI") declined = !force_click_request(record); // WST-75: the HUD owns the click
+                else if (!story_rewards || !executor) { record.outcome = "refused: no reward provider is bound"; declined = true; }
+                else {
+                    world().note_native_output_published();
+                    auto applied = story_rewards(world(), record, *executor);
+                    if (!applied) { finish_locks(); return core::Result<void>::failure(applied.error()); }
+                    record.outcome = applied.value().applied ? "applied" : "refused: " + applied.value().note;
+                    declined = !applied.value().applied;
+                }
+                if (declined) { // once per reward type and reason, not once per event
+                    auto text = record.reward_type + " not applied: " + record.outcome.substr(std::string_view("refused: ").size());
+                    if (story_reported.insert(text).second) story_notes.push_back(std::move(text));
+                }
+                world().note_native_output_published(); // dialog/triggered reports leave this story phase
+                if (!record.dialog.empty()) {
+                    finish_locks(); // Dialog callbacks observe the preceding rewards.
+                    apply_story_dialog(record); // WST-20 (6): the dialog follows the reward
+                }
+                story_triggers.push_back(std::move(record));
             }
-            if (declined) { // once per reward type and reason, not once per event
-                auto text = record.reward_type + " not applied: " + record.outcome.substr(std::string_view("refused: ").size());
-                if (story_reported.insert(text).second) story_notes.push_back(std::move(text));
-            }
-            world().note_native_output_published(); // dialog/triggered reports leave this story phase
-            if (!record.dialog.empty()) apply_story_dialog(record); // WST-20 (6): the dialog follows the reward
-            story_triggers.push_back(std::move(record));
-        }
+            finish_locks();
+        } catch (...) { finish_locks(); throw; }
     }
     story_notes.push_back("reward chain exceeds " + std::to_string(max_rounds) + " rounds; the rest waits for the next step");
     return core::Result<void>::success();
@@ -351,7 +365,22 @@ core::Result<void> GameSession::Impl::battle_notice(GalacticAiBattleKind kind, c
     if (!native_ai.battle) return core::Result<void>::success();
     const auto snapshot = world().snapshot();
     world().note_native_output_published();
-    return native_ai.battle({kind, tick, conflict, *snapshot, result, automatic});
+    // Owned copies, handed over at once: the AI runtime's own inbox decides when the AI applies them (at once on the reference
+    // schedule, at the next window start on the async one). This queue only keeps the notice alive across the call.
+    battle_inbox.push_back(OwnedGalacticAiBattleNotice{kind, tick, conflict, snapshot,
+        result ? std::optional<BattleResult>(*result) : std::nullopt, automatic});
+    return deliver_battle_inbox();
+}
+
+core::Result<void> GameSession::Impl::deliver_battle_inbox() {
+    // The queue is taken first: a failed delivery never leaves older notices behind to be applied twice.
+    auto notices = std::move(battle_inbox);
+    battle_inbox.clear();
+    for (const auto& item : notices) {
+        if (!native_ai.battle) break;
+        if (auto delivered = native_ai.battle(item.view()); !delivered) return delivered;
+    }
+    return core::Result<void>::success();
 }
 
 core::Result<std::string> GameSession::Impl::native_hash() const {
@@ -1352,6 +1381,45 @@ std::function<core::Result<void>(const galactic::story::PlotCommand&)> GameSessi
         impl->world().note_native_output_published();
         return impl->story_engine->apply(command);
     };
+}
+namespace {
+// What the sub-plot Lua scripts commit to the plot engine from the story service (WST-37, WST-55, WST-56). Like the plot
+// applier it is bound to the session's heap state and runs only in the ordered commit of a story service, never on a
+// Lua worker.
+class StoryScriptSink final : public GalacticStorySink {
+public:
+    using Plot = std::function<core::Result<void>(const galactic::story::PlotCommand&)>;
+    StoryScriptSink(galactic::story::Engine& engine, Plot plot, std::function<void()> published, std::weak_ptr<const bool> alive)
+        : engine_(engine), plot_(std::move(plot)), published_(std::move(published)), alive_(std::move(alive)) {}
+    core::Result<void> plot(const galactic::story::PlotCommand& command) override { return plot_(command); }
+    core::Result<void> notify(const galactic::story::TextNotice& notice) override {
+        if (alive_.expired()) return core::Result<void>::success();
+        published_();
+        return engine_.notify(std::nullopt, notice); // WST-14: absence broadcasts
+    }
+    void clear_flag(galactic::story::Player player, std::uint64_t planet, std::string_view name) override {
+        if (alive_.expired()) return;
+        published_();
+        engine_.clear_ai_flag(player, planet, name);
+    }
+    bool flag(galactic::story::Player player, std::uint64_t planet, std::string_view name) const override {
+        return !alive_.expired() && engine_.ai_flag(player, planet, name);
+    }
+private:
+    galactic::story::Engine& engine_;
+    Plot plot_;
+    std::function<void()> published_;
+    std::weak_ptr<const bool> alive_;
+};
+} // namespace
+
+core::Result<void> GameSession::connect_story_link(const std::shared_ptr<GalacticStoryLink>& link) {
+    if (!link || !impl_->story_engine || !impl_->scripts)
+        return fail<void>("the story link needs the installed plots and galactic schedulers");
+    link->bind(impl_->story_engine->definitions(), std::make_unique<StoryScriptSink>(*impl_->story_engine, story_plot_applier(),
+        [impl = impl_.get()] { impl->world().note_native_output_published(); }, std::weak_ptr<const bool>(impl_->story_plot_alive)));
+    impl_->scripts->set_story_command_committer([link](script::authoritative::ServiceReport& report) { return link->commit(report); });
+    return core::Result<void>::success();
 }
 void GameSession::set_feedback_notice_handler(sim::galactic::GalacticSession::FeedbackNoticeHandler handler) {
     impl_->world().set_feedback_notice_handler(std::move(handler));

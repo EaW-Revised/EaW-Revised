@@ -5,7 +5,7 @@
 # overcommits the machine, and builds in its own tree <Base>\release-kit\debug\src (the slot trees stay untouched). Never run it on
 # the host that builds the Release viewer for the same release (the two viewers must not share an output tree or a machine's slots).
 param([Parameter(Mandatory)][string]$Base, [Parameter(Mandatory)][string]$Sha, [string]$Jobs = '4', [string]$Slots = '1',
-      [string]$LockTimeout = '21600', [string]$KitName = 'release-kit', [string]$RootBuild = 'release-debug')
+      [string]$LockTimeout = '21600', [string]$KitName = 'release-kit', [string]$RootBuild = 'release-clang-debug')
 $ErrorActionPreference = 'Stop'
 function Say([string]$t) { [Console]::Out.WriteLine($t); [Console]::Out.Flush() }
 if ($Sha -notmatch '^[0-9a-f]{40}$') { throw 'bad sha' }
@@ -58,6 +58,9 @@ try {
 
     $vs = (& "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -version '[17.0,18.0)' -latest -products * -property installationPath | Select-Object -First 1)
     if (-not $vs) { throw 'no Visual Studio 2022' }
+    $clang = Join-Path $vs 'VC\Tools\Llvm\x64\bin\clang-cl.exe'
+    $lld = Join-Path (Split-Path $clang) 'lld-link.exe'
+    if (-not (Test-Path -LiteralPath $clang) -or -not (Test-Path -LiteralPath $lld)) { throw 'clang-cl or lld-link missing' }
     $dev = "call `"$vs\VC\Auxiliary\Build\vcvars64.bat`" >NUL 2>&1 && "
     $pins = Get-Content -LiteralPath (Join-Path $src 'apps\viewer\dependencies.json') -Raw | ConvertFrom-Json
     $cpp = Join-Path $Base "deps\godot-cpp-$($pins.godot_cpp.commit)"
@@ -68,11 +71,11 @@ try {
     $tools = 'sim_headless','sim_bench','path_bench','asset_scan','asset_validate','xml_scan','scene_scan','sky_scan','unit_scan','script_smoke','hud_movie_prepare'
     # root Debug with the static debug C runtime, tests off, symbols on so each tool has its PDB
     $root = "out\build\$RootBuild"
-    Stage 'root-configure' ("($dev" + "cmake --preset windows-msvc-ninja -B $root -DCMAKE_BUILD_TYPE=Debug -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDebug -DEAWR_WARNINGS_AS_ERRORS=OFF -DBUILD_TESTING=OFF -DEAWR_DEBUG_SYMBOLS=ON)") $src
+    Stage 'root-configure' ("($dev" + "cmake --preset windows-clang-ninja -B $root -DCMAKE_C_COMPILER=`"$clang`" -DCMAKE_CXX_COMPILER=`"$clang`" -DCMAKE_LINKER=`"$lld`" -DCMAKE_BUILD_TYPE=Debug -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDebug -DEAWR_WARNINGS_AS_ERRORS=OFF -DBUILD_TESTING=OFF -DEAWR_DEBUG_SYMBOLS=ON)") $src
     Stage 'root-build' ("($dev" + "cmake --build $root --config Debug --target $($tools -join ' ') -j $Jobs)") $src
     # the online-enabled Debug viewer (relay + GNS), in its own tree; bin/ of THIS tree only
-    $vdir = 'out\build\viewer-debug-relay-ninja'
-    Stage 'viewer-configure' ("($dev" + "cmake -S apps\viewer -B $vdir -G Ninja -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_COMPILER=cl -DEAWR_GODOT_CPP_ROOT=`"$cpp`" -DEAWR_ENABLE_LAND_SKIRMISH=OFF -DEAWR_DEBUG_SYMBOLS=ON -DEAWR_ENABLE_RELAY=ON -DEAWR_ENABLE_GNS=ON)") $src
+    $vdir = 'out\build\viewer-clang-debug-relay-ninja'
+    Stage 'viewer-configure' ("($dev" + "cmake -S apps\viewer -B $vdir -G Ninja -DCMAKE_BUILD_TYPE=Debug -DCMAKE_C_COMPILER=`"$clang`" -DCMAKE_CXX_COMPILER=`"$clang`" -DCMAKE_LINKER=`"$lld`" -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDebug -DEAWR_GODOT_CPP_ROOT=`"$cpp`" -DEAWR_ENABLE_LAND_SKIRMISH=OFF -DEAWR_DEBUG_SYMBOLS=ON -DEAWR_ENABLE_RELAY=ON -DEAWR_ENABLE_GNS=ON)") $src
     Stage 'viewer-build' ("($dev" + "cmake --build $vdir --config Debug --target eawr_viewer -j $Jobs)") $src
     $dll = Join-Path $src 'apps\viewer\project\bin\libeawr_viewer.windows.template_release.x86_64.dll'
     if (-not (Test-Path -LiteralPath $dll) -or -not (Test-Path -LiteralPath ([IO.Path]::ChangeExtension($dll, '.pdb')))) { throw 'debug viewer DLL or PDB missing' }

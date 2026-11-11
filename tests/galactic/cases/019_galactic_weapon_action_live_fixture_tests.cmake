@@ -3,7 +3,7 @@ eawr_add_test_case(
     SOURCES weapon_action_live_fixture_tests.cpp
         "${PROJECT_SOURCE_DIR}/apps/viewer/src/galactic/galaxy_view.cpp"
         "${PROJECT_SOURCE_DIR}/apps/viewer/src/galactic/galaxy_snapshot_stub.cpp"
-    LIBS eawr::campaign eawr::sim_galactic eawr::platform
+    LIBS eawr::campaign eawr::sim_galactic eawr::platform eawr::ui_model
     INCLUDE_DIRS "${PROJECT_SOURCE_DIR}/apps/viewer/src"
     TESTS galactic_weapon_action_live_fixture
 )

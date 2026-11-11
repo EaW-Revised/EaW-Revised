@@ -348,9 +348,10 @@ class is its uint32 value):
   little-endian.
 - An optional is a 0 byte when absent, or a 1 byte followed by the value.
 
-When live capture types are loaded, a trailing `PADS-v1` extension binds the selected
+When capture types are loaded, or land build pads are loaded, a trailing `PADS-v1` extension binds the selected
 AI build multiplier, sorted authored neutral faction IDs, and each unit's capture and living-projectile flags, radius/time, construction result
-and attachment position. Tables without capture points retain the previous encoding.
+and attachment position. Tables without capture points or land build pads retain the previous encoding.
+Land tables that emit this extension also bind each type's prebuilt-respect flag in `land-pad-prebuilt-v1`.
 
 When any station has a nonzero `Base_Level`, a following `ai-station-levels-v1`
 extension writes the unit count and each unit's ID text and uint32 base level in table
@@ -460,8 +461,9 @@ pulse delay, `Targeting_Fire_Inaccuracy`, the cone and muzzle rows; `Targeting_P
 attack distance, stickiness, the three chase ranges and `Ranged_Target_Z_Adjust`; `Collidable_By_Projectile_Living`
 and `_Dead`; the footprint and model collision; and the death presentation rows (`Death_Clone`,
 `Death_Fade_Time`, `Death_Persistence_Duration`). Projectile rows load by name like the space ones. No
-hardpoints, turret poses, abilities or production are read for land. The land table encoding ends with a
-`land-combat-rows-v1` record for the rows the core unit encoding lacks; space tables write nothing.
+hardpoints or turret poses are read for land. Pad types and construction children read production rows, and
+land unit types read authored income abilities. The land table encoding ends with a
+`land-combat-rows-v2` record for the rows the core unit encoding lacks; space tables write nothing.
 
 `build_land_bindings` turns the loaded rows into `LandStartBindings::durability` and `::combat` (the same
 `durability_table` and `combat_table` the space start uses, with the land health multiplier), and
@@ -469,8 +471,10 @@ hardpoints, turret poses, abilities or production are read for land. The land ta
 tables. `LandContentInputs::content_errors` defaults to `skip_object`: a type with a bad combat row is left
 out and named in the binding notes. The land step reads the tables: Attack orders, target choice, weapon fire,
 projectiles, damage and death run from them (docs/behaviour/land-combat-slice.md), so this is a behaviour
-change; the `land-content` identity domain is version 3, the adapter fingerprint `land-content-adapter-v6` (the
-stopped-pair overlap coefficient and the container's collision class and jiggle distance bind into it, the company
-record is `land-companies-v4`) and the land checkpoint section 18 is v9 (a formation squad is one collision body).
+change; the `land-content` identity domain is version 3, the adapter fingerprint `land-content-adapter-v7` (the
+formation constants, stopped-pair overlap coefficient, container collision class and jiggle distance, and start clip
+clock bind into it; the company record is `land-companies-v5`, which adds `FormationGrouping`) and the land checkpoint
+section 18 is v14 (v9: a formation squad is one collision body; v14: the start clip clock; see the history comment in
+`include/eawr/checkpoint/tactical.hpp` for intervening versions).
 A caller that wants the map's statics in the combat tables passes their names in `LoadInput::obstacles`
 (`read_land_start_inputs` returns them in `static_tables`).

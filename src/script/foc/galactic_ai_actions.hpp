@@ -5,7 +5,48 @@
 #include "galactic_ai_selector_runtime.hpp"
 #include "galactic_ai_freestore.hpp"
 
+#include <algorithm>
+#include <functional> // include-guard: keep
+#include <map>
+#include <optional>
+#include <span>
+#include <utility>
+#include <variant>
+#include <vector>
+
 namespace eawr::script::foc::galactic_ai {
+// W1 S3: a pay-as-you-go bill as a pure function of the AI budget, the purchase row and the notice. The direct path decides
+// against the live AI state; the async lane decides against the billing view and the AI applies the recorded effect later.
+struct BillRow {
+    gc::PlayerId player{};
+    std::uint64_t goal{};
+    sim::math::Fixed price{}, billed{}, marked{}, remaining{};
+    bool orphan{};
+    bool operator==(const BillRow&) const = default;
+};
+struct BillEffect {
+    enum class Kind : std::uint8_t { none, mark, spend };
+    Kind kind{};
+    gc::PlayerId payer{};
+    std::uint64_t goal{}; // spend: 0 charges the dead budget
+    sim::math::Fixed amount{}, remaining{};
+    bool operator==(const BillEffect&) const = default;
+};
+struct BillDecision {
+    gc::GalacticSession::NativeProductionPayment payment;
+    BillEffect effect;
+};
+using BillLedgers = std::function<const gc::funding::Ledger*(gc::PlayerId)>;
+[[nodiscard]] core::Result<BillDecision> decide_bill(const BillRow&, const gc::GalacticSession::NativeProductionNotice&,
+    const BillLedgers&, std::span<const gc::ProductionPlayer>);
+// Where a recorded effect lands in a ledger that may have moved on since the decision: a mark for a goal that is gone is dropped
+// (its obligations moved to the dead goals when it was removed); a spend the goal or its dead obligation cannot take goes to the
+// dead budget, as orphan billing does. The live goal, as decided, is the common case.
+[[nodiscard]] bool bill_mark_applies(const gc::funding::Ledger&, const BillEffect&);
+[[nodiscard]] std::uint64_t bill_spend_goal(const gc::funding::Ledger&, const BillEffect&);
+[[nodiscard]] core::Result<gc::funding::Ledger> apply_bill_ledger(gc::funding::Ledger, const BillEffect&);
+void apply_bill_row(BillRow&, const BillEffect&);
+
 // Ordered native adapter. Default Lua transactions stage commands; the bounded
 // immediate host exposes private cash/placement writes and publishes at the barrier.
 class NativeActions final : public Actions, public TrackedStateContributor {
@@ -76,9 +117,37 @@ public:
     NativeActions& operator=(const NativeActions&) = delete;
     // Runtime handlers are recreated before the first producer service/load resume.
     void bind_handlers();
-    using ActorChanges = std::function<core::Result<void>(NativeActions&, const gc::GalacticSnapshot&,
+    // Actor lifecycle batches in two parts: the facts are read from the delivery snapshot when the world delivers the batch (sim side),
+    // the owner applies them to its retained freestore (AI side), at once or at the next async window start (A2.1).
+    using ActorFacts = std::vector<std::pair<sim::EntityId, FreestoreFacts>>; // ascending actor, one row per non-lost actor
+    using ActorFactsReader = std::function<core::Result<ActorFacts>(const gc::GalacticSnapshot&,
         std::span<const gc::GalacticSession::NativeActorChange>)>;
-    void bind_actor_changes(ActorChanges callback) { actor_changes_ = std::move(callback); }
+    using ActorChanges = std::function<core::Result<void>(NativeActions&, std::span<const gc::GalacticSession::NativeActorChange>,
+        const ActorFacts&)>;
+    void bind_actor_changes(ActorFactsReader read, ActorChanges apply) { actor_facts_ = std::move(read); actor_changes_ = std::move(apply); }
+    // A2.1 sim->AI deliveries. While the bound sink takes them (async schedule, outside the AI window), the world's handlers hand an
+    // owned copy to the sink instead of writing AI state; the owner applies it in order at the next window start (apply_delivery).
+    struct ActorChangesDelivery {
+        std::vector<gc::GalacticSession::NativeActorChange> changes;
+        ActorFacts facts;
+    };
+    using Delivery = std::variant<gc::GalacticSession::NativeProductionOutcome, gc::GalacticEvent, ActorChangesDelivery>;
+    using DeliverySink = std::function<bool(Delivery&)>; // true: the sink took the delivery
+    void bind_delivery_sink(DeliverySink sink) { delivery_sink_ = std::move(sink); }
+    [[nodiscard]] core::Result<void> apply_delivery(const Delivery&);
+    // W1 S3 funding. A sink that answers a world bill or credit notice outside the AI window (async lane: the billing view decides
+    // and the AI applies the recorded effect at the next window start). No value: not taken, the AI answers at once as before.
+    using BillingSink = std::function<std::optional<core::Result<gc::GalacticSession::NativeProductionPayment>>(
+        const gc::GalacticSession::NativeProductionNotice&)>;
+    using CreditSink = std::function<std::optional<core::Result<void>>(const gc::GalacticSession::CreditNotification&)>;
+    void bind_funding_sinks(BillingSink billing, CreditSink credits) { billing_sink_ = std::move(billing); credit_sink_ = std::move(credits); }
+    [[nodiscard]] static BillRow bill_row(const Purchase&);
+    [[nodiscard]] std::map<sim::EntityId, BillRow> bill_rows() const;
+    // The bill decision against the AI's current ledgers and purchase row, without writing either.
+    [[nodiscard]] core::Result<BillDecision> decide_live_bill(const gc::GalacticSession::NativeProductionNotice&) const;
+    // The recorded outcome of a bill decided outside the window, applied to the AI's ledger and purchase row (never decided again).
+    [[nodiscard]] core::Result<void> apply_bill_effect(sim::EntityId build, const BillEffect&);
+    [[nodiscard]] core::Result<void> apply_credit(const gc::GalacticSession::CreditNotification&);
     using FreestoreBirths = std::function<core::Result<void>(QualifiedFreestore&, const gc::GalacticSnapshot&,
         const gc::GalacticSession::NativeActionShadow&, std::span<const gc::GalacticSession::NativeActorChange>,
         const sim::PartitionExecutor&)>;
@@ -138,9 +207,26 @@ public:
         std::shared_ptr<const gc::GalacticSnapshot>)>;
     void bind_movement_frontier(MovementFrontier frontier) { movement_frontier_ = std::move(frontier); }
     [[nodiscard]] core::Result<Movement> poll_movement(std::uint64_t request, bool taskforce_has_members = true);
+    // Test seam: reads the orbit from the live world. Production goes through the battle listener with the notice's orbits
+    // (the overload below); no source caller may use this one.
     [[nodiscard]] core::Result<void> movement_conflict(std::uint64_t request, gc::PlanetId location, bool begin);
+    // The same, with the fleets in orbit of `location` when the battle notice was taken (ascending): a delivery applied later
+    // than its notice never reads the world of its apply tick.
+    [[nodiscard]] core::Result<void> movement_conflict(std::uint64_t request, gc::PlanetId location, bool begin,
+        std::span<const sim::EntityId> orbiting);
+    // Async lane: a movement polled inside the batch counted the lane view's events. Once the lane is dropped the cursor
+    // may only point into the live world's events of the same tick.
+    [[nodiscard]] core::Result<void> settle_movement_cursors();
     [[nodiscard]] core::Result<void> invalidate_freestore_actor(std::uint64_t request, gc::FleetId subject);
     [[nodiscard]] core::Result<void> retire_movement(std::uint64_t request);
+    // GFS-A22 ordered commit: the merged world refused a move the player projected as admitted.
+    // Ends that player's unfinished block for the actor, as a refused hop does in advance_movement.
+    // Returns whether a retained row changed; idempotent.
+    [[nodiscard]] core::Result<bool> refuse_movement(gc::PlayerId, gc::FleetId actor);
+    // GFS-A22 ordered commit: the merged world refused a speculative paid build. Marks the retained
+    // purchase failed, like a failed-build outcome; the goal then refunds its mark as usual.
+    // Returns whether a retained row changed; idempotent.
+    [[nodiscard]] core::Result<bool> refuse_purchase(gc::PlayerId, sim::EntityId build);
     [[nodiscard]] core::Result<void> retire_freestore_movement(sim::EntityId actor, bool actor_lost = false);
     struct FreestoreMoveInput {
         bool actor_valid{}, source_ai_usable{};
@@ -189,6 +275,10 @@ public:
     [[nodiscard]] core::Result<sim::EntityId> build_actor(gc::PlayerId, sim::EntityId build) const;
     [[nodiscard]] core::Result<sim::math::Fixed> generic_build_cost(gc::TypeId type) const;
     [[nodiscard]] std::shared_ptr<const gc::GalacticSnapshot> snapshot() const { return world_.snapshot(); }
+    // W1 S6 (async lane): a sink that takes a runtime load note raised inside the AI window (published with it and appended by
+    // the world at its apply tick). False: not taken, the note goes to the world at once.
+    using LoadNoteSink = std::function<bool(core::LoadNote&)>;
+    void bind_load_note_sink(LoadNoteSink sink) { load_note_sink_ = std::move(sink); }
     // Runtime diagnostics are a sidecar, outside native state and replay bytes.
     void note_battle_delivery(std::uint64_t request, const core::Diagnostic& diagnostic) {
         core::LoadNote note;
@@ -197,6 +287,7 @@ public:
         note.action = core::LoadAction::runtime_degraded;
         note.effective_value = "unavailable AI battle notification skipped; battle continues";
         note.diagnostic_code = diagnostic.code; note.message = diagnostic.message;
+        if (load_note_sink_ && load_note_sink_(note)) return;
         world_.add_runtime_load_notes(std::span<const core::LoadNote>(&note, 1));
     }
     // Direct native actions can allocate after the AI perception view was bound.
@@ -225,6 +316,24 @@ public:
     [[nodiscard]] std::weak_ptr<QualifiedFreestore> freestore_owner() const noexcept { return bound().freestore_; }
     using FreestoreRestoreValidator = std::function<core::Result<void>(const QualifiedFreestore&)>;
     void bind_freestore_validation(FreestoreRestoreValidator validator) { freestore_validation_ = std::move(validator); }
+    // Async lane: world events the AI has not received yet (they wait for the next window start). A restore checks the saved
+    // freestore against the world only after these pending actor batches are replayed onto a staged copy of it.
+    using PendingFreestoreReplay = std::function<core::Result<void>(QualifiedFreestore&)>;
+    void bind_pending_freestore_replay(PendingFreestoreReplay replay) { pending_freestore_replay_ = std::move(replay); }
+    // Async lane (W1 S3): bills the world decided against the billing view that the AI has not applied yet. A restore compares
+    // the production queue with each purchase row as it will be after they apply (the newest pending remaining time per build).
+    using PendingBillRemaining = std::function<std::optional<sim::math::Fixed>(sim::EntityId)>;
+    void bind_pending_bill_remaining(PendingBillRemaining pending) { pending_bill_remaining_ = std::move(pending); }
+    // Async lane: identities the AI holds beyond the world's frontier (intents decided but not applied yet).
+    void bind_identity_ceiling(std::function<sim::EntityId()> ceiling) { identity_ceiling_ = std::move(ceiling); }
+    // Identities from this one up are the lane's: objects the AI holds that the world creates when their slice applies.
+    void bind_lane_floor(std::function<sim::EntityId()> floor) { lane_floor_ = std::move(floor); }
+    // Invasion requests the AI holds that the world creates when their slice applies (decided, not applied yet).
+    // The lane's pending intents answer it, not the world's counter: that already stands past the window's reserved block.
+    void bind_invasion_pending(std::function<bool(std::uint64_t)> pending) { invasion_pending_ = std::move(pending); }
+    [[nodiscard]] bool invasion_pending(std::uint64_t request) const { return invasion_pending_ && invasion_pending_(request); }
+    [[nodiscard]] sim::EntityId lane_floor() const { return lane_floor_ ? lane_floor_() : sim::EntityId{}; }
+    [[nodiscard]] sim::EntityId identity_ceiling() const { return std::max(world_.next_entity_id(), identity_ceiling_ ? identity_ceiling_() : sim::EntityId{}); }
     [[nodiscard]] bool qualified_freestore_available() const noexcept { return static_cast<bool>(freestore_validation_); }
     [[nodiscard]] std::span<const sim::EntityId> created(gc::PlayerId) const noexcept;
 private:
@@ -251,6 +360,9 @@ private:
     [[nodiscard]] core::Result<void> advance_movement(Movement&, bool taskforce_has_members = true);
     [[nodiscard]] core::Result<void> advance_freestore_movement(Movement&);
     void bind_movement_listener();
+    // A2.1: a movement event outside the async window goes to the delivery sink; otherwise it applies at once.
+    void on_movement_event(const gc::GalacticEvent&);
+    void apply_movement_event(const gc::GalacticEvent&);
     [[nodiscard]] core::Result<ActionReceipt> admit_movement(const ActionRequest&);
     [[nodiscard]] core::Result<void> refresh_freestore_movement(sim::EntityId, gc::FleetId, bool tracked);
     gc::GalacticSession& world_;
@@ -268,7 +380,18 @@ private:
     }
     std::shared_ptr<NativeActions*> lifetime_;
     FreestoreRestoreValidator freestore_validation_;
+    PendingFreestoreReplay pending_freestore_replay_;
+    PendingBillRemaining pending_bill_remaining_;
+    std::function<sim::EntityId()> identity_ceiling_;
+    std::function<sim::EntityId()> lane_floor_;
+    std::function<bool(std::uint64_t)> invasion_pending_;
+    ActorFactsReader actor_facts_;
     ActorChanges actor_changes_;
+    DeliverySink delivery_sink_;
+    BillingSink billing_sink_;
+    CreditSink credit_sink_;
+    LoadNoteSink load_note_sink_;
+    void apply_production_outcome(const gc::GalacticSession::NativeProductionOutcome&);
     FreestoreBirths freestore_births_;
     FreestoreMoveProvider freestore_move_;
     PlanetUsability planet_usability_;

@@ -173,6 +173,43 @@ void WorldUiView::place_circles(const Frame& frame) {
     max_circles_ = std::max(max_circles_, circles_drawn_);
 }
 
+void WorldUiView::place_healing_blobs(const Frame& frame) {
+    auto* rendering = RenderingServer::get_singleton();
+    if (!rendering || !scenario_.is_valid()) return;
+    std::size_t count = 0;
+    healing_blobs_last_.clear();
+    std::set<sim::EntityId> seen;
+    for (const auto& unit : *frame.units) {
+        if (!unit.own || !frame.selection->contains(unit.entity) || !seen.insert(unit.entity).second) continue;
+        const auto type = types_.find(unit.type);
+        if (type == types_.end()) continue;
+        for (const auto& blob : type->second.healing_blobs) {
+            if (blob.mesh.is_null()) continue;
+            if (count == healing_blob_instances_.size()) {
+                const RID instance = rendering->instance_create2(blob.mesh->get_rid(), scenario_);
+                if (!instance.is_valid()) continue;
+                rendering->instance_geometry_set_cast_shadows_setting(instance, RenderingServer::SHADOW_CASTING_SETTING_OFF);
+                healing_blob_instances_.push_back(instance);
+            }
+            const RID instance = healing_blob_instances_[count++];
+            rendering->instance_set_base(instance, blob.mesh->get_rid());
+            auto at = unit.position;
+            if (frame.live->squadron_members().contains(unit.entity)) {
+                if (const auto source = frame.live->unit_frame(unit.entity))
+                    at = {static_cast<float>(source->position[0]), static_cast<float>(source->position[1]),
+                          static_cast<float>(source->position[2])};
+            }
+            rendering->instance_set_transform(instance, Transform3D(
+                Basis().scaled(Vector3(blob.diameter, 1.0F, blob.diameter)), Vector3(at[0], at[2], -at[1])));
+            rendering->instance_set_visible(instance, true);
+            healing_blobs_last_.push_back(blob);
+        }
+    }
+    healing_blobs_drawn_ = count;
+    for (; count < healing_blob_instances_.size(); ++count)
+        rendering->instance_set_visible(healing_blob_instances_[count], false);
+}
+
 void WorldUiView::update_grid(const Frame& frame) {
     // WU-25 (#457): the sim flies the dogfights over its combat cells (space-fighters FD-01 to
     // FD-03) and publishes the cell each squadron records; the joined ones hold their icons, in

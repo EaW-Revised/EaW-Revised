@@ -18,6 +18,14 @@
 #include <utility>
 
 namespace eawr::sim::tactical {
+
+const std::optional<ShotProfile>& lucky_shot(const WeaponProfile& weapon, const TypeId holder) noexcept {
+    const auto found = std::lower_bound(weapon.lucky_shots.begin(), weapon.lucky_shots.end(), holder,
+        [](const HolderShotProfile& entry, const TypeId type) { return entry.holder < type; });
+    static const std::optional<ShotProfile> empty;
+    return found != weapon.lucky_shots.end() && found->holder == holder ? found->shot : empty;
+}
+
 namespace {
 
 constexpr std::int64_t one_raw = math::Fixed::scale;
@@ -203,7 +211,14 @@ core::Result<void> validate_combat(const CombatTable& table) {
                     return invalid(name + "invalid manual turret of weapon " + std::to_string(weapon.hardpoint));
                 }
             }
-            for (const auto* candidate : {&weapon.shot, &weapon.ability_shot, &weapon.barrage_shot, &weapon.charged_shot}) {
+            std::vector<const std::optional<ShotProfile>*> shots{&weapon.shot, &weapon.ability_shot, &weapon.barrage_shot, &weapon.charged_shot};
+            TypeId previous_holder{};
+            for (const auto& override : weapon.lucky_shots) {
+                if (override.holder <= previous_holder || !override.shot) return invalid(name + "invalid holder projectile override");
+                previous_holder = override.holder;
+                shots.push_back(&override.shot);
+            }
+            for (const auto* candidate : shots) {
                 if (!*candidate) continue;
                 const auto& shot = **candidate;
                 const auto weapon_name = weapon.hardpoint == object_weapon ? std::string("object weapon")

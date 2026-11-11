@@ -886,6 +886,16 @@ struct DistantHardpointRun {
         team.recharge_frames = 600;
         abilities.profiles = {{craft_type, {own}, false}, {bomber_type, {own}, false},
             {squadron_a, {team}, false}, {bomber_team, {team}, false}};
+        tactical::SpecialAbilityProfile handler;
+        handler.name = "Ion_Handler";
+        handler.kind = tactical::special_ability_kind("Ion_Cannon_Shot_Attack_Ability");
+        handler.style = tactical::SpecialActivationStyle::user_input;
+        handler.filter.applicable_categories = ~std::uint64_t{};
+        for (auto& profile : abilities.profiles) {
+            if (!profile.abilities.front().team) continue;
+            profile.abilities.front().gui_activated_ability_name = handler.name;
+            profile.special = {handler};
+        }
         abilities.humans = {empire, rebel};
     }
     auto created = tactical::TacticalSession::create(setup, sight, health, table, std::nullopt, weapons, {}, abilities);

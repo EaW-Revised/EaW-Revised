@@ -571,10 +571,13 @@ in the same field, not a format change.
 The lobby core stays mode-agnostic (`LobbyGame` is a map string and opaque option bytes); the mode is the first bytes of
 those options, so every peer reads the same mode from the same room revision. A skirmish room's options are the text v1 that
 starts with a digit and are unchanged (`tests/net/galactic_lobby_tests.cpp` pins them). A Galactic Conquest room's options
-start with `gc1` (`include/eawr/net/galactic_lobby.hpp`): `gc1 <delay> <seed> <auto resolve> <custom> <credits> <start tech>
+start with `gc2` (`include/eawr/net/galactic_lobby.hpp`): `gc2 <delay> <seed> <auto resolve> <vote timeout> <custom> <credits> <start tech>
 <max tech> <heroes> "<difficulty>" <rows>` and per faction row `<player> <faction id> <flags> "<faction>" <human> <dropout>`;
 `LobbyGame::map` names the campaign. Decode accepts only bytes that re-encode to themselves and refuses an unknown version by
-name. The host owns the mode for the room's lifetime: it is chosen with the retail "Campaign" game type of the host options
+name. `<vote timeout>` is the battle-vote timeout in seconds (legacy EAWR-6156): the host picks 5 to 120, default 15; it rides the agreed
+roster and the setup payload, so every peer arms the same tick count. The decoder accepts anything below the tick horizon, not only
+5 to 120, because a resumed save keeps the value it recorded (a mod's constant can lie outside the host range) and the restore refuses
+a different one. The host owns the mode for the room's lifetime: it is chosen with the retail "Campaign" game type of the host options
 dialog before the room opens.
 
 - **Campaign list.** `campaign::list_mp_lobby_campaigns` applies the campaign menu's filter (WGP-65: `Is_Listed`, absent =

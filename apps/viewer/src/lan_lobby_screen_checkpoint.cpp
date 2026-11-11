@@ -45,7 +45,6 @@ void EawrLanLobby::open_checkpoint_list() {
             if (arguments[i] == "--eawr-save-dir") directory = ViewerPath{utf8(arguments[i + 1])}.native();
     }
     if (!impl.checkpoint_store) {
-        prime_mounted_mods(options_.game_root);
         impl.checkpoint_listing_request = ++impl.checkpoint_request;
         impl.checkpoint_listing_started = std::chrono::steady_clock::now();
         auto source = std::make_shared<viewer::DirectorySavedGameStore>(directory,
@@ -135,10 +134,17 @@ void EawrLanLobby::process_checkpoint_read() {
                     prepared.value().manifest.description = net::sanitize_lan_menu_text(impl.checkpoint_description, net::save_description_limit);
                     prepared.value().manifest.date = net::sanitize_lan_menu_text(impl.checkpoint_date, net::save_date_limit);
                 }
+                const bool was_prepared = static_cast<bool>(prepared);   // read before the move below
                 auto result = prepared ? impl.galactic_backend->commit_checkpoint(std::move(prepared).value(), *snapshot)
                                        : core::Result<void>::failure(prepared.error());
                 impl.checkpoint_applied = static_cast<bool>(result);
                 impl.checkpoint_problem = result ? std::string{} : result.error().message;
+                // The refusal shows in the panel; the log gets it too, in full (the panel row is cut at the screen edge).
+                if (!result) {
+                    const auto line = std::string("EAWR checkpoint refused: ") + (was_prepared ? "commit: " : "restore: ")
+                        + result.error().code + " " + result.error().message;
+                    UtilityFunctions::print(String::utf8(line.data(), static_cast<std::int64_t>(line.size())));
+                }
             }
             impl.rows_signature.clear(); impl.checkpoint_signature.clear();
         } else if (polled.state == State::timed_out) {
@@ -195,11 +201,11 @@ void EawrLanLobby::process_checkpoint_read() {
     impl.checkpoint_problem.clear(); impl.checkpoint_bindings.clear();
     impl.checkpoint_signature.clear(); impl.rows_signature.clear();
     const auto room = match_->lobby_state();
-    const auto humans = viewer::checkpoint_humans(display_roster(*impl.checkpoint_candidate));
-    if (room) for (std::size_t i = 0; i < room->snapshot.seats.size(); ++i) {
-        net::SetupSeat binding{}; binding.peer = static_cast<net::PeerIndex>(i);
-        if (i < humans.size()) { binding.seat = humans[i].seat_id; binding.player = humans[i].player; }
-        impl.checkpoint_bindings.push_back(binding);
+    impl.checkpoint_bound_peers.clear();
+    if (room) {
+        for (const auto& seat : room->snapshot.seats) impl.checkpoint_bound_peers.push_back(seat.peer);
+        impl.checkpoint_bindings = viewer::reconcile_checkpoint_bindings(
+            display_roster(*impl.checkpoint_candidate), {}, {}, impl.checkpoint_bound_peers);
     }
 }
 
@@ -253,6 +259,8 @@ void EawrLanLobby::apply_checkpoint_selection() {
     options.campaign = roster.campaign; options.difficulty = roster.difficulty; options.seed = candidate.seed;
     options.custom = roster.custom; options.credits = roster.credits; options.starting_tech = roster.starting_tech;
     options.maximum_tech = roster.maximum_tech; options.allow_heroes = roster.allow_heroes; options.rows.clear();
+    // #6156: the save's own battle-vote timeout (zero: a save that recorded none keeps the room's value).
+    if (roster.vote_timeout_seconds) options.vote_timeout = roster.vote_timeout_seconds;
     for (const auto& player : roster.players) {
         net::GalacticLobbyRow row{}; row.player = player.player; row.faction_id = player.faction_id;
         row.flags = player.flags; row.faction = player.faction; row.dropout = player.dropout;
@@ -287,6 +295,20 @@ void EawrLanLobby::refresh_checkpoint_staging() {
     const auto room = match_->lobby_state();
     if (!room || !state_->dialog || !impl.galactic_backend) return;
     const bool staging = room->snapshot.phase == net::LobbyPhase::staging;
+    // #6121: a guest who joins, leaves or leaves and rejoins after Load Game changes which peers hold the room's seats. The assignment
+    // is fitted to the room again, keeping the host's choices, so every human has a saved seat and the combo, Apply and Retry all
+    // work; a restore already applied is void (the backend refuses a changed room) and Apply is needed again. A duplicate the host
+    // picks on purpose is left alone: Apply names it.
+    std::vector<net::PeerIndex> room_peers;
+    for (const auto& seat : room->snapshot.seats) room_peers.push_back(seat.peer);
+    if (impl.host && staging && impl.checkpoint_candidate && !impl.checkpoint_prepare.active()
+        && (impl.checkpoint_bindings.size() != room_peers.size() || impl.checkpoint_bound_peers != room_peers)) {
+        impl.checkpoint_bindings = viewer::reconcile_checkpoint_bindings(display_roster(*impl.checkpoint_candidate),
+            impl.checkpoint_bindings, impl.checkpoint_bound_peers, room_peers);
+        impl.checkpoint_bound_peers = std::move(room_peers);
+        impl.galactic_backend->clear_checkpoint(); impl.checkpoint_applied = false;
+        impl.checkpoint_problem.clear(); impl.checkpoint_signature.clear(); impl.rows_signature.clear();
+    }
     auto button = [&](const char* id, const char* caption, const char* anchor) {
         auto* found = EAWR_CONTROL(EawrUiButton, id);
         if (!found) {
@@ -364,14 +386,17 @@ void EawrLanLobby::refresh_checkpoint_staging() {
         std::vector<net::PeerIndex> peers;
         if (checkpoint) peers = checkpoint->peers;
         else for (const auto& seat : room->snapshot.seats) peers.push_back(seat.peer);
-        const auto* manifest = impl.galactic_backend->checkpoint_manifest();
+        const auto manifest = impl.galactic_backend->checkpoint_manifest();
         const auto description = impl.host ? net::sanitize_lan_menu_text(impl.checkpoint_description, net::save_description_limit)
             : manifest ? manifest->description : std::string{};
         const auto date = impl.host ? net::sanitize_lan_menu_text(impl.checkpoint_date, net::save_date_limit)
             : manifest ? manifest->date : std::string{};
+        const auto faction_name = [this](const std::string& faction) {
+            return resources_->text ? model::faction_display_name(*resources_->content->catalog, &*resources_->text, faction) : faction;
+        };
         const auto model = viewer::checkpoint_lobby_model(impl.host, staging, roster, tick, bindings, peers,
             match_->view().seat, transfer, description, date,
-            problem);
+            problem, faction_name);
         if (auto* maps = EAWR_CONTROL(Control, "IDC_STAGING_MAP_LIST")) maps->hide();
         auto* panel = EAWR_CONTROL(Control, "EAWR_GC_CHECKPOINT");
         const auto* area = find_gadget(*state_->dialog, "IDC_STAGING_MAP_LIST");
@@ -406,10 +431,14 @@ void EawrLanLobby::refresh_checkpoint_staging() {
                         const auto& saved = humans[j];
                         const auto player = std::find_if(roster.players.begin(), roster.players.end(), [&](const auto& row) { return row.player == saved.player; });
                         combo->add_item(text(room->snapshot.seats[i].selection.name + " -> seat " + std::to_string(saved.seat_id.value)
-                            + " / " + (player == roster.players.end() ? "unknown" : resources_->text
-                                ? model::faction_display_name(*resources_->content->catalog, &*resources_->text, player->faction)
-                                : player->faction)));
+                            + " / " + (player == roster.players.end() ? "unknown" : faction_name(player->faction))));
                         if (i < bindings.size() && bindings[i].seat == saved.seat_id) combo->select(static_cast<int>(j));
+                    }
+                    // #6178: a peer beyond the save's humans has no saved seat. Say so in its combo instead of showing the first seat as
+                    // if it were chosen; the entry sits after the saved seats, so choosing it (index past the humans) changes nothing.
+                    if (i < bindings.size() && bindings[i].seat.value == 0) {
+                        combo->add_item(text(room->snapshot.seats[i].selection.name + " -> no saved seat (not in the save)"));
+                        combo->select(static_cast<int>(humans.size()));
                     }
                     combo->set_disabled(!model.can_assign || impl.checkpoint_prepare.active());
                     combo->connect("item_selected", callable_mp(this, &EawrLanLobby::select_checkpoint_seat).bind(static_cast<int64_t>(i)));
@@ -434,7 +463,8 @@ void EawrLanLobby::refresh_checkpoint_staging() {
     if (!checkpoint && !impl.checkpoint_candidate) {
         if (auto* maps = EAWR_CONTROL(Control, "IDC_STAGING_MAP_LIST")) maps->show();
     }
-    const bool blocked = pending || transfer.refusal || (checkpoint && !transfer.agreed);
+    // The host waits for every guest's restore (`agreed`); a guest only for its own (#6128: `agreed` is never set on a guest).
+    const bool blocked = viewer::checkpoint_start_blocked(impl.host, pending, transfer.refusal.has_value(), checkpoint.has_value(), transfer);
     if (blocked) {
         impl.start_enabled = false;
         for (const char* id : {"IDC_LOAD_GAME", "IDC_LAN_START_GAME_BUTTON"})

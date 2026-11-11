@@ -6,6 +6,7 @@
 #include "eawr/script/foc/galactic_ai_state.hpp"
 #include "../script/foc/galactic_ai_funding.hpp"
 
+#include <algorithm>
 #include <exception>
 #include <cstdlib>
 #include <cassert>
@@ -153,8 +154,10 @@ core::Result<void> ComposedGalacticAiState::restore(const ai::NativeState& state
     for (auto& [name, cache] : external_cache_) { static_cast<void>(name); cache.revision.reset(); }
     for (auto& [name, cache] : sync_cache_) { static_cast<void>(name); cache.revision.reset(); }
     sync_validation_pending_ = true;
-    std::vector<Contributor> restore_order(owners_.begin(), owners_.begin() + 4);
+    // External owners (the async outbox) restore first: goal validation asks whether a lane-decided invasion is pending.
+    std::vector<Contributor> restore_order;
     for (const auto& [name, owner] : external_) { static_cast<void>(name); restore_order.push_back(owner); }
+    restore_order.insert(restore_order.end(), owners_.begin(), owners_.begin() + 4);
     restore_order.insert(restore_order.end(), owners_.begin() + 4, owners_.end());
     auto restored = core::Result<void>::success();
     for (const auto& owner : restore_order) {
@@ -165,24 +168,29 @@ core::Result<void> ComposedGalacticAiState::restore(const ai::NativeState& state
     if (!restored) {
         // Even a rejecting owner or publisher might have made a partial write.
         // Reconstruct every prior dependency in the same forward order.
+        // The refusal that started this is the cause; a rollback that then fails (the world stays restored, so an owner can
+        // disagree with its own previous state) must not replace it.
+        const auto first = (restored.error().code.empty() ? std::string() : "[" + restored.error().code + "] ") + restored.error().message;
         for (const auto& old_owner : restore_order) {
             if (auto rollback = restore_owner(*old_owner, previous.value()); !rollback) {
-                failure_ = fail<void>("native restore rollback failed: " + rollback.error().message).error();
+                failure_ = fail<void>("native restore failed: " + first + " (the rollback then failed too: " + rollback.error().message + ")").error();
                 return core::Result<void>::failure(*failure_);
             }
         }
         if (auto rollback = publish_restored_copy(after_restore_); !rollback) {
-            failure_ = fail<void>("native derived rollback publication failed: " + rollback.error().message).error();
+            failure_ = fail<void>("native restore failed: " + first + " (the derived rollback publication then failed too: " + rollback.error().message + ")").error();
             return core::Result<void>::failure(*failure_);
         }
         return restored;
     }
     return core::Result<void>::success();
 }
-core::Result<std::string> ComposedGalacticAiState::sync_hash() const {
-    gc_profile::Scope profile_scope(gc_profile::Phase::native_digest);
-    if (failure_) return core::Result<std::string>::failure(*failure_);
-    ++digest_requests_;
+core::Result<ai::NativeDigests> ComposedGalacticAiState::sync_digests() const {
+    if (failure_) return core::Result<ai::NativeDigests>::failure(*failure_);
+    return collect_sync_digests({});
+}
+core::Result<ai::NativeDigests> ComposedGalacticAiState::collect_sync_digests(std::string_view only) const {
+    using Digests = core::Result<ai::NativeDigests>;
     ai::NativeDigests digests;
     std::size_t total_bytes = 4 + std::string_view("eawr-galactic-ai-native").size() + 4 + 8;
     const auto account_bytes = [&](std::size_t bytes, std::string_view name) {
@@ -239,19 +247,48 @@ core::Result<std::string> ComposedGalacticAiState::sync_hash() const {
         sync_owner_nanoseconds_[name] = static_cast<std::uint64_t>(elapsed);
         return result;
     };
+    if (!only.empty()) {
+        // One sim-owned contributor alone (W1 S4: the live part of a published composition).
+        const auto found = external_.find(only);
+        if (found == external_.end()) return fail<ai::NativeDigests>("unknown live sync component: " + std::string(only));
+        if (auto copied = measured_append(found->first, found->second); !copied) return Digests::failure(copied.error());
+        return Digests::success(std::move(digests));
+    }
     for (std::size_t i = 0; i < owners_.size(); ++i)
-        if (auto copied = measured_append(std::string(components[i]), owners_[i]); !copied) return core::Result<std::string>::failure(copied.error());
+        if (auto copied = measured_append(std::string(components[i]), owners_[i]); !copied) return Digests::failure(copied.error());
     for (const auto& [name, owner] : external_)
-        if (auto copied = measured_append(name, owner); !copied) return core::Result<std::string>::failure(copied.error());
+        if (auto copied = measured_append(name, owner); !copied) return Digests::failure(copied.error());
     if (total_bytes > ai::native_state_max_bytes) {
-        auto exact = capture(); if (!exact) return core::Result<std::string>::failure(exact.error());
+        auto exact = capture(); if (!exact) return Digests::failure(exact.error());
     }
     if (sync_validation_pending_) {
         if (auto valid = static_cast<const FundingContributor&>(*owners_[3]).validate_current(); !valid)
-            return core::Result<std::string>::failure(valid.error());
+            return Digests::failure(valid.error());
         sync_validation_pending_ = false;
     }
-    const auto result = ai::compose_native_sync_digests(digests);
+    return Digests::success(std::move(digests));
+}
+core::Result<std::string> ComposedGalacticAiState::sync_hash() const {
+    gc_profile::Scope profile_scope(gc_profile::Phase::native_digest);
+    if (failure_) return core::Result<std::string>::failure(*failure_);
+    ++digest_requests_;
+    // W1 S4: on the async schedule the AI-owned digests are the window's published ones; only the sim-owned lane is read live.
+    std::optional<ai::NativeDigests> published = published_sync_ ? published_sync_() : std::nullopt;
+    if (published) {
+        // An empty live component would collect every component live and overwrite the published ones without notice.
+        if (live_sync_component_.empty()) return fail<std::string>("published native digests bound without the live lane component");
+        // No full-verification cross-check (state_hash) here: the published digests are by design not the live state. The
+        // observation oracle checks them cold once at their publication and the live lane part cold per tick.
+        auto live = collect_sync_digests(live_sync_component_);
+        if (!live) return core::Result<std::string>::failure(live.error());
+        for (auto& [name, digest] : live.value()) published->insert_or_assign(name, std::move(digest));
+        const auto composed = ai::compose_native_sync_digests(*published);
+        if (cached_sync_digest_ != composed) { cached_sync_digest_ = composed; ++sync_generations_; }
+        return core::Result<std::string>::success(composed);
+    }
+    auto digests = collect_sync_digests({});
+    if (!digests) return core::Result<std::string>::failure(digests.error());
+    const auto result = ai::compose_native_sync_digests(digests.value());
     if (cached_sync_digest_ != result) { cached_sync_digest_ = result; ++sync_generations_; }
     if (full_verification_enabled()) {
         // Independently rebuilt owner sums were compared above. Canonical
@@ -263,6 +300,20 @@ core::Result<std::string> ComposedGalacticAiState::sync_hash() const {
 core::Result<std::string> ComposedGalacticAiState::record_sync_hash(bool cold) const {
     if (!cold) return sync_hash();
     if (failure_) return core::Result<std::string>::failure(*failure_);
+    // W1 S4: a cold check of a published composition rebuilds the live part cold and takes the published AI digests as they are
+    // (they were checked cold when the window published them; see cold_sync_digests).
+    std::optional<ai::NativeDigests> published = published_sync_ ? published_sync_() : std::nullopt;
+    auto digests = cold_sync_digests(published ? std::string_view(live_sync_component_) : std::string_view{});
+    if (!digests) return core::Result<std::string>::failure(digests.error());
+    if (published) {
+        for (auto& [name, digest] : digests.value()) published->insert_or_assign(name, std::move(digest));
+        return core::Result<std::string>::success(ai::compose_native_sync_digests(*published));
+    }
+    return core::Result<std::string>::success(ai::compose_native_sync_digests(digests.value()));
+}
+core::Result<ai::NativeDigests> ComposedGalacticAiState::cold_sync_digests(std::string_view only) const {
+    using Digests = core::Result<ai::NativeDigests>;
+    if (failure_) return Digests::failure(*failure_);
     ai::NativeDigests digests;
     const auto append = [&](std::string name, const Contributor& owner) -> core::Result<void> {
         auto records = owner->record_sync_hash(true); if (!records) return core::Result<void>::failure(records.error());
@@ -275,11 +326,17 @@ core::Result<std::string> ComposedGalacticAiState::record_sync_hash(bool cold) c
         digests.emplace(std::move(name), std::move(records).value());
         return core::Result<void>::success();
     };
+    if (!only.empty()) {
+        const auto found = external_.find(only);
+        if (found == external_.end()) return fail<ai::NativeDigests>("unknown live sync component: " + std::string(only));
+        if (auto rebuilt = append(found->first, found->second); !rebuilt) return Digests::failure(rebuilt.error());
+        return Digests::success(std::move(digests));
+    }
     for (std::size_t i = 0; i < owners_.size(); ++i)
-        if (auto rebuilt = append(std::string(components[i]), owners_[i]); !rebuilt) return core::Result<std::string>::failure(rebuilt.error());
+        if (auto rebuilt = append(std::string(components[i]), owners_[i]); !rebuilt) return Digests::failure(rebuilt.error());
     for (const auto& [name, owner] : external_)
-        if (auto rebuilt = append(name, owner); !rebuilt) return core::Result<std::string>::failure(rebuilt.error());
-    return core::Result<std::string>::success(ai::compose_native_sync_digests(digests));
+        if (auto rebuilt = append(name, owner); !rebuilt) return Digests::failure(rebuilt.error());
+    return Digests::success(std::move(digests));
 }
 core::Result<std::string> ComposedGalacticAiState::state_hash() const {
     ++digest_requests_;
@@ -375,6 +432,31 @@ bool ComposedGalacticAiState::full_verification_enabled() const noexcept {
 #else
     return verify_hash_;
 #endif
+}
+GalacticAiBattleFacts galactic_ai_battle_facts(const GalacticAiBattleNotice& notice) {
+    GalacticAiBattleFacts facts;
+    facts.kind = notice.kind; facts.synchronization_tick = notice.synchronization_tick; facts.auto_resolve = notice.auto_resolve;
+    facts.conflict.id = notice.conflict.id; facts.conflict.layer = notice.conflict.layer; facts.conflict.planet = notice.conflict.planet;
+    std::vector<sim::EntityId> named;
+    for (const auto& force : notice.conflict.forces) {
+        ConflictForce kept; kept.id = force.id; kept.owner = force.owner; kept.parent = force.parent; kept.carrier = force.carrier;
+        facts.conflict.forces.push_back(kept);
+        for (const auto id : {force.id, force.parent, force.carrier}) if (id) named.push_back(id);
+    }
+    std::sort(named.begin(), named.end()); named.erase(std::unique(named.begin(), named.end()), named.end());
+    for (const auto& fleet : notice.world.fleets())
+        if (std::binary_search(named.begin(), named.end(), fleet.id)) facts.fleets.push_back(fleet.id);
+    std::sort(facts.fleets.begin(), facts.fleets.end());
+    for (const auto& fleet : notice.world.fleets())
+        if (fleet.orbit && fleet.orbit == notice.conflict.planet) facts.orbiting.push_back(fleet.id);
+    std::sort(facts.orbiting.begin(), facts.orbiting.end());
+    if (notice.result) {
+        BattleResult kept; kept.conflict = notice.result->conflict; kept.winner = notice.result->winner;
+        kept.retreat_player = notice.result->retreat_player;
+        for (const auto& force : notice.result->forces) { ForceResult row; row.id = force.id; row.disposition = force.disposition; kept.forces.push_back(row); }
+        facts.result = std::move(kept);
+    }
+    return facts;
 }
 core::Result<std::shared_ptr<ComposedGalacticAiState>> install_composed_galactic_ai(GameSession& game,
     GalacticAiContributors owners, std::function<core::Result<void>(const GalacticAiBattleNotice&)> battle) {

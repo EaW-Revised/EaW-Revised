@@ -248,6 +248,16 @@ void LiveSessionView::record_draw_digest(const std::vector<BattleScene::LivePose
         drawn_hash.add(static_cast<std::uint64_t>(clip.position.subdivisions));
         drawn_hash.add(hundredths(static_cast<double>(clip.blend_from)));
         drawn_hash.add(static_cast<std::uint64_t>(clip.alternate));
+        if (clip.land_type) {
+            drawn_hash.add(static_cast<std::uint64_t>(*clip.land_type));
+            drawn_hash.add(static_cast<std::uint64_t>(clip.outgoing_land_type.has_value()));
+            if (clip.outgoing_land_type) {
+                drawn_hash.add(static_cast<std::uint64_t>(*clip.outgoing_land_type));
+                drawn_hash.add(clip.outgoing_position.position);
+                drawn_hash.add(static_cast<std::uint64_t>(clip.outgoing_position.subdivisions));
+                drawn_hash.add(hundredths(static_cast<double>(clip.land_blend)));
+            }
+        }
     }
     const DrawDigestRow row{frames_, tick, std::llround(presented_tick_ * 1000.0), visible_.size(), drawn.size(),
                             visible_hash.value(), drawn_hash.value()};
@@ -472,6 +482,8 @@ void LiveSessionView::write_report_slots(std::ostream& output) const {
            << ", \"undrawn_fallbacks\": " << identity_undrawn_ << ", \"both_undrawn\": " << identity_both_undrawn_
            << ", \"entries\": " << slot_identity_of_entity_.size() << "}"
            << ", \"slots_grown\": " << arrival_slots_.grown
+           << ", \"launch_read_bytes\": " << arrival_slots_.launch_read_bytes
+           << ", \"preload_fallbacks\": " << preload_fallbacks()
            << ", \"campaign_warm\": {\"requested\": " << arrival_slots_.warm_requested
            << ", \"admitted\": " << arrival_slots_.warm_admitted
            << ", \"complete\": " << (arrival_slots_.warm_complete ? "true" : "false")
@@ -480,6 +492,7 @@ void LiveSessionView::write_report_slots(std::ostream& output) const {
                : arrival_slots_.warm_probe_available ? "device" : "unknown_existing_only")
            << ", \"available_bytes\": " << arrival_slots_.warm_available_bytes
            << ", \"estimated_additional_bytes\": " << arrival_slots_.warm_estimated_bytes
+           << ", \"resident_proxy_bytes\": " << arrival_slots_.warm_resident_bytes
            << ", \"load_ms\": " << arrival_slots_.warm_ms
            << ", \"driver_overhead_known\": false}"
            << ", \"undrawn_entities\": " << arrival_slots_.undrawn.size()

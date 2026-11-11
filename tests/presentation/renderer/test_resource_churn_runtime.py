@@ -40,7 +40,7 @@ assert HARNESS_SPEC is not None and HARNESS_SPEC.loader is not None
 HARNESS = importlib.util.module_from_spec(HARNESS_SPEC)
 HARNESS_SPEC.loader.exec_module(HARNESS)
 
-TIMEOUT_SECONDS = 300
+TIMEOUT_SECONDS = int(os.environ.get("EAWR_CHURN_TIMEOUT_SECONDS", "300"))
 ALLOWED_WARNINGS = tuple(
     line.strip() for line in os.environ.get("EAWR_ALLOW_ENGINE_WARNINGS", "").splitlines()
     if line.strip())

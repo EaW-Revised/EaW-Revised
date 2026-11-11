@@ -1,4 +1,5 @@
 #include "galactic_support.hpp"
+#include "ability_fixture.hpp"
 
 #include "eawr/platform/sim_workers.hpp"
 #include "eawr/sim/galactic/replay.hpp"
@@ -121,6 +122,19 @@ void live_equals_replay() {
         const eawr::platform::ThreadWorkerAdapter pool(workers);
         expect(replayed(parsed.value(), pool) == hashes,
             "the headless replay on " + std::to_string(workers) + " workers reproduces the live per-tick hashes");
+    }
+}
+
+void ability_respawn_default_round_trip() {
+    for (const auto seconds : {-1, 0, 1}) {
+        auto setup = ability_fixture::base_setup();
+        setup.ability_host->default_hero_absence = ability_fixture::whole(seconds);
+        const GalacticReplay replay{setup, 0, {}};
+        const auto bytes = galactic::write_replay(replay);
+        expect(static_cast<bool>(bytes), "ability setup with authored default writes");
+        if (!bytes) continue;
+        const auto parsed = galactic::parse_replay(bytes.value());
+        expect(parsed && parsed.value() == replay, "ability setup preserves negative, zero and positive respawn defaults");
     }
 }
 
@@ -344,6 +358,7 @@ void refusals() {
 } // namespace
 
 int case_galactic_replay_tests() {
+    ability_respawn_default_round_trip();
     raid_codec();
     payloads();
     refusals();

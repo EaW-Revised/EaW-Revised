@@ -331,9 +331,11 @@ std::string_view to_string(const SceneRoute route) noexcept {
     }
     return "unknown";
 }
+bool has_environment_adapter(const std::string_view shader) noexcept { return route_of(shader) != SceneRoute::unsupported; }
 
 std::vector<SceneSurface> scene_surfaces(const assets::Model& model,
-                                       const std::function<bool(std::string_view)>& effect_missing) {
+                                       const std::function<bool(std::string_view)>& effect_missing,
+                                       const std::function<bool(const assets::Submesh&)>& native) {
     std::vector<SceneSurface> result;
     for (std::size_t mesh_index = 0; mesh_index < model.meshes.size(); ++mesh_index) {
         const assets::Mesh& mesh = model.meshes[mesh_index];
@@ -356,7 +358,8 @@ std::vector<SceneSurface> scene_surfaces(const assets::Model& model,
                 surface.billboard = model.bones[static_cast<std::size_t>(mesh.bone)].billboard;
             }
             if (!submesh.skin_bones.empty()) note("the surface is skinned");
-            if (const std::string problem = chain_problem(model, mesh.bone); !problem.empty()) note(problem);
+            const auto bone_problem = chain_problem(model, mesh.bone);
+            if (!bone_problem.empty()) note(bone_problem);
             bool geometry = !submesh.vertices.empty() && !submesh.indices.empty() && submesh.indices.size() % 3 == 0;
             for (const std::uint16_t index : submesh.indices) geometry = geometry && index < submesh.vertices.size();
             for (const assets::Vertex& vertex : submesh.vertices) {
@@ -367,6 +370,8 @@ std::vector<SceneSurface> scene_surfaces(const assets::Model& model,
             if (surface.billboard == 4 || surface.billboard == 5 || surface.billboard > 7) {
                 note("billboard mode " + std::to_string(surface.billboard) + " has no environment rule");
             }
+            surface.native_geometry = geometry && submesh.skin_bones.empty() && bone_problem.empty() && surface.billboard == 0
+                && surface.route != SceneRoute::missing_effect && native && native(submesh);
             if (const auto* base = parameter(submesh, "BaseTexture")) {
                 if (const auto* name = std::get_if<std::string>(&base->value)) surface.base_texture = *name;
             }
@@ -427,7 +432,7 @@ std::vector<SceneSurface> scene_surfaces(const assets::Model& model,
             }
             assets::Submesh geometry_copy = submesh;
             geometry_copy.skin_bones.clear();
-            if (surface.problem.empty()) {
+            if (surface.problem.empty() || surface.native_geometry) {
                 if (surface.billboard == 0) {
                     const Rigid chain = chain_transform(model, mesh.bone);
                     for (assets::Vertex& vertex : geometry_copy.vertices) {
@@ -453,7 +458,7 @@ std::vector<SceneSurface> scene_surfaces(const assets::Model& model,
 float surface_radius(const std::span<const SceneSurface> surfaces) noexcept {
     float radius = 0.0F;
     for (const SceneSurface& surface : surfaces) {
-        if (!surface.problem.empty() || surface.billboard != 0) continue;
+        if ((!surface.problem.empty() && !surface.native_geometry) || surface.billboard != 0) continue;
         for (const assets::Mesh& mesh : surface.model.meshes) {
             for (const assets::Submesh& submesh : mesh.submeshes) {
                 for (const assets::Vertex& vertex : submesh.vertices) {

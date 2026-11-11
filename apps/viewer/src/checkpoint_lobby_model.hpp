@@ -112,15 +112,76 @@ inline std::vector<sim::galactic::Seat> checkpoint_humans(const sim::galactic::M
         if (seat.kind == sim::SeatKind::human && seat.active) result.push_back(seat);
     return result;
 }
+// #6121: the host's saved-seat assignment, one entry per seat now in the room (peer index = position in the room's roster).
+// It is rebuilt whenever the room's seat count changes: the first version was built once when the save was read, so a guest who
+// joined afterwards had no entry (its combo showed the first saved seat, selecting a seat did nothing, Apply always refused).
+// An existing assignment is kept while its saved seat is still a human seat of the save and no earlier peer holds it; every other
+// peer gets the first saved human seat nobody holds, in saved order, so each human has a distinct saved seat, whatever the
+// factions (three or more humans on one faction included). A peer beyond the save's humans stays unassigned (seat 0): Apply
+// then says the room has an extra human.
+// #6178: `current` is indexed by place in the room as it was (`previous_peers`, the lobby peer at each place), and the result by place
+// in the room as it is (`room_peers`). A kept assignment follows its PEER, so when a middle guest leaves, the guest behind keeps its
+// own saved seat instead of inheriting the one at the place it moved into.
+inline std::vector<net::SetupSeat> reconcile_checkpoint_bindings(const sim::galactic::MpRoster& roster,
+    const std::vector<net::SetupSeat>& current, const std::vector<net::PeerIndex>& previous_peers,
+    const std::vector<net::PeerIndex>& room_peers) {
+    const auto humans = checkpoint_humans(roster);
+    const std::size_t room_seats = room_peers.size();
+    std::vector<net::SetupSeat> result(room_seats);
+    std::vector<bool> taken(humans.size(), false);
+    const auto hold = [&](const net::SetupSeat& binding) {
+        for (std::size_t j = 0; j < humans.size(); ++j)
+            if (humans[j].seat_id == binding.seat && humans[j].player == binding.player && !taken[j]) { taken[j] = true; return true; }
+        return false;
+    };
+    std::vector<bool> kept(room_seats, false);
+    for (std::size_t peer = 0; peer < room_seats; ++peer) {
+        result[peer].peer = static_cast<net::PeerIndex>(peer);
+        const auto before = std::find(previous_peers.begin(), previous_peers.end(), room_peers[peer]);
+        const auto place = static_cast<std::size_t>(before - previous_peers.begin());
+        if (before != previous_peers.end() && place < current.size() && hold(current[place])) {
+            result[peer].seat = current[place].seat; result[peer].player = current[place].player; kept[peer] = true;
+        }
+    }
+    for (std::size_t peer = 0; peer < room_seats; ++peer) {
+        if (kept[peer]) continue;
+        for (std::size_t j = 0; j < humans.size(); ++j)
+            if (!taken[j]) { taken[j] = true; result[peer].seat = humans[j].seat_id; result[peer].player = humans[j].player; break; }
+    }
+    return result;
+}
+// The room as places 0..n-1 (what the first version, and a room whose peers never change, assumed).
+inline std::vector<net::SetupSeat> reconcile_checkpoint_bindings(const sim::galactic::MpRoster& roster,
+    const std::vector<net::SetupSeat>& current, const std::size_t room_seats) {
+    std::vector<net::PeerIndex> before(current.size()), now(room_seats);
+    for (std::size_t i = 0; i < before.size(); ++i) before[i] = static_cast<net::PeerIndex>(i);
+    for (std::size_t i = 0; i < now.size(); ++i) now[i] = static_cast<net::PeerIndex>(i);
+    return reconcile_checkpoint_bindings(roster, current, before, now);
+}
+// #6128: when a restored save keeps the lobby's Start (host) and Accept (guest) buttons off. Only the host ever sees `agreed`: it is
+// set when the host has collected every guest's restore acknowledgement, and no message carries it back. A guest is done when its own
+// restore is `restored`; waiting for `agreed` on a guest kept Accept off for ever ("Waiting for restore agreement"), so no saved
+// co-op game could start.
+inline bool checkpoint_start_blocked(const bool host, const bool pending, const bool refused, const bool has_checkpoint,
+    const net::SaveTransferView& transfer) {
+    return pending || refused || (has_checkpoint && !(host ? transfer.agreed : transfer.restored));
+}
+struct IdentityFactionName {
+    std::string operator()(const std::string& faction) const { return faction; }
+};
+template<class FactionName = IdentityFactionName>
 inline CheckpointLobbyModel checkpoint_lobby_model(bool host, bool staging,
     const sim::galactic::MpRoster& roster, std::uint64_t tick,
     const std::vector<net::SetupSeat>& bindings, const std::vector<net::PeerIndex>& peers,
     net::PeerIndex local, const net::SaveTransferView& transfer,
-    const std::string& description, const std::string& date, const std::string& problem) {
+    const std::string& description, const std::string& date, const std::string& problem,
+    const FactionName& faction_name = {}) {
+    // The model has no catalog: the screen passes the display-name lookup in (#6086). Without one the identity stays.
     CheckpointLobbyModel result;
     result.can_assign = host && staging;
-    result.can_accept = staging && transfer.agreed && problem.empty() && !transfer.refusal;
-    result.progress = transfer.agreed ? "Save restored by every player" : transfer.restored ? "Waiting for restore agreement"
+    result.can_accept = staging && (host ? transfer.agreed : transfer.restored) && problem.empty() && !transfer.refusal;
+    result.progress = transfer.agreed ? "Save restored by every player"
+        : transfer.restored ? (host ? "Waiting for every player to restore the save" : "Save restored; accept when ready")
         : "Transfer: " + std::to_string(transfer.received) + " / " + std::to_string(transfer.total) + " bytes";
     result.refusal = !problem.empty() ? problem : transfer.refusal ? transfer.refusal->message : std::string{};
     result.rows.push_back("Description: " + (description.empty() ? std::string("unavailable") : description));
@@ -132,7 +193,8 @@ inline CheckpointLobbyModel checkpoint_lobby_model(bool host, bool staging,
         const auto player = std::find_if(roster.players.begin(), roster.players.end(),
             [&](const auto& row) { return row.player == seat.player; });
         std::string line = "Seat " + std::to_string(seat.seat_id.value) + " - "
-            + (player == roster.players.end() ? std::string("unknown faction") : player->faction)
+            + (player == roster.players.end() ? std::string("unknown faction")
+                : faction_name(player->faction))
             + (seat.kind == sim::SeatKind::human ? " (human" : " (AI/script")
             + (seat.active ? ")" : ", inactive)");
         for (std::size_t i = 0; i < bindings.size() && i < peers.size(); ++i)
@@ -140,6 +202,7 @@ inline CheckpointLobbyModel checkpoint_lobby_model(bool host, bool staging,
         result.rows.push_back(std::move(line));
     }
     result.rows.push_back("Difficulty: " + roster.difficulty);
+    if (roster.vote_timeout_seconds) result.rows.push_back("Battle vote timeout: " + std::to_string(roster.vote_timeout_seconds) + " s");
     if (roster.custom) {
         result.rows.push_back("Credits: " + std::to_string(roster.credits));
         result.rows.push_back("Technology: " + std::to_string(roster.starting_tech) + " / " + std::to_string(roster.maximum_tech));

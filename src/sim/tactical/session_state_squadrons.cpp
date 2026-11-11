@@ -125,6 +125,17 @@ void TacticalSession::Impl::append_canonical_hangars_state(std::vector<std::uint
             for (const auto& [id, state] : spawners) {
                 append_spawner(bytes, id, state);
             }
+            const auto selected = std::count_if(spawners.begin(), spawners.end(), [](const auto& row) {
+                return row.second.selected_tech.has_value();
+            });
+            if (selected != 0) {
+                sim::detail::append_u32(bytes, 0x52495447U); // GTIR: selected garrison tiers
+                sim::detail::append_u64(bytes, static_cast<std::uint64_t>(selected));
+                for (const auto& [id, state] : spawners) if (state.selected_tech) {
+                    sim::detail::append_u64(bytes, id);
+                    sim::detail::append_u32(bytes, *state.selected_tech);
+                }
+            }
         }
 }
 

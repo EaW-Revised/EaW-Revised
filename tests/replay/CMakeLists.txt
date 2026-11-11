@@ -66,6 +66,15 @@ add_executable(tactical_ability_tests ability_tests.cpp
 target_link_libraries(tactical_ability_tests PRIVATE eawr::sim eawr::platform)
 target_compile_features(tactical_ability_tests PRIVATE cxx_std_20)
 add_test(NAME tactical_mod_loadability_contracts COMMAND tactical_ability_tests --mod-loadability)
+add_test(NAME tactical_beams_lifecycle_contracts COMMAND tactical_ability_tests --beams)
+add_executable(tactical_deploy_squad_tests deploy_squad_tests.cpp)
+target_link_libraries(tactical_deploy_squad_tests PRIVATE eawr::units eawr::scene eawr::platform)
+target_compile_features(tactical_deploy_squad_tests PRIVATE cxx_std_20)
+eawr_target_project_warnings(tactical_deploy_squad_tests)
+add_test(NAME tactical_deploy_squad_contracts COMMAND tactical_deploy_squad_tests)
+eawr_add_game_data_test(NAME tactical_deploy_squad_installed COMMAND tactical_deploy_squad_tests --installed)
+eawr_add_game_data_test(NAME tactical_deploy_squad_mod COMMAND tactical_deploy_squad_tests
+    --installed-workshop Gladiator_Class_Destroyer 2712013423)
 eawr_target_project_warnings(tactical_ability_tests)
 add_test(
     NAME tactical_ability_contracts
@@ -149,6 +158,12 @@ add_test(
     NAME tactical_formation_contracts
     COMMAND tactical_formation_tests
 )
+
+add_executable(tactical_inactive_beams_formation_tests inactive_beams_formation_tests.cpp)
+target_link_libraries(tactical_inactive_beams_formation_tests PRIVATE eawr::sim eawr::platform)
+target_compile_features(tactical_inactive_beams_formation_tests PRIVATE cxx_std_20)
+eawr_target_project_warnings(tactical_inactive_beams_formation_tests)
+add_test(NAME tactical_inactive_beams_formation_contracts COMMAND tactical_inactive_beams_formation_tests)
 # #75: fighter squadrons (hangars, the fighter locomotor, squadron targets).
 add_executable(tactical_fighter_tests fighter_tests.cpp
     fighter_spawner_tests.cpp
@@ -352,6 +367,12 @@ add_test(
     COMMAND tactical_ion_tests
 )
 add_executable(tactical_ion_shot_tests ion_shot_tests.cpp)
+add_executable(tactical_lucky_shot_tests lucky_shot_tests.cpp ../units/unit_tables_fixture.cpp)
+target_link_libraries(tactical_lucky_shot_tests PRIVATE eawr::units eawr::sim eawr::platform)
+target_compile_features(tactical_lucky_shot_tests PRIVATE cxx_std_20)
+eawr_target_project_warnings(tactical_lucky_shot_tests)
+add_test(NAME tactical_lucky_shot_contracts COMMAND tactical_lucky_shot_tests)
+eawr_add_game_data_test(NAME tactical_lucky_shot_installed COMMAND tactical_lucky_shot_tests --installed)
 target_link_libraries(tactical_ion_shot_tests PRIVATE eawr::sim eawr::platform eawr::script_foc)
 target_include_directories(tactical_ion_shot_tests PRIVATE "${PROJECT_SOURCE_DIR}/src/script/foc")
 target_compile_features(tactical_ion_shot_tests PRIVATE cxx_std_20)

@@ -168,7 +168,16 @@ Existing starts continue to apply SK-01 to SK-24 and SC-01/SC-02.
   shows its colour as a bar centred in its text area. A combo's drop-down list is the
   list skin as the retail capture shows it: the small frame's rim around the skin's
   translucent backing, the entries in the list font and left aligned, no mark beside
-  the chosen one. The popup contents scale with their owning combo. The advanced
+  the chosen one. The popup contents scale with their owning combo. **UI-COMBO-01:**
+  scrolling resources (`WS_VSCROLL`) in both setup screens retain the combo height minus the closed text box
+  as the list budget. After frame margins, capacity rounds down to complete rows;
+  longer lists scroll and entries outside the frame are clipped. The list stays
+  within the viewport. Generated player rows inherit that budget. Controls whose
+  geometry describes only a closed box keep the viewport-bounded fallback.
+  Backing alpha remains authored by the skin, so translucent
+  art can still show the dialog beneath it. Evidence: targeted debug-build list
+  initialization, visibility, refresh and scrollbar reads, and the dialog resource.
+  The advanced
   dialog hides the prebuilt-base check in space (WSS-27); its credits slider and
   win-condition list are described under R-SETUP-05. The staging's Cancel button ends
   the screen: it quits the stand-alone screen, and a shell that owns it takes the

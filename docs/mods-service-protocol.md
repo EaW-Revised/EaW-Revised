@@ -657,8 +657,13 @@ Protocol 1.14 (additive; older clients ignore the new members):
   `chain.resolve` rows carry only the `content` object, not that warning.
 - **Who starts a job.** `mods.discover` only reports cache hits (`ready`) and never reads a mod file.
   `chain.resolve` returns immediately and, for each layer of the chain, adds `content` to its `rows` entry: `ready`
-  from the cache, or `pending` with one low-priority job queued. The job runs on one worker thread, reads in 1 MiB
-  chunks at background I/O priority and pauses briefly after every 64 MiB. When the records were discovered with
+  from the cache, or `pending` with one low-priority job queued. Jobs run one at a time on two hashing threads at
+  below-normal CPU priority (normal I/O priority: Windows background I/O mode is ~6x slower and costs ~4x the kernel
+  CPU), read in 1 MiB chunks and pause briefly after every 64 MiB. While a game instance runs
+  (`profile.locks` shows a profile, or an instance's state cannot be read) a job reads nothing and stays `pending`
+  (checked every 2 s, between files): the running game hashes the layers it mounts itself into the same cache folder,
+  and when that finished digest for the same tree is there the paused job takes it without reading the mod. When the
+  game exits the job carries on from its per-file partial cache. When the records were discovered with
   `walk_trees: false` there is no tree fingerprint to key on: the answer is `unavailable` with note "tree not walked"
   and no job starts. The next `chain.resolve` or `mods.discover` shows the result.
 - **Cache.** `<user data>/mods/cache/content/content-<id>.json`, keyed by the mod key plus `fingerprint.tree` and

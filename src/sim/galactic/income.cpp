@@ -2,9 +2,12 @@
 
 #include <array>
 #include <map>
+#include <optional>
+#include <stdexcept>
 #include <algorithm>
 #include <string>
 #include <tuple>
+#include "eawr/core/gc_profile.hpp"
 #include "encoding.hpp"
 #include "session_impl.hpp"
 #include "native_income_projection.hpp"
@@ -107,7 +110,7 @@ core::Result<void> validate_planet_income_rules(const GalacticSetup& setup) {
         if (rules.factions[i].player != setup.players[i].player_id || rules.factions[i].alignment > IncomeAlignment::dark) return invalid();
     // CGS-16: authored strength is unclamped; checked arithmetic owns overflow.
     for (std::size_t i = 0; i < rules.planets.size(); ++i)
-        if (rules.planets[i].planet != setup.planets[i].id || rules.planets[i].alignment > IncomeAlignment::dark) return invalid();
+        if (rules.planets[i].planet != setup.planets[i].id || rules.planets[i].alignment > IncomeAlignment::invalid) return invalid();
     for (std::size_t i = 0; i < rules.routes.size(); ++i)
         if (rules.routes[i].route != setup.routes[i].id || !bounded(rules.routes[i].factor)) return invalid();
     for (std::size_t i = 0; i < rules.political_curve.size(); ++i)
@@ -427,10 +430,14 @@ const IncomeSetup& GalacticSession::Impl::live_income_inputs() const {
 core::Result<void> GalacticSession::Impl::service_income(const PartitionExecutor& executor,
     std::uint64_t tick, std::vector<GalacticEvent>& events, bool sample) {
     if (!income) return core::Result<void>::success();
-    auto staged = *income;
-    staged.inputs = live_income_inputs();
+    // The new rows come from the live gather and the saved rows; the whole saved state is neither copied nor compared
+    // unless something in it actually changes (it used to be copied twice and compared in full on every tick).
+    std::optional<gc_profile::Scope> part(std::in_place, gc_profile::Phase::inc_gather);
+    const auto& live = live_income_inputs();
+    const auto& saved_rows = income->gambling;
+    part.emplace(gc_profile::Phase::inc_phase);
     const auto owners = sorted_planets();
-    std::vector<std::optional<GamblingIncomeState>> rows(staged.inputs.sources.size());
+    std::vector<std::optional<GamblingIncomeState>> rows(live.sources.size());
     std::vector<std::optional<GalacticEvent>> notices(rows.size());
     std::vector<std::optional<core::Diagnostic>> errors(rows.size());
     std::vector<std::uint32_t> draws(rows.size());
@@ -438,21 +445,21 @@ core::Result<void> GalacticSession::Impl::service_income(const PartitionExecutor
     constexpr std::uint32_t sample_slot = 0xfffe000dU; // coordinator-reserved, WGEP-76
     const auto phase = executor.execute_phase("galactic-income-sources", tick_partition_count, [&](std::size_t partition) {
         for (std::size_t i = partition; i < rows.size(); i += tick_partition_count) {
-            const auto& source = staged.inputs.sources[i]; const auto* type = profile(staged.inputs, source.type);
+            const auto& source = live.sources[i]; const auto* type = profile(live, source.type);
             if (!type || !type->gambling) continue;
             const auto& ability = *type->gambling;
-            const auto* where = location(staged.inputs, source.planet);
+            const auto* where = location(live, source.planet);
             const auto owner = std::lower_bound(owners.begin(), owners.end(), source.planet,
                 [](const auto& value, auto id) { return value.id < id; });
             const bool valid = source.enabled && where && owner != owners.end()
                 && owner->id == source.planet; // WGEP-76 has no source-owner comparison
             GamblingIncomeState row{source.id, source.planet, std::numeric_limits<std::uint32_t>::max(), {}};
-            const auto old = std::lower_bound(staged.gambling.begin(), staged.gambling.end(), row.source,
+            const auto old = std::lower_bound(saved_rows.begin(), saved_rows.end(), row.source,
                 [](const auto& value, auto id) { return value.source < id; });
-            if (old != staged.gambling.end() && old->source == row.source) row = *old;
+            if (old != saved_rows.end() && old->source == row.source) row = *old;
             // WGEP-77: an ownership callback removes a nonplanet source's old
             // contribution; the next due WGEP-76 service may install a new one.
-            if (old != staged.gambling.end() && old->source == row.source && !source.planet_source
+            if (old != saved_rows.end() && old->source == row.source && !source.planet_source
                 && owner != owners.end() && owner->id == source.planet && row.planet == source.planet
                 && row.planet_owner != owner->owner && (row.planet_owner == 0 || row.planet_owner == source.owner)) row.income = {};
             if (!valid || row.planet != source.planet) { row.income = {}; row.planet = source.planet; }
@@ -484,14 +491,30 @@ core::Result<void> GalacticSession::Impl::service_income(const PartitionExecutor
             rows[i] = row;
         }
     });
+    part.emplace(gc_profile::Phase::inc_commit);
     if (!phase) return core::Result<void>::failure(phase.error());
     for (const auto& error : errors) if (error) return core::Result<void>::failure(*error);
-    staged.gambling.clear();
+    std::vector<GamblingIncomeState> gambling;
+    gambling.reserve(rows.size());
+    auto random_draws = income->random_draws;
     for (std::size_t i = 0; i < rows.size(); ++i) {
-        if (rows[i]) staged.gambling.push_back(*rows[i]);
-        staged.random_draws += draws[i];
+        if (rows[i]) gambling.push_back(*rows[i]);
+        random_draws += draws[i];
     }
-    if (staged != *income) { *income = std::move(staged); dirty[15] = true; }
+    // `income->inputs` is only ever assigned here, from the live gather, and the gather changes only with its
+    // generation: when that generation is the one stored last time, the stored inputs are the live ones.
+    const bool shortcut = income_inputs_stored == income_gather_generation;
+    // Hash verification checks the shortcut like every other kept result in this area: a future writer of `income->inputs`
+    // that forgets to reset `income_inputs_stored` would otherwise leave stale inputs silently, and the stale value is saved.
+    if (shortcut && verify_cached_hash && income->inputs != live)
+        throw std::runtime_error("galactic stored income inputs differ from the live gather");
+    const bool inputs_equal = shortcut || income->inputs == live;
+    if (!inputs_equal || gambling != income->gambling || random_draws != income->random_draws) {
+        if (!inputs_equal) income->inputs = live;
+        income->gambling = std::move(gambling); income->random_draws = random_draws;
+        dirty[15] = true;
+    }
+    income_inputs_stored = income_gather_generation;
     for (const auto& notice : notices) if (notice) events.push_back(*notice);
     return core::Result<void>::success();
 }

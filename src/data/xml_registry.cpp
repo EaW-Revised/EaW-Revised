@@ -303,7 +303,7 @@ core::Result<ParsedDocument> parse_document(
 ) {
     namespace profile = core::load_profile;
     profile::Scope parse_scope(profile::Phase::xml_parse);
-    const profile::FileScope parse_timer(record.canonical_path, record.layer_id, &profile::FileCost::parse_ms);
+    const profile::FileScope parse_timer(record.canonical_path, record.layer_id, profile::FileField::parse);
     ParsedDocument parsed{.document = {}, .root = {}, .offsets = SourceOffsets(bytes),
                           .compatible_header = {}, .compatible_header_offset = 0};
     auto result = parsed.document.load_buffer(

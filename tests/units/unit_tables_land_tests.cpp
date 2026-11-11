@@ -36,7 +36,11 @@ std::string repeat(const std::string_view item, const int count) {
 
 std::string land_xml() {
     return R"xml(
-<Props_Generic Name="Mod_Static"><LandBehavior>LAND_OBSTACLE</LandBehavior>
+<Props_Generic Name="Mod_Static"><LandBehavior>LAND_OBSTACLE, GARRISON_STRUCTURE</LandBehavior>
+  <Garrison_Category>Infantry, Vehicle</Garrison_Category><Num_Garrison_Slots>7</Num_Garrison_Slots>
+  <Num_Garrison_Guns>3</Num_Garrison_Guns><Garrison_Radius>9</Garrison_Radius>
+  <Garrison_Enter_Dist>4</Garrison_Enter_Dist><Garrison_Exit_Dist>12</Garrison_Exit_Dist>
+  <Garrison_Bone_Names>Root, HP_F-L_BONE</Garrison_Bone_Names>
   <Land_Model_Name>test_frigate</Land_Model_Name><Scale_Factor>2</Scale_Factor>
   <Obstacle_Width>60</Obstacle_Width><Obstacle_Height>100</Obstacle_Height>
   <Obstacle_X_Offset>-30</Obstacle_X_Offset><Obstacle_Y_Offset>-50</Obstacle_Y_Offset>
@@ -56,7 +60,7 @@ std::string land_xml() {
   <Custom_Hard_XExtent>2</Custom_Hard_XExtent><Custom_Hard_YExtent>4</Custom_Hard_YExtent>
   <UnitCollisionClass> Infantry </UnitCollisionClass><FormationSpacing>.4</FormationSpacing>
 </GroundInfantry>
-<Container Name="Land_Trooper_Team"><LandBehavior>LAND_TEAM_CONTAINER_LOCOMOTOR</LandBehavior><Max_Speed> .8 </Max_Speed></Container>
+<Container Name="Land_Trooper_Team"><LandBehavior>LAND_TEAM_CONTAINER_LOCOMOTOR, GARRISON_UNIT</LandBehavior><Garrison_Category>Infantry</Garrison_Category><Garrison_Value>2</Garrison_Value><Max_Speed> .8 </Max_Speed></Container>
 <GroundVehicle Name="Land_Walker">
   <Create_Team>No</Create_Team>
   <MovementClass>Walker</MovementClass>
@@ -116,7 +120,10 @@ std::string land_xml() {
 <GroundCompany Name="Land_Empty_Company"><Company_Units/></GroundCompany>
 <GroundVehicle Name="Mod_Siege_Tank"><MovementClass>ModHover</MovementClass><LandBehavior>HOVER_LOCOMOTOR</LandBehavior>
   <Land_Model_Name>test_frigate</Land_Model_Name><Max_Speed>1</Max_Speed><Max_Rate_Of_Turn>2</Max_Rate_Of_Turn>
+  <Walk_Animation_Speed>0.3</Walk_Animation_Speed><Crouch_Animation_Speed>0.4</Crouch_Animation_Speed>
+  <Rotation_Animation_Speed>0.5</Rotation_Animation_Speed><Max_Rate_Of_Roll>2</Max_Rate_Of_Roll><Bank_Turn_Angle>35</Bank_Turn_Angle>
   <Custom_Hard_XExtent>-0.4</Custom_Hard_XExtent><Custom_Hard_YExtent>-0.4</Custom_Hard_YExtent>
+  <Min_Speed_Fraction_For_Turn> .25 </Min_Speed_Fraction_For_Turn><Close_Enough_Angle_For_Move_Start> 45 </Close_Enough_Angle_For_Move_Start>
   <UnitCollisionClass>Vehicle</UnitCollisionClass></GroundVehicle>
 <GroundCompany Name="Mod_Siege_Tank_Company"><Company_Units>Mod_Siege_Tank</Company_Units></GroundCompany>
 <GroundInfantry Name="Mod_Model_Guard"><MovementClass>Infantry</MovementClass><LandBehavior>IDLE, LAND_TEAM_INFANTRY_LOCOMOTOR</LandBehavior>
@@ -331,6 +338,60 @@ void land_selection_rows() {
         "WSU-21: land structures remain direct-click targets outside mobile box selection");
 }
 
+// LC-86: the land body reads the reveal behaviour and its authored inputs, each from its own tag.
+void land_reveal_rows() {
+    TempTree tree;
+    auto xml = units_xml("3600", "Unit_Select_Test");
+    xml.insert(xml.rfind("</Objects>"), R"xml(
+<GroundInfantry Name="Reveal_Full">
+  <LandBehavior>IDLE, REVEAL, HIDE_WHEN_FOGGED, LAND_TEAM_INFANTRY_LOCOMOTOR</LandBehavior>
+  <Land_FOW_Reveal_Range> 130 </Land_FOW_Reveal_Range>
+  <Dense_FOW_Reveal_Range_Multiplier> 0.25 </Dense_FOW_Reveal_Range_Multiplier>
+  <Multisample_FOW_Check>Yes</Multisample_FOW_Check>
+  <Custom_Hard_XExtent_Offset>3</Custom_Hard_XExtent_Offset><Custom_Hard_YExtent_Offset>-2</Custom_Hard_YExtent_Offset>
+</GroundInfantry>
+<GroundStructure Name="Reveal_Shared_List"><Behavior>REVEAL</Behavior><Land_FOW_Reveal_Range>600</Land_FOW_Reveal_Range>
+  <Space_FOW_Reveal_Range>999</Space_FOW_Reveal_Range></GroundStructure>
+<GroundInfantry Name="Reveal_Without_Range"><LandBehavior>REVEAL, LAND_TEAM_INFANTRY_LOCOMOTOR</LandBehavior></GroundInfantry>
+<GroundInfantry Name="Range_Without_Reveal"><LandBehavior>LAND_TEAM_INFANTRY_LOCOMOTOR</LandBehavior>
+  <Land_FOW_Reveal_Range>200</Land_FOW_Reveal_Range></GroundInfantry>
+<GroundInfantry Name="Space_Range_Only"><LandBehavior>REVEAL, LAND_TEAM_INFANTRY_LOCOMOTOR</LandBehavior>
+  <Space_FOW_Reveal_Range>999</Space_FOW_Reveal_Range></GroundInfantry>
+)xml");
+    write_fixture(tree.root, xml);
+    const auto loaded = load_types(tree.root, BattleDomain::land,
+        {"Reveal_Full", "Reveal_Shared_List", "Reveal_Without_Range", "Range_Without_Reveal", "Space_Range_Only"}, {});
+    if (!loaded.tables) return;
+    const auto& tables = *loaded.tables;
+    const auto* full = tables.find("Reveal_Full");
+    const auto* shared = tables.find("Reveal_Shared_List");
+    const auto* without_range = tables.find("Reveal_Without_Range");
+    const auto* without_reveal = tables.find("Range_Without_Reveal");
+    const auto* space_only = tables.find("Space_Range_Only");
+    expect(full && shared && without_range && without_reveal && space_only, "LC-86: the reveal fixture types load");
+    if (!full || !shared || !without_range || !without_reveal || !space_only) return;
+    const auto number = [](const std::int64_t whole) { return Fixed::from_integer(whole).value(); };
+    expect(full->reveal && full->fow_reveal_range == std::optional<Fixed>(number(130))
+            && eawr::units::sensor_range(*full) == std::optional<Fixed>(number(130)),
+        "LC-86: a land REVEAL type reads Land_FOW_Reveal_Range");
+    expect(full->dense_fow_multiplier == Fixed::from_decimal("0.25").value() && full->multisample_fow
+            && full->fog_box_offset.x == number(3) && full->fog_box_offset.y == number(-2),
+        "LC-86: the dense multiplier, multisample flag and fog box offset come from their tags");
+    expect(shared->reveal && eawr::units::sensor_range(*shared) == std::optional<Fixed>(number(600)),
+        "LC-86: REVEAL in the shared behaviour list reveals in land, and the space range tag is not read");
+    expect(shared->dense_fow_multiplier == Fixed::from_raw(Fixed::scale / 2) && !shared->multisample_fow
+            && shared->fog_box_offset == eawr::sim::math::Vec3{},
+        "LC-86: absent dense, multisample and offset tags keep the type defaults (0.5, off, 0)");
+    expect(without_range->reveal && without_range->fow_reveal_range == std::optional<Fixed>(Fixed{})
+            && eawr::units::sensor_range(*without_range) == std::optional<Fixed>(Fixed{}),
+        "LC-86: a REVEAL type without a range reveals with the type default 0 (the reveal floors it at 10)");
+    expect(!without_reveal->reveal && without_reveal->fow_reveal_range == std::optional<Fixed>(number(200))
+            && !eawr::units::sensor_range(*without_reveal),
+        "LC-86: an authored range without the REVEAL behaviour reveals nothing");
+    expect(space_only->reveal && space_only->fow_reveal_range == std::optional<Fixed>(Fixed{}),
+        "LC-86: a land load never reads Space_FOW_Reveal_Range");
+}
+
 void land_combat_rows() {
     using eawr::sim::tactical::object_weapon;
     TempTree tree;
@@ -342,11 +403,25 @@ void land_combat_rows() {
     const auto constants = tree.root / "XML" / "GameConstants.xml";
     respell_file(constants, "Object_Max_Speed_Multiplier_Space", "Object_Max_Speed_Multiplier_Land");
     respell_file(constants, "Object_Max_Health_Multiplier_Space", "Object_Max_Health_Multiplier_Land");
-    respell_file(constants, "</GameConstants>", "<Damage_To_Armor_Mod> Damage_Blaster, Armor_Infantry, 0.8 </Damage_To_Armor_Mod></GameConstants>");
+    respell_file(constants, "</GameConstants>", "<Damage_To_Armor_Mod> Damage_Blaster, Armor_Infantry, 0.8 </Damage_To_Armor_Mod>"
+        "<WalkAnimationCutoff>0.6</WalkAnimationCutoff><MoveBlendTime>0.5</MoveBlendTime>"
+        "<Garrisoned_Max_Attack_Distance_Multiplier>1.5</Garrisoned_Max_Attack_Distance_Multiplier></GameConstants>");
     const std::vector<std::string> companies{"Shoot_Infantry_Company", "Shoot_Armor_Company"};
     const auto land = load_types(tree.root, BattleDomain::land, companies, {"Shoot_Wall"});
     if (!land.tables) return;
     const auto& tables = *land.tables;
+    const auto constant = [&](const std::string_view tag) -> std::optional<Fixed> {
+        for (const auto& row : tables.land_animation_constants) if (row.tag == tag) return row.value;
+        return std::nullopt;
+    };
+    expect(constant("WalkAnimationCutoff") == Fixed::from_decimal("0.6").value()
+        && constant("MoveBlendTime") == Fixed::from_decimal("0.5").value(),
+        "WLAN-03/06: authored game constants reach the presentation inputs");
+    {
+        std::optional<Fixed> garrisoned;
+        for (const auto& row : tables.constants.scalars) if (row.tag == "Garrisoned_Max_Attack_Distance_Multiplier") garrisoned = row.value;
+        expect(garrisoned == Fixed::from_decimal("1.5").value(), "LC-102: a land load reads the garrisoned range multiplier");
+    }
     // The companies pull their members in: no second pass over the member names.
     const auto* trooper = tables.find("Shoot_Trooper");
     const auto* tank = tables.find("Shoot_Tank");
@@ -567,6 +642,19 @@ void real_mod_values(const eawr::units::UnitTables& loaded) {
     inputs.collision_class_order = {{"Infantry", 1}, {"Vehicle", 2}};
     inputs.contacts = {100, 5, Fixed{}, Fixed{}};
     const auto* tank = company(tables, "Mod_Siege_Tank_Company");
+    expect(tank && tank->locomotion.size() == 1
+        && tank->locomotion.front().walk_animation_speed == Fixed::from_decimal("0.3").value()
+        && tank->locomotion.front().crouch_animation_speed == Fixed::from_decimal("0.4").value()
+        && tank->locomotion.front().rotation_animation_speed == Fixed::from_decimal("0.5").value()
+        && tank->locomotion.front().max_rate_of_roll == Fixed::from_integer(2).value()
+        && tank->locomotion.front().bank_turn_angle == Fixed::from_integer(35).value(),
+        "WLAN-03/05/12: authored animation values reach the land member");
+    auto presentation_changed = tables;
+    for (auto& entry : presentation_changed.land_companies)
+        for (auto& member : entry.locomotion) member.walk_animation_speed = Fixed::from_integer(99).value();
+    presentation_changed.land_animation_constants.push_back({"WalkAnimationCutoff", Fixed::from_integer(1).value(), "1"});
+    expect(eawr::units::content_identity(presentation_changed) == eawr::units::content_identity(tables),
+        "WLAN: presentation-only values do not change simulation content identity");
     expect(tank && tank->locomotion.size() == 1 && tank->locomotion.front().hard_x == Fixed::from_decimal("-0.4").value()
         && tank->locomotion.front().hard_y == tank->locomotion.front().hard_x && !has_row(tables.unresolved, "Mod_Siege_Tank", "Custom_Hard_XExtent"),
         "LSL-04: the loader keeps the authored -0.4 hard extents as parsed");
@@ -575,6 +663,13 @@ void real_mod_values(const eawr::units::UnitTables& loaded) {
     expect(tank_bound && tank && tank->locomotion.front().collision_x && tank->locomotion.front().collision_y && tank_bound.value().land.companies.front().members.front().hard_x == *tank->locomotion.front().collision_x
         && tank_bound.value().land.companies.front().members.front().hard_y == *tank->locomotion.front().collision_y,
         "LSL-04: RaW Siege_Tank -0.4 hard extents bind with the model collision extents");
+    // WLPA-90/91: the vehicle's authored corner tags reach its movement profile (a quarter minimum fraction, an eighth of a turn).
+    expect(tank && tank->locomotion.front().min_speed_fraction_for_turn == Fixed::from_decimal(".25").value()
+        && tank->locomotion.front().close_enough_angle == Fixed::from_integer(45).value()
+        && tank_bound && tank_bound.value().land.companies.front().members.front().locomotion.min_speed_fraction_for_turn
+            == Fixed::from_decimal(".25").value()
+        && tank_bound.value().land.companies.front().members.front().locomotion.close_enough_angle == Fixed::from_ratio(1, 8).value(),
+        "WLPA-90/91: a stock-style vehicle carries the authored Min_Speed_Fraction_For_Turn and Close_Enough_Angle_For_Move_Start");
     const auto* guard = company(tables, "Mod_Model_Guard_Company");
     expect(guard && guard->locomotion.size() == 1 && guard->members.front().max_speed == Fixed{}
         && guard->locomotion.front().rate_of_turn == Fixed{} && !guard->locomotion.front().scale_factor
@@ -609,8 +704,192 @@ void real_mod_values(const eawr::units::UnitTables& loaded) {
         "LSL-02/03/04: a 0.0-speed stationary member binds immobile, with the default scale and model footprint");
 }
 
+// LC-86 (#6183): a placed static candidate (read as an obstacle type) carries the same fog inputs as a land body, whether or
+// not it is a LAND_OBSTACLE: a build pad reveals without being an obstacle.
+void land_static_reveal_rows() {
+    TempTree tree;
+    auto xml = units_xml("3600", "Unit_Select_Test");
+    xml.insert(xml.rfind("</Objects>"), R"xml(
+<GroundStructure Name="Static_Reveal_Hq"><Behavior>REVEAL, LAND_OBSTACLE</Behavior>
+  <Land_FOW_Reveal_Range>300</Land_FOW_Reveal_Range>
+  <Dense_FOW_Reveal_Range_Multiplier>0.25</Dense_FOW_Reveal_Range_Multiplier>
+  <Multisample_FOW_Check>Yes</Multisample_FOW_Check>
+  <Custom_Hard_XExtent>12</Custom_Hard_XExtent><Custom_Hard_YExtent>8</Custom_Hard_YExtent>
+  <Custom_Hard_XExtent_Offset>3</Custom_Hard_XExtent_Offset><Custom_Hard_YExtent_Offset>-2</Custom_Hard_YExtent_Offset>
+</GroundStructure>
+<GroundStructure Name="Static_Reveal_Pad"><Behavior>REVEAL</Behavior><Land_FOW_Reveal_Range>100</Land_FOW_Reveal_Range></GroundStructure>
+<GroundStructure Name="Static_Reveal_No_Range"><LandBehavior>REVEAL</LandBehavior></GroundStructure>
+<GroundStructure Name="Static_Range_No_Reveal"><Behavior>LAND_OBSTACLE</Behavior><Land_FOW_Reveal_Range>200</Land_FOW_Reveal_Range></GroundStructure>
+<GroundStructure Name="Static_Mod_Value"><Behavior>REVEAL</Behavior><Land_FOW_Reveal_Range>450</Land_FOW_Reveal_Range></GroundStructure>
+)xml");
+    write_fixture(tree.root, xml);
+    const auto loaded = load_types(tree.root, BattleDomain::land, {},
+        {"Static_Reveal_Hq", "Static_Reveal_Pad", "Static_Reveal_No_Range", "Static_Range_No_Reveal", "Static_Mod_Value"});
+    if (!loaded.tables) return;
+    const auto find = [&](const std::string_view id) -> const eawr::units::LandStaticObject* {
+        for (const auto& row : loaded.tables->land_static_objects)
+            if (row.id == id) return &row;
+        return nullptr;
+    };
+    const auto* hq = find("Static_Reveal_Hq");
+    const auto* pad = find("Static_Reveal_Pad");
+    const auto* bare = find("Static_Reveal_No_Range");
+    const auto* range_only = find("Static_Range_No_Reveal");
+    const auto* mod = find("Static_Mod_Value");
+    expect(hq && pad && bare && range_only && mod, "LC-86: the static reveal fixture rows load");
+    if (!hq || !pad || !bare || !range_only || !mod) return;
+    const auto number = [](const std::int64_t whole) { return Fixed::from_integer(whole).value(); };
+    expect(hq->fog.reveal && hq->fog.range == std::optional<Fixed>(number(300)) && hq->fog.multisample
+            && hq->fog.dense_multiplier == Fixed::from_decimal("0.25").value()
+            && hq->fog.box_x_offset == number(3) && hq->fog.box_y_offset == number(-2)
+            && hq->fog.custom_hard_x == std::optional<Fixed>(number(12)) && hq->fog.custom_hard_y == std::optional<Fixed>(number(8)),
+        "LC-86: a static structure reads the reveal range, dense multiplier, multisample flag, box offsets and hard extents");
+    expect(pad->fog.reveal && !pad->land_obstacle && pad->fog.range == std::optional<Fixed>(number(100)),
+        "LC-86: a static row that is not a LAND_OBSTACLE still reads its REVEAL fog inputs");
+    expect(bare->fog.reveal && bare->fog.range == std::optional<Fixed>(Fixed{})
+            && bare->fog.dense_multiplier == Fixed::from_raw(Fixed::scale / 2) && !bare->fog.multisample,
+        "LC-86: a REVEAL static without a range reads 0 (the reveal floors it) and keeps the default dense multiplier");
+    expect(!range_only->fog.reveal && range_only->fog.range == std::optional<Fixed>(number(200)),
+        "LC-86: an authored range without the REVEAL behaviour is kept as data but does not reveal");
+    expect(mod->fog.reveal && mod->fog.range == std::optional<Fixed>(number(450)),
+        "LC-86: a mod-authored range is read as authored, not from a list of stock names");
+}
+
+// LE-LOADER: a land build pad decodes its pad rows without a CAPTURE_POINT, with the type-constructor radius default; a pad
+// with CAPTURE_POINT keeps its authored capture inputs; a construction child decodes its price, time and constructed type.
+void land_pad_rows() {
+    TempTree tree;
+    auto xml = units_xml("3600", "Unit_Select_Test");
+    xml.insert(xml.rfind("</Objects>"), R"xml(
+<GroundBuildable Name="Pad_Faction"><Behavior>TACTICAL_BUILD_OBJECTS, REVEAL</Behavior>
+  <Respects_Skirmish_Pre_Build_Bases_Option>No</Respects_Skirmish_Pre_Build_Bases_Option>
+  <Capture_Point_Radius>0</Capture_Point_Radius>
+  <Minimum_Time_Before_Pad_Can_Build_Again>15</Minimum_Time_Before_Pad_Can_Build_Again>
+  <Tactical_Buildable_Objects_Multiplayer>Rebel, UC_Child</Tactical_Buildable_Objects_Multiplayer>
+</GroundBuildable>
+<GroundBuildable Name="Pad_Structure"><Behavior>TACTICAL_BUILD_OBJECTS</Behavior></GroundBuildable>
+<GroundBuildable Name="Pad_Capture"><Behavior>TACTICAL_BUILD_OBJECTS, CAPTURE_POINT</Behavior>
+  <Affiliation>Rebel</Affiliation>
+  <Capture_Point_Radius>100</Capture_Point_Radius><Capture_Point_Transition_Time_Seconds>5</Capture_Point_Transition_Time_Seconds>
+  <Ownership_Sticks>Yes</Ownership_Sticks></GroundBuildable>
+<GroundBuildable Name="UC_Child"><Behavior>TACTICAL_UNDER_CONSTRUCTION</Behavior>
+  <Tactical_Buildable_Constructed>Done_Child</Tactical_Buildable_Constructed>
+  <Tactical_Build_Cost_Multiplayer>850</Tactical_Build_Cost_Multiplayer>
+  <Tactical_Build_Time_Seconds>23</Tactical_Build_Time_Seconds><Tactical_Health>200</Tactical_Health></GroundBuildable>
+<GroundStructure Name="Done_Child"><Tactical_Health>200</Tactical_Health>
+  <Abilities><Income_Stream_Ability Name="Income"><Base_Income_Value>45</Base_Income_Value>
+    <Base_Interval_In_Secs>5</Base_Interval_In_Secs></Income_Stream_Ability></Abilities></GroundStructure>
+)xml");
+    write_fixture(tree.root, xml);
+    write(tree.root / "XML" / "FactionFiles.xml", "<Faction_Files><File>pad_factions.xml</File></Faction_Files>");
+    write(tree.root / "XML" / "pad_factions.xml", "<Factions><Faction Name=\"Rebel\" /></Factions>");
+    const auto loaded = load_types(tree.root, BattleDomain::land, {"Pad_Faction", "Pad_Structure", "Pad_Capture"}, {});
+    if (!loaded.tables) return;
+    const auto number = [](const std::int64_t whole) { return Fixed::from_integer(whole).value(); };
+    const auto* faction = loaded.tables->find("Pad_Faction");
+    const auto* structure = loaded.tables->find("Pad_Structure");
+    const auto* capture = loaded.tables->find("Pad_Capture");
+    const auto* child = loaded.tables->find("UC_Child");
+    const auto* done = loaded.tables->find("Done_Child");
+    expect(faction && structure && capture && child && done, "LE-LOADER: the pads, the construction child and its constructed type load");
+    if (!faction || !structure || !capture || !child || !done) return;
+    expect(faction->build_pad && !faction->capture_point && faction->capture_radius == std::optional<Fixed>(Fixed{})
+            && faction->pad_rebuild_seconds == std::optional<Fixed>(number(15)) && faction->child_persists && !faction->respects_prebuilt_base,
+        "LE-LOADER: a land pad without CAPTURE_POINT reads its authored radius (0) and its rebuild time");
+    expect(structure->build_pad && !structure->capture_point && structure->capture_radius == std::optional<Fixed>(number(200))
+            && structure->capture_seconds == std::optional<Fixed>(number(2)) && structure->respects_prebuilt_base,
+        "LE-LOADER: a pad without the radius tag takes the type-constructor default 200 (debug build) and transition time 2");
+    expect(capture->capture_point && capture->capture_radius == std::optional<Fixed>(number(100))
+            && capture->capture_seconds == std::optional<Fixed>(number(5)) && capture->ownership_sticks && capture->affiliation == "Rebel",
+        "LE-LOADER: a pad with CAPTURE_POINT keeps its authored capture inputs");
+    expect(faction->production.buildable.size() == 1 && faction->production.buildable.front().types.size() == 1
+            && faction->production.buildable.front().types.front() == "UC_Child",
+        "LE-LOADER: the pad menu lists its construction child under the faction");
+    expect(child->under_construction && child->constructed_type == "Done_Child"
+            && child->production.build_cost_multiplayer == std::optional<Fixed>(number(850))
+            && child->production.build_time_seconds == std::optional<Fixed>(number(23)),
+        "LE-LOADER: a construction child reads its price, time and constructed type");
+    expect(!done->build_pad && !done->under_construction && !done->capture_point,
+        "LE-LOADER: a constructed structure is an ordinary land body");
+    expect(done->production.income.size() == 1 && done->production.income.front().base_value == number(45)
+            && done->production.income.front().interval_seconds == number(5),
+        "LR4-15: a constructed land structure reads its authored income stream");
+}
+
+// A placed CAPTURE_POINT structure that omits the radius or the transition time (the stock Secondary_* structures) keeps the type
+// constructor defaults of the debug build, 200 and 2, and still loads (it used to be refused as a missing required tag).
+void land_static_capture_defaults() {
+    TempTree tree;
+    auto xml = units_xml("3600", "Unit_Select_Test");
+    xml.insert(xml.rfind("</Objects>"), R"xml(
+<Marker Name="Static_Capture_Bare"><Behavior>CAPTURE_POINT, LAND_OBSTACLE</Behavior></Marker>
+<Marker Name="Static_Capture_Authored"><Behavior>CAPTURE_POINT, LAND_OBSTACLE</Behavior>
+  <Capture_Point_Radius>150</Capture_Point_Radius><Capture_Point_Transition_Time_Seconds>7</Capture_Point_Transition_Time_Seconds>
+  <LandBehavior>HIDE_WHEN_FOGGED, DUMMY_TOOLTIP</LandBehavior><Immune_To_Damage>Yes</Immune_To_Damage><Is_Valid_Target>No</Is_Valid_Target>
+</Marker>
+)xml");
+    write_fixture(tree.root, xml);
+    const auto loaded = load_types(tree.root, BattleDomain::land, {}, {"Static_Capture_Bare", "Static_Capture_Authored"});
+    if (!loaded.tables) return;
+    const eawr::units::LandStaticObject* bare = nullptr;
+    const eawr::units::LandStaticObject* authored = nullptr;
+    for (const auto& row : loaded.tables->land_static_objects) {
+        if (row.id == "Static_Capture_Bare") bare = &row;
+        if (row.id == "Static_Capture_Authored") authored = &row;
+    }
+    expect(bare && authored, "a capture-point static without a radius still loads");
+    if (!bare || !authored) return;
+    const auto number = [](const std::int64_t whole) { return Fixed::from_integer(whole).value(); };
+    expect(bare->capture_point && bare->capture_radius == std::optional<Fixed>(number(200))
+            && bare->capture_seconds == std::optional<Fixed>(number(2)),
+        "a capture-point static without a radius or transition time keeps the type constructor defaults 200 and 2");
+    expect(authored->capture_radius == std::optional<Fixed>(number(150)) && authored->capture_seconds == std::optional<Fixed>(number(7)),
+        "an authored radius and transition time are read as authored");
+    expect(authored->hide_when_fogged && authored->dummy_tooltip && authored->immune_to_damage && !authored->valid_target,
+        "land static behavior and combat flags are read from the effective type");
+    expect(!bare->hide_when_fogged && !bare->dummy_tooltip && !bare->immune_to_damage && bare->valid_target,
+        "land static flags retain their defaults when absent");
+}
+
+void land_capture_influence() {
+    TempTree tree;
+    auto xml = units_xml("3600", "Unit_Select_Test");
+    xml.insert(xml.rfind("</Objects>"), R"xml(
+<GroundInfantry Name="Capture_Enabled"><LandBehavior>LAND_TEAM_INFANTRY_LOCOMOTOR</LandBehavior></GroundInfantry>
+<GroundInfantry Name="Capture_Disabled"><LandBehavior>LAND_TEAM_INFANTRY_LOCOMOTOR</LandBehavior><Influences_Capture_Point>No</Influences_Capture_Point></GroundInfantry>
+<GroundCompany Name="Capture_Direct"><MovementClass>Infantry</MovementClass><Influences_Capture_Point>No</Influences_Capture_Point></GroundCompany>
+)xml");
+    write_fixture(tree.root, xml);
+    const auto loaded = load_types(tree.root, BattleDomain::land, {"Capture_Enabled", "Capture_Disabled", "Capture_Direct"}, {});
+    if (!loaded.tables) return;
+    const auto find = [&](const std::string_view id) -> const eawr::units::UnitType* {
+        for (const auto& unit : loaded.tables->units) if (unit.id == id) return &unit;
+        return nullptr;
+    };
+    const auto* enabled = find("Capture_Enabled");
+    const auto* disabled = find("Capture_Disabled");
+    expect(enabled && disabled && enabled->influences_capture && !disabled->influences_capture,
+        "LC-53: land bodies read the capture flag and retain its true default");
+    const auto direct = std::find_if(loaded.tables->land_static_objects.begin(), loaded.tables->land_static_objects.end(),
+        [](const auto& row) { return row.id == "Capture_Direct"; });
+    expect(direct != loaded.tables->land_static_objects.end() && !direct->influences_capture,
+        "LC-53: a direct company retains the flag of its physical object");
+}
+
 void land_companies() {
     using eawr::units::plan_land_company;
+    {
+        eawr::units::LandGarrisonData host, entrant;
+        host.categories = {"Infantry", "Vehicle"}; entrant.categories = {"vehicle"};
+        expect(eawr::units::land_garrison_compatible(host, entrant), "G-02: category comparison ignores case");
+        entrant.categories = {"Air"};
+        expect(!eawr::units::land_garrison_compatible(host, entrant), "G-02: disjoint categories are refused");
+        entrant.categories.clear();
+        expect(eawr::units::land_garrison_compatible(host, entrant), "G-02: an empty mask is unrestricted");
+        const std::array<std::uint32_t, 2> used{2, 2};
+        expect(eawr::units::land_garrison_has_capacity(5, used, 1)
+            && !eawr::units::land_garrison_has_capacity(5, used, 2), "G-03: capacity charges occupant values");
+    }
     TempTree tree;
     const auto base_xml = units_xml("3600", "Unit_Select_Test");
     auto with_land = base_xml;
@@ -624,6 +903,15 @@ void land_companies() {
     expect(tables.land_static_objects.size() == 3, "land scene object types decode separately from companies");
     if (tables.land_static_objects.size() == 3) {
         const auto& prop = tables.land_static_objects[0];
+        expect(prop.garrison.host && prop.garrison.slots == 7 && prop.garrison.guns == 3
+            && prop.garrison.categories.size() == 2 && prop.garrison.radius == Fixed::from_integer(9).value()
+            && prop.garrison.enter_distance == Fixed::from_integer(4).value()
+            && prop.garrison.exit_distance == Fixed::from_integer(12).value(),
+            "G-01: static host retains authored containment values");
+        expect(prop.garrison.bones.size() == 2 && prop.garrison.bones[0].position
+            && prop.garrison.bones[1].position
+            && prop.garrison.bones[1].position->x == Fixed::from_integer(10).value(),
+            "G-01: host bones retain model-space bind positions in authored order");
         const auto& proxy = tables.land_static_objects[1];
         expect(prop.land_obstacle && prop.width == Fixed::from_integer(60).value() && prop.height == Fixed::from_integer(100).value()
             && proxy.width == prop.width && proxy.x_offset == prop.x_offset,
@@ -697,6 +985,10 @@ void land_companies() {
     }
 
     const auto* infantry = company(tables, "Land_Infantry_Company");
+    expect(infantry && infantry->team_garrison.entrant && infantry->team_garrison.value == 2
+               && infantry->team_garrison.categories.size() == 1
+               && infantry->team_garrison.categories.front() == "Infantry",
+           "G-01: the entrant profile belongs to the team container");
     expect(infantry && infantry->members.size() == 18 && !infantry->direct_object && infantry->max_squad_size == 9U
                && infantry->team_type == "Land_Trooper_Team" && infantry->team_max_speed
                && infantry->team_max_speed->raw() == Fixed::from_decimal("0.8").value().raw(),
@@ -715,6 +1007,9 @@ void land_companies() {
         const auto adapted = eawr::skirmish::build_land_bindings(authored_tables, selected, inputs);
         expect(static_cast<bool>(adapted), "L2b: mod-style authored company adapts without a unit-name whitelist");
         if (adapted) {
+            expect(std::any_of(adapted.value().land.garrisons.begin(), adapted.value().land.garrisons.end(),
+                [](const auto& row) { return row.data.entrant && row.data.value == 2; }),
+                "G-01: the land content adapter retains the team entrant profile");
             const auto& binding = adapted.value().land.companies.front();
             const auto& profile = binding.members.front().locomotion;
             expect(profile.maximum_speed == Fixed::from_raw(60 * Fixed::scale)
@@ -765,6 +1060,53 @@ void land_companies() {
             expect(defaulted && defaulted.value().land.companies.front().members.front().locomotion.turn_rate
                     == converted(eawr::skirmish::type_default_max_rate_of_turn, 60, 360),
                 "LSL-02: an absent Max_Rate_Of_Turn is the type default 2.3");
+            // WLPA-90/91: a vehicle profile carries the authored corner and move-start values; unauthored ones are the type
+            // default 0 and the game constant (180 degrees); the angle is turns, the fraction is clamped to [0, 1].
+            const auto locomotion_of = [&](const std::optional<Fixed>& fraction, const std::optional<Fixed>& angle) {
+                auto variant = authored_tables;
+                auto& data = variant.land_companies.front().locomotion.front();
+                data.min_speed_fraction_for_turn = fraction; data.close_enough_angle = angle;
+                const auto bound = eawr::skirmish::build_land_bindings(variant, selected, inputs);
+                expect(static_cast<bool>(bound), "WLPA-90/91: the corner tags bind");
+                return bound ? bound.value().land.companies.front().members.front().locomotion : eawr::sim::tactical::LandLocomotionProfile{};
+            };
+            const auto vehicle = locomotion_of(Fixed::from_decimal(".25").value(), Fixed::from_integer(45).value());
+            expect(vehicle.min_speed_fraction_for_turn == Fixed::from_decimal(".25").value()
+                    && vehicle.close_enough_angle == Fixed::from_ratio(1, 8).value(),
+                "WLPA-90/91: a vehicle profile carries Min_Speed_Fraction_For_Turn .25 and a 45 degree move-start angle (an eighth of a turn)");
+            const auto unauthored = locomotion_of(std::nullopt, std::nullopt);
+            expect(unauthored.min_speed_fraction_for_turn == Fixed{} && unauthored.close_enough_angle == Fixed::from_ratio(1, 2).value(),
+                "WLPA-90/91: unauthored tags are the type default 0 and the game constant (half a turn)");
+            const auto odd = locomotion_of(Fixed::from_integer(5).value(), Fixed{});
+            expect(odd.min_speed_fraction_for_turn == Fixed::from_integer(1).value() && odd.close_enough_angle == Fixed::from_ratio(1, 2).value(),
+                "WLPA-90/91: a fraction above one reads as one, a zero angle is the game constant");
+            const auto full_turn = locomotion_of(Fixed::from_integer(-1).value(), Fixed::from_integer(360).value());
+            expect(full_turn.min_speed_fraction_for_turn == Fixed{} && full_turn.close_enough_angle == Fixed::from_integer(1).value(),
+                "WLPA-90/91: a negative fraction reads as zero, 360 degrees is one turn");
+            // LR13-17 (#6115): a Walk_Transition member whose MOVESTART clip was read waits whole logical frames: the stored
+            // frame count minus 2 frames at the clip rate times Max_Speed / Movement_Animation_Speed, rounded up, one short.
+            const auto clip_of = [&](bool walk, bool read, std::uint32_t frames, const std::optional<Fixed>& animation_speed) {
+                auto variant = authored_tables;
+                auto& data = variant.land_companies.front().locomotion.front();
+                data.walk_transition = walk; data.start_clip_read = read; data.start_clip_frames = frames;
+                data.start_clip_fps = Fixed::from_integer(30).value(); data.movement_animation_speed = animation_speed;
+                const auto bound = eawr::skirmish::build_land_bindings(variant, selected, inputs);
+                expect(static_cast<bool>(bound), "LR13-17: the start clip data binds");
+                return bound ? bound.value().land.companies.front().members.front().locomotion : eawr::sim::tactical::LandLocomotionProfile{};
+            };
+            const auto clip = clip_of(true, true, 32, std::nullopt);
+            expect(clip.start_clock && clip.start_clip_ticks == 29,
+                "LR13-17: a 32 frame MOVESTART clip at 30 frames per second is a one second clip: 30 logical frames less one");
+            const auto authored_speed = authored_tables.land_companies.front().members.front().max_speed.value_or(eawr::skirmish::type_default_max_speed);
+            expect(authored_speed > Fixed{}, "LR13-17: the fixture member has an authored Max_Speed");
+            const auto half_speed = Fixed::from_raw(authored_speed.raw() / 2); // half of the authored per-frame Max_Speed
+            const auto fast = clip_of(true, true, 32, half_speed);
+            expect(fast.start_clock && fast.start_clip_ticks >= 13 && fast.start_clip_ticks <= 15,
+                "LR13-17: Movement_Animation_Speed at half of Max_Speed plays the clip twice as fast");
+            const auto no_clip = clip_of(true, true, 0, std::nullopt);
+            expect(no_clip.start_clock && no_clip.start_clip_ticks == 0, "LR13-17: a model without a MOVESTART clip has nothing to wait for");
+            expect(!clip_of(true, false, 32, std::nullopt).start_clock && !clip_of(false, true, 32, std::nullopt).start_clock,
+                "LR13-17: no clock without a Walk_Transition type or without a clip read");
             missing = authored_tables;
             auto& zero = missing.land_companies.front().locomotion.front();
             zero.soft_radius = Fixed{}; zero.collision_x = Fixed::from_integer(10).value(); zero.collision_y = zero.collision_x;
@@ -943,6 +1285,11 @@ void land_companies() {
            "a member locomotor change moves the land table identity");
     land_combat_rows();
     land_selection_rows();
+    land_reveal_rows();
+    land_static_reveal_rows();
+    land_pad_rows();
+    land_static_capture_defaults();
+    land_capture_influence();
 }
 
 // Every company object of the installed game decodes in a land load, with no row against it.

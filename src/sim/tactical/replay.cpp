@@ -586,7 +586,7 @@ core::Result<void> validate_replay(const TacticalReplay& replay) {
             }
         }
         if (record.use.unit == invalid_entity_id || record.use.ability == AbilityKind::none
-            || static_cast<std::uint8_t>(record.use.ability) > static_cast<std::uint8_t>(AbilityKind::super_laser)
+            || static_cast<std::uint8_t>(record.use.ability) > static_cast<std::uint8_t>(AbilityKind::lucky_shot)
             || static_cast<std::uint8_t>(record.use.action) < static_cast<std::uint8_t>(AbilityAction::activate)
             || static_cast<std::uint8_t>(record.use.action) > static_cast<std::uint8_t>(AbilityAction::autofire_off)) {
             return fail<void>(diagnostic_codes::invalid_command, label + " names no unit, ability or action", path);

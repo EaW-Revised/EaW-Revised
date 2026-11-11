@@ -509,6 +509,7 @@ int run_launcher(const Options& options, const RegistryReader& registry, Ui& ui,
         // Saves and the font cache stay shared with the first instance; the host port is this instance's own.
         inputs.save_dir = primary_viewer / "saves";
         inputs.font_cache = primary_viewer / "fonts";
+        inputs.digest_cache = primary_viewer / "mods" / "cache" / "content";
         inputs.lan_game_port = instance_host_port(instance);
     }
     const fs::path next_action = state_dir / "next-action.json";

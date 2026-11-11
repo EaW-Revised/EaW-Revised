@@ -1,5 +1,6 @@
 #include "scene_test_support.hpp"
 #include "eawr/assets/asset_names.hpp"
+#include "eawr/presentation/ui/startup_splash.hpp"
 #include <bit>
 #include <limits>
 #include <thread>
@@ -7,7 +8,110 @@
 namespace eawr::tests::scene_tests {
 
 namespace {
+void translated_scene_contracts() {
+    TempTree tree;
+    write_catalog(tree.root);
+    const std::array mounts{eawr::vfs::MountSpec{"base", tree.root, "data", {}}};
+    auto mounted = eawr::vfs::Vfs::mount(mounts);
+    expect(bool(mounted), "shader route fixture mounts");
+    if (!mounted) return;
+    auto loaded = eawr::data::load_catalog(mounted.value(), eawr::data::Profile::eaw);
+    expect(bool(loaded), "shader route fixture catalog loads");
+    if (!loaded) return;
+    const auto& catalog = loaded.value().catalog;
+    const auto bytes = ted({Record{"EAWR_SCENE_ODD_SHADER", std::array<float, 3>{5, 5, 0}}});
+    eawr::assets::Source source;
+    source.logical_path = "data/art/maps/shader_routes.ted";
+    source.stored_size = bytes.size();
+    auto map = eawr::assets::load_map(bytes, source, eawr::assets::object_type_catalog(catalog));
+    expect(bool(map), "shader route fixture map loads");
+    if (!map) return;
+    Assets assets;
+    eawr::scene::BuildInput input;
+    input.map = &map.value(); input.catalog = &catalog; input.map_sha256 = "shader-route-fixture";
+    input.access = assets.access();
+    const auto baseline = eawr::scene::canonical_text(eawr::scene::build(input));
+    std::size_t preparations{};
+    input.access.admitted_shader = [&](const eawr::assets::Submesh& submesh) {
+        ++preparations; return submesh.shader == "EawrUnlisted.fx";
+    };
+    const auto admitted = eawr::scene::construction_surfaces(input.access, "data/art/models/eawr_scene_odd.alo");
+    expect(admitted.size() == 2 && admitted[0].supported && !admitted[0].translated
+        && admitted[1].supported && admitted[1].translated && preparations == 1,
+        "only an unknown surface invokes binding preparation; its admitted marker preserves known adapters");
+    if (admitted.size() == 2) expect(eawr::scene::material_selector(admitted[1])
+        == &eawr::scene::translated_material_selector()
+        && eawr::scene::material_selector(admitted[1])->program.empty(),
+        "native admission marker cannot silently select a generic legacy program");
+    expect(eawr::scene::canonical_text(eawr::scene::build(input)) != baseline,
+        "activation admits the previously unsupported surface into scene evidence");
+    input.access.admitted_shader = [](const eawr::assets::Submesh&) { return false; };
+    expect(eawr::scene::canonical_text(eawr::scene::build(input)) == baseline,
+        "unavailable providers or textures preserve the complete prior scene bytes");
+    input.access.admitted_shader = {};
+    const auto before_off = preparations;
+    expect(eawr::scene::canonical_text(eawr::scene::build(input)) == baseline && preparations == before_off,
+        "activation OFF after a generation switch preserves canonical scene bytes and performs no binding preparation");
+    assets.files.erase("data/art/shaders/eawrunlisted.fxo");
+    input.access.admitted_shader = [&](const eawr::assets::Submesh&) { ++preparations; return true; };
+    const auto missing = eawr::scene::construction_surfaces(input.access, "data/art/models/eawr_scene_odd.alo");
+    expect(missing.size() == 2 && missing[1].effect_missing && !missing[1].translated
+        && eawr::scene::material_selector(missing[1]) == &eawr::scene::missing_effect_selector()
+        && preparations == before_off,
+        "a missing effect retains explicit green routing without invoking native binding preparation");
+}
+
 void asset_name_contracts() {
+    TempTree splash_tree;
+    for (const auto& folder : {"first", "second"})
+        std::filesystem::create_directories(splash_tree.root / folder / "XML");
+    {
+        std::ofstream first(splash_tree.root / "first/XML/GameConstants.xml");
+        first << "<GameConstants><Localized_Splash_Screen>ENGLISH, first.tga</Localized_Splash_Screen>"
+                 "<Localized_UK_English_Splash_Screen>first_uk.dds</Localized_UK_English_Splash_Screen></GameConstants>";
+        std::ofstream second(splash_tree.root / "second/XML/GameConstants.xml");
+        second << "<GameConstants><Localized_Splash_Screen>ENGLISH, second.tga</Localized_Splash_Screen>"
+                  "<Localized_UK_English_Splash_Screen>second_uk.dds</Localized_UK_English_Splash_Screen></GameConstants>";
+    }
+    const std::array first_chain{eawr::vfs::MountSpec{"first", splash_tree.root / "first", "data", {}}};
+    const std::array second_chain{eawr::vfs::MountSpec{"second", splash_tree.root / "second", "data", {}}};
+    auto first_mount = eawr::vfs::Vfs::mount(first_chain);
+    auto second_mount = eawr::vfs::Vfs::mount(second_chain);
+    expect(first_mount && second_mount, "startup chain fixtures mount");
+    if (first_mount && second_mount) {
+        auto first_doc = eawr::presentation::ui::startup_constants(first_mount.value());
+        auto second_doc = eawr::presentation::ui::startup_constants(second_mount.value());
+        expect(first_doc && second_doc, "each startup chain reads its constants");
+        if (first_doc && second_doc) {
+            expect(eawr::presentation::ui::startup_splash_name(first_doc.value().root, "ENGLISH", false) == "first.tga"
+                && eawr::presentation::ui::startup_splash_name(second_doc.value().root, "ENGLISH", false) == "second.tga"
+                && eawr::presentation::ui::startup_splash_name(second_doc.value().root, "ENGLISH", true) == "second_uk.dds",
+                "a new chain selects its own constants and the UK entry");
+        }
+    }
+    const std::vector<std::string> splash_layers{"mod", "base"};
+    std::string splash_winner;
+    const auto splash_probe = [&](const std::string& layer, const std::string& path) {
+        const bool present = (layer == "mod" && path == "data/art/textures/splash.dds")
+            || (layer == "base" && path == "data/art/textures/splash.tga");
+        if (present) splash_winner = layer;
+        return present;
+    };
+    expect(eawr::presentation::ui::select_startup_splash(splash_layers, "Splash.TGA", splash_probe)
+        && splash_winner == "mod", "startup splash resolves extensions within each layer before lower layers");
+    expect(eawr::presentation::ui::select_startup_splash(splash_layers, "", splash_probe)
+        && splash_winner == "mod", "empty startup splash name uses the default");
+    splash_winner.clear();
+    expect(eawr::presentation::ui::select_startup_splash(splash_layers, "Splash.TGA",
+        [&](const std::string& layer, const std::string& path) {
+            if (layer == "base" && path == "data/art/textures/splash.tga") {
+                splash_winner = layer;
+                return true;
+            }
+            return false;
+        }) && splash_winner == "base", "a rejected higher-layer splash falls back to a lower layer");
+    expect(!eawr::presentation::ui::select_startup_splash(splash_layers, "absent.tga", splash_probe),
+        "missing startup splash leaves the neutral background");
     expect(eawr::assets::normalized_model_name(" Folder.With.Dots\\PLANET ") == "folder.with.dots/planet.alo",
         "extensionless model leaf gains ALO after folding case, separators and whitespace");
     expect(eawr::assets::normalized_model_name("Data\\Art\\Models\\PLANET.ALO") == "data/art/models/planet.alo",
@@ -616,6 +720,7 @@ void missing_material_effect_contracts() {
 } // namespace
 
 void selector_contracts() {
+    translated_scene_contracts();
     asset_name_contracts();
     expect(eawr::scene::legacy_selectors().size() == 22, "the selector table matches the accepted legacy list");
     const auto* alpha = eawr::scene::find_legacy_selector("MeshAlpha.fx");

@@ -1,11 +1,13 @@
 #include "eawr/sim/tactical/land_movement.hpp"
 #include "eawr/platform/sim_workers.hpp"
+#include "eawr/sim/math/trig.hpp"
 #include "land_test_support.hpp"
 #include "../support/reverse_partition_executor.hpp"
 
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <limits>
 #include <cstdlib>
 #include <iostream>
@@ -78,6 +80,81 @@ Field obstacle() {
         ".......#.......", ".......#.......", "...............", "...............", "..............."});
 }
 
+void motion_inputs() {
+    sim::InlineExecutor serial;
+    auto field = make_field(std::vector<std::string>(9, std::string(15, '.')));
+    auto saved = movement(field, 1, 1).checkpoint();
+    saved.squads[0].generic_team = true;
+    saved.squads[0].collision_class = units::LandCollisionGroup::none;
+    saved.members[0].facing = Fixed::from_ratio(1, 4).value();
+    auto moving = LandMovement::from_checkpoint(saved).value();
+    expect(!moving.member_motion_inputs()[0].valid, "transient inputs are unavailable after restore");
+    expect(static_cast<bool>(moving.step(field.occupancy, serial, dt)), "motion input step");
+    const auto input = moving.member_motion_inputs()[0];
+    expect(input.valid && input.turn_fraction_valid, "a generic-team member publishes both inputs");
+    expect(input.heading_error == Fixed::from_ratio(-1, 4).value(), "heading error is the exact signed yaw to the target");
+    expect(input.turn_fraction == whole(1), "a yaw beyond the budget consumes exactly the whole budget");
+    for (std::size_t workers : {1U, 2U, 4U, 8U}) {
+        auto parallel_field = make_field(std::vector<std::string>(9, std::string(15, '.')));
+        auto parallel = LandMovement::from_checkpoint(saved).value();
+        platform::ThreadWorkerAdapter executor(workers);
+        expect(static_cast<bool>(parallel.step(parallel_field.occupancy, executor, dt)), "parallel motion input step");
+        expect(parallel.member_motion_inputs()[0] == input, "motion inputs match across worker counts");
+    }
+    const auto checkpoint = moving.checkpoint();
+    auto restored = LandMovement::from_checkpoint(checkpoint).value();
+    expect(!restored.member_motion_inputs()[0].valid && restored.checkpoint() == checkpoint,
+        "restoring drops only transient presentation inputs");
+}
+
+// A formation member (stock vehicle) has a heading error but no turn fraction: the viewer keeps its estimate for it.
+// A generic-team member held by the body-pair guard does not move, so it consumes no turn budget.
+void motion_input_formation_and_revert() {
+    sim::InlineExecutor serial;
+    auto field = make_field(std::vector<std::string>(9, std::string(15, '.')));
+    auto saved = movement(field, 1, 1).checkpoint();
+    saved.members[0].facing = Fixed::from_ratio(1, 4).value();
+    auto formation = LandMovement::from_checkpoint(saved).value();
+    expect(static_cast<bool>(formation.step(field.occupancy, serial, dt)), "formation motion input step");
+    const auto formation_input = formation.member_motion_inputs()[0];
+    expect(formation_input.valid && !formation_input.turn_fraction_valid && formation_input.turn_fraction == Fixed{},
+        "a formation member publishes the heading error but no turn fraction");
+
+    const auto blocker_gap = [&](Fixed gap) {
+        auto two = movement(field, 2, 1).checkpoint();
+        const auto start = centre(3, 3);
+        for (auto& squad : two.squads) {
+            squad.generic_team = true;
+            squad.collision_class = units::LandCollisionGroup::none;
+        }
+        auto& mover = two.squads[0]; auto& blocker = two.squads[1];
+        mover.position = start; mover.order = LandMoveOrder::following; mover.next_node = 1;
+        mover.path = plan(field, request(*field.terrain, 3, 3, 12, 3));
+        blocker.position = {Fixed::from_raw(start.x.raw() + gap.raw()), start.y};
+        blocker.order = LandMoveOrder::idle; blocker.next_node = blocker.path.nodes.size();
+        auto& m = two.members[0]; auto& other = two.members[1];
+        m.position = start; m.next_node = 1; m.facing = Fixed::from_ratio(1, 20).value(); m.speed = whole(30);
+        m.profile.maximum_speed = whole(30); m.profile.acceleration = whole(45); m.profile.deceleration = whole(60);
+        m.profile.turn_rate = whole(1); m.profile.radius = whole(3);
+        m.profile.collision_class = units::LandCollisionGroup::vehicle;
+        m.slot = {};
+        other.position = blocker.position; other.facing = Fixed{}; other.speed = Fixed{}; other.slot = {};
+        other.next_node = blocker.next_node; other.profile = m.profile;
+        return LandMovement::from_checkpoint(two).value();
+    };
+    auto free_run = blocker_gap(whole(200));
+    expect(static_cast<bool>(free_run.step(field.occupancy, serial, dt)), "unblocked generic step");
+    expect(free_run.members()[0].speed > Fixed{} && free_run.member_motion_inputs()[0].turn_fraction == whole(1),
+        "a moving generic member that turns at the limit publishes a full turn fraction");
+    auto held = blocker_gap(Fixed::from_ratio(602, 100).value());
+    expect(static_cast<bool>(held.step(field.occupancy, serial, dt)), "blocked generic step");
+    expect(held.members()[0].speed == Fixed{} && held.members()[0].state == LandWalkState::stopping,
+        "the body-pair guard stops the member");
+    const auto held_input = held.member_motion_inputs()[0];
+    expect(held_input.turn_fraction_valid && held_input.turn_fraction == Fixed{},
+        "a reverted member publishes a zero turn fraction that agrees with its zero speed");
+}
+
 void speed_rules() {
     expect(land_member_desired_speed(whole(10), whole(20), whole(1), false) == whole(10), "LR3-15 inclusive +1 deadband");
     expect(land_member_desired_speed(whole(10), whole(20), whole(-1), false) == whole(10), "LR3-15 inclusive -1 deadband");
@@ -96,8 +173,10 @@ LandMovement::Checkpoint straggler_wait_guard(const sim::PartitionExecutor& exec
     initial.members[0].profile.maximum_speed = Fixed{};
     auto moving = LandMovement::from_checkpoint(initial).value();
     const auto end = initial.squads[0].path.nodes.back();
-    for (int i = 0; i < 250; ++i) {
+    int arrival = -1;
+    for (int i = 0; i < 330; ++i) {
         expect(static_cast<bool>(moving.step(field.occupancy, executor, dt)), "straggler guard step");
+        if (arrival < 0 && moving.squads()[0].position == end) arrival = i;
         if (i == 14 && restore) {
             const auto saved = moving.checkpoint();
             expect(saved.squads[0].straggler_wait_remaining < land_straggler_wait_visits,
@@ -107,6 +186,9 @@ LandMovement::Checkpoint straggler_wait_guard(const sim::PartitionExecutor& exec
         }
     }
     expect(moving.squads()[0].position == end, "stalled straggler releases leader through path end");
+    // 30 waits, then 140 units at 20/s (210 ticks), then the end-point braking at 60/s^2 (about 5 more ticks): the walk is
+    // not slowed by more than that.
+    expect(arrival >= 0 && arrival <= 262, "the end-point slowdown adds only the braking tail to the released walk");
     return moving.checkpoint();
 }
 
@@ -250,6 +332,59 @@ LandMovement::Checkpoint follow(const sim::PartitionExecutor& executor, bool res
         expect(m.source.locomotor == "synthetic-locomotor", "L2 per-member locomotor identity survives following");
     }
     return moving.checkpoint();
+}
+
+// LR13-17 (#6115): a Walk_Transition member plays its MOVESTART clip from standing and walks once the clip is almost finished.
+// Nothing published a start gate in a live session, so a stock walker waited in `starting` for ever; the adapter now reads
+// the clip and the movement keeps the clip clock itself. The result is the tick of the first displacement (0: none).
+struct StartClipRun { int first_move{0}; int started_at{0}; bool arrived{}; LandMovement::Checkpoint end; };
+StartClipRun start_clip_run(const sim::PartitionExecutor& executor, bool restore, bool clock, std::uint32_t ticks) {
+    auto field = make_field(std::vector<std::string>(9, std::string(15, '.')));
+    auto moving = movement(field, 1, 1);
+    auto saved = moving.checkpoint();
+    auto& profile = saved.members[0].profile;
+    profile.walk_transition = true; profile.start_clock = clock;
+    profile.start_clip_ticks = ticks;
+    moving = LandMovement::from_checkpoint(saved).value();
+    const auto origin = moving.squads()[0].position;
+    StartClipRun run;
+    for (int tick = 1; tick <= 400; ++tick) {
+        expect(static_cast<bool>(moving.step(field.occupancy, executor, dt)), "start clip step");
+        if (run.first_move == 0 && moving.squads()[0].position != origin) run.first_move = tick;
+        if (run.started_at == 0 && moving.members()[0].state != LandWalkState::stopped && moving.members()[0].state != LandWalkState::starting)
+            run.started_at = tick;
+        if (restore && tick % 11 == 0) {
+            const auto before = moving.checkpoint();
+            auto resumed = LandMovement::from_checkpoint(before);
+            expect(resumed && resumed->checkpoint() == before, "the start clip clock round trips");
+            if (resumed) moving = std::move(*resumed);
+        }
+    }
+    run.arrived = moving.squads()[0].order == LandMoveOrder::reached;
+    run.end = moving.checkpoint();
+    return run;
+}
+
+void start_clip_clock() {
+    sim::InlineExecutor serial;
+    // A wait of 29 logical frames (a one second clip, one frame short): the first displacement is on the 30th step.
+    const auto clip = start_clip_run(serial, false, true, 29);
+    expect(clip.first_move >= 29 && clip.first_move <= 31,
+        "a Walk_Transition member holds the walk while its start clip plays, then walks (first displacement near tick 30)");
+    expect(clip.started_at >= 29 && clip.started_at <= 31 && clip.arrived, "the member leaves starting when the clip is almost finished and the walk completes");
+    const auto fast = start_clip_run(serial, false, true, 9);
+    expect(fast.first_move >= 9 && fast.first_move <= 11, "a shorter wait (a faster playback) starts earlier");
+    const auto none = start_clip_run(serial, false, true, 0);
+    expect(none.first_move >= 1 && none.first_move <= 2, "a model without a MOVESTART clip has nothing to wait for");
+    const auto held = start_clip_run(serial, false, false, 29);
+    expect(held.first_move == 0 && !held.arrived, "without the adapter's clock only a published gate opens the start (hand-built profile)");
+    expect(start_clip_run(serial, true, true, 29).end == clip.end, "save/restore through the start clip continues identically");
+    for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+        platform::ThreadWorkerAdapter threads(workers);
+        expect(start_clip_run(threads, true, true, 29).end == clip.end, "the start clip walk equals on 1/2/4/8 workers");
+    }
+    test_support::ReverseOrderExecutor reverse(8);
+    expect(start_clip_run(reverse, true, true, 29).end == clip.end, "the start clip walk equals with reverse partitions");
 }
 
 void lifecycle_and_gates() {
@@ -404,10 +539,13 @@ LandMovement::Checkpoint reorder_splice(const sim::PartitionExecutor& executor, 
 void reorder_gate() {
     auto field = make_field(std::vector<std::string>(9, std::string(15, '.')));
     sim::InlineExecutor executor;
-    const auto slow = [&](Fixed rate) {
+    const auto slow = [&](Fixed rate, Fixed minimum = {}) {
         auto moving = movement(field, 1, 3);
         auto saved = moving.checkpoint();
-        for (auto& member : saved.members) member.profile.turn_rate = rate;
+        for (auto& member : saved.members) {
+            member.profile.turn_rate = rate;
+            member.profile.min_speed_fraction_for_turn = minimum;
+        }
         moving = LandMovement::from_checkpoint(saved).value();
         for (int i = 0; i < 10; ++i) expect(static_cast<bool>(moving.step(field.occupancy, executor, dt)), "walk");
         return moving;
@@ -417,13 +555,20 @@ void reorder_gate() {
         req.start = *moving.splice_anchor(0);
         return plan(field, req);
     };
-    // WLPA-89 interim gate: smooth when the slowest member turns through the corner within one second (a quarter turn here).
-    auto sharp = slow(Fixed::from_ratio(1, 10).value());
+    // WLPA-89/90: a corner keeps the walk while it has turn speed; only a corner whose turn speed falls below the authored
+    // minimum fraction (here a fifth of the top speed; this quarter turn gets about an eighth) falls back to the stop.
+    auto sharp = slow(Fixed::from_ratio(1, 100).value(), Fixed::from_ratio(1, 5).value());
     const auto before = sharp.checkpoint();
     expect(sharp.splice_path(0, from_anchor(sharp, 12, 7)) == LandMovement::SpliceResult::sharp && sharp.checkpoint() == before,
-        "a corner the slowest member cannot turn in a second falls back and changes nothing");
+        "a corner below the minimum turn speed fraction falls back and changes nothing");
     expect(sharp.splice_path(0, from_anchor(sharp, 14, 3)) == LandMovement::SpliceResult::installed,
         "a collinear continuation is smooth at any turn rate");
+    auto lenient = slow(Fixed::from_ratio(1, 100).value(), Fixed::from_ratio(1, 10).value());
+    expect(lenient.splice_path(0, from_anchor(lenient, 12, 7)) == LandMovement::SpliceResult::installed,
+        "the same slow corner is smooth when the minimum fraction is below its turn speed");
+    auto slowest = slow(Fixed::from_ratio(1, 100).value());
+    expect(slowest.splice_path(0, from_anchor(slowest, 12, 7)) == LandMovement::SpliceResult::installed,
+        "no authored minimum: even a very slow turn rate keeps the squad walking (WLPA-89 retail rule)");
     auto smooth = slow(whole(1));
     expect(smooth.splice_path(0, from_anchor(smooth, 12, 7)) == LandMovement::SpliceResult::installed,
         "a quarter turn is smooth when the slowest member turns a full turn per second");
@@ -439,6 +584,24 @@ void reorder_gate() {
     replacement.start = moving.squads()[0].position;
     expect(moving.install_path(0, plan(field, replacement), 0) && moving.squads()[0].turning,
         "a standing start still turns in place before walking");
+    // WLPA-91: only a team container always turns in place first. A single object (a hero, a lone vehicle) walks off at
+    // once when its heading error is within one frame's turn or within the move-start angle, and turns first beyond it.
+    const auto standing_start = [&](bool formation, Fixed close_enough, std::int64_t to_x, std::int64_t to_y) {
+        auto saved = movement(field, 1, 1).checkpoint();
+        saved.squads[0].has_formation = formation; saved.squads[0].order = LandMoveOrder::idle; saved.squads[0].speed = Fixed{};
+        saved.members[0].profile.close_enough_angle = close_enough;
+        auto idle = LandMovement::from_checkpoint(std::move(saved)).value();
+        const LandPath path{LandPathStatus::found, {centre(2, 3), centre(to_x, to_y)}, whole(80)};
+        const bool accepted = idle.install_path(0, path, 0);
+        return accepted && idle.squads()[0].turning;
+    };
+    const auto quarter = Fixed::from_ratio(9, 32).value(); // a little over a quarter turn
+    const auto eighth = Fixed::from_ratio(1, 8).value();
+    expect(standing_start(true, quarter, 2, 7), "a team container turns in place first whatever its move-start angle");
+    expect(!standing_start(false, quarter, 2, 7), "a single object walks off a quarter turn from its heading when the move-start angle allows it");
+    expect(standing_start(false, eighth, 2, 7), "a single object turns in place first when the heading error is beyond its move-start angle");
+    expect(!standing_start(false, Fixed{}, 6, 3), "a single object already on its first heading never turns in place");
+    expect(standing_start(false, Fixed{}, 2, 7), "no move-start angle: only a heading error within one frame's turn walks off");
     auto turning_saved = slow(whole(1)).checkpoint();
     turning_saved.squads[0].turning = true;
     expect(!LandMovement::from_checkpoint(turning_saved).value().splice_anchor(0), "a squad still turning has no anchor");
@@ -459,6 +622,253 @@ void reorder_gate() {
         expect(short_leg.squads()[0].order == LandMoveOrder::reached && short_leg.squads()[0].position == path.nodes.back(),
             "short leg replacement reaches its destination");
     }
+}
+
+// WLPA-90/91: corner speed, start gate and approach slowdown. A squad of one soldier walks a two-leg path on open ground at
+// 20 units/second with a deceleration of 60; its turn rate is a twentieth of a turn per second (18 degrees per second) so
+// that the corner caps matter.
+double real(Fixed value) { return static_cast<double>(value.raw()) / static_cast<double>(Fixed::scale); }
+const auto slow_turn = Fixed::from_ratio(1, 20).value();
+
+LandTurnLimits corner_limits(Fixed rate, Fixed minimum = {}) {
+    LandTurnLimits limits;
+    limits.maximum_speed = whole(20); limits.turn_rate = rate; limits.deceleration = whole(60);
+    limits.minimum_fraction = minimum; limits.turns = true;
+    return limits;
+}
+
+void corner_fractions() {
+    const sim::math::Vec2 east{whole(1), Fixed{}};
+    const auto limits = corner_limits(slow_turn);
+    const auto straight = land_corner_fraction(east, at(100, 0), limits);
+    const auto degrees45 = land_corner_fraction(east, at(71, 71), limits);
+    const auto degrees90 = land_corner_fraction(east, at(0, 100), limits);
+    const auto degrees180 = land_corner_fraction(east, at(-100, 0), limits);
+    expect(straight == whole(1) && degrees45 == whole(1), "a straight continuation and a 45 degree corner keep full speed at this rate");
+    expect(degrees90 > Fixed::from_ratio(78, 100).value() && degrees90 < Fixed::from_ratio(79, 100).value(),
+        "a quarter turn at 18 degrees/second over 100 units keeps about 78.5 percent of the top speed (w d / 2)");
+    expect(degrees180 > Fixed::from_ratio(39, 100).value() && degrees180 < Fixed::from_ratio(40, 100).value(),
+        "a U-turn is limited by the deviation rule to about 39 percent");
+    expect(degrees45 > degrees90 && degrees90 > degrees180, "a sharper corner never keeps more speed");
+    expect(land_corner_fraction(east, at(-100, 0), corner_limits(slow_turn, Fixed::from_ratio(1, 2).value())) == Fixed{},
+        "a corner below the minimum turn speed fraction stops to turn");
+    expect(land_corner_fraction(east, at(0, 100), corner_limits(slow_turn, Fixed::from_ratio(1, 2).value())) == degrees90,
+        "a corner above the minimum keeps its turn speed");
+    auto fixed = limits; fixed.turns = false;
+    expect(land_corner_fraction(east, at(-100, 0), fixed) == whole(1), "a body that does not turn is never limited");
+    expect(land_corner_fraction(east, at(0, 0), limits) == whole(1), "a zero-length segment has no corner");
+    expect(land_corner_fraction(east, at(0, 100), corner_limits(whole(1))) == whole(1), "a fast turn rate takes the corner at full speed");
+}
+
+LandMovement corner_squad(const Field& field, const std::vector<sim::math::Vec2>& nodes, Fixed rate, Fixed minimum = {}) {
+    auto saved = movement(field, 1, 1).checkpoint();
+    auto& squad = saved.squads[0];
+    squad.position = nodes.front(); squad.facing = Fixed{}; squad.turn_start_heading = Fixed{};
+    squad.maximum_speed = whole(20);
+    squad.path = LandPath{LandPathStatus::found, nodes, whole(400)};
+    squad.next_node = 1; squad.order = LandMoveOrder::following;
+    saved.members[0].position = nodes.front();
+    saved.members[0].profile.turn_rate = rate;
+    saved.members[0].profile.min_speed_fraction_for_turn = minimum;
+    return LandMovement::from_checkpoint(std::move(saved)).value();
+}
+
+struct CornerRun {
+    LandMovement::Checkpoint end;
+    Fixed fastest_after{}, final_speed{};
+    double corner_cap{0}; // the largest speed / cos(error) while the heading is unmet near the corner: the corner's turn speed
+    bool turned{}, stopped_at_corner{}, arrived{}, speed_held{true}, cosine_held{true};
+};
+
+CornerRun corner_run(const sim::PartitionExecutor& executor, bool restore, const std::vector<sim::math::Vec2>& nodes, Fixed rate,
+    Fixed minimum = {}) {
+    auto field = make_field(std::vector<std::string>(20, std::string(30, '.')));
+    auto moving = corner_squad(field, nodes, rate, minimum);
+    CornerRun run;
+    const auto corner = nodes[1];
+    const auto last = nodes.back();
+    int ticks = 0;
+    while (moving.squads()[0].order == LandMoveOrder::following && ticks < 2500) {
+        const auto position = moving.squads()[0].position;
+        const auto left = real(distance(position, last));
+        // The heading error of this tick against the segment the squad walks, before it steps.
+        double error_turns = 0;
+        {
+            const auto& before = moving.squads()[0];
+            auto ahead = before.next_node;
+            while (ahead < nodes.size() && nodes[ahead] == before.position) ++ahead;
+            if (ahead < nodes.size()) {
+                const auto heading = sim::math::atan2_turn(Fixed::from_raw(nodes[ahead].y.raw() - before.position.y.raw()),
+                    Fixed::from_raw(nodes[ahead].x.raw() - before.position.x.raw())).value();
+                error_turns = std::fabs(real(sim::math::wrap_turn(Fixed::from_raw(heading.raw() - before.facing.raw()))));
+            }
+        }
+        expect(static_cast<bool>(moving.step(field.occupancy, executor, dt)), "corner walk step");
+        const auto& squad = moving.squads()[0];
+        run.turned = run.turned || squad.turning;
+        // Position stays on the path, so the body never runs along it against its facing: while the heading error is beyond
+        // one frame's turn the speed is at most the top speed times the cosine of the error (zero at a quarter turn).
+        if (error_turns > real(rate) / 30.0 + 1e-6 && !squad.turning)
+            run.cosine_held = run.cosine_held
+                && real(squad.speed) <= 20.0 * std::max(0.0, std::cos(6.283185307179586 * error_turns)) + 1e-3;
+        {
+            // The corner's turn speed is the cap before the cosine of the heading error scales it.
+            const auto cosine = std::cos(6.283185307179586 * error_turns);
+            if (error_turns > real(rate) / 30.0 + 1e-6 && cosine > 0.2 && squad.next_node >= 2 && !squad.turning
+                && distance(squad.position, corner) < whole(60))
+                run.corner_cap = std::max(run.corner_cap, real(squad.speed) / cosine);
+        }
+        if (squad.next_node >= 2 && distance(squad.position, corner) > whole(85)) run.fastest_after = std::max(run.fastest_after, squad.speed);
+        run.stopped_at_corner = run.stopped_at_corner || (distance(squad.position, corner) < whole(1) && squad.speed == Fixed{});
+        // WLPA-91: within the last stretch the speed never exceeds the speed that brakes to a stop at the path end.
+        if (squad.next_node + 1 >= nodes.size() && left < 3.0)
+            run.speed_held = run.speed_held && real(squad.speed) <= std::sqrt(2.0 * 60.0 * left) + 0.001;
+        run.final_speed = squad.speed;
+        ++ticks;
+        if (restore && ticks % 11 == 0) moving = LandMovement::from_checkpoint(moving.checkpoint()).value();
+    }
+    run.arrived = moving.squads()[0].order == LandMoveOrder::reached && moving.squads()[0].position == last;
+    run.end = moving.checkpoint();
+    return run;
+}
+
+void corner_trajectories() {
+    sim::InlineExecutor serial;
+    const std::vector<sim::math::Vec2> d45{at(60, 100), at(260, 100), at(331, 171)};
+    const std::vector<sim::math::Vec2> d90{at(60, 100), at(260, 100), at(260, 200)};
+    const std::vector<sim::math::Vec2> d180{at(60, 100), at(260, 100), at(160, 100)};
+    const auto run45 = corner_run(serial, false, d45, slow_turn);
+    const auto run90 = corner_run(serial, false, d90, slow_turn);
+    const auto run180 = corner_run(serial, false, d180, slow_turn);
+    expect(run45.arrived && run90.arrived && run180.arrived, "the squad arrives at the end of a 45, 90 and 180 degree path");
+    expect(!run45.turned && !run90.turned && !run180.turned, "a corner never stops the walk to turn in place without a minimum fraction");
+    expect(run45.corner_cap > 19.9 && run45.corner_cap < 20.1, "a 45 degree corner keeps the top speed as its turn speed");
+    expect(run90.corner_cap < 17.0 && run90.corner_cap > 14.0,
+        "a 90 degree corner's turn speed is near 78.5 percent of the top speed");
+    expect(run180.corner_cap < 9.0 && run180.corner_cap > 6.0, "a 180 degree corner's turn speed is near 39 percent");
+    expect(run180.corner_cap < run90.corner_cap && run90.corner_cap < run45.corner_cap, "a sharper corner is taken slower");
+    expect(run90.fastest_after == whole(20) && run180.fastest_after == whole(20),
+        "once the heading is met the squad is back at the top speed");
+    expect(run45.speed_held && run90.speed_held && run180.speed_held, "the approach never exceeds the braking speed to the end point");
+    expect(run45.cosine_held && run90.cosine_held && run180.cosine_held,
+        "while the heading is unmet the speed never exceeds the top speed times the cosine of the heading error");
+    expect(run45.final_speed < whole(5) && run90.final_speed < whole(5) && run180.final_speed < whole(5),
+        "the squad reaches the end point slowly, not at the top speed");
+    for (const auto* run : {&run45, &run90, &run180}) {
+        const auto& squad = run->end.squads[0];
+        const auto& nodes = squad.path.nodes;
+        const auto out = sim::math::Vec2{Fixed::from_raw(nodes.back().x.raw() - nodes[nodes.size() - 2].x.raw()),
+            Fixed::from_raw(nodes.back().y.raw() - nodes[nodes.size() - 2].y.raw())};
+        const auto heading = sim::math::atan2_turn(out.y, out.x).value();
+        const auto error = sim::math::wrap_turn(Fixed::from_raw(squad.facing.raw() - heading.raw())).raw();
+        expect(std::llabs(error) <= Fixed::scale / 500, "the facing swings to the heading of the last leg");
+    }
+    // A corner with no turn speed (minimum fraction above it) stops at the corner, turns in place, then walks on.
+    const auto stopping = corner_run(serial, false, d90, slow_turn, Fixed::from_ratio(9, 10).value());
+    expect(stopping.arrived && stopping.turned && stopping.stopped_at_corner,
+        "a corner below the minimum turn speed fraction brakes to a stop, turns in place and arrives");
+    // Save/restore in the middle of the turn and every worker count give the same end state.
+    expect(corner_run(serial, true, d90, slow_turn).end == run90.end, "save/restore across the corner continues identically");
+    expect(corner_run(serial, true, d180, slow_turn).end == run180.end, "save/restore across a U-turn continues identically");
+    expect(corner_run(serial, true, d90, slow_turn, Fixed::from_ratio(9, 10).value()).end == stopping.end,
+        "save/restore across a stop-and-turn corner continues identically");
+    for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+        platform::ThreadWorkerAdapter executor(workers);
+        expect(corner_run(executor, true, d90, slow_turn).end == run90.end, "the corner walk equals on 1/2/4/8 workers");
+        expect(corner_run(executor, false, d180, slow_turn).end == run180.end, "the U-turn walk equals on 1/2/4/8 workers");
+    }
+    test_support::ReverseOrderExecutor reverse(8);
+    expect(corner_run(reverse, true, d90, slow_turn).end == run90.end, "the corner walk equals with reverse partitions");
+}
+
+// WLPA-91: a single object may walk off at once whatever its heading error, but it never runs against its facing: ordered
+// straight behind itself it rotates at zero speed until its error is under a quarter turn, then walks and arrives.
+void reverse_start(const sim::PartitionExecutor& executor) {
+    auto field = make_field(std::vector<std::string>(20, std::string(30, '.')));
+    const std::vector<sim::math::Vec2> nodes{at(260, 100), at(160, 100)};
+    auto saved = corner_squad(field, nodes, slow_turn).checkpoint();
+    saved.squads[0].has_formation = false;
+    saved.squads[0].facing = Fixed{}; // east; the path leads west
+    auto moving = LandMovement::from_checkpoint(std::move(saved)).value();
+    const auto start = moving.squads()[0].position;
+    bool held_while_behind = true, rotated = false;
+    int ticks = 0;
+    while (moving.squads()[0].order == LandMoveOrder::following && ticks < 2000) {
+        const auto before = moving.squads()[0];
+        expect(static_cast<bool>(moving.step(field.occupancy, executor, dt)), "reverse start step");
+        const auto error = std::fabs(real(sim::math::wrap_turn(Fixed::from_raw(Fixed::scale / 2 - before.facing.raw()))));
+        if (error > 0.25 + 1e-3) held_while_behind = held_while_behind && moving.squads()[0].position == start;
+        rotated = rotated || moving.squads()[0].facing != before.facing;
+        ++ticks;
+    }
+    expect(held_while_behind && rotated, "a unit ordered straight behind itself rotates at zero speed instead of walking backwards");
+    expect(moving.squads()[0].order == LandMoveOrder::reached && moving.squads()[0].position == nodes.back(),
+        "the unit that rotated first still arrives");
+}
+
+// A re-order while the squad is turning through a corner: the new path splices in behind the squad, which never stops.
+LandMovement::Checkpoint cornering_reorder(const sim::PartitionExecutor& executor, bool restore) {
+    auto field = make_field(std::vector<std::string>(20, std::string(30, '.')));
+    auto moving = corner_squad(field, {at(60, 100), at(260, 100), at(260, 200)}, slow_turn);
+    const auto reload = [&] { if (restore) moving = LandMovement::from_checkpoint(moving.checkpoint()).value(); };
+    int ticks = 0;
+    while (moving.squads()[0].next_node < 2 && ticks < 900) {
+        expect(static_cast<bool>(moving.step(field.occupancy, executor, dt)), "walk to the corner");
+        ++ticks;
+    }
+    for (int i = 0; i < 40; ++i) {
+        expect(static_cast<bool>(moving.step(field.occupancy, executor, dt)), "turn through the corner");
+        reload();
+    }
+    expect(moving.squads()[0].speed > Fixed{} && moving.squads()[0].speed < whole(20) && !moving.squads()[0].turning
+        && moving.squads()[0].facing != Fixed{} && moving.squads()[0].facing < Fixed::from_ratio(1, 4).value(),
+        "the squad is slowed and half way through its turn when it is re-ordered");
+    const auto anchor = moving.bounded_splice_anchor(0);
+    expect(anchor.has_value(), "a squad cornering has a splice anchor");
+    if (!anchor) return moving.checkpoint();
+    moving.cut_splice_anchor(0, *anchor);
+    expect(moving.squads()[0].awaiting_splice, "the cut path ends at a splice anchor, not a destination");
+    const LandPath replacement{LandPathStatus::found, {*anchor, {whole(460), anchor->y}}, whole(200)};
+    const auto before_install = moving.squads()[0].facing;
+    expect(moving.splice_path(0, replacement) == LandMovement::SpliceResult::installed,
+        "a squad that is cornering splices the new path in without stopping");
+    expect(!moving.squads()[0].awaiting_splice && moving.squads()[0].turn_start_heading == before_install,
+        "the spliced path measures its first corner from the current facing");
+    int walked = 0, zero_visits = 0;
+    while (moving.squads()[0].order == LandMoveOrder::following && walked < 2500) {
+        // The replacement turns a quarter turn at the anchor: the cosine cap holds the speed at zero for the visit that
+        // starts with exactly that heading error, and for no other visit.
+        double error_turns = 0;
+        {
+            const auto& before = moving.squads()[0];
+            const auto target = before.path.nodes[std::min<std::size_t>(before.next_node, before.path.nodes.size() - 1)];
+            const auto heading = sim::math::atan2_turn(Fixed::from_raw(target.y.raw() - before.position.y.raw()),
+                Fixed::from_raw(target.x.raw() - before.position.x.raw())).value();
+            error_turns = std::fabs(real(sim::math::wrap_turn(Fixed::from_raw(heading.raw() - before.facing.raw()))));
+        }
+        expect(static_cast<bool>(moving.step(field.occupancy, executor, dt)), "walk the re-ordered path");
+        if (!(moving.squads()[0].speed > Fixed{})) ++zero_visits;
+        expect(!moving.squads()[0].turning && (moving.squads()[0].speed > Fixed{} || error_turns > 0.249),
+            "never zero speed through the re-order except at the cosine cap of a quarter turn");
+        ++walked;
+        if (walked % 7 == 0) reload();
+    }
+    expect(zero_visits <= 1, "the re-order stops for one visit at most, at the quarter turn of the anchor");
+    expect(moving.squads()[0].order == LandMoveOrder::reached && moving.squads()[0].position == replacement.nodes.back(),
+        "the re-ordered squad arrives at the new destination");
+    return moving.checkpoint();
+}
+
+void cornering_reorder_contracts() {
+    sim::InlineExecutor serial;
+    const auto reference = cornering_reorder(serial, false);
+    expect(cornering_reorder(serial, true) == reference, "save/restore through a corner re-order continues identically");
+    for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+        platform::ThreadWorkerAdapter executor(workers);
+        expect(cornering_reorder(executor, true) == reference, "the corner re-order equals on 1/2/4/8 workers");
+    }
+    test_support::ReverseOrderExecutor reverse(8);
+    expect(cornering_reorder(reverse, true) == reference, "the corner re-order equals with reverse partitions");
 }
 
 void allocation_and_stress() {
@@ -518,7 +928,9 @@ void allocation_and_stress() {
 }
 
 int main() {
-    speed_rules(); straggler_progress_guard(); straggler_near_hold_paths(); zero_heading_boundaries(); lifecycle_and_gates(); neighbour_contract(); reorder_gate();
+    motion_inputs(); motion_input_formation_and_revert(); speed_rules(); straggler_progress_guard(); straggler_near_hold_paths(); zero_heading_boundaries(); lifecycle_and_gates(); start_clip_clock(); neighbour_contract(); reorder_gate();
+    corner_fractions(); corner_trajectories(); cornering_reorder_contracts();
+    { sim::InlineExecutor reverse_serial; reverse_start(reverse_serial); }
     {
         sim::InlineExecutor spliced;
         const auto reference = reorder_splice(spliced, false);

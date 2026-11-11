@@ -145,6 +145,10 @@ void drop_skipped_launch_content(SessionContent& content, const units::UnitTable
         (void)key;
         filter(spawner);
     }
+    for (auto& [type, tiers] : content.motion.squadrons.tech_spawners) {
+        (void)type;
+        for (auto& spawner : tiers) filter(spawner);
+    }
 }
 
 // Close removal over whole squadron placements so neither orphan craft nor empty

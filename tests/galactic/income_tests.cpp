@@ -10,6 +10,7 @@
 #include "eawr/platform/sim_workers.hpp"
 #include "eawr/vfs/vfs.hpp"
 #include "ability_ruins_support.hpp"
+#include "restore_patch.hpp"
 
 #include <algorithm>
 #include <cstddef>
@@ -19,6 +20,8 @@
 #include <iostream>
 #include <limits>
 #include <optional>
+#include <ranges>
+#include <stdexcept>
 #include <span>
 #include <string>
 #include <string_view>
@@ -1059,6 +1062,64 @@ void land_return_publication() {
         expect(notified, "land victory invokes the control callback");
     }
 }
+// The production reduction sources kept between ticks and the stored income inputs must follow every input they read:
+// a session that kept them and a fresh restore of it (which recomputes everything) publish the same offers and hash after
+// a source moves, a planet changes owner and credits change.
+void income_memos_follow_inputs() {
+    eawr::sim::InlineExecutor serial;
+    auto config = setup();
+    config.observer.emplace(); auto& observer = *config.observer;
+    observer.human_observers = {1}; observer.solo_reference_human = 1;
+    observer.players = {{1, false, false, 0, 1, {}}, {2, true, false, 0, 1, {}}};
+    observer.types = {{1000, false, false, false}};
+    for (const auto& planet : config.planets) {
+        gc::ObserverPlanet facts; facts.planet = planet.id;
+        facts.allegiance = facts.target_owner = facts.current_owner = facts.current_controller = planet.owner;
+        observer.planets.push_back(facts);
+        for (const auto& player : config.players)
+            observer.records.push_back({player.player_id, planet.id, true, 0, 0, 0, {}});
+    }
+    std::sort(observer.records.begin(), observer.records.end(), [](const auto& a, const auto& b) {
+        return std::pair{a.player, a.planet} < std::pair{b.player, b.planet};
+    });
+    auto game = take(gc::GalacticSession::create(config));
+    game.set_hash_verification(true); // kept results are recomputed and refused when they differ (a saved stale one would also restore)
+    const auto fleet = config.fleets[0].id;
+    std::vector<std::vector<gc::ObservedProductionOffer>> seen;
+    const auto compare = [&](const char* when) {
+        const auto saved = take(game.save_checkpoint_state());
+        auto fresh = take(gc::GalacticSession::create(config));
+        fresh.set_hash_verification(true);
+        if (const auto loaded = fresh.load_checkpoint_state(saved); !loaded) throw std::runtime_error(loaded.error().message);
+        const auto cards = game.snapshot()->production_offers();
+        const auto restored = fresh.snapshot()->production_offers();
+        expect(!cards.empty() && std::ranges::equal(cards, restored), when);
+        expect(game.cached_state_hash().get() == fresh.cached_state_hash().get(), when);
+        seen.emplace_back(cards.begin(), cards.end());
+    };
+    std::uint64_t sequence{};
+    const auto step = [&] { (void)take(game.step(serial)); };
+    step(); compare("idle tick keeps the published offers");
+    step(); compare("a second idle tick keeps them");
+    take(game.submit(orbit(game.completed_tick(), {1}, ++sequence, fleet, 3))); step();
+    compare("an income source moving to another planet reaches the offers");
+    take(game.submit(owner(game.completed_tick(), {1}, ++sequence, 1, 2))); step();
+    compare("a planet changing owner reaches the offers");
+    step(); compare("the tick after an ownership change");
+    take(game.submit(owner(game.completed_tick(), {1}, ++sequence, 1, 1))); step();
+    compare("the planet returning to its owner reaches the offers");
+    take(game.submit(buy(game.completed_tick(), ++sequence))); step();
+    compare("a purchase changes credits without changing the offers' sources");
+    take(game.submit(orbit(game.completed_tick(), {1}, ++sequence, fleet, 1))); step();
+    compare("the source returning reaches the offers");
+    std::size_t distinct{};
+    for (std::size_t i = 0; i < seen.size(); ++i) {
+        bool repeated = false;
+        for (std::size_t j = 0; j < i && !repeated; ++j) repeated = std::ranges::equal(seen[i], seen[j]);
+        if (!repeated) ++distinct;
+    }
+    expect(distinct >= 3, "the scenario really changes the published offers");
+}
 } // namespace
 // #3003: the gathered query's inline category buffer keeps the general per-category maximum,
 // with repeated categories and past the buffer's size.
@@ -1081,9 +1142,66 @@ void gathered_reduction_categories() {
                 "gathered category maximum equals the general reduction multiplier");
     }
 }
+namespace {
+// Restore refuses income and production tables that the lookups cannot read: each case writes one violation into an
+// otherwise valid checkpoint and expects its own cause, so a refusal for another reason cannot satisfy it.
+void malformed_service_restore() {
+    const auto config = setup();
+    auto probe = take(gc::GalacticSession::create(config));
+    const std::optional<gc::IncomeState> income = *probe.snapshot()->income();
+    const std::optional<gc::ProductionSetup> production = probe.snapshot()->production();
+    constexpr auto never = std::numeric_limits<std::uint64_t>::max();
+    expect(restore_message_after(config, income, [](auto&) {}).empty(), "unchanged income table restores");
+    expect(restore_message_after(config, production, [](auto&) {}).empty(), "unchanged production table restores");
+    const auto income_case = [&](const char* phrase, const char* label, auto mutate) {
+        expect_refusal(restore_message_after(config, income, mutate), phrase, label);
+    };
+    const auto production_case = [&](const char* phrase, const char* label, auto mutate) {
+        expect_refusal(restore_message_after(config, production, mutate), phrase, label);
+    };
+    income_case("gambling income rows are unordered", "gambling rows out of source order are refused", [](auto& t) {
+        t->gambling = {{5, 1, 0, {}, false, 0}, {3, 1, 0, {}, false, 0}}; });
+    income_case("gambling income row has no source", "gambling row without a source is refused", [](auto& t) {
+        t->gambling = {{0, 1, 0, {}, false, 0}}; });
+    income_case("income blockers are unordered", "blockers out of (planet, source) order are refused", [&](auto& t) {
+        t->blockers = {{2, 1, 0, never}, {1, 1, 0, never}}; });
+    income_case("income blockers are unordered", "duplicate blocker rows are refused", [&](auto& t) {
+        t->blockers = {{1, 4, 0, never}, {1, 4, 0, never}}; });
+    income_case("no source, no planet", "blocker on an unknown planet is refused", [&](auto& t) { t->blockers = {{99, 1, 0, never}}; });
+    income_case("reversed frame range", "blocker expiring before it began is refused", [](auto& t) { t->blockers = {{1, 1, 10, 5}}; });
+    income_case("blocker expiry differs", "blocker rows with a stale expiry scalar are refused", [](auto& t) { t->blockers = {{1, 1, 0, 100}}; });
+    income_case("income profiles differ", "income profiles that differ from setup are refused", [](auto& t) { t->inputs.types.pop_back(); });
+    income_case("income offer basis differs", "income offer basis that differs from setup is refused", [](auto& t) { t->inputs.offers.pop_back(); });
+    income_case("income sources are unordered", "income sources out of order are refused", [](auto& t) {
+        t->inputs.sources.push_back(t->inputs.sources.front()); });
+    income_case("no identity, profile or owner", "income source with an unknown profile is refused", [](auto& t) {
+        t->inputs.sources.back().type = 777; });
+    production_case("queue limit differs", "production queue limit that differs from setup is refused", [](auto& t) { ++t->maximum_human_queue; });
+    production_case("technology registry differs", "technology registry that differs from setup is refused", [](auto& t) {
+        t->technology_types.push_back({5, 1, false, false, {}}); });
+    production_case("fleet blocker declarations differ", "fleet blocker table that setup lacks is refused", [](auto& t) {
+        t->fleet_blockers.emplace(); });
+    production_case("payment or population policy differs", "player human flag that differs from setup is refused", [](auto& t) {
+        t->players[0].human = !t->players[0].human; });
+    production_case("payment or population policy differs", "pay-as-you-go flag that differs from setup is refused", [](auto& t) {
+        t->players[0].pay_as_you_go = !t->players[0].pay_as_you_go; });
+    production_case("census or lock table", "unordered census counts are refused", [](auto& t) {
+        t->players[0].counts = {{5, 0, 0}, {3, 0, 0}}; });
+    production_case("offers differ from setup", "production offers that differ from setup are refused", [&](auto& t) {
+        t->planets[0].offers.front().price = f(101); });
+    production_case("gates are out of range", "planet gate beyond the level range is refused", [](auto& t) { t->planets[0].ground_level = 9; });
+    production_case("objects are unordered", "unordered production objects are refused", [](auto& t) {
+        gc::ProductionObject a{}, b{}; a.id = 9; a.type = 1; a.owner = 1; b.id = 8; b.type = 1; b.owner = 1;
+        t->planets[0].objects = {a, b}; });
+    production_case("object identity or cost", "production object without a type is refused", [](auto& t) {
+        gc::ProductionObject a{}; a.id = 9; a.owner = 1; t->planets[0].objects = {a}; });
+    production_case("queue entry is invalid", "queue entry of an unlisted builder is refused", [](auto& t) {
+        gc::ProductionEntry entry{}; entry.type = 2000; entry.builder = 99; t->planets[0].queues[0].push_back(entry); });
+}
+} // namespace
 int case_galactic_income_tests() {
-    try { math_rules(); filters(); planet_reduction_cards(); technology_price_planets(); technology_price_callbacks(); lifecycle_and_queues(); replay_checkpoint(); installed_data(); publication_cache(); political_income_retention(); land_return_publication();
-        gathered_reduction_categories(); nested_sources(); ruined_income_readers(); }
+    try { malformed_service_restore(); math_rules(); filters(); planet_reduction_cards(); technology_price_planets(); technology_price_callbacks(); lifecycle_and_queues(); replay_checkpoint(); installed_data(); publication_cache(); political_income_retention(); land_return_publication();
+        gathered_reduction_categories(); nested_sources(); ruined_income_readers(); income_memos_follow_inputs(); }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
     return failures ? 1 : 0;
 }

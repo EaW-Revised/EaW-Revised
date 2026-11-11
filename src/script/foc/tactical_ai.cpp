@@ -42,6 +42,54 @@ using namespace detail;
 
 using HostPtr = std::shared_ptr<Host>;
 
+} // namespace
+
+core::Result<void> tactical_ai_detail::resolve_commands(detail::Host& host, authoritative::ServiceReport& report) {
+    using namespace detail;
+    std::map<tactical::PlayerId, std::int64_t> wallets;
+    std::set<sim::EntityId> pads;
+    std::vector<authoritative::ScriptCommand> kept;
+    kept.reserve(report.commands.size());
+    for (auto& command : report.commands) {
+        if (command.verb == pending_debit || command.verb == verb_credit_grant || command.verb == turn_grant) {
+            if (command.arguments.size() != 3) return core::Result<void>::failure(make_error(
+                authoritative::codes::session_abort, "invalid wallet command"));
+            const auto* id = std::get_if<LuaNumber>(&command.arguments[0].data);
+            const auto* value = std::get_if<LuaNumber>(&command.arguments[2].data);
+            const auto player = id ? numeric::to_exact_integer(*id) : core::Result<std::int64_t>::failure(make_error(
+                authoritative::codes::session_abort, "invalid wallet player"));
+            const auto amount = value ? numeric::to_fixed(*value) : core::Result<math::Fixed>::failure(make_error(
+                authoritative::codes::session_abort, "invalid wallet amount"));
+            if (!player || !amount || player.value() < 0 || static_cast<std::uint64_t>(player.value()) > std::numeric_limits<tactical::PlayerId>::max())
+                return core::Result<void>::failure(make_error(authoritative::codes::session_abort, "invalid wallet command"));
+            if (command.verb == turn_grant) {
+                command.verb = std::string(verb_credit_grant);
+            } else {
+                const auto player_id = static_cast<tactical::PlayerId>(player.value());
+                auto [it, inserted] = wallets.try_emplace(player_id, 0);
+                if (inserted) it->second = host.credits(player_id).raw();
+                if (command.verb == pending_debit) {
+                    const auto debit = std::min(it->second, -amount.value().raw());
+                    if (debit <= 0) continue;
+                    it->second -= debit;
+                    command.verb = std::string(verb_reservation_debit);
+                    command.arguments[2] = number(numeric::from_fixed(math::Fixed::from_raw(debit)));
+                } else {
+                    it->second += amount.value().raw();
+                }
+            }
+        } else if (command.verb == verb_pad_build && command.arguments.size() >= 2) {
+            const auto* pad = as_handle(command.arguments[1], handle_game_object);
+            if (pad && !pads.insert(pad->id).second) continue;
+        }
+        kept.push_back(std::move(command));
+    }
+    report.commands = std::move(kept);
+    return core::Result<void>::success();
+}
+
+namespace {
+
 // ---- Engine side (FH-10 to FH-13) -------------------------------------------------------
 
 const LuaNumber* number_of(const std::optional<Value>& value) {
@@ -249,6 +297,7 @@ public:
         std::sort(report.commands.begin(), report.commands.end(), [](const auto& left, const auto& right) {
             return std::tie(left.issuer, left.sequence) < std::tie(right.issuer, right.sequence);
         });
+        if (auto resolved = resolve_commands(*host_, report); !resolved) return resolved;
         std::sort(report.loads.begin(), report.loads.end(), [](const auto& left, const auto& right) { return left.instance < right.instance; });
         // FD-72: late Lua commands take effect only after this frame's AI turn.
         std::vector<authoritative::ScriptCommand> kept;

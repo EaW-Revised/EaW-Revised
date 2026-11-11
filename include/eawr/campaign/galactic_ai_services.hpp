@@ -2,10 +2,15 @@
 
 #include "eawr/campaign/conflict.hpp"
 #include "eawr/script/foc/galactic_ai.hpp"
+#include "eawr/script/foc/galactic_ai_state.hpp"
 #include "eawr/sim/galactic/snapshot.hpp"
 
 #include <array>
 #include <functional>
+#include <optional>
+#include <string>
+#include <string_view>
+#include <vector>
 
 namespace eawr::script::foc::ai { class GalacticFunding; }
 
@@ -24,6 +29,34 @@ struct GalacticAiBattleNotice {
     const BattleResult* result{};
     bool auto_resolve{};
 };
+// A queued battle notice: the same facts as GalacticAiBattleNotice with owned storage, so the AI side can apply it later than
+// the sim thread produced it (A2.1 inbox). view() hands the borrowed form to the listener.
+struct OwnedGalacticAiBattleNotice {
+    GalacticAiBattleKind kind{};
+    std::uint64_t synchronization_tick{};
+    ConflictRecord conflict;
+    std::shared_ptr<const sim::galactic::GalacticSnapshot> world;
+    std::optional<BattleResult> result;
+    bool auto_resolve{};
+    [[nodiscard]] GalacticAiBattleNotice view() const {
+        return GalacticAiBattleNotice{kind, synchronization_tick, conflict, *world, result ? &*result : nullptr, auto_resolve};
+    }
+};
+// What the native AI battle listener reads of a notice (async lane inbox, A2.1). Owned plain data, so the AI side can apply it at its
+// next window start and a save can hold it: the conflict keeps its identity, layer, planet and each force's id, owner, parent and
+// carrier; the result keeps its conflict, winner, retreat player and each force's id and disposition; `fleets` lists, ascending, the
+// fleets of the notice's world that a force names as its id, parent or carrier. Observers of the full notice read GalacticAiBattleNotice.
+struct GalacticAiBattleFacts {
+    GalacticAiBattleKind kind{};
+    std::uint64_t synchronization_tick{};
+    ConflictRecord conflict;
+    std::optional<BattleResult> result;
+    bool auto_resolve{};
+    std::vector<sim::EntityId> fleets;
+    std::vector<sim::EntityId> orbiting; // fleets in orbit of conflict.planet at the notice, ascending (a return resumes them)
+    friend bool operator==(const GalacticAiBattleFacts&, const GalacticAiBattleFacts&) = default;
+};
+[[nodiscard]] GalacticAiBattleFacts galactic_ai_battle_facts(const GalacticAiBattleNotice&);
 struct GalacticAiServices {
     std::shared_ptr<script::foc::galactic_ai::StateContributor> state;
     std::function<core::Result<void>(const GalacticAiBattleNotice&)> battle;
@@ -56,6 +89,16 @@ public:
     [[nodiscard]] core::Result<std::string> state_hash() const override;
     [[nodiscard]] core::Result<std::string> sync_hash() const override;
     [[nodiscard]] core::Result<std::string> record_sync_hash(bool cold = false) const override;
+    // W1 S4: the per-component sync digests that sync_hash composes, recomputed now (a window publishes them at its commit).
+    [[nodiscard]] core::Result<script::foc::galactic_ai::NativeDigests> sync_digests() const;
+    // The same digests rebuilt cold from every owner (no caches); `only` non-empty: that one external contributor alone.
+    [[nodiscard]] core::Result<script::foc::galactic_ai::NativeDigests> cold_sync_digests(std::string_view only = {}) const;
+    // W1 S4: on the async schedule sync_hash composes the AI-owned digests of the newest visible publication with the named
+    // sim-owned component digested live. A source that returns nullopt (no publication yet, or the reference schedule) means: all live.
+    using PublishedDigests = std::function<std::optional<script::foc::galactic_ai::NativeDigests>()>;
+    void bind_published_sync(PublishedDigests source, std::string live_component) {
+        published_sync_ = std::move(source); live_sync_component_ = std::move(live_component);
+    }
     // Deterministic work receipt, excluded from saves/hashes.
     [[nodiscard]] std::uint64_t digest_generations() const noexcept { return digest_generations_; }
     [[nodiscard]] std::uint64_t digest_requests() const noexcept { return digest_requests_; }
@@ -72,6 +115,10 @@ private:
     mutable std::map<std::string, std::uint64_t, std::less<>> sync_owner_nanoseconds_;
     using Contributor = std::shared_ptr<script::foc::galactic_ai::StateContributor>;
     explicit ComposedGalacticAiState(std::array<Contributor, 6>);
+    // Empty `only`: every owner and external contributor; otherwise that one external contributor alone.
+    [[nodiscard]] core::Result<script::foc::galactic_ai::NativeDigests> collect_sync_digests(std::string_view only) const;
+    PublishedDigests published_sync_;
+    std::string live_sync_component_;
     std::array<Contributor, 6> owners_;
     std::optional<core::Diagnostic> failure_;
     struct OwnerCache {

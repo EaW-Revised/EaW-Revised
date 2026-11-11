@@ -489,7 +489,8 @@ struct PlanetBaseIncome {
     friend bool operator==(const PlanetBaseIncome&, const PlanetBaseIncome&) = default;
 };
 // WGEP-06..09/63/75: immutable authored inputs, separate from live ownership.
-enum class IncomeAlignment : std::uint8_t { neutral, light, dark };
+// `invalid` is a planet type that authors no alignment (the unset default, never a faction value).
+enum class IncomeAlignment : std::uint8_t { neutral, light, dark, invalid };
 struct IncomeCurvePoint {
     math::Fixed x, y;
     friend bool operator==(const IncomeCurvePoint&, const IncomeCurvePoint&) = default;
@@ -685,6 +686,7 @@ struct CensusObject {
     ActorAbilityState abilities{};
     std::optional<bool> garrison{}; // GAG-01..03: retained owner fact, absence refuses
     math::Fixed paid_cost{}; // GHUD-S94: actual cost survives nested placement and save/restore.
+    std::optional<bool> story_prevent_ai_usage{}, story_prefer_ground{}; // World-owned script writes; absent until written.
     friend bool operator==(const CensusObject&, const CensusObject&) = default;
 };
 struct CensusPlayer {
@@ -966,7 +968,8 @@ struct EconomyCorruptionState {
 
 // GFS-C-01/WGCH-70: live content is immutable; actors remain in the canonical census.
 enum class AbilityKind : std::uint8_t { black_market = 1, technology_theft = 2, corruption = 3,
-    superweapon_hack = 4, planet_destruction = 5, structure_sabotage = 6, hero_neutralization = 7, system_spy = 8 }; // 4..7: coordinator-reserved host-local values
+    superweapon_hack = 4, planet_destruction = 5, structure_sabotage = 6, hero_neutralization = 7, system_spy = 8,
+    remove_corruption = 9 };
 struct CorruptionChoice {
     corruption_fixture::Type type{}, required_mission_type{};
     math::Fixed price, credit_reward, unlock_build_cost;
@@ -981,6 +984,14 @@ struct CorruptionAbilityProfile {
     std::string name;
     bool initially_enabled{true};
     friend bool operator==(const CorruptionAbilityProfile&, const CorruptionAbilityProfile&) = default;
+};
+// WGCH-18/19/189: validated authored removal controls, separate from corruption creation.
+struct RemovalAbilityProfile {
+    std::string name, text_identity, activation_sfx;
+    math::Fixed cost_multiplier{math::Fixed::from_raw(math::Fixed::scale)};
+    math::Fixed seconds{math::Fixed::from_raw(10 * math::Fixed::scale)};
+    bool initially_enabled{true}, causes_despawn{}, hero{};
+    friend bool operator==(const RemovalAbilityProfile&, const RemovalAbilityProfile&) = default;
 };
 // WGCH-57/139: a named activated hack ability; names route through the authored activated list.
 struct HackAbilityProfile {
@@ -999,6 +1010,7 @@ struct CorruptionPlanet {
     TypeId type{};
     bool retains_influence{};
     std::array<CorruptionChoice, 3> slots;
+    math::Fixed removal_base_cost{};
     friend bool operator==(const CorruptionPlanet&, const CorruptionPlanet&) = default;
 };
 struct CorruptionPlayer {
@@ -1146,6 +1158,7 @@ struct GalacticAbilityProfile {
     std::optional<SpyAbilityProfile> spy{};
     std::vector<AbilityKind> ground_activated{}; // WGCH-157: authored Activation_Style membership
     std::vector<AutoSpyProfile> auto_spies{}; // initially enabled automatic spies, authored order
+    std::optional<RemovalAbilityProfile> removal{};
     friend bool operator==(const GalacticAbilityProfile&, const GalacticAbilityProfile&) = default;
 };
 struct GalacticAbilitySetup {
@@ -1169,6 +1182,7 @@ struct GalacticAbilitySetup {
     std::vector<SabotageStructureCost> sabotage_costs{}; // ascending type
     std::vector<NeutralizationTarget> neutralization_targets{}; // ascending type
     bool multiplayer{}, fast_corruption{}, tutorial_corruption_allowed{true};
+    std::vector<std::string> activated_removal_abilities{};
     friend bool operator==(const GalacticAbilitySetup&, const GalacticAbilitySetup&) = default;
 };
 struct PreparedAbility {
@@ -1232,6 +1246,7 @@ struct AbilityActorState {
     bool spy_enabled{}, spy_cancelled{};
     std::vector<PlanetId> spy_targets{}; // WGCH-108: registered even after a refused insertion
     bool contested_check_disabled{}; // WGCH-58/160: false (the default) keeps the contested-orbit refusal armed
+    bool removal_enabled{}, removal_cancelled{};
     friend bool operator==(const AbilityActorState&, const AbilityActorState&) = default;
 };
 struct SabotageHistory {

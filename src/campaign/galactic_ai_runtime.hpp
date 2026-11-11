@@ -10,6 +10,10 @@
 #include "../script/foc/galactic_ai_goal_state.hpp"
 #include "../script/foc/galactic_ai_selection_content.hpp"
 
+#include <array>
+#include <cstdint>
+#include <memory>
+
 namespace eawr::campaign {
 // Immutable selected stock closure. No live pointers or saved state belong here.
 struct GalacticAiRuntimeSetup {
@@ -24,6 +28,8 @@ struct GalacticAiRuntimeSetup {
     // RGC-196: the game mode is a multiplayer one; the story scripts' Free_Random then uses the synchronised stream.
     bool multiplayer{};
     std::string content_identity;
+    // The digests (first 8 hex) of the groups content_identity is made of, for naming a mismatch; not part of any identity.
+    std::string content_identity_detail;
     // CGS-07/AI-16: what the load went on without. Mutable: the install step appends what materialization skips.
     mutable std::vector<std::string> load_diagnostics;
     std::shared_ptr<const sim::PartitionExecutor> executor;
@@ -51,6 +57,9 @@ void bind_galactic_ai_actor_changes(script::foc::galactic_ai::NativeActions&,
 // Prepare only the actual event frontier in partitioned work, then commit in
 // writer order. The reader closes over its immutable completed snapshot or
 // private creation view. Generated sources precede their children in that order.
+[[nodiscard]] core::Result<void> initialize_freestore_with_world_usage(
+    script::foc::galactic_ai::QualifiedFreestore&, sim::galactic::PlayerId,
+    std::span<const sim::EntityId> offers, std::span<const sim::galactic::CensusObject> actors);
 [[nodiscard]] core::Result<void> apply_galactic_ai_actor_changes(
     script::foc::galactic_ai::QualifiedFreestore&,
     std::span<const sim::galactic::GalacticSession::NativeActorChange>,
@@ -73,7 +82,10 @@ void bind_galactic_ai_actor_changes(script::foc::galactic_ai::NativeActions&,
     std::shared_ptr<const sim::PartitionExecutor>, bool uses_fog,
     std::size_t immediate_instances, std::size_t immediate_requests,
     std::string_view authored_difficulty = {},
-    script::foc::galactic_ai::ServicePeriods service_periods = script::foc::galactic_ai::retail_service_periods);
+    script::foc::galactic_ai::ServicePeriods service_periods = script::foc::galactic_ai::retail_service_periods,
+    // Production runs the one standard schedule. Tests that assert the per-tick timeline of a decision pass the
+    // synchronous reference (K = 1, D = 0); a test of the async behaviour itself uses the default.
+    script::foc::galactic_ai::AsyncSchedule schedule = script::foc::galactic_ai::standard_async_schedule);
 // Qualified owning-lane bindings. Missing functions refuse production startup.
 // Execution writers use replace_retained/mark_state_changed on the passed owner.
 struct GalacticAiDigestWork {
@@ -85,6 +97,23 @@ struct GalacticAiDigestWork {
     std::map<std::string, std::uint64_t, std::less<>> external_encodes;
     std::uint64_t native_bytes{};
 };
+// Async apply-time outcomes, observer only (never saved, hashed or read by a decision): the pending records the window overlay could
+// not replay, the intents refused as stale and, by intent kind (IntentKind order), the intents the world refused at their apply tick.
+struct GalacticAiApplyTally {
+    std::uint64_t overlay_refused{}, stale{};
+    std::array<std::uint64_t, 10> refused{};
+    // Sim->AI deliveries: applied at once (reference schedule, or the AI's own window work), queued for the next window start, and
+    // drained. Of the drained ones: applied later than the first window start after their arrival, or out of arrival order.
+    // Entries restored from a save carry no arrival tag and are drained without being judged.
+    std::uint64_t delivered_at_once{}, queued{}, drained{}, late{}, out_of_order{};
+    // W1 S3 billing view: bills decided against it, bills it could not answer (decided by the AI at once instead), drains where the
+    // AI's ledgers or purchase rows differ from the newest publication with the log replayed (must stay 0), and the time the world
+    // side spent on the view (bills, credits, publications, captures; observation only).
+    std::uint64_t bills_viewed{}, billing_direct{}, billing_view_mismatch{}, billing_nanoseconds{};
+    // Production marks noticed outside the AI window (must stay 0: marks come only from the AI's own admission, which runs in the
+    // window or, on the reference schedule, at once).
+    std::uint64_t marks_outside_window{};
+};
 struct GalacticAiRuntimeView {
     std::weak_ptr<const script::foc::ai::Engine> engine;
     std::weak_ptr<const script::foc::ai::GalacticWorld> world;
@@ -95,6 +124,7 @@ struct GalacticAiRuntimeView {
     GalacticParentQueryFactory child_parent_queries;
     std::weak_ptr<const script::foc::ai::GalacticFunding> funding;
     std::function<core::Result<void>(sim::galactic::PlayerId, std::uint64_t, const sim::PartitionExecutor&)> prepare_path_table{};
+    std::shared_ptr<const GalacticAiApplyTally> apply_tally{};
 };
 struct GalacticAiRuntimeProviders {
     using Actions = script::foc::galactic_ai::NativeActions;
@@ -121,9 +151,12 @@ struct GalacticAiRuntimeProviders {
     // native installer completes pending bindings after the game owner exists.
     using ChildTimelineBinder = std::function<std::shared_ptr<GameSession::ChildTimelineValueReader>(ModeId)>;
     std::function<core::Result<ChildScripts>(std::shared_ptr<Engine>, std::shared_ptr<World>, ChildTimelineBinder)> prepare_child_scripts;
-    using BattleListener = std::function<core::Result<void>(const GalacticAiBattleNotice&)>;
+    // The native AI battle listener reads the owned facts (an async window may apply them later, A2.1); an observer of the full
+    // notice runs when the notice is published and never reads AI state.
+    using BattleListener = std::function<core::Result<void>(const GalacticAiBattleFacts&)>;
     std::function<BattleListener(std::shared_ptr<Actions>, std::shared_ptr<Engine>,
         std::function<script::authoritative::ScriptScheduler*()>)> prepare_battle;
+    std::function<void(const GalacticAiBattleNotice&)> observe_battle;
     Actions::Placement placement;
     Actions::ShadowPlacement shadow_placement;
     Actions::ReconciliationPlacement reconciliation_placement;
@@ -189,8 +222,9 @@ struct GalacticAiStockQueries {
         const sim::galactic::GalacticSnapshot&, sim::EntityId)> freestore_actor_facts;
     // Exact actor/current/original/parent/lifecycle references from reconstruction.
     // Engine potential-plan associations are checked by the retained adapter.
+    // lane_floor: actors from that identity up that the world does not hold yet are decided-but-not-applied (async AI).
     std::function<core::Result<void>(const sim::galactic::GalacticSnapshot&,
-        const script::foc::galactic_ai::QualifiedFreestore&)> freestore_references;
+        const script::foc::galactic_ai::QualifiedFreestore&, sim::EntityId lane_floor)> freestore_references;
 };
 using GalacticAiStockQueryFactory = std::function<core::Result<GalacticAiStockQueries>()>;
 [[nodiscard]] core::Result<GalacticAiRuntimeProviderFactory> stock_galactic_ai_providers(

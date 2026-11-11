@@ -1,3 +1,4 @@
+#include "../support/runtime_path.hpp"
 // The skirmish staging screen's text and start blockers (docs/ui/menu-screens.md MNU-21 and MNU-22,
 // docs/behaviour/skirmish-setup.md R-SETUP-01 and R-SETUP-05, WSS-16 to WSS-18, WSS-27): every caption the
 // screen sets itself is a text-database key, the screen's source holds no caption literal, the land game
@@ -161,7 +162,7 @@ bool has_literal_after(const std::string& line, const std::size_t from) {
 // takes a value (a database caption or data). Empty strings, which clear a text, are allowed.
 void source_has_no_caption_literal() {
 #ifdef EAWR_VIEWER_SOURCE_DIR
-    const std::string path = std::string(EAWR_VIEWER_SOURCE_DIR) + "/skirmish_setup_mode.cpp";
+    const std::string path = (eawr::testing::runtime_path("EAWR_TEST_SOURCE_ROOT", "apps/viewer/src", EAWR_VIEWER_SOURCE_DIR) / "skirmish_setup_mode.cpp").string();
     std::ifstream stream(path);
     expect(static_cast<bool>(stream), "SSC-06: the setup screen's source is readable");
     if (!stream) return;

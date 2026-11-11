@@ -147,11 +147,11 @@ int main() {
         counting = true;
         for (int i = 0; i < 1000; ++i) {
             lp::Scope scope(lp::Phase::catalog_resolve);
-            const lp::FileScope file(path, layer, &lp::FileCost::parse_ms);
+            const lp::FileScope file(path, layer, lp::FileField::parse);
             const lp::LayerScope layer_scope(layer, lp::LayerKind::registry, 10);
             lp::file_cost(path, [](lp::FileCost& cost) { ++cost.requests; });
             lp::layer_cost(layer, [](lp::LayerCost& cost) { ++cost.loose_files; });
-            const lp::ModelScope model(path, &lp::ModelCost::decode_ms);
+            const lp::ModelScope model(path, lp::ModelField::decode);
             lp::model_cost(path, [](lp::ModelCost& cost) { ++cost.requests; });
             lp::ResolveDepthScope depth;
             depth.depth(3);
@@ -248,7 +248,7 @@ int main() {
         const std::string model_path = "data/art/models/test.alo";
         {
             lp::Scope request(lp::Phase::model_request);
-            const lp::ModelScope decode(model_path, &lp::ModelCost::decode_ms);
+            const lp::ModelScope decode(model_path, lp::ModelField::decode);
             lp::model_cost(model_path, [](lp::ModelCost& cost) { ++cost.requests; ++cost.loads; cost.bytes = 64; });
             lp::count(lp::Counter::bone_scan_steps, 5);
             lp::count(lp::Counter::bone_scan_steps, 4);
@@ -268,7 +268,7 @@ int main() {
     lp::active = &recording;
     {
         lp::Scope read(lp::Phase::model_read);
-        const lp::ModelScope timer("data/art/models/test.alo", &lp::ModelCost::read_ms);
+        const lp::ModelScope timer("data/art/models/test.alo", lp::ModelField::read);
         std::uint64_t io = 0;
         { const lp::IoScope scope(lp::Phase::model_read, &io); }
         lp::model_cost("data/art/models/test.alo", [](lp::ModelCost& cost) { cost.file_bytes = 64; });
@@ -342,7 +342,7 @@ int main() {
         lp::active = &undetailed;
         {
             lp::DetailScope scope(lp::Phase::upload_identity_copy);
-            const lp::DetailModelScope timer("data/art/models/a.alo", &lp::ModelCost::compose_ms);
+            const lp::DetailModelScope timer("data/art/models/a.alo", lp::ModelField::compose);
             lp::detail_composed("data/art/models/a.alo");
         }
         lp::slot_composed("launch", "SHIP_A");
@@ -359,8 +359,8 @@ int main() {
             lp::DetailScope scope(lp::Phase::upload_identity_copy);
         }
         {
-            const lp::DetailModelScope compose("data/art/models/a.alo", &lp::ModelCost::compose_ms);
-            const lp::DetailModelScope upload("data/art/models/a.alo", &lp::ModelCost::upload_ms);
+            const lp::DetailModelScope compose("data/art/models/a.alo", lp::ModelField::compose);
+            const lp::DetailModelScope upload("data/art/models/a.alo", lp::ModelField::upload);
             lp::detail_composed("data/art/models/a.alo");
         }
         lp::detail_composed("data/art/models/a.alo");

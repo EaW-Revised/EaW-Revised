@@ -1,6 +1,7 @@
 #pragma once
 
 #include "space_populate.hpp"
+#include "shader_activation_owner.hpp"
 #include "eawr/assets/assets.hpp"
 #include "eawr/scene/scene.hpp"
 
@@ -73,6 +74,7 @@ struct SpacePopulation::ComposeOwner final {
         input.map = &map;
         input.map_sha256 = map_hash;
         input.catalog = &catalog;
+        admit_scene_shaders(cache, renderer);
         input.access = cache.access();
     }
 };

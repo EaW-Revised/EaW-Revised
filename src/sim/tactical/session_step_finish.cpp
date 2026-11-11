@@ -367,10 +367,20 @@ core::Result<void> session_detail::Tick::finalize_defences() {
                 const auto* combat = impl_->combat.find(unit.state.type_id);
                 if (!combat || (unit.durability && unit.durability->hull.raw() <= 0)) continue;
                 const auto* ability = impl_->abilities.find(unit.state.type_id);
-                const bool static_source = combat->passive_missile_shield_radius.raw() > 0
-                    || (ability && ability_slot(*ability, AbilityKind::missile_shield));
+                bool nested_registered = false;
+                bool nested_jammer = false;
+                if (ability && unit.abilities) for (std::size_t i = 0; i < ability->special.size(); ++i) {
+                    if (ability->special[i].kind != SpecialAbilityKind::sensor_jamming) continue;
+                    nested_jammer = true;
+                    const auto& state = unit.abilities->special.slots[i];
+                    nested_registered = nested_registered || state.jammer_registered;
+                }
+                const bool static_source = (combat->passive_missile_shield_radius.raw() > 0
+                    || (ability && ability_slot(*ability, AbilityKind::missile_shield)));
                 const auto jammer = ability ? ability_slot(*ability, AbilityKind::sensor_jamming) : std::nullopt;
-                const bool active_jammer = jammer && unit.abilities && unit.abilities->slots[*jammer].active;
+                const bool active_jammer = nested_registered || (!nested_jammer && jammer && unit.abilities
+                    && ability->abilities[*jammer].gui_activated_ability_name.empty()
+                    && unit.abilities->slots[*jammer].active);
                 registered[slot] = static_source || active_jammer ? 1U : 0U;
                 jammer_only[slot] = active_jammer && !static_source ? 1U : 0U;
             }

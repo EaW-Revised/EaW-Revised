@@ -535,6 +535,8 @@ void Engine::commit_global_values(authoritative::ServiceReport& report) {
         else if (number) globals_[*key] = *number;
         else if (text) globals_[*key] = *text;
         else if (boolean) globals_[*key] = *boolean;
+        if (deleting) global_writes_.emplace_back(*key, std::nullopt);
+        else global_writes_.emplace_back(*key, globals_.at(*key));
         return true;
     });
 }

@@ -131,6 +131,18 @@ bool MapMode::State::prepare_live_population(Node3D& host, const assets::Map& ma
         if (!config) return state.fail_ready(core::format_diagnostic(config.error()));
         (*camera_slot) = state.load_map_camera(camera::Mode::space, live_failure, &config.value());
         if (!*camera_slot) return state.fail_ready(live_failure);
+        if (state.options.battle_save_camera) {
+            const auto& camera = *state.options.battle_save_camera;
+            auto& source = **camera_slot;
+            if (camera[3] >= 0.0F && camera[3] <= 1.0F && camera[4] >= source.constants.yaw_min
+                && camera[4] <= source.constants.yaw_max) {
+                source.config.target_x = camera[0];
+                source.config.target_height = camera[1];
+                source.config.target_y = -camera[2];
+                source.config.zoom = camera[3];
+                source.config.yaw_degrees = camera[4];
+            }
+        }
     }
         return true;
     })) return false;
@@ -256,6 +268,12 @@ bool MapMode::State::prepare_live_population(Node3D& host, const assets::Map& ma
         state.unit_emitters->set_async_final(state.particle_workers->count() > 1);
         if (auto detail = state.unit_emitters->set_particle_detail(state.live_options.particle_detail); !detail)
             return state.fail_ready(core::format_diagnostic(detail.error()));
+        // #6560: read back from the registries, so the log shows what the battle really runs with.
+        const particles::ParticleDetail applied = state.unit_emitters->particle_detail();
+        godot::UtilityFunctions::print("EAWR particle detail: unit emitters global=", applied.global, " local=", applied.local,
+            " heat=", applied.heat ? "on" : "off", "; battle effects global=",
+            state.battle_effects ? state.battle_effects->particle_detail().global : -1.0F,
+            state.live_options.particle_global_given ? " (launch flag)" : " (saved settings or default)");
     }
         return true;
     })) return false;
@@ -280,11 +298,9 @@ SpacePopulateHook MapMode::State::make_population_hook() {
                                                                     .message = failure, .logical_path = {}, .line = {}, .column = {}, .source_id = {}});
             }
             auto prepare = [population, live_session, emitters, map_state, renderer = &context.renderer] {
-                if (live_session && !live_session->warm_campaign_slots(*population, *renderer)) {
-                    const std::string failure = population->failure();
-                    population->release(*renderer);
-                    return map_state->fail_ready(failure);
-                }
+                // Preloading is optional admission. Its failures retain the composed
+                // scene and a visible runtime fallback; they never cancel battle entry.
+                if (live_session) static_cast<void>(live_session->warm_campaign_slots(*population, *renderer));
                 if (emitters) {
                     core::load_profile::Scope prepare_emitters(core::load_profile::Phase::particles);
                     emitters->prepare_assets(*population);
@@ -874,6 +890,7 @@ bool MapMode::State::ready_space(Node3D& host, const assets::Map& map,
                 .debug_ship = state.space_place_object,
                 .placed_ships = state.space_place_at,
                 .session_records = std::move(session_records),
+                .battle_start = state.live_session ? state.live_session->start_data() : nullptr,
                 // The composed scene (the debug ship included) and its
                 // hardpoint states re-plan the attached effects (#136). The
                 // live session's units move: their emitters are UnitEmitters' (#394),
@@ -933,6 +950,8 @@ bool MapMode::State::ready_space(Node3D& host, const assets::Map& map,
         // Population compose re-plans over its own scene, which may admit
         // emitters (the debug ship's) this map-only plan has none of.
         const bool attached_effects = state.populate && state.options.map_effects && state.catalog && !live;
+        // #6448 J1: a new space view has no post-live camera pass installed yet (MapMode::process installs it).
+        state.finalize_camera_installed = false;
         state.space = std::make_unique<SpaceEnvironment>(SpaceEnvironment::Options{
             .map_path = state.options.map_path,
             .map_sha256 = state.map_hash,
@@ -940,6 +959,9 @@ bool MapMode::State::ready_space(Node3D& host, const assets::Map& map,
             .profile = state.profile,
             .layers = state.layers,
             .shaders = state.options.shaders,
+            .shader_generation = state.shader_generation,
+            .shader_receipt = state.shader_receipt,
+            .shader_filesystem = state.shader_generation ? state.filesystem : nullptr,
             .report_path = state.options.report_path,
             .capture_path = state.options.capture_path,
             .warmup_frames = state.options.warmup_frames,
@@ -962,6 +984,7 @@ bool MapMode::State::ready_space(Node3D& host, const assets::Map& map,
             .catalog = state.catalog ? &*state.catalog : nullptr,
             .fog_admit = state.space_fog_admit,
             .fog_paint_evidence = state.fog ? state.fog_paint_evidence : std::filesystem::path{},
+            .battle_start = state.live_session ? state.live_session->start_data() : nullptr,
             .populate = state.make_population_hook(),
             .effects = attached_effects ? SpaceEffectsHook{
                 .tick = [&state](const FixedCamera& camera, const std::uint32_t tick) {
@@ -1016,6 +1039,8 @@ bool MapMode::State::ready_space(Node3D& host, const assets::Map& map,
                 else if (!state.loading_failure.empty())
                     output << "  \"loading_screen\": {\"shown\": false, \"failure\": " << json(state.loading_failure) << "},\n";
                 if (state.hud) output << "  \"hud\": " << state.hud->report_json() << ",\n";
+                // #5355: the shared battle speed notice as last shown (empty outside multiplayer).
+                output << "  \"speed_notice\": " << json(state.speed_notice_text.text()) << ",\n";
                 output << "  \"perf_overlay\": " << state.perf_report_json() << ",\n";
                 output << "  \"net_perf\": " << state.net_perf_json() << ",\n";
                 if (state.live_session) output << "  \"overview_ui\": " << state.overview_report_json() << ",\n";
@@ -1035,6 +1060,12 @@ bool MapMode::State::ready_space(Node3D& host, const assets::Map& map,
 
 bool MapMode::State::finish_ready_space(const bool ready) {
         State& state = *this;
+        // The audio preload must be published before anything can play.
+        // A refused or failed load drops the unpublished rest instead of publishing it.
+        if (state.battle_audio) {
+            if (ready) state.battle_audio->finish_loading();
+            else state.battle_audio->cancel_loading();
+        }
         if (ready && state.live_session) {
             state.live_session->loading_complete();
             if (state.live_session->phase() == LiveSessionView::Phase::ready && state.battle_audio)

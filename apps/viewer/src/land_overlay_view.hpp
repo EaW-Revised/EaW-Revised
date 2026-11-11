@@ -1,6 +1,6 @@
 #pragma once
 
-#include "eawr/sim/tactical/land_debug_overlay.hpp"
+#include "eawr/platform/land_debug_overlay.hpp"
 #include "eawr/sim/tactical/land_terrain.hpp"
 
 #include <godot_cpp/classes/node3d.hpp>

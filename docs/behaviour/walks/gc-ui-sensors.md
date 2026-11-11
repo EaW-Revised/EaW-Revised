@@ -719,3 +719,36 @@ Transit entries with no resolvable parked planet are omitted; orbit/surface rece
 no distinct badge. Double-click remains unverified; a
 second click follows the same ordinary selection gesture without added zoom.
 The advanced map hides the bar as WGUI-89 requires.
+
+### Optional galaxy radar fit (WGUI-177)
+
+Owner decision (2026-11-07) (legacy EAWR-5967): **Options > Tweaks > Fit radar to galaxy**
+is a default-off presentation deviation from WGUI-90/142. Retail's centred
+380 by 460 half-extents remain the default. When enabled, expand each axis to
+include every finite loaded campaign planet position. Only an axis exceeded by
+a planet expands, placing the outermost planet centre at 95% of that axis's half-extent
+(a margin of 2.5% of the full span at each edge). Never
+shrink the retail frame. The origin and
+backdrop stay centred; planet markers, the camera marker and radar clicks share
+the expanded transform. The option applies to both radar sizes, independently
+of discovery and ownership. It adds no XML interpretation or simulation state.
+Galaxies entirely inside the retail frame retain the original transform.
+
+The fixed transform explains cropping of authored galaxies beyond those extents;
+WGUI-142 establishes that retail does not substitute the computed planet bounds.
+This option makes those larger galaxies visible without a mod-specific rule.
+
+### Galactic radar camera footprint (WGUI-178)
+
+Owner request (2026-11-06) (legacy EAWR-6050): the galactic radar rectangle follows
+camera pan and zoom like the skirmish viewer. Compute the live perspective
+viewport footprint on source Z=0 with the shared skirmish near/far-plane cuts,
+then use the shared minimap rectangle calculation to enclose its four corners.
+Map this rectangle through the selected retail or WGUI-177 fitted radar frame.
+The existing authored camera-marker texture stretches to that rectangle and the
+radar parent clips it. Focused hold keeps the existing hidden-marker policy.
+
+This is the requested presentation behaviour, distinct from WGUI-127/145's
+retail authored-size guide. It does not claim a new retail geometry finding.
+It changes marker dimensions for all campaigns; WGUI-177's default-off fit setting
+continues to leave the planet/click mapping unchanged.

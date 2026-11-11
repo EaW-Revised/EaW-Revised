@@ -85,13 +85,20 @@ accepted VFS boundary and every identifier present in the measured corpus, while
 preserving original spelling for display/provenance.
 
 Definitions in stronger VFS layers override weaker-layer definitions. Within one
-layer, registry include order is authoritative: later definitions win, while all
-definitions and a duplicate diagnostic remain available. This extends the LSP's
-evidenced rule (highest layer rank wins; same-rank duplicates are errors and the index
-retains all sites) with deterministic registry order required by the game's ordered
-file lists. VFS file precedence alone never selects between differently named include
-files. Exact duplicate occurrences in one file likewise retain every site and select
-the later occurrence. Raw APIs expose all candidates; `find` returns the winner.
+layer, registry include order is authoritative: the first listed definition wins (as in
+the original), while all definitions and a duplicate diagnostic remain available. This
+extends the LSP's evidenced rule (highest layer rank wins; same-rank duplicates are
+errors and the index retains all sites) with deterministic registry order required by
+the game's ordered file lists. VFS file precedence alone never selects between
+differently named include files. Exact duplicate occurrences in one file likewise retain
+every site and select the first occurrence. Raw APIs expose all candidates; `find`
+returns the winner.
+
+For mod authors: in EAWR a mod object beats a same-named stock object regardless of the
+order of the object file lists; inside one mod, the first listed definition wins, as in
+the original. The first half is a deliberate deviation (DEV-6 in
+`docs/behaviour/deviations.md`). Fact, not a promise: D-01 ranks a parent mod's files
+below stock, so a parent mod's object does not beat a same-named stock object.
 
 ## Variant chain and merge rules
 

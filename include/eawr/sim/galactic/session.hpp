@@ -18,6 +18,9 @@
 #include "eawr/sim/world.hpp"
 
 #include <array>
+#include <map>
+#include <mutex>
+#include <string>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -60,7 +63,7 @@ enum class StateSection : std::uint16_t {
     history = 22, // GREF-24..26: session-owned per-player chart archives
 };
 inline constexpr std::size_t state_section_count = 23;
-inline constexpr std::string_view state_encoding_name = "eawr-galactic-state-v11";
+inline constexpr std::string_view state_encoding_name = "eawr-galactic-state-v13";
 
 struct GalacticTick {
     std::uint64_t completed_tick{};
@@ -369,6 +372,10 @@ public:
     };
     struct ProductionLockReceipt { bool tech_incremented{}; };
     [[nodiscard]] core::Result<ProductionLockReceipt> apply_production_lock(const ProductionLockWrite&);
+    // Coalesce adjacent story lock writes; any snapshot read publishes the pending writes first.
+    void begin_production_lock_batch();
+    void end_production_lock_batch();
+    [[nodiscard]] std::uint64_t production_offer_rebuild_count() const noexcept;
     // WGA-13..15/85: actual post-multiplier/cap deltas, delivered at the credit
     // commit boundary before the outer player AI turn. Only initialized AI
     // ledgers consume them. Runtime dependency, never checkpoint state.
@@ -382,6 +389,8 @@ public:
     };
     using CreditNotificationHandler = std::function<core::Result<void>(const CreditNotification&)>;
     void set_credit_notification_handler(CreditNotificationHandler handler);
+    // #6378: a world script's credit write committed through an immediate batch reaches the AI's funding like any other windfall.
+    [[nodiscard]] core::Result<void> notify_credit(const CreditNotification&);
     struct TechnologyPriceWrite {
         PlayerId player{};
         EntityId source{};
@@ -442,6 +451,9 @@ public:
         Kind kind{};
         EntityId actor{}, source{};
         std::optional<bool> dead, deleting, death_clone;
+        // #6378: a world script's AI-usage write on a live actor (Prevent_AI_Usage, Set_Prefer_Ground_Over_Space), carried by an
+        // ordinary `changed` notification; the AI applies it to its own store when the notification reaches it.
+        std::optional<bool> prevent_ai_usage, prefer_ground;
     };
     using NativeActorChangesHandler = std::function<core::Result<void>(
         const GalacticSnapshot&, std::span<const NativeActorChange>)>;
@@ -541,6 +553,9 @@ public:
         [[nodiscard]] std::optional<math::Fixed> credits(PlayerId) const;
         [[nodiscard]] const CensusObject* created_object(EntityId) const;
         [[nodiscard]] std::span<const NativeActorChange> actor_changes() const noexcept;
+        // #6378: a world script's AI-usage write on an actor of this batch's view (existing or created by it), staged as a
+        // `changed` notification in call order among the batch's births. It changes no world row.
+        [[nodiscard]] core::Result<void> stage_actor_ai_usage(EntityId, std::optional<bool> prevent, std::optional<bool> prefer_ground);
         [[nodiscard]] const Planet* planet(PlanetId) const;
         // Sequential player passes inherit an immutable lower-ID frontier.
         // Forking does not copy any scene rows or the preceding player's writes.
@@ -575,6 +590,7 @@ public:
         void detach();
         friend class GalacticSession;
     };
+    [[nodiscard]] core::Result<void> set_story_ai_usage(EntityId, std::optional<bool> prevent, std::optional<bool> prefer_ground);
     [[nodiscard]] core::Result<NativeActionShadow> begin_native_actions(std::size_t max_requests) const;
     [[nodiscard]] core::Result<NativeActionShadow> begin_native_actions(PlayerId, std::size_t max_requests) const;
     // Legacy immediate batches apply prepared placements and publish once;
@@ -591,7 +607,7 @@ public:
     // Only an admitted candidate publishes; refused provisional IDs stay burned.
     [[nodiscard]] core::Result<NativeFleetReceipt> readmit_native_fleet(const NativeActionShadow::IntentRecord&);
     [[nodiscard]] core::Result<NativeTransportLandingReceipt> readmit_native_control(const NativeActionShadow::IntentRecord&);
-    [[nodiscard]] core::Result<NativeInvasionReceipt> readmit_native_invasion(const NativeActionShadow::IntentRecord&);
+    [[nodiscard]] core::Result<NativeInvasionReceipt> readmit_native_invasion(const NativeActionShadow::IntentRecord&, bool reserved_lane = false);
     [[nodiscard]] core::Result<bool> readmit_native_invasion_release(const NativeActionShadow::IntentRecord&);
     // The economic journal owner records the returned actual delta, as with add_credits().
     [[nodiscard]] core::Result<math::Fixed> readmit_native_cash(const NativeActionShadow::IntentRecord&);
@@ -646,6 +662,9 @@ public:
         };
         [[nodiscard]] core::Result<std::unique_ptr<ProviderSavepoint>> begin_provider(PlayerId);
         [[nodiscard]] core::Result<void> begin_tail();
+        // Lane barriers only: leave the tail and open the next virtual tick's turn over everything decided so
+        // far (the AI's own earlier effects stay visible to it). Players are selected again with select_player.
+        [[nodiscard]] core::Result<void> begin_turn();
         // Discard an entire unpublished serial service phase. Unlike an
         // unaccounted destructor this is an explicit deterministic-fault path.
         // Never clears a pre-existing infrastructure/session failure.
@@ -659,8 +678,70 @@ public:
         explicit NativeActionBarrier(std::shared_ptr<State>);
         friend class GalacticSession;
     };
+    // Optional shape of one serial barrier. A deferred AI batch (async lane) decides against a frozen
+    // world, keeps its intents and commits them ticks later through the readmit_native_* functions,
+    // which only accept a first identity at or above the live frontier. The lane therefore starts its
+    // identities at `first_id` / `first_invasion` (zero selects the live frontier) and the world
+    // burns the gap when the first intent is admitted; an intent whose identities the world has
+    // meanwhile reached is refused, never merged. `intent_sink` receives every request as it is
+    // recorded (stream order, the selected player), so the barrier can be discarded afterwards.
+    // Async lane: the AI decided these effects in its barrier and has already taken every notification they cause
+    // (actor births and changes, movement listeners, credits, production outcomes), exactly as the prepared
+    // barrier commit did. While this guard lives, the readmission of those intents does not deliver them again.
+    // The world must have no undelivered actor notifications when the guard is created.
+    class PreparedNotifications {
+    public:
+        explicit PreparedNotifications(GalacticSession&);
+        ~PreparedNotifications();
+        PreparedNotifications(const PreparedNotifications&) = delete;
+        PreparedNotifications& operator=(const PreparedNotifications&) = delete;
+    private:
+        struct Saved;
+        GalacticSession& world_;
+        std::unique_ptr<Saved> saved_;
+    };
+    struct NativeBarrierOptions {
+        EntityId first_id{};
+        std::uint64_t first_invasion{};
+        NativeActionShadow::IntentSink intent_sink;
+        // A lane barrier is never committed: players may take turns in any order and many times (one turn
+        // per virtual tick), see begin_turn(). Only discard() ends it.
+        bool lane{};
+        // Exclusive ends of the window's fixed identity blocks (0 = unbounded). An allocation past the end is a deterministic
+        // refusal of that command, never an abort. When the world counter already equals id_end the block is reserved and
+        // first_id may lie below the counter.
+        EntityId id_end{};
+        std::uint64_t invasion_end{};
+        // Async window overlay: the barrier's root continues this shadow (the world plus the lane's still-pending slices,
+        // see build_native_overlay) instead of opening on the bare world. The root's identity counters restart at
+        // first_id/first_invasion, so the pending spans stay out of the window's own allocations.
+        std::optional<NativeActionShadow> overlay;
+    };
+    // One recorded lane decision to project onto the overlay, in the order the apply will take them.
+    struct NativeOverlayRecord { PlayerId player{}; const NativeActionShadow::IntentRecord* record{}; };
+    // Deterministic work counters of one overlay build (the cost gate and the residual tally).
+    struct NativeOverlayStats {
+        std::uint64_t records{}, replayed{}, refused{};
+        std::uint64_t unreplayed_finish{}, unreplayed_release{}, unreplayed_journal{}, unreplayed_orbit{};
+    };
+    // The world as it will be once `records` are applied: each admitted record is replayed through the same raw shadow admission
+    // the ordered readmit uses (probe_native_movement, create_force/admit_production with the recorded placement and no
+    // preflight, add_credits), on ONE free-player chain with the movement listener and the intent sink nulled. A record the
+    // admission refuses leaves nothing. Kinds without a shadow verb (finish, release, journal, orbit recheck) are counted, not
+    // replayed. The returned root has its request, actor-change and event logs cleared; its identity counters are the last
+    // record's (the barrier resets them).
+    [[nodiscard]] core::Result<NativeActionShadow> build_native_overlay(PlayerId opener, std::span<const NativeOverlayRecord> records,
+        const PartitionExecutor&, NativeOverlayStats&) const;
+    // Async lane host (A2.5): a detached session that is never stepped and holds only what begin_native_actions / begin_native_barrier
+    // read from the live session. create_lane_shell builds it once from the live setup; refresh_lane (sim thread, at the batch snapshot,
+    // no open barrier on either session) copies the live values at that instant, so a lane barrier opened on the shell sees exactly what
+    // the inline lane would see, while the live session keeps stepping.
+    [[nodiscard]] static core::Result<GalacticSession> create_lane_shell(const GalacticSession& live);
+    [[nodiscard]] core::Result<void> refresh_lane(const GalacticSession& live);
     [[nodiscard]] core::Result<std::unique_ptr<NativeActionBarrier>> begin_native_barrier(
         std::span<const PlayerId>, std::size_t max_requests);
+    [[nodiscard]] core::Result<std::unique_ptr<NativeActionBarrier>> begin_native_barrier(
+        std::span<const PlayerId>, std::size_t max_requests, NativeBarrierOptions);
 
     // WGA-99: direct placement, no paid/population admission. The pure builder
     // resolves original types and recursively expands additional creations.
@@ -746,6 +827,9 @@ public:
     // then per section its ID, version, length and bytes. The checkpoint's galaxy sections use
     // the same encodings.
     [[nodiscard]] std::vector<std::uint8_t> canonical_state_bytes() const;
+    // The checkpoint form: identical except that the production section writes each planet's offer table as an index
+    // into `pool` (interning it there) instead of the rows. The state hash never reads this encoding.
+    [[nodiscard]] std::vector<std::uint8_t> canonical_state_bytes(OfferPool& pool) const;
     // The same bytes as canonical_state_bytes() for the lockstep exchange (#5519): sections encode concurrently on the
     // executor and share one fleet-row copy, then concatenate in section order. The only reuse across calls is the
     // production offer tables, which never change after the owner is built; the save path keeps using the fresh
@@ -754,8 +838,10 @@ public:
     // Builds the exchange encoding's one-time inputs now (load time) instead of inside the first exchange tick.
     void prepare_exchange_encoding() const;
     // Complete owner barrier, including non-hashed command/native cursors. No historical service.
-    [[nodiscard]] core::Result<std::vector<std::uint8_t>> save_checkpoint_state() const;
-    [[nodiscard]] core::Result<void> load_checkpoint_state(std::span<const std::uint8_t>);
+    // With a pool the production offer tables are written as (and read back from) indices into it, so a checkpoint
+    // stores them once; without one they stay inline. Loading needs the same form the bytes were saved in.
+    [[nodiscard]] core::Result<std::vector<std::uint8_t>> save_checkpoint_state(OfferPool* pool = nullptr) const;
+    [[nodiscard]] core::Result<void> load_checkpoint_state(std::span<const std::uint8_t>, OfferPool* pool = nullptr);
     // The sectioned state hash computed from scratch: SHA-256 over the encoding name and every
     // section's ID, version and SHA-256. Equals the hash step() returned for this tick.
     [[nodiscard]] std::string state_sha256() const;
@@ -781,8 +867,28 @@ public:
     void scramble_storage_for_testing();
 
 private:
+    friend struct GalacticCheckpointTestAccess;
+    [[nodiscard]] std::vector<std::uint8_t> canonical_bytes_with(OfferPool* pool) const;
     class Impl;
     [[nodiscard]] core::Result<NativeTransportLandingReceipt> readmit_native_movement(const NativeActionShadow::IntentRecord&);
+    // Async AI: an allocating intent whose identities lie in the lane range below the world counter is readmitted with
+    // the counter rewound to its first identity (journaled identity reservations, replay-exact) and restored afterwards.
+    [[nodiscard]] core::Result<NativeTransportLandingReceipt> readmit_native_movement_unscoped(const NativeActionShadow::IntentRecord&);
+    [[nodiscard]] static core::Result<NativeTransportLandingReceipt> probe_native_movement(NativeActionShadow&, const NativeActionShadow::IntentRecord&,
+        const NativeFleetReceipt&, EntityId allocated);
+    [[nodiscard]] core::Result<NativeForceReceipt> readmit_native_force_unscoped(const NativeActionShadow::IntentRecord&,
+        const NativeReconciledForceBuilder&, const PartitionExecutor&);
+    [[nodiscard]] core::Result<NativeProductionReceipt> readmit_native_production_unscoped(
+        const NativeActionShadow::IntentRecord&, const PartitionExecutor&, const NativeProductionPreflight&);
+    [[nodiscard]] bool native_lane_identity_in_use(EntityId first_id) const;
+    [[nodiscard]] core::Result<bool> rewind_native_lane_identity(EntityId first_id, EntityId allocated);
+    [[nodiscard]] core::Result<NativeInvasionReceipt> readmit_native_invasion_unscoped(const NativeActionShadow::IntentRecord&);
+    // reserve_native_frontiers() for the owners that may rewind (the lane readmission and the replay of its journal).
+    [[nodiscard]] core::Result<void> reserve_native_frontiers_rewindable(EntityId expected, EntityId next,
+        std::uint64_t expected_invasion, std::uint64_t next_invasion);
+    [[nodiscard]] core::Result<void> reserve_native_frontiers_inner(EntityId expected, EntityId next,
+        std::uint64_t expected_invasion, std::uint64_t next_invasion, bool allow_rewind);
+    [[nodiscard]] core::Result<void> restore_native_lane_identity();
     [[nodiscard]] NativeActionBarrier::State* native_barrier() const noexcept;
     [[nodiscard]] NativeActionShadow* native_shadow() const noexcept;
     [[nodiscard]] core::Result<NativeActionShadow> continue_native_actions(const NativeActionShadow&,

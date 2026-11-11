@@ -341,6 +341,16 @@ std::vector<EntityId> CombatWorld::candidates(const math::Vec3& centre, const ma
 }
 
 
+std::optional<math::Fixed> target_priority(const CombatWorld& world, const CombatProfile& scanner,
+    const CombatUnit& target) {
+    if (!scanner.priority_set) return math::Fixed::from_raw(math::Fixed::scale);
+    const auto& set = world.table->priority_sets[*scanner.priority_set];
+    const auto found = std::lower_bound(set.rows.begin(), set.rows.end(), target.type_id,
+        [](const PriorityRow& row, const TypeId id) { return row.type_id < id; });
+    if (found != set.rows.end() && found->type_id == target.type_id) return found->priority;
+    return set.unlisted;
+}
+
 bool target_type_admissible(const CombatWorld& world, const CombatUnit& target) noexcept {
     if (target.profile == nullptr) return false;
     const auto team = std::lower_bound(world.teams.begin(), world.teams.end(), target.id,

@@ -93,7 +93,7 @@ void GnsTransport::Impl::release_listener() {
 }
 
 std::vector<SteamNetworkingConfigValue_t> GnsTransport::Impl::config() const {
-    std::vector<SteamNetworkingConfigValue_t> values(4 + (turn ? 4 : 0) + (options.stun_servers.empty() ? 0 : 1));
+    std::vector<SteamNetworkingConfigValue_t> values(5 + (turn ? 4 : 0) + (options.stun_servers.empty() ? 0 : 1));
     values[0].SetPtr(k_ESteamNetworkingConfig_Callback_ConnectionStatusChanged,
         reinterpret_cast<void*>(Runtime::changed));
     values[1].SetInt32(k_ESteamNetworkingConfig_TimeoutInitial, static_cast<std::int32_t>(options.handshake_timeout.count()));
@@ -102,11 +102,16 @@ std::vector<SteamNetworkingConfigValue_t> GnsTransport::Impl::config() const {
     const auto send_buffer = pair_link ? std::min<std::size_t>(options.queue_bytes, 2 * 1024 * 1024) : options.queue_bytes;
     values[3].SetInt32(k_ESteamNetworkingConfig_SendBufferSize,
         static_cast<std::int32_t>(std::max<std::size_t>(send_buffer, 4096)));
+    // #6130: the default 256 KiB/s ceiling caps even loopback checkpoint transfers.
+    // Keep SendRateMin at its default so congestion control can reduce the rate on slower links.
+    // The ceiling produces no traffic: bounded queues and the 64-packet flush budget still apply.
+    constexpr std::int32_t transfer_rate = 64 * 1024 * 1024;
+    values[4].SetInt32(k_ESteamNetworkingConfig_SendRateMax, transfer_rate);
     if (turn) {
-        values[4].SetString(k_ESteamNetworkingConfig_P2P_TURN_ServerList, turn->uri.c_str());
-        values[5].SetString(k_ESteamNetworkingConfig_P2P_TURN_UserList, turn_users.c_str());
-        values[6].SetString(k_ESteamNetworkingConfig_P2P_TURN_PassList, turn_passwords.c_str());
-        values[7].SetInt32(k_ESteamNetworkingConfig_P2P_Transport_ICE_Enable, options.turn_only
+        values[5].SetString(k_ESteamNetworkingConfig_P2P_TURN_ServerList, turn->uri.c_str());
+        values[6].SetString(k_ESteamNetworkingConfig_P2P_TURN_UserList, turn_users.c_str());
+        values[7].SetString(k_ESteamNetworkingConfig_P2P_TURN_PassList, turn_passwords.c_str());
+        values[8].SetInt32(k_ESteamNetworkingConfig_P2P_Transport_ICE_Enable, options.turn_only
             ? k_nSteamNetworkingConfig_P2P_Transport_ICE_Enable_Relay : k_nSteamNetworkingConfig_P2P_Transport_ICE_Enable_All);
     }
     if (!options.stun_servers.empty())

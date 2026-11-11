@@ -226,7 +226,17 @@ script::foc::AiSetup ai_setup(const SkirmishStart& start, const StartInputs& inp
 }
 
 script::foc::AiSetup land_ai_setup(const LandStart& land, const LandStartInputs& inputs, const units::UnitTables& tables) {
-    auto setup = ai_setup(land.start, inputs.common, tables);
+    // The map's build pads and the structures they construct are decoded apart from the faction forces' tables. The AI type
+    // registry (what GameObject.Build and the type queries resolve against) must hold them, exactly as the land start's own
+    // bindings do (merge_land_pad_types). ai_setup orders its types by the authored table order and drops duplicate ids, so the
+    // append order of the pad rows and the worker count never reach the registry.
+    units::UnitTables merged;
+    const bool with_pads = !inputs.pad_tables.units.empty();
+    if (with_pads) {
+        merged = tables;
+        merge_land_pad_types(merged, inputs.pad_tables);
+    }
+    auto setup = ai_setup(land.start, inputs.common, with_pads ? merged : tables);
     setup.domain = sim::tactical::BattleDomain::land;
     // The perception grid covers the playable land rectangle (left, top, right, bottom as in the space bounds).
     if (land.content.land_terrain) {

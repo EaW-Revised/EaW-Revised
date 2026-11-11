@@ -112,6 +112,60 @@ core::Result<bool> GalacticSession::Impl::begin_corruption(PlanetId planet, Corr
     row->transition = changed; corruption_due[changed.end].push_back(planet); touch_abilities();
     return R::success(true);
 }
+// WGCH-18/19/189: admission and transition precede payment; consumption is success-only.
+void GalacticSession::Impl::execute_removal(const GameCommand& command, const CensusObject& live,
+    const GalacticAbilityProfile& profile, PlanetId target, std::uint64_t tick, std::vector<GalacticEvent>& events) {
+    const auto actor = live; // successful consumption can erase the canonical actor
+    GalacticEvent event{tick, GalacticEventKind::command_rejected, command.key.seat, actor.id, command.key.sequence};
+    const auto reject = [&] { event.reason = GalacticRejectReason::unknown_value; events.push_back(event); };
+    const auto* service = ability_host ? find(ability_host->actors, actor.id, [](const auto& row) { return row.actor; }) : nullptr;
+    const auto* surface = control ? find(control->planets, target, [](const auto& row) { return row.planet; }) : nullptr;
+    const auto* content = setup.ability_host ? find(setup.ability_host->corruption_planets, target, [](const auto& row) { return row.planet; }) : nullptr;
+    auto* account = economy ? find(economy->players, actor.owner, [](const auto& row) { return row.player; }) : nullptr;
+    if (!service || !surface || !content || !account || !profile.removal
+        || !ground_ability_enabled(profile, *service, AbilityKind::remove_corruption)) return reject();
+    const auto index = static_cast<std::size_t>(surface - control->planets.data());
+    if (control->state[index].target_player != actor.owner) return reject();
+    const auto& ability = *profile.removal;
+    if (ability_host->next_request == std::numeric_limits<std::uint64_t>::max()
+        || (ability_host->results.size() >= galactic_max_objects
+            && !find(ability_host->results, actor.id, [](const auto& row) { return row.actor; }))) return reject();
+    const auto cost = math::multiply(content->removal_base_cost, ability.cost_multiplier);
+    if (!cost) return reject();
+    const auto price = std::max(Fixed{}, cost.value());
+    if (price > Fixed{} && account->credits < price) return reject();
+    const auto balance = math::subtract(account->credits, price), delta = math::negate(price);
+    if (!balance || !delta) return reject();
+    std::optional<HeroDefeat> defeat;
+    if (ability.causes_despawn) {
+        if (!ability_consumption_handler) return reject();
+        defeat = prepare_ability_defeat(actor, {}, false);
+        if (!defeat) return reject();
+    }
+    auto started = begin_corruption(target, CorruptionType::none, ability.seconds);
+    if (!started) { failed = true; return; }
+    if (!started.value()) return reject();
+    if (price > Fixed{}) {
+        if (credit_notification_handler) {
+            const auto notice = credit_notification_handler({CreditNotification::Kind::windfall,
+                actor.owner, balance.value(), delta.value(), {}});
+            if (!notice) { failed = true; return; }
+        }
+        account->credits = balance.value(); dirty[static_cast<std::size_t>(StateSection::players)] = true;
+    }
+    if (ground_ability_story_handler) {
+        const auto told = ground_ability_story_handler(actor.owner, target, ability.text_identity, ability.hero);
+        if (!told) { failed = true; return; }
+    }
+    events.push_back({tick, GalacticEventKind::corruption_removal_started, command.key.seat,
+        target, command.key.sequence, actor.current_type});
+    if (defeat && !ability_consumption_handler(*defeat)) { failed = true; return; }
+    AbilityResult result{ability_host->next_request++, 0, actor.id, target, actor.owner, 0, AbilityOutcome::purchased};
+    result.kind = AbilityKind::remove_corruption;
+    put(ability_host->results, std::move(result), [](const auto& row) { return row.actor; });
+    touch_abilities(); ++ability_work.executions;
+    event.kind = GalacticEventKind::ability_settled; events.push_back(event);
+}
 core::Result<void> GalacticSession::Impl::capture_corruption(PlanetId planet, PlayerId before, PlayerId after) {
     auto* row = ability_host ? find(ability_host->transitions, planet, [](const auto& r) { return r.planet; }) : nullptr;
     auto* economic = economy_corruption ? find(economy_corruption->planets, planet, [](const auto& r) { return r.planet; }) : nullptr;

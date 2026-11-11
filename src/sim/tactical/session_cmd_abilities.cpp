@@ -42,6 +42,33 @@
 
 namespace eawr::sim::tactical {
 
+core::Result<RejectReason> session_detail::Tick::deploy_squad(LiveUnit& source,
+    const AbilityPayload& payload, const std::uint64_t command_tick) {
+    using Result = core::Result<RejectReason>;
+    const auto* profile = source.abilities ? impl_->abilities.find(source.state.type_id) : nullptr;
+    const auto index = profile ? ability_slot(*profile, AbilityKind::deploy_squad) : std::nullopt;
+    if (!index || impl_->setup.domain != BattleDomain::space) return Result::success(RejectReason::ability_unavailable);
+    const auto& ability = profile->abilities[*index];
+    auto& slot = source.abilities->slots[*index];
+    if (payload.action == AbilityAction::deactivate) return Result::success(RejectReason::none);
+    if (payload.action == AbilityAction::autofire_on || payload.action == AbilityAction::autofire_off) {
+        if (!ability.supports_autofire) return Result::success(RejectReason::ability_unavailable);
+        slot.autofire = payload.action == AbilityAction::autofire_on;
+        return Result::success(RejectReason::none);
+    }
+    if (deploy_squad_requests_.contains(source.state.entity_id)
+        || !ability_ready(ability, slot, impl_->ability_gate(source, command_tick), command_tick))
+        return Result::success(RejectReason::ability_unavailable);
+    // FL-18: manual readiness leads the recharge by one logical second.
+    const auto lead = ability.recharge_frames > logical_frames_per_second
+        ? ability.recharge_frames - logical_frames_per_second : 0U;
+    deploy_squad_requests_.emplace(source.state.entity_id, command_tick + lead);
+    slot.active = false;
+    slot.started_tick = command_tick;
+    slot.ready_tick = command_tick + ability.recharge_frames;
+    return Result::success(RejectReason::none);
+}
+
 std::vector<LiveUnit*> session_detail::Tick::CommandHandlers::ordinary_ability_holders(const EntityId unit_id, const AbilityKind kind) const {
     auto& staged = phase.tracked_.value().staged.value();
     std::vector<LiveUnit*> holders;
@@ -58,9 +85,7 @@ std::vector<LiveUnit*> session_detail::Tick::CommandHandlers::ordinary_ability_h
     return holders;
 }
 
-// An ability command on one listed unit (AB-10 to AB-15, AB-40): the unit itself, or for a
-// squadron container its live craft that have the ability. Every holder must be ready and
-// off for an activation to act (AB-15); otherwise nothing changes.
+// Initiate a charged blast for the specified unit (AB-40).
 core::Result<RejectReason> session_detail::Tick::CommandHandlers::apply_blast(EntityId unit_id,
         const AbilityPayload& payload, const std::uint64_t& command_tick, UnitStage& staged) const {
     auto& source = staged.at(unit_id);
@@ -201,14 +226,26 @@ core::Result<RejectReason> session_detail::Tick::CommandHandlers::apply_replenis
         const SquadronTable& squadron_table, std::map<EntityId, PadState>& pads,
         std::map<EntityId, ConstructionState>& construction) const {
     LiveUnit* source = &staged.at(unit_id);
-    if (const auto group = std::find_if(phase.impl_->squadrons.begin(), phase.impl_->squadrons.end(),
-            [unit_id](const Squadron& entry) { return entry.container == unit_id; }); group != phase.impl_->squadrons.end()) {
-        source = nullptr;
-        for (const auto member : group->members) {
+    const auto group_for = [unit_id](const std::vector<Squadron>& groups) -> const Squadron* {
+        const auto group = std::find_if(groups.begin(), groups.end(),
+            [unit_id](const Squadron& entry) { return entry.container == unit_id; });
+        return group == groups.end() ? nullptr : &*group;
+    };
+    const auto* group = group_for(phase.impl_->squadrons);
+    if (group && !(group->members.size() == 1 && group->members.front() == unit_id)) {
+        // FS-52: preserve member-index successes before the first failure.
+        const auto members = group->members;
+        for (const auto member : members) {
+            if (member == unit_id) continue;
             const auto found = staged.find(member);
             const auto* profile = found != staged.end() ? phase.impl_->abilities.find(found->second.state.type_id) : nullptr;
-            if (profile && ability_slot(*profile, payload.ability)) { source = &found->second; break; }
+            if (!profile || !ability_slot(*profile, payload.ability)) continue;
+            auto result = apply_replenish_wingmen(member, payload, command_tick, reinforcement_work, minds, crafts,
+                arrivals, ledgers, pad_requests, shares, arrived_squadrons, earners, next_id, staged,
+                squadron_table, pads, construction);
+            if (!result || result.value() != RejectReason::none) return result;
         }
+        return core::Result<RejectReason>::success(RejectReason::none);
     }
     const auto* profile = source ? phase.impl_->abilities.find(source->state.type_id) : nullptr;
     const auto slot = profile ? ability_slot(*profile, payload.ability) : std::nullopt;
@@ -220,8 +257,7 @@ core::Result<RejectReason> session_detail::Tick::CommandHandlers::apply_replenis
         state.autofire = payload.action == AbilityAction::autofire_on;
         return core::Result<RejectReason>::success(RejectReason::none);
     }
-    if (payload.action != AbilityAction::activate || !ability_ready(ability, state, phase.impl_->ability_gate(*source, command_tick), command_tick)
-        || !squadron_table.find_squadron(ability.replenish_team))
+    if (payload.action != AbilityAction::activate)
         return core::Result<RejectReason>::success(RejectReason::ability_unavailable);
     Impl::EconomyStage stage{ledgers, arrivals, shares, crafts, minds, arrived_squadrons,
         phase.staging_.value().born_spawners, earners, next_id,
@@ -229,18 +265,19 @@ core::Result<RejectReason> session_detail::Tick::CommandHandlers::apply_replenis
         phase.pending_economy_cues_, &reinforcement_work};
     const auto leader_id = source->state.entity_id;
     const auto first_added = next_id;
-    auto filled = phase.impl_->replenish_wingmen(leader_id, ability.replenish_team, staged, stage, command_tick);
-    if (!filled) return core::Result<RejectReason>::failure(filled.error());
-    phase.sync_radar_creations(staged, first_added, next_id);
-    if (filled.value()) {
-        auto& current = staged.at(leader_id).abilities->slots[*slot];
-        current.active = false;
-        current.started_tick = command_tick;
-        current.ready_tick = command_tick + ability.recharge_frames;
-        for (const auto& group : arrived_squadrons)
-            if (std::find(group.members.begin(), group.members.end(), leader_id) != group.members.end())
-                for (const auto member : group.members) phase.craft_prep_->craft_squadron.value()[member] = group.container;
+    auto filled = phase.impl_->request_replenishment(leader_id, staged, stage, command_tick);
+    if (!filled || filled.value() != RejectReason::none) return filled;
+    std::vector<EntityId> created;
+    for (auto id = first_added; id != invalid_entity_id && id != next_id;
+            id = id == std::numeric_limits<EntityId>::max() ? invalid_entity_id : id + 1) {
+        if (staged.find(id) != staged.end()) created.push_back(id);
     }
+    if (auto defaults = phase.impl_->request_creation_defaults(created, staged, stage, command_tick); !defaults)
+        return core::Result<RejectReason>::failure(defaults.error());
+    phase.sync_radar_creations(staged, first_added, next_id);
+    for (const auto& group : arrived_squadrons)
+        if (std::find(group.members.begin(), group.members.end(), leader_id) != group.members.end())
+            for (const auto member : group.members) phase.craft_prep_->craft_squadron.value()[member] = group.container;
     return core::Result<RejectReason>::success(RejectReason::none);
     }
 
@@ -564,6 +601,16 @@ core::Result<RejectReason> session_detail::Tick::CommandHandlers::apply_buzz_dro
         phase.staging_.value().born_spawners.push_back(droid_id);
     staged.emplace(droid_id, std::move(droid));
     phase.track_victory_change(nullptr, &staged.at(droid_id).state, false);
+    Impl::EconomyStage creation{phase.staging_.value().ledgers.value(), phase.staging_.value().arrivals.value(),
+        phase.staging_.value().shares.value(), phase.staging_.value().crafts.value(), minds,
+        phase.staging_.value().arrived_squadrons.value(), phase.staging_.value().born_spawners,
+        phase.staging_.value().earners.value(), next_id, phase.impl_->pad_stage.values,
+        phase.impl_->construction_stage.values, phase.staging_.value().pad_requests.value(),
+        phase.impl_->pad_stage, phase.impl_->construction_stage, phase.pending_economy_cues_,
+        &phase.gather_.value().reinforcement_work.value()};
+    const std::array<EntityId, 1> created_defaults{droid_id};
+    if (auto defaults = phase.impl_->request_creation_defaults(created_defaults, staged, creation, command_tick); !defaults)
+        return core::Result<RejectReason>::failure(defaults.error());
     auto& live = staged.at(unit_id); // insertion can move the vector
     if (minds.find(unit_id) != minds.end()) {
         apply_squadron_order(minds.at(unit_id), StopPayload{}, live.state.position, squadron_table);
@@ -612,6 +659,9 @@ core::Result<RejectReason> session_detail::Tick::CommandHandlers::apply_ion_cann
         if (!phase.impl_->ion_target_valid(container.state.owner, &target->second)) {
             return core::Result<RejectReason>::success(RejectReason::target_not_hostile);
         }
+        if (!phase.impl_->ion_handler_admits(container, &target->second, false)) {
+            return core::Result<RejectReason>::success(RejectReason::ability_unavailable);
+        }
         const auto* hit = phase.impl_->health_profile(target->second);
         const auto hardpoint = hit != nullptr && payload.target_hardpoint != no_hardpoint
                 && damage_target_valid(*hit, payload.target_hardpoint)
@@ -644,25 +694,30 @@ core::Result<RejectReason> session_detail::Tick::CommandHandlers::switch_ordinar
         const AbilityPayload& payload, const std::vector<LiveUnit*>& holders, auto& slot_of, auto& profile_of,
         const std::uint64_t& command_tick, const std::uint64_t& frame, std::vector<PlayerEconomy>& ledgers,
         detail::MapStage<CraftState>& crafts, UnitStage& staged, std::vector<EntityId>& changed_speed,
-        bool& hunt_stopped) const {
+        bool& hunt_stopped, bool& switched_any) const {
     switch (payload.action) {
     case AbilityAction::activate:
         for (auto* live : holders) {
             const auto& slot = slot_of(*live);
-            if (slot.active || !ability_ready(profile_of(*live), slot, phase.impl_->ability_gate(*live, command_tick), command_tick)) {
+            if (slot.active || !ability_ready(profile_of(*live), slot, phase.impl_->ability_gate(*live, command_tick), command_tick))
                 return core::Result<RejectReason>::success(RejectReason::ability_unavailable);
-            }
-        }
-        for (auto* live : holders) {
+            if (payload.ability == AbilityKind::sensor_jamming
+                && !phase.impl_->jammer_ready(*live, profile_of(*live), phase.named_ability_locks_))
+                return core::Result<RejectReason>::success(RejectReason::ability_unavailable);
             const auto switched = activate_ability(profile_of(*live), slot_of(*live), phase.impl_->ability_gate(*live, command_tick), command_tick);
-            if (switched.changed && (payload.ability == AbilityKind::interdict || payload.ability == AbilityKind::missile_shield)) {
-                // WIN-02, WMS-02: deployment halts the current move even without a movement lock.
+            switched_any = switched_any || switched.changed;
+            if (switched.changed && (payload.ability == AbilityKind::interdict || payload.ability == AbilityKind::missile_shield
+                || (payload.ability == AbilityKind::self_destruct && profile_of(*live).stop_when_activated))) {
+                // WIN-02, WMS-02, WSD-02: activation halts the current move.
                 live->formation.reset();
                 live->state.order = order_for(StopPayload{}, command_tick);
                 if (auto stopped = phase.impl_->plan_order(*live, StopPayload{}, frame); !stopped)
                     return core::Result<RejectReason>::failure(stopped.error());
             }
-            if (switched.changed && payload.ability == AbilityKind::sensor_jamming) phase.register_jammer(live->state.entity_id, true);
+            if (switched.changed && payload.ability == AbilityKind::sensor_jamming) {
+                phase.impl_->jammer_reactivated(*live, profile_of(*live));
+                phase.register_jammer(live->state.entity_id, true);
+            }
             if (switched.changed && payload.ability == AbilityKind::defend) phase.impl_->defend_switched_on(*live, command_tick);
             if (switched.changed && payload.ability == AbilityKind::self_destruct) Impl::self_destruct_switched(*live);
             if (switched.changed && payload.ability == AbilityKind::stealth) {
@@ -753,8 +808,9 @@ core::Result<RejectReason> session_detail::Tick::CommandHandlers::apply_ordinary
     const auto original_order = staged.at(unit_id).state.order;
     std::vector<EntityId> changed_speed;
     bool hunt_stopped = false; // also LURE: WAB-05 and WLU-02 stop the behaviour's move
-    auto switched = switch_ordinary_ability(payload, holders, slot_of, profile_of, command_tick, frame, ledgers, crafts, staged, changed_speed, hunt_stopped);
-    if (!switched || switched.value() != RejectReason::none) return switched;
+    bool switched_any = false;
+    auto switched = switch_ordinary_ability(payload, holders, slot_of, profile_of, command_tick, frame, ledgers, crafts, staged, changed_speed, hunt_stopped, switched_any);
+    if (!switched || (switched.value() != RejectReason::none && !switched_any)) return switched;
     const bool behaviour_on = (payload.ability == AbilityKind::hunt || payload.ability == AbilityKind::lure
         || payload.ability == AbilityKind::stealth)
         && payload.action == AbilityAction::activate;
@@ -833,7 +889,7 @@ core::Result<RejectReason> session_detail::Tick::CommandHandlers::apply_ordinary
     }
     // WHE-51: later commands and environmental hits read the newly switched modes.
     for (auto* live : holders) phase.impl_->refresh_damage_modes(*live);
-    return core::Result<RejectReason>::success(RejectReason::none);
+    return switched;
 }
 
 core::Result<RejectReason> session_detail::Tick::CommandHandlers::apply_ability(const EntityId unit_id, const AbilityPayload& payload, const SeatId caller) const {
@@ -856,6 +912,9 @@ core::Result<RejectReason> session_detail::Tick::CommandHandlers::apply_ability(
     auto& construction = phase.impl_->construction_stage.values;
     const auto& view = world.value();
     const auto& table = phase.impl_->motion;
+    if (payload.ability == AbilityKind::deploy_squad) {
+        return phase.deploy_squad(staged.at(unit_id), payload, command_tick);
+    }
     if (payload.ability == AbilityKind::blast) {
         return apply_blast(unit_id, payload, command_tick, staged);
     }
@@ -884,6 +943,9 @@ core::Result<RejectReason> session_detail::Tick::CommandHandlers::apply_ability(
         return apply_buzz_droids(unit_id, payload, command_tick, minds, next_id, frame, staged, squadron_table, table, caller);
     }
     // AB-61 to AB-65 (#561): ION_CANNON_SHOT acts on the squadron's team container itself.
+    if (payload.ability == AbilityKind::lucky_shot) {
+        return apply_lucky_shot(unit_id, payload, command_tick, minds, staged);
+    }
     if (payload.ability == AbilityKind::ion_cannon_shot) {
         return apply_ion_cannon_shot(unit_id, payload, command_tick, minds, staged, squadron_table);
     }

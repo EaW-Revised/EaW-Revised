@@ -255,6 +255,46 @@ void setup_contract(const std::filesystem::path& fixtures) {
                 const auto cycle = eawr::data::with_overrides(catalog.value().catalog,
                     std::array{eawr::data::ValueOverride{"Team_00_Space_Station", "Variant_Of_Existing_Type", {"Team_00_Space_Station"}}});
                 const eawr::units::UnitTables empty_tables;
+                const auto object_types = eawr::assets::object_type_catalog(catalog.value().catalog);
+                const skirmish::DataIdentity identity{};
+                skirmish::CampaignStartInputsCache common;
+                common.object_types = &object_types;
+                const auto fresh = skirmish::read_start_inputs(fixture, fs.value(), catalog.value().catalog, empty_tables, identity);
+                const auto initial = skirmish::read_start_inputs(fixture, fs.value(), catalog.value().catalog, empty_tables, identity, common);
+                const auto cached = skirmish::read_start_inputs(fixture, fs.value(), catalog.value().catalog, empty_tables, identity, common);
+                expect(fresh && initial && cached && common.common.has_value()
+                    && setup_map_golden::digest(fresh.value()) == setup_map_golden::digest(cached.value()),
+                    "cached campaign inputs preserve synthetic map and common facts");
+                if (fresh && cached) {
+                    expect(eawr::core::load_notes_json(fresh.value().placement_load_notes)
+                            == eawr::core::load_notes_json(cached.value().placement_load_notes)
+                        && fresh.value().new_markers == cached.value().new_markers
+                        && fresh.value().land_victory_condition == cached.value().land_victory_condition
+                        && fresh.value().land_fog_cell_size == cached.value().land_fog_cell_size
+                        && fresh.value().land_fog_regrow_seconds == cached.value().land_fog_regrow_seconds
+                        && ((!fresh.value().catalog_types && !cached.value().catalog_types)
+                            || (fresh.value().catalog_types && cached.value().catalog_types
+                                && *fresh.value().catalog_types == *cached.value().catalog_types)),
+                        "cached campaign inputs preserve notes and remaining input fields");
+                }
+                {
+                    std::ofstream broken(directory / "xml/gameconstants.xml", std::ios::trunc);
+                    broken << "<GameConstants>";
+                }
+                auto broken_fs = eawr::vfs::Vfs::mount(std::span(&mount, 1));
+                if (broken_fs) {
+                    skirmish::CampaignStartInputsCache empty_cache;
+                    empty_cache.object_types = &object_types;
+                    const auto original_error = skirmish::read_start_inputs(fixture, broken_fs.value(),
+                        catalog.value().catalog, empty_tables, identity);
+                    const auto cached_error = skirmish::read_start_inputs(fixture, broken_fs.value(),
+                        catalog.value().catalog, empty_tables, identity, empty_cache);
+                    expect(!original_error && !cached_error && !empty_cache.common
+                        && eawr::core::format_diagnostic(original_error.error())
+                            == eawr::core::format_diagnostic(cached_error.error()),
+                        "invalid constants retain the original first refusal");
+                }
+                setup_map_golden::write_team_corpus(directory);
                 expect(missing_base && cycle, "variant placement overlays are admitted");
                 if (missing_base && cycle) {
                     const auto skipped = skirmish::read_start_inputs(fixture, fs.value(), missing_base.value(), empty_tables);

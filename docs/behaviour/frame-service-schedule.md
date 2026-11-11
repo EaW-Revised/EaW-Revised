@@ -1161,3 +1161,233 @@ producer closure and the exact measured settlement gate remain qualified.
 Implementation consumers retain immutable partitioned inputs, disjoint
 staging and ordered commits, equal on 1/2/4/8 workers. This append supplies
 no rate, cone, damage, turn-budget or RNG tuning.
+
+## Space sensor-jamming cadence and automatic-handler order
+
+Read-only debug-build research on 2026-11-09 extends WHE-09/31/32,
+WPJ-10/17 and FC-24. EFSJ-01..08 indexes the private dispatcher, emitter,
+recipient and projectile reads. Comparison base is main
+`6aa59181a942c410bd6240596e725f9f4f160aba`. These are static findings and
+synthetic acceptance cases; no new runtime counter recording is claimed.
+
+### Jammer order
+
+| ID | Established rule | Evidence |
+| --- | --- | --- |
+| FS-45 | A source polls its jammer in the ordinary special-handler tail: after that object's authored periodic behaviours and model work, before object Lua and its hardpoint tail. The dispatcher visits the effective declared nested-handler list from first to last, admitting each enabled handler whose positive interval is due. There is no fixed global sequence of healing, jamming, point defence or other automatic kinds. On a type carrying several periodic handlers, their data order and independent deadlines determine their admitted call order. Other objects, including projectiles and other defensive sources, retain WFO-11/12's service-registration order. | Debug build EFSJ-01/02; WFO-15/20/21/23; FC-24; FS-30 |
+| FS-46 | Jammer polling is distinct from projectile defence and hit reaction. Missile/direct-path shield deflection reads each registered emitter's current positive run counter during that projectile's own movement service; rocket-path avoidance reads it during rocket movement. Guided-missile path choice instead reads the target recipient's retained jamming stamp. Point-defence zapping runs in its holder's periodic special-handler turn (WLD-03..05). `Redirect_Blaster_Ability` uses `Take_Damage` and reacts inside hit delivery, with no periodic service (WRB-02/03). None supplies a universal defence-before-jammer or jammer-before-projectile stage. | Debug build EFSJ-03/04/05/07; WPJ-10/17; WLD-03..05; WRB-02/03 |
+
+### Jammer clocks and transitions
+
+| ID | Service / interval and source | Start / retained state | Reset and skip triggers / gates | Evidence |
+| --- | --- | --- | --- | --- |
+| FC-77 | Jammer handler interval is code **1 logical frame**. After an admitted call, schedule current frame + 1; missed frames do not cause multiple calls. `COMBAT_AUTOMATIC` writes run count **10 at the start of every call**, then an ordinary non-nebula call stamps recipients and subtracts one, ending at **9**. Ten is a refresh value, not a ten-frame polling interval. | Ordinary fresh enabled initialization seeds the outer due frame at initialization mode frame plus synchronized integer draw **0..1 inclusive**. Initialization automatically applies an appropriate automatic handler: an ordinary `SENSOR_JAMMING` slot supplies trunc(`Expiration_Seconds` x logical FPS), otherwise nested `Duration_In_Secs` supplies the initial count. Apply registers the source for projectile-shield checks and starts its authored presentation. Neither the authored duration nor that initial count sets the poll interval. | The dispatcher requires owner/type, no manager cancellation, no death clone/editor, enabled handler and due frame. A due automatic call refreshes even when its incoming count is zero. If tactical combat state reports nebula, terminate/unregister the emitter and write zero; otherwise stamp recipients before decrement. A nonautomatic count reaching zero terminates. Disable terminates and cancels service; enabling appropriate periodic handlers re-randomizes the first due frame and reapplies automatic activation. Manager resume re-randomizes the poll and invokes its resume interface. The inspected service adds no direct ion-stun, under-fire or limbo gate. Ordinary gameplay pause prevents object traversal. Complete exceptional ownership/restore and nebula-exit registration are UFS-38. | Debug build EFSJ-01/02/03/06; FC-24; WHE-31 |
+| FC-78 | Recipient jamming has a separate timestamp lifetime: **(current synchronization frame minus retained stamp) / logical FPS** must be **strictly less than `Sensor_Jamming_Time`**. Stock 0.5 seconds at 30 FPS is ages **0..14**, with age 15 expired when clocks are aligned. This is neither the emitter's remaining count nor a current-frame-only boolean. | A negative stamp never qualifies. Each admitted emitter scan overwrites eligible recipients with its supplied **mode frame**, forwarded from the containing mode through object service. The read uses the synchronization clock; do not silently equate these labels. Radius and recipient qualification remain WHE-32: ordinary unit-slot `Effective_Radius` when present, otherwise `Passive_Missile_Shield_Radius`, 3D distance at most radius, nonenemy live nonprojectile locomotor recipients with combat state. | Leaving range, missing a source poll, source termination or entering its nebula does not erase an already written recipient stamp on the inspected paths. Without another stamp it ages out at strict expiry. A source's projectile-shield registration is removed on termination independently of those recipient stamps. Retained campaign-child and restore experiments must record both clocks rather than assuming the standalone aligned ages. | Debug build EFSJ-01/03/04/05; effective XML EFSJ-08; WHE-32; WPJ-10 |
+
+Stock sensor-satellite data authors `COMBAT_AUTOMATIC`, nested duration 60
+seconds and passive radius 1000. It does not thereby request a 60-second
+cooldown, a ten-frame poll or an ordinary GUI ability slot. The ordinary
+one-frame refresh above is the relevant automatic service. Authored duration,
+radius, style and global stamp lifetime remain effective-data inputs, including
+mod overrides. Blob/owner-particle rendering is not a scheduler (EFSJ-03/08).
+
+### Same-frame dependencies and remake comparison
+
+| ID | Producer → consumer | Original boundary | Remake at the comparison base | Observable case |
+| --- | --- | --- | --- | --- |
+| FD-75 | Source refresh/termination and registration → projectile's emitter-defence read | Source-before-projectile sees the updated counter/registration; projectile-before-source sees their earlier state. The source's periodic behaviours can update nebula contact before its jammer tail. Other due periodic handlers on that source use FS-45's declared order. | **Automatic provider missing; phase differs.** `session_world.cpp` builds defence inputs from ordinary ability slots, while `session_step.cpp` prepares a world before point defence and projectile movement. It cannot represent the nested automatic refresh or every original interleaving by treating all jammers as one global early or late sweep. | FSC-80 and the nebula/order variant of FSC-81. Keep immutable partitioned inputs and ordered commits; this is not permission to copy a serial object loop. |
+| FD-76 | Source writes recipient stamp → guided missile chooses direct versus guided path | A missile serviced after the due source reads its new stamp in that frame. A missile serviced before it can see an expired previous stamp. Recipient service itself is not needed to publish the stamp. Terminating the source does not remove the recipient's remaining timestamp lifetime. | **Lifetime differs.** `prepare_projectile_defences()` clears and recomputes `sensor_jammed` from current eligible ordinary-slot emitters for each world snapshot. That provides same-frame geometry but no retained half-second tail after withdrawal, and no source/projectile registration boundary. The nested automatic producer is also missing at this base. | FSC-81/82. A current-frame-only flag loses a real continuation boundary; do not use the emitter's ten-count refresh as a substitute recipient lifetime. |
+
+### Jammer acceptance cases
+
+Use a synthetic definition with `Sensor_Jamming_Ability` and
+`COMBAT_AUTOMATIC`, an eligible friendly recipient, and an existing hostile
+guided missile. Record synchronization frame, mode frame, actual service rank,
+outer due frame, emitter run count/registration and recipient stamp separately.
+Normalize the two frame clocks before using the concrete 30-FPS ages below.
+These are executable-contract specifications, not observations from a rig run.
+
+| ID | At t | At t+1 | At t+2 / variants |
+| --- | --- | --- | --- |
+| FSC-80 | At the first admitted enabled non-nebula poll, incoming count may reflect authored duration or zero. It becomes 10, the recipient is stamped t, then count becomes **9** and next due is t+1. Fresh first due is initialization frame or the following frame; actual traversal insertion still controls the first visit. | Another admitted poll refreshes to 10 then ends at **9**, with recipient stamp t+1; no ten-frame gap. | Repeat for several frames. Skip traversal for one admitted-frame gap, then resume: perform one poll, not catch-up polls. A nebula-admitted poll ends at zero and unregisters; a later outside-nebula automatic poll can again refresh/stamp, but this service alone does not prove re-registration. Record presentation and registration separately under UFS-38. |
+| FSC-81 | At aligned frame t=15, a recipient's only old stamp is 0. In the source-before-missile order, the source writes 15 and the missile takes the direct path; in missile-before-source order, age 15 has expired when the missile reads and it takes the guided path. Use a pose where these paths diverge and preserve the same target lock. | Both runs can read the previous source stamp as still live; do not require a second source-before-missile write merely to retain jamming. | Nebula variant: start a registered positive-count emitter with no passive-shield fallback and stage termination at its source turn. A projectile before that turn can read active emitter defence; a projectile after it reads the unregistered state. Suppress other defence sources and normalize actual contact/termination rank. |
+| FSC-82 | Recipient was last stamped at aligned frame 100; then it leaves range or the emitter terminates. A read at 100 still reports jammed. Emitter registration/counter may already be absent/zero. | At 101 the recipient still reports jammed without another stamp. | With no new stamps, frame 114 remains jammed; frame 115 is not. Perturb `Sensor_Jamming_Time` and logical FPS to verify authored lifetime rather than a fixed 15-frame rule. Keep missile target identity unchanged while comparing path selection. |
+
+### Remaining runtime qualification
+
+| ID | Missing evidence | Minimal plan |
+| --- | --- | --- |
+| UFS-38 | Actual first-poll rank after satellite construction, normalized service/synchronization labels, every owner/death/disable/restore producer, and emitter re-registration/presentation after nebula exit. Static local refresh and timestamp reads do not settle all lifecycle callbacks. | On the queued original-game rig, stage FSC-80..82 with AI held and one jammer, one locomotor recipient and one missile. Count frames between **counter refreshes**, not merely successful recipient stamps. Record handler entry/exit and outer due values where read-only inspection exposes them; otherwise label those fields unobserved. Reverse actual source/projectile registration and swap declared periodic-handler order on a synthetic combined source; log zaps, damage reactions, counter, registry, recipient stamp, missile path/target and position. Repeat source-range exit, nebula enter/exit, disable/enable, pause, destruction, owner transfer and save/load against uninterrupted controls. |
+
+These rows narrow WFO-21, FC-24 and the jammer portion of U-BP-8. WHE-32's
+current-frame stamp **write** does not imply current-frame-only stamp validity.
+The automatic sensor consumer owns the new runtime application; this docs-only
+change does not alter combat staging, introduce a serial sweep or qualify a
+retail measurement of first construction service.
+
+## Land garrison containment service
+
+Read-only debug-build research on 2026-11-09 extends
+[land combat](walks/land-combat.md) LC-38..41 and the
+[land frame map](../research/land/R1-frame-map.md) LR1-03/04.
+EFSG-01..09 indexes entrant service, cadence, containment, host destruction
+and selected effective data. Comparison base is main
+`4c7035bbc3c83122207d0e01ed98d6ec4f76a02c`.
+This is the containment follow-up (legacy EAWR-6437); FC-28's space squadron
+spawner and LR1-11's player reserve replenishment are separate services.
+These are static findings and synthetic cases; no new runtime recording is
+claimed, and no exact stock fade-completion frame is inferred.
+
+### Entrant, host and destruction positions
+
+| ID | Established rule | Evidence |
+| --- | --- | --- |
+| FS-47 | Entrance/fade/waiting-exit progress runs on the **entrant's** authored periodic garrison turn. Its locomotion, targeting and weapon turns retain their effective general-then-land attachment order. The inspected stock infantry squad places container locomotion, then team targeting, then garrison service. The inspected structure and transport host service bodies do no containment work. There is no global host-owned garrison sweep between all movement and all combat. | Debug build EFSG-01/02/05/09; effective data EFSG-08; WFO-15/16; LR1-04 |
+| FS-48 | Fade completion calls containment immediately in the entrant turn: recheck slots, finish formation, teleport/stop, add membership/parent, apply host policy to entrant and team members, then host-entered/story hooks. Placement hides/disables model collision, sets limbo and removes movement-coordinator and tracking membership before returning. Structure policy preserves targeting/weapons; transport policy disables them. These are direct state publications, distinct from later derived spatial maintenance. | Debug build EFSG-03/04; LC-39/40 |
+| FS-49 | Normal unload first requests an exit state. Its next admitted entrant service reads the host's **current** locomotor state; stopped/deployed/none states permit immediate removal and exit placement, while moving states retain the wait. Removal changes containment and enablement before assigning the exit route. Movement-finished notification can start/finish entrance states or finish exit inside its producer's call, separately from periodic polling. A later coordinator callback cannot repeat the entrant's already completed turn. | Debug build EFSG-01/03/07; WFO-27; LR1-03 |
+| FS-50 | Ordinary host destruction processes occupants inside the destruction call, before the manager destruction endpoint and eventual memory deletion. Structure/walking hosts release occupants immediately. A hover host releases when its locomotor is absent or reports not hovering; otherwise it destroys occupants. Release invokes immediate removal/exit placement rather than waiting for the normal stopped-host poll. Other objects' movement, targeting and fire can precede or follow this call according to the actual damage producer and service order. | Debug build EFSG-06/07/09; WFO-14/24/26; LC-41 qualification narrowed |
+
+### Containment cadence
+
+| ID | Interval / initial state | Resets, skips and inner progress | Evidence |
+| --- | --- | --- | --- |
+| FC-79 | Entrant periodic interval is code **1 logical frame**. Ordinary fresh construction/initialization gives deadline **0** and enabled depth **0**; no randomized first phase for this interval. At an admitted call, common rearm writes supplied service frame + stored interval **before** inspecting entrance state. | Ordinary caller requires deadline <= service frame and enabled service, within an admitted object traversal. Fade advances once by inverse logical FPS per admitted visit; missing visits do not cause elapsed-time catch-up. Moving/entering visits recheck slots and geometry; a poll that starts fade does not also execute the earlier fade-update branch in that call. An earlier movement notification can already have changed state before this poll. Waiting exit uses host state rather than a new unload countdown. Normal disable/enable gates and whole-mode/cinematic skips remain distinct; complete exceptional ownership/restore producers are UFS-39. | Debug build EFSG-01/02/03/09; WFO-16; GFC-04 |
+
+### Movement, occupancy and combat readers
+
+The remake's `src/sim/tactical/session_land.cpp` commits movement occupancy
+after member proposals/contacts and before land combat. The proposed land
+garrison seam runs after that commit and before combat, with host death in
+the death phase. At this comparison base containment is absent; this is a
+comparison with the proposed seam, not a reproduced implementation failure.
+
+The debug-build containment call changes parent/list, collision enablement,
+limbo and tracking registration directly (FS-48). A limbo-bit write alone
+does not remove a passability-cell occupant. Tracking removal marks derived
+tracking state dirty. Static land-cell composition/dirty refresh retains
+WLPA-03/04/06/11; it must not be collapsed into the dynamic object-tracking
+registry. The ordinary final-exit legality helper queries the current land
+position finder, with object collisions ignored and zone checking enabled.
+This does not establish a global occupancy-commit barrier before every
+entrant. Complete obstacle/secondary-cell refresh and first restored query
+remain UFS-39.
+
+| ID | Producer → consumer | Debug-build boundary | Provisional seam verdict / observable case |
+| --- | --- | --- | --- |
+| FD-77 | Entrant locomotion or movement notification → entrant garrison → its targeting/weapon work | Same-object order follows authored attachment. In the selected stock squad, locomotion and team targeting precede garrison. Notifications can change the entrance state before or after that poll. | **Partly aligned, not universal:** after movement agrees for this squad; before all combat loses the earlier team-targeting boundary and any declared weapon-before-garrison case. FSC-84. |
+| FD-78 | Containment publication → another entrant's capacity check, member fire or collision/target reader | Earlier commits immediately change contained slots, limbo and enabled state. An already completed reader keeps its earlier outcome. Derived spatial maintenance has its separate rules above. | **Order seam:** a global post-movement/pre-combat publication forces all readers onto one side. Test member fire/target eligibility and competing capacity directly, rather than inferring static-cell removal. FSC-85/86. |
+| FD-79 | Host locomotor stop/deploy → waiting occupant's normal exit poll | An occupant before the host's state change can keep waiting; an occupant after it can exit on the same admitted frame. Exit assigns a route, not a second ordinary locomotion invocation. | **Order seam:** after all movement gives every occupant the new host state, irrespective of registration. FSC-87. |
+| FD-80 | Damage-triggered host destruction → occupant membership/liveness/enablement → later movement or combat reader | Ejection/destruction occurs at the damage call, without waiting for host or occupant periodic service. A still-unvisited enabled occupant can consume its changed state; an earlier completed turn is not repeated. | **Event seam:** a single late death phase delays these publications for earlier damage producers. Preserve the immediate destruction boundary independently of later deletion. FSC-88. |
+
+### Land containment acceptance cases
+
+Use synthetic types and explicit state at a completed boundary; suppress
+unrelated victory, AI and damage. Record mode/synchronization frames, object
+and member service rank, effective attachment order, next due frame,
+entrance state/fade, host motion, membership, limbo, enabled flags and actual
+query/fire outcomes. These are specifications, not completed rig tests.
+
+| ID | At t | At t+1 / t+2 and controls |
+| --- | --- | --- |
+| FSC-83 | An enabled entrant due at t polls once and rearms t+1, even with no entry work. Seed a known fading value and record one inverse-FPS update; separately seed moving state just inside entry radius and observe fade start without a second state-machine branch that call. | Skip t+1 and resume at t+2: rearm t+3 and do one update, not two. Ordinary initialization is due zero; actual first visit still depends on registration/insertion. No specific number of frames for the smoothing law is asserted. |
+| FSC-84 | Use a squad whose locomotion crosses entry radius at t and whose effective order is locomotion, team targeting, garrison. Its targeting reader runs before the entry publication. Movement-finished before the poll may start fade for that poll; the same notification after it waits for a later smoothing visit. | Reverse only synthetic garrison/targeting or garrison/weapon declaration order and log distinguishable gate/fire state. A post-movement/pre-all-combat sweep must not be accepted as reproducing both declarations. Hold geometry constant through t+2. |
+| FSC-85 | Seed a transport entrant's fade at a value that completes on its due t poll. Put one member's due weapon turn before that commit and another run's equivalent turn after it. Earlier fire can consume the enabled outside state; later fire must observe the transport's disabling. A later enemy suitability reader sees limbo. | No new outside fire while retained inside at t+1/t+2. Repeat structure policy: targeting/weapons remain enabled while limbo still prevents the ordinary outside target eligibility. Normalize each reader's other gates; do not interpret gun bones as a shooter cap. |
+| FSC-86 | Two entrants both reach commit with value 1 and only one free slot. Process A then B: A's membership is present for B's capacity recheck, so B cannot also be added. Reverse actual entrant registration and reverse the winner. | At t+1/t+2 contained cost never exceeds capacity. Record the refused entrant's local state separately from real parent/list membership; do not invent an automatic retry or repair for the rare failed final commit. |
+| FSC-87 | A waiting occupant reads a host that changes from moving to an admitted stopped state during its own t turn. Occupant-before-host remains waiting; host-before-occupant removes it and assigns exit placement/route at t. | With host still stopped, the former can exit at t+1. Record first physical displacement through t+2 separately: an assigned route grants no extra locomotion turn. Repeat deployed and deliberately still-moving controls. |
+| FSC-88 | Destroy an ordinary loaded walking host from an explicitly ranked producer at t. Immediately after the call its released occupants have lost host membership and are enabled/placed for exit, without an occupant poll. A later valid reader consumes that state; an earlier reader is not rerun. | Repeat hover-host hovering versus not-hovering branches: hovering destroys occupants; not-hovering releases. Bracket occupant movement/fire around destruction and inspect through t+2 and manager deletion. Keep death eligibility and pending-victory gates controlled. |
+
+### Remaining land containment qualification
+
+| ID | Missing evidence | Minimal plan |
+| --- | --- | --- |
+| UFS-39 | Actual first entry/fade/exit frame and clock normalization, every disable/death/ownership/load producer, cell-occupancy dirty propagation for unusual occupying entrants/hosts, restored list rank, failed final-commit recovery and synchronous listener reentry. | Use the queued original-game rig and Lua debugger/read-only inspection to stage FSC-83..88, reversing real service registration rather than IDs. Log before/after entrant, host, member and damage turns, and before/after direct collision/limbo/tracking writes versus the first passability and contact readers. Include overlapping primary/secondary cell contributors so removing one cannot clear another; record derived revision/dirty state where exposed. Repeat save/load just before fade completion, host stop and destruction against uninterrupted controls, plus disable/enable and pause. If internal state is inaccessible, retain that subquestion explicitly rather than infer it from pixels or wall time. |
+
+LS's single provisional seam can consume the one-frame cadence and immediate
+containment/death publications now, while retaining FD-77..80 as the shared
+ordering limitations. Implementation uses immutable partitioned preparation
+and ordered commits equal on 1, 2, 4 and 8 workers; this research does not
+authorize a serial per-object land loop or a universal move/garrison/fire order.
+
+## Default unit abilities at creation
+
+| Rule | Original behaviour | Evidence |
+| --- | --- | --- |
+| FS-51 | Ordinary live non-team object creation requests authored default-on unit abilities synchronously before creation returns, rather than waiting for object service. The default setup skips an object pending deletion and visits primary then secondary: each slot with data and `Active_By_Default` true makes an activation request. A request is subject to its ordinary ability gates, so a request is not proof of a successful effect. Separately authored automatic special handlers have their own initialization path (WGT-49). | Debug build EFSDA-01/02; LR11-32; WGT-49 |
+| FS-52 | The team creation path creates the container, adds its members, then requests its defaults before team creation returns. For a non-team ability the ordinary dispatcher checks the container's ability and activation gates, then visits member indices in ascending order, requesting each member that owns the ability. The first failed member request stops the dispatch; absent such a failure, the dispatcher returns without a container-local handler, except for the separate spread-out ability. Members may already have received their own defaults during their individual creation. | Debug build EFSDA-01/03/04; WHE-70 |
+
+| Rule | Dependency | Original boundary | Remake implication |
+| --- | --- | --- | --- |
+| FD-81 | Creation/default request → activation effect or team member request | The request is inside creation, and team routing follows attachment and member-index order. Later readers can observe successful effects without a first service turn; failure and already-active gates still matter. | Preserve creation and attachment ordering as an explicit seam; do not equate a default request with guaranteed success or retry it on first service. FSC-89. |
+
+| Seam | Open question and boundary |
+|---|---|
+| UFS-40 | `TacticalSetup` predeclares an attached team and its member identities; reinforcement and hangar deployment likewise create craft before the container. These adapters treat members as attached when requesting their defaults, then request the container defaults without reordering stable IDs. FS-51/52/53 and FD-83 instead create members before attachment: a member's default replenishment can create another team before the original attachment. The result of that later attachment is pending retail observation; see (legacy EAWR-6523) and FSC-91. |
+
+| Case | Observable synthetic setup and expected boundary |
+| --- | --- |
+| FSC-89 | Create a live non-team object with an enabled, default-on INTERDICT and a working generator, alongside an enemy player. Inspect enemy retreat-prevention state immediately after creation returns, before any object service; compare an otherwise identical `Active_By_Default` false control. For team routing, create a container whose default-on non-team ability has three indexed eligible members and instrument requests and outcomes: expect member indices 0, 1, 2 after attachment; force index 1 to fail and expect no index 2 request. Isolate prior member default activations so their already-active gates do not confound this case. This case is a prediction from the debug build, not a completed retail capture. |
+
+## Land collision removal boundary
+
+| Rule | Dependency | Original boundary | Remake implication |
+| --- | --- | --- | --- |
+| FD-82 | Pad destruction/removal → dynamic contact discovery and retained contact | Ordinary manager destruction marks the object pending deletion and synchronously removes it from the collidable-object discovery list. The tracked prediction is removed and its layer marked dirty in that notification; the traced collision and linear-collision queries rebuild dirty trees before reading, so those later queries exclude it even in the same tick. Earlier queries are not rerun. Existing contact records use a separate final object-lifetime notification that removes the participant. In the traced moving-versus-stopped contact, its common check resolves a record with fewer than two participants at the next contact service. Final lifetime can depend on retained references and deletion processing; this does not prove a fixed tick delay or immediate cancellation of a previously assigned route. Static obstacle occupancy is a separate producer (WLPA-66). | Preserve the two boundaries rather than assuming one global death-to-motion deadline. FSC-90; debug build EFSLC-01..08. The visible clearance timing and other contact states need runtime qualification. |
+
+| Case | Observable synthetic setup and expected boundary |
+| --- | --- |
+| FSC-90 | Use a non-obstacle land pad with a dynamic hard footprint and a mover whose contact gates are controlled. Destroy the pad at t and bracket the traced layer collision queries before and after deletion-pending notification: only the earlier query can see it. In a separate run establish a moving-versus-stopped contact first; record its participants, pending-deletion state, final lifetime notification, contact service and mover route/position at t, t+1 and t+2. On final notification the pad is removed from that record; its next common contact check resolves the now incomplete pair. Do not assume final notification occurs at a fixed tick or that a pre-existing route disappears with the contact. This is a debug-build prediction; a retail capture is still needed. |
+
+## Squadron creation and default replenishment
+
+| Rule | Original behaviour | Evidence |
+| --- | --- | --- |
+| FS-53 | The traced squadron producer creates its authored craft in order before forming the outer team. Each ordinary craft's creation can issue its own defaults before that attachment (FS-51). A successful parentless default `REPLENISH_WINGMEN` request creates its own team around that craft before returning; the later outer-team creation still visits the original craft list. This is a debug-build path prediction, not an observed setup outcome. | Debug build EFSSQ-01..03; FS-51/52; WHE-63 |
+
+| Rule | Dependency | Original boundary | Remake implication |
+| --- | --- | --- | --- |
+| FD-83 | Member default replenishment → later outer-team attachment | The attachment helper asserts that the member has no parent. If execution continues through that assertion, the traced path appends the member to the outer roster and replaces its parent pointer without first removing it from the earlier roster in that helper. This does not establish which rosters survive subsequent work or what a live game displays. | Keep setup and reinforcement ordering unchanged pending observation; do not infer a clean transfer or stable-ID order from this prediction. FSC-91; debug build EFSSQ-01..04. |
+
+| Case | Observable synthetic setup and expected boundary |
+| --- | --- |
+| FSC-91 | Author a squadron whose first craft has enabled, default-on `REPLENISH_WINGMEN`, a valid creation-team composition, and no refusal gates. On the traced producer, record its parent and both team rosters after the member's creation and again at outer attachment. Expect an inner team before outer attachment; the debug build predicts an already-parented assertion, followed, if continued, by outer append and parent overwrite. Record subsequent roster, selection and unit count separately; the live outcome is unverified. Repeat with the default flag false as a control and with reinforcement deployment as a separate producer. |
+
+## Attack clip advance versus ability service (super laser `Fire_Frame`)
+
+Read-only debug-build research on 2026-11-10, EFSAN-01..06 (static; no runtime
+recording). Private decompiles and call-site notes stay in ignored
+`out/research/gc-6553/`. Question from the skirmish lane (legacy EAWR-6553) about
+the super laser work (legacy EAWR-6248): in one tactical frame, does the owner's
+animation clip advance before or after the ability service, which decides
+whether the beam's `Fire_Frame` test sees the same tick's clip advance.
+
+**Answer: before.** Inside one object's service the order is periodic
+behaviours, dirty transform, **clip advance**, animation-triggered audio, the
+special-ability manager, then object Lua. The skirmish lane's clip-before-ability
+seam therefore matches the original. This refines WFO-20/21 for the owner's own
+clip; it adds no new object-level phase.
+
+| ID | Established rule | Evidence |
+|---|---|---|
+| FS-54 | The clip advance is one call per object turn, made from that object's service itself, between periodic behaviours and the ability manager. It reads the synchronized time (admitted logical frame / logical FPS), not a render delta, and adds `(now - time of previous clip service) x speed factor x clip frame rate` to the active clip's frame. It runs once per admitted frame, whether or not the object has abilities. The other clip-advance call sites found are creation, saved-model restore, fogged-model ghosts and UI/shell components; none is a second tactical advance of a live owner. The advance is skipped for an object in limbo; a cinematic clip with `Pause_During_Cinematic_Anim` skips the behaviours but not the clip advance or the ability manager. The special case where the whole object turn is entered in animation-only mode (paused galactic gameplay with animation allowed) advances the clip and skips abilities; it is tied to paused galactic gameplay or a queued conflict with speech, and was not shown to apply to an ordinary admitted tactical frame. | debug build EFSAN-01/02/03/05 |
+| FS-55 | The super laser handler has service interval **1** and is visited by the ability manager every admitted frame while enabled. With `Face_Target` and the facing within `Firing_Cone` (horizontal plane) it starts the attack clip (`Attack_Anim_Sub_Index`, non-looping, no blend, speed factor 1) **inside the ability service**: the clip frame is set to **0** and the previous-service time is set to the synchronized time of that same frame. The beam is not fired on that visit; the fire test is in the other branch, so the first test is on the next admitted frame. The test then reads the **stored** clip frame (no advance of its own) and fires when the active clip is not the attack clip, or the frame is **>=** `Fire_Frame`. A non-looping clip stops at its frame count minus two, so a `Fire_Frame` above that value is never reached by this test. | debug build EFSAN-02/04/06; WSPL-04 |
+
+| ID | Producer → consumer | Original boundary | Remake implication |
+|---|---|---|---|
+| FD-84 | Owner clip advance → same-frame ability fire test | Clip advance precedes the ability manager in the same object turn, so the fire test on frame n+k sees the advance of frame n+k. Start on frame n (after that frame's advance, at frame 0); first test n+1. Fire frame n+k, with k the smallest count whose accumulated advance reaches `Fire_Frame`: **k = `Fire_Frame` when the clip rate equals the logical FPS** (30), more generally k = ceil(`Fire_Frame` x logical FPS / clip rate). | **Aligned** with clip-before-ability (the skirmish seam). Do not run the fire test before the clip advance, and do not give the start frame its own advance. FSC-92. |
+
+The advance is accumulated in 32-bit floats: the per-frame increment is the
+difference of two quotients (frame / logical FPS) times the clip rate, summed
+into the stored frame. In a float32 emulation of this expression at 30 logical
+FPS and a 30 fps clip, the fire frame is `Fire_Frame` for most start frames but
+`Fire_Frame` + 1 for some (for example `Fire_Frame` 60 and start frame 425), because the sum can land just under the integer.
+This is a static prediction, not an observation; a remake that rounds the
+advance to exact whole frames will differ by one tick in those cases.
+
+| Case | Observable synthetic setup and expected boundary |
+|---|---|
+| FSC-92 | Synthetic unit with the super laser handler (`Face_Target` true, `Firing_Cone` 45, `Attack_Anim_Sub_Index` 0, `Fire_Frame` 6), a synthetic non-looping attack clip of at least 20 frames at the logical FPS (clip rate equal to logical FPS), a valid target inside the cone and the fire-start frame already passed. Start the ability so the clip starts on frame n. Record per frame: the stored clip frame after the clip advance, the ability visit, and the beam-fired flag. Expect: frame n clip 0 and no beam; frames n+1..n+5 clip 1..5, no beam; **frame n+6 clip 6 and the beam fires on that same visit**. Controls: (a) `Face_Target` false and no attack clip playing: fires at the first test, n+1, whatever `Fire_Frame` is; (b) `Fire_Frame` 0 fires at n+1; (c) `Fire_Frame` above the clip's frame count minus two never fires; (d) repeat start frames n and n+1 and, if float32 is emulated, a start frame such as 425 with `Fire_Frame` 60 and the stock 30 fps clip expecting fire at n+61. Expected results equal on 1/2/4/8 workers. |
+
+Runtime qualification (open, not blocking): the clip rate of the stock Death Star
+and Eclipse attack clips and whether the float32 +1 cases appear in a retail
+capture; both need a debug-build or retail capture of the beam start with the clip
+frame logged.

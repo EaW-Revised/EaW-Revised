@@ -18,7 +18,10 @@ std::string loadcheck_chain_fingerprint(const Profile& profile, const fs::path& 
     const auto append = [&](const fs::path& root) {
         const auto tree = tree_fingerprint(root);
         if (tree.capped || tree.incomplete || tree.tree.empty()) return false;
-        material += '\n' + steam::path_to_utf8(root) + '\n' + tree.tree;
+        std::error_code error;
+        const auto canonical = fs::weakly_canonical(root, error);
+        if (error) return false;
+        material += '\n' + steam::path_to_utf8(canonical) + '\n' + tree.tree;
         return true;
     };
     for (const auto& layer : profile.layers) {
@@ -83,10 +86,14 @@ TreeFingerprint tree_fingerprint(const fs::path& root, std::uint64_t entry_cap) 
     result.capped = listing.capped;
     result.incomplete = listing.incomplete;
     std::string text;
+    std::string portable;
     for (const TreeFile& file : listing.files) {
+        portable += file.relative + "\t" + std::to_string(file.size) + "\n";
         text += file.relative;
         text += "\t" + std::to_string(file.size) + "\t" + std::to_string(file.mtime) + "\n";
     }
+    if (!listing.capped && !listing.incomplete)
+        result.portable_tree = core::sha256_hex(std::span<const std::uint8_t>(reinterpret_cast<const std::uint8_t*>(portable.data()), portable.size()));
     result.files = listing.files.size();
     result.tree = core::sha256_hex(std::span<const std::uint8_t>(reinterpret_cast<const std::uint8_t*>(text.data()), text.size()));
     return result;

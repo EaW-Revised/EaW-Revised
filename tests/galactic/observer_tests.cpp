@@ -11,6 +11,8 @@
 #include <vector>
 #include "../support/result.hpp"
 #include "galactic_support.hpp"
+#include "restore_patch.hpp"
+#include "../../src/sim/galactic/checkpoint_fields_internal.hpp"
 #include "../../apps/viewer/src/galactic/campaign_capture_metrics.hpp"
 #include "eawr/sim/galactic/observer.hpp"
 #include "eawr/campaign/game_session.hpp"
@@ -57,6 +59,56 @@ void submit(gc::GalacticSession& session, std::uint64_t sequence, gc::ObserverCo
     require(session.submit({{session.completed_tick(), seat, sequence}, std::move(c)}));
 }
 const gc::ObservedPlanet& view(const gc::GalacticSession& session, std::size_t index) { return session.snapshot()->observations()[index]; }
+
+void malformed_observer_restore() {
+    auto s = setup();
+    auto source = take(gc::GalacticSession::create(s));
+    auto bytes = take(source.save_checkpoint_state());
+    namespace archive = gc::checkpoint_detail;
+    archive::Writer original; original(s.observer);
+    auto malformed = s.observer;
+    malformed->players.pop_back();
+    malformed->records.resize(malformed->players.size() * malformed->planets.size());
+    archive::Writer replacement; replacement(malformed);
+    const auto at = std::search(bytes.begin(), bytes.end(), original.bytes.begin(), original.bytes.end());
+    expect(at != bytes.end(), "observer table found in checkpoint owner");
+    if (at == bytes.end()) return;
+    const auto offset = static_cast<std::size_t>(at - bytes.begin());
+    bytes.erase(bytes.begin() + offset, bytes.begin() + offset + original.bytes.size());
+    bytes.insert(bytes.begin() + offset, replacement.bytes.begin(), replacement.bytes.end());
+    auto restored = take(gc::GalacticSession::create(s));
+    const auto result = restored.load_checkpoint_state(bytes);
+    expect(!result && result.error().code == gc::diagnostic_codes::invalid_setup,
+        "self-consistent observer table with wrong roster is refused on restore");
+}
+
+// The wrong-shaped table is refused (above); so is every other table the sinks read that no valid game produces.
+void malformed_observer_facts_restore() {
+    const auto s = setup();
+    auto probe = take(gc::GalacticSession::create(s));
+    const std::optional<gc::ObserverSetup> table = probe.snapshot()->observer();
+    using galactic_test::restore_message_after;
+    using galactic_test::expect_refusal;
+    expect(restore_message_after(s, table, [](auto&) {}).empty(), "unchanged observer table restores");
+    const auto refused = [&](const char* phrase, const char* label, auto mutate) {
+        expect_refusal(restore_message_after(s, table, mutate), phrase, label);
+    };
+    refused("ranges are invalid", "zero logical rate is refused", [](auto& t) { t->logical_fps = 0; });
+    refused("History players are not listed", "unlisted History player is refused", [](auto& t) { t->history_players = {9}; });
+    refused("planet spy is invalid", "spy on an unknown planet is refused", [](auto& t) {
+        t->planet_spies.push_back({99, 1, "", 0, {}, {}, gc::SpyStyle::disabled, false, false}); });
+    refused("human roster is empty", "empty human roster is refused", [](auto& t) { t->human_observers.clear(); t->solo_reference_human = 0; });
+    refused("solo reference differs", "solo reference outside the roster is refused", [](auto& t) { t->solo_reference_human = 2; });
+    refused("faction facts are invalid", "unlisted ally is refused", [](auto& t) { t->players[0].allies = {9}; });
+    refused("planet facts are invalid", "unlisted planet allegiance is refused", [](auto& t) { t->planets[0].allegiance = 99; });
+    refused("landed transport reference is invalid", "landed transport of an unlisted owner is refused", [](auto& t) {
+        t->planets[0].landed_transports = {{5, 99, false, false}}; });
+    refused("type rows are unordered", "observer type without an identity is refused", [](auto& t) { t->types = {{0, false, false, false}}; });
+    refused("trait registry differs from setup", "changed observer trait flags are refused", [](auto& t) {
+        if (!t->types.empty()) t->types.front().superweapon = !t->types.front().superweapon; });
+    refused("record or apparent owner is invalid", "apparent owner of an unlisted player is refused", [](auto& t) { t->records[0].apparent_owner = 99; });
+    refused("intelligence source is invalid", "intelligence source without an identity is refused", [](auto& t) { t->records[0].sources.push_back({}); });
+}
 
 void campaign_home_expansion() {
     // WGS-06 installs the home; WGUI-01/04/107 independently qualify seeds.
@@ -854,7 +906,7 @@ int case_galactic_observer_tests() {
     if (!galactic_support_self_test()) return 1;
     black_market_publication();
     discovery_audio_publication();
-    try { solo_observer_publication(); multiplayer_observer_contexts(); capture_metrics_contract(); planet_spy_non_source_budget(); planet_spy_lifecycle(); predicates(); discovery(); campaign_home_expansion(); arrival_order_and_budget(); landed_ownership(); effects(); staggered_observer_sources(); apparent_memory(); source_lifecycle(); projection_cache(); replay_checkpoint(); }
+    try { malformed_observer_restore(); malformed_observer_facts_restore(); solo_observer_publication(); multiplayer_observer_contexts(); capture_metrics_contract(); planet_spy_non_source_budget(); planet_spy_lifecycle(); predicates(); discovery(); campaign_home_expansion(); arrival_order_and_budget(); landed_ownership(); effects(); staggered_observer_sources(); apparent_memory(); source_lifecycle(); projection_cache(); replay_checkpoint(); }
     catch (const std::exception& e) { std::cerr << "FAIL: " << e.what() << '\n'; return 1; }
     return galactic_test::failures ? 1 : 0;
 }

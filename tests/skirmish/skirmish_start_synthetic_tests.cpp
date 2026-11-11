@@ -1,4 +1,5 @@
 #include "skirmish_start_support.hpp"
+#include "../../apps/viewer/src/space_removed_records.hpp"
 #include "eawr/core/build_identity.hpp"
 #include "eawr/core/result.hpp"
 #include "eawr/core/diagnostic.hpp"
@@ -389,6 +390,31 @@ void synthetic_start() {
         return;
     }
     const auto& start = built.value();
+
+    // The new-marker ownership pass removes playable-owned pads but leaves a neutral pad live.
+    auto pad_inputs = synthetic_inputs(tables);
+    pad_inputs.placements.push_back(object(40, "Playable_Pad_A", "SpaceBuildable", 0, "Rebel", at(15, 15), 0));
+    pad_inputs.placements.push_back(object(41, "Playable_Pad_B", "SpaceBuildable", 1, "Empire", at(16, 16), 0));
+    auto pads = skirmish::build_start(fixture, pad_inputs);
+    expect(static_cast<bool>(pads), "new-marker pad fixture builds");
+    if (pads) {
+        namespace view = eawr::presentation::godot_backend;
+        for (const std::uint32_t record : {40U, 41U}) {
+            expect(view::removed_space_record(&pads.value(), record), "playable pad is removed before presentation");
+            eawr::scene::SpacePlacementDecision decision{};
+            decision.role = eawr::scene::SpaceRole::drawn;
+            expect(view::suppress_removed_space_placement(&pads.value(), record, decision), "removed pad is excluded");
+            expect(decision.role == eawr::scene::SpaceRole::not_drawable, "removed pad is not composed");
+        }
+        expect(!view::removed_space_record(&pads.value(), 6), "neutral control is not removed");
+        eawr::scene::SpacePlacementDecision neutral{};
+        neutral.role = eawr::scene::SpaceRole::drawn;
+        expect(!view::suppress_removed_space_placement(&pads.value(), 6, neutral)
+            && neutral.role == eawr::scene::SpaceRole::drawn, "neutral control remains eligible for composition");
+        expect(std::any_of(pads.value().units.begin(), pads.value().units.end(), [](const auto& unit) {
+            return unit.record == 6 && unit.role == skirmish::UnitRole::map_object;
+        }), "neutral pad remains a live map object");
+    }
 
     // MPS-6: domains can be extended by GC; order and worker scheduling are irrelevant.
     const auto identity = skirmish::match_identity(inputs);

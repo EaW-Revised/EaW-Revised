@@ -226,6 +226,7 @@ public:
         std::span<const sim::tactical::UpgradeProfile> upgrades,
         const std::map<sim::tactical::TypeId, std::string>& names);
     void set_world_hover(const std::optional<std::pair<std::uint64_t, std::string>>& hovered);
+    void set_production_hover(const EawrProductionPanel::Hover* hovered);
     void set_ability_hover(const std::string& type, std::uint32_t ability, std::size_t component);
     // #455 (docs/behaviour/foc-minimap.md): the command bar's minimap; null before build() or when the
     // shell has no radar mesh. Each frame the live battle hands it what the local player sees; the
@@ -273,7 +274,8 @@ public:
     void refresh_gift_layout();
     void set_beacon_handler(std::function<void()> handler);
     void set_beacon(bool enabled, bool targeting);
-    void set_movie_mode(bool on);
+    void set_movie_mode(bool on, bool immediate = false);
+    void advance_movie_bands(double delta);
     void set_order_mode(std::string_view active);
     void set_order_shortcut(std::string_view order, std::string_view caption);
     void set_special_weapon_handler(std::function<void()> handler);

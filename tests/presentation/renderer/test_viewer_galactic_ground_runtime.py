@@ -26,19 +26,115 @@ class GalacticGroundRuntime(unittest.TestCase):
     def capture(self, fixture="ground-contents", focused=True):
         return fleets.GalacticFleetRuntime.capture(self, fixture, focused)
 
-    def test_focused_planet_has_no_unplaced_ground_count(self):
+    def test_focused_planet_draws_the_base_layout_caption(self):
+        # Debug build Update_Organization_Display: the Text_Land_Fleet component's first text is TEXT_BASE_LAYOUT, the
+        # second is empty while the ground force size is visible; retail draws no landed-force digit there.
         data, capture = self.capture("ground-contents")
         self.assertTrue(data["fleet_hud"]["cards"])
+        # Stock mesh-backed fleet frame geometry from the pre-change focused fixture.
+        frame = next(row for row in data["fleet_hud"]["shell_geometry"] if row["name"] == "q1_frame")
+        for actual, expected in zip(frame["rect"], (150.625, 41.25, 328.125, 254.348)):
+            self.assertAlmostEqual(actual, expected, delta=0.1, msg="fleet frame placement changed")
+        card = next(row for row in data["fleet_hud"]["controls"] if row["name"] == "q1_0001")
+        for actual, expected in zip(card["rect"], (212.969, 64.2188, 40.3125, 40.3125)):
+            self.assertAlmostEqual(actual, expected, delta=0.1, msg="fleet card placement changed")
         self.assertTrue(data["ground_hud"]["widgets"])
         hud = data["ground_hud"]
-        self.assertTrue(hud["count_visible"], "retail ground count must remain visible")
-        self.assertTrue(hud["count"].isdigit() and int(hud["count"]) > 0, hud)
-        x, y, width, height = hud["count_rect"]
+        self.assertTrue(hud["caption"]["visible"], hud)
+        self.assertEqual(hud["caption"]["text"], "BASE LAYOUT", hud)
+        self.assertFalse(hud["unknown"]["visible"], "the size is visible, so no UNKNOWN line")
+        x, y, width, height = hud["caption"]["rect"]
         self.assertGreater(x, 32, hud)
         self.assertGreater(y, 32, hud)
         self.assertLess(x + width, 1280, hud)
         self.assertLess(y + height, 720, hud)
         self.assertTrue(capture.is_file())
+
+    def test_bone_only_focused_buttons_are_visible(self):
+        # GHUD-S98: both buttons are attached to shell bones, including when no mesh exists.
+        directory = pathlib.Path(tempfile.mkdtemp(prefix="eawr-focused-buttons-"))
+        report, probe, capture, driver = (directory / name for name in
+            ("report.json", "buttons.json", "focused.png", "input.gd"))
+        driver.write_text('''extends SceneTree
+var elapsed = 0.0
+var frame = 0
+func _initialize(): call_deferred("_start")
+func _start():
+    var instance = load(ProjectSettings.get_setting("application/run/main_scene")).instantiate()
+    root.add_child(instance)
+    current_scene = instance
+func _process(delta):
+    elapsed += delta
+    if elapsed < 2.0: return false
+    frame += 1
+    if frame == 120:
+        var rows = {}
+        for name in ["advanced_planetary", "planet_info", "base_layout_caption"]:
+            var found = root.find_children(name, "Control", true, false)
+            if not found.is_empty():
+                var node = found[0]
+                var rect = node.get_global_rect()
+                rows[name] = {"visible": node.is_visible_in_tree(), "rect": [rect.position.x, rect.position.y, rect.size.x, rect.size.y]}
+        var file = FileAccess.open(%s, FileAccess.WRITE)
+        file.store_string(JSON.stringify(rows))
+        file.close()
+        root.get_texture().get_image().save_png(%s)
+        current_scene.propagate_notification(Node.NOTIFICATION_WM_CLOSE_REQUEST)
+        quit()
+    return false
+''' % (json.dumps(probe.as_posix()), json.dumps(capture.as_posix())), encoding="utf-8")
+        result = subprocess.run([os.environ["EAWR_GODOT_EXECUTABLE"], "--resolution", "1280x720",
+            "--path", str(support.ROOT / "apps/viewer/project"), "--script", str(driver), "--",
+            "--eawr-galactic", "synthetic", "--eawr-galactic-hud-fixture", "ground-contents",
+            "--eawr-galactic-focus", "101", "--eawr-galactic-flight-ms", "750",
+            "--eawr-game-root", support.GAME_ROOT, "--eawr-galactic-paused", "yes",
+            "--eawr-report", str(report)], cwd=support.ROOT, capture_output=True, text=True, timeout=300, check=False)
+        (directory / "viewer.log").write_text(result.stdout + result.stderr, encoding="utf-8")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue(probe.is_file(), result.stdout + result.stderr)
+        rows = json.loads(probe.read_text(encoding="utf-8"))
+        for name in ("advanced_planetary", "planet_info"):
+            self.assertIn(name, rows)
+            self.assertTrue(rows[name]["visible"], rows)
+            self.assertGreater(rows[name]["rect"][2], 0, rows)
+            self.assertGreater(rows[name]["rect"][3], 0, rows)
+        self.assertIn("base_layout_caption", rows)
+        button = rows["advanced_planetary"]["rect"]
+        caption = rows["base_layout_caption"]["rect"]
+        # Read the gold horizontal border from the rendered stock texture. The
+        # longest run is the bar, excluding the separate round magnifier.
+        from tests.presentation.renderer.space_map_test_support import decode_png
+        image_width, image_height, pixels = decode_png(capture.read_bytes())
+        x0 = max(0, int(button[0]))
+        x1 = min(image_width, int(button[0] + button[2] + 1))
+        y0 = max(0, int(button[1]))
+        y1 = min(image_height, int(button[1] + button[3] + 1))
+        runs = []
+        for y in range(y0, y1):
+            start = None
+            for x in range(x0, x1 + 1):
+                r, g, b = pixels[y][x] if x < x1 else (0, 0, 0)
+                gold = r > 130 and g > 95 and b < 90 and r > g * 1.05
+                if gold and start is None:
+                    start = x
+                elif not gold and start is not None:
+                    runs.append((x - start, start, x))
+                    start = None
+        self.assertTrue(runs, "stock Base Layout bar border is missing")
+        length, left, right = max(runs)
+        self.assertGreater(length, button[2] / 2, "longest gold run must be the bar border")
+        bar_centre = (left + right - 1) / 2
+        self.assertAlmostEqual(bar_centre, caption[0] + caption[2] / 2, delta=2.0,
+            msg="stock Base Layout bar and caption align")
+        self.assertTrue(capture.is_file())
+
+    def test_unseen_ground_force_size_reads_unknown(self):
+        data, _ = self.capture("ground-unseen")
+        hud = data["ground_hud"]
+        self.assertTrue(hud["caption"]["visible"], hud)
+        self.assertEqual(hud["caption"]["text"], "BASE LAYOUT", hud)
+        self.assertTrue(hud["unknown"]["visible"], hud)
+        self.assertEqual(hud["unknown"]["text"], "UNKNOWN", hud)
 
     @staticmethod
     def center(row):

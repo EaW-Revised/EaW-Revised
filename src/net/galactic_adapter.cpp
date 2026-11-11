@@ -172,16 +172,21 @@ core::Result<void> GalacticSessionAdapter::restore_network_state(std::span<const
     };
     const auto invalid = [] { return fail_with<void>(session_errors::options, "invalid saved campaign clock continuation"); };
     std::uint64_t policy{}, window{}, limit{}, present{}, actor{}, count{};
+    // #5355: a continuation saved under older shared-clock constants (such as #4574's 6 changes per 1,350 ticks) still
+    // resumes. Its per-seat speed history is read against the saved limit and then dropped: it is throttle state only,
+    // never campaign state, and every peer restores the same agreed bytes. Policy, pause actor and debounce stay.
+    constexpr std::uint64_t legacy_limit_max = 64;
     if (!read_word(policy, 1) || policy != static_cast<std::uint8_t>(options_.clock_policy)
-        || !read_word(window, 8) || window != GalacticClockLimiter::window_ticks
-        || !read_word(limit, 4) || limit != GalacticClockLimiter::changes_per_window
+        || !read_word(window, 8) || !window
+        || !read_word(limit, 4) || !limit || limit > legacy_limit_max
         || !read_word(present, 1) || present > 1 || !read_word(actor, 4) || (!present && actor)
         || (present && !seat(sim::SeatId{static_cast<std::uint32_t>(actor)}))
         || !read_word(count, 4) || count > roster_.size()) return invalid();
+    const bool legacy = window != GalacticClockLimiter::window_ticks || limit != GalacticClockLimiter::changes_per_window;
     GalacticClockLimiter::History history; GalacticClockLimiter::Toggles toggles;
     for (std::uint64_t i = 0; i < count; ++i) {
         std::uint64_t id{}, length{};
-        if (!read_word(id, 4) || !read_word(length, 4) || !length || length > GalacticClockLimiter::changes_per_window) return invalid();
+        if (!read_word(id, 4) || !read_word(length, 4) || !length || length > limit) return invalid();
         const sim::SeatId key{static_cast<std::uint32_t>(id)};
         if (!seat(key) || (!history.empty() && key <= history.rbegin()->first)) return invalid();
         auto& row = history[key];
@@ -201,8 +206,10 @@ core::Result<void> GalacticSessionAdapter::restore_network_state(std::span<const
     }
     if (!bytes.empty() || (options_.clock_policy == GalacticClockPolicy::unrestricted && (!history.empty() || !toggles.empty() || present)))
         return invalid();
+    if (legacy) history.clear();
     clock_limiter_.restore(std::move(history), std::move(toggles));
     pause_actor_ = present ? std::optional{sim::SeatId{static_cast<std::uint32_t>(actor)}} : std::nullopt;
+    if (legacy) return core::Result<void>::success(); // re-encoded with the current constants from here on
     const auto canonical = clock_state();
     if (!std::equal(canonical.begin(), canonical.end(), original.begin(), original.end())) return invalid();
     return core::Result<void>::success();

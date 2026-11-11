@@ -105,5 +105,8 @@ def install_manager(kit: Path, service: Path, artifact: Path | None = None,
     pin = install(kit / "launcher", artifact, pin_path)
     shutil.copyfile(service, kit / "eawr_mods_service.exe")
     shutil.copyfile(helper, kit / "eawr_loadcheck.exe")
-    (kit / "launcher-pin.json").write_text(json.dumps(pin, indent=2) + "\n", encoding="utf-8")
+    # CRLF on every host: kits cut on the Windows pool always had it (text mode translated the newlines there), and writing it
+    # explicitly makes a kit cut on another host byte-equal.
+    with (kit / "launcher-pin.json").open("w", encoding="utf-8", newline="\r\n") as stream:
+        stream.write(json.dumps(pin, indent=2) + "\n")
     return pin

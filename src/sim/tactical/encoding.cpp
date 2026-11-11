@@ -14,6 +14,8 @@ std::string_view to_string(const OrderKind kind) noexcept {
     switch (kind) {
     case OrderKind::battle_control: return "battle_control";
     case OrderKind::script_invulnerable: return "script_invulnerable";
+    case OrderKind::land_garrison: return "land_garrison";
+    case OrderKind::land_unload: return "land_unload";
     case OrderKind::gift: return "gift";
     case OrderKind::none:
         return "none";
@@ -190,6 +192,8 @@ std::size_t payload_prefix_size(const std::uint8_t opcode) noexcept {
     case opcode_attack_hardpoint:
     case opcode_manual_target:
     case opcode_special_fire:
+    case opcode_land_garrison:
+    case opcode_land_unload:
         return 16;
     case opcode_gift: // ADR-020: recipient seat and reserved word
     case opcode_script_invulnerable: // TL-03: enabled flag and zero reserved word
@@ -220,6 +224,8 @@ std::size_t payload_prefix_size(const std::uint8_t opcode) noexcept {
 }
 
 std::uint8_t command_opcode(const PlayerCommand& command) noexcept {
+    if (std::holds_alternative<LandGarrisonPayload>(command.payload)) return opcode_land_garrison;
+    if (std::holds_alternative<LandUnloadPayload>(command.payload)) return opcode_land_unload;
     if (std::holds_alternative<BattleControlPayload>(command.payload)) return opcode_battle_control;
     if (std::holds_alternative<ScriptInvulnerablePayload>(command.payload)) return opcode_script_invulnerable;
     if (std::holds_alternative<GiftPayload>(command.payload)) return opcode_gift;
@@ -332,7 +338,15 @@ void append_command(std::vector<std::uint8_t>& bytes, const PlayerCommand& comma
     bytes.push_back(command_opcode(command));
     bytes.push_back(0);
     sim::detail::append_u16(bytes, 0);
-    if (const auto* control = std::get_if<BattleControlPayload>(&command.payload)) {
+    if (const auto* garrison = std::get_if<LandGarrisonPayload>(&command.payload)) {
+        sim::detail::append_u64(bytes, garrison->host);
+        sim::detail::append_u32(bytes, garrison->bone);
+        sim::detail::append_u32(bytes, 0);
+    } else if (const auto* unload = std::get_if<LandUnloadPayload>(&command.payload)) {
+        sim::detail::append_u64(bytes, unload->occupant);
+        sim::detail::append_u32(bytes, unload->all ? 1U : 0U);
+        sim::detail::append_u32(bytes, 0);
+    } else if (const auto* control = std::get_if<BattleControlPayload>(&command.payload)) {
         sim::detail::append_u32(bytes, control->departed.value);
         append_controller_policy(bytes, control->policy, 4);
     } else if (const auto* invulnerable = std::get_if<ScriptInvulnerablePayload>(&command.payload)) {
@@ -494,6 +508,14 @@ core::Result<void> validate_command_shape(
         return core::Result<void>::failure(diagnostic(diagnostic_codes::resource_limit,
             std::string(context) + ": unit list exceeds the per-command limit", logical_path));
     }
+    if (const auto* garrison = std::get_if<LandGarrisonPayload>(&command.payload);
+        garrison && garrison->host == invalid_entity_id)
+        return core::Result<void>::failure(diagnostic(diagnostic_codes::invalid_command,
+            std::string(context) + ": garrison requires a host", logical_path));
+    if (const auto* unload = std::get_if<LandUnloadPayload>(&command.payload);
+        unload && (command.units.size() != 1 || unload->all != (unload->occupant == invalid_entity_id)))
+        return core::Result<void>::failure(diagnostic(diagnostic_codes::invalid_command,
+            std::string(context) + ": unload requires one host and either one occupant or all", logical_path));
     if (const auto* control = std::get_if<BattleControlPayload>(&command.payload)) {
         if (command.origin != CommandOrigin::engine || command.issuing_seat.value != 0
             || control->departed.value == 0 || !command.units.empty()
@@ -609,7 +631,7 @@ core::Result<void> validate_command_shape(
         const bool aims = (ability->ability == AbilityKind::ion_cannon_shot
             || ability->ability == AbilityKind::concentrate_fire || ability->ability == AbilityKind::energy_weapon
             || ability->ability == AbilityKind::tractor_beam || ability->ability == AbilityKind::leech_shields
-            || ability->ability == AbilityKind::super_laser)
+            || ability->ability == AbilityKind::super_laser || ability->ability == AbilityKind::lucky_shot)
             && ability->action == AbilityAction::activate;
         if (aims != (ability->target != invalid_entity_id)
             || (ability->target == invalid_entity_id && ability->target_hardpoint != 0xffffffffU)) {

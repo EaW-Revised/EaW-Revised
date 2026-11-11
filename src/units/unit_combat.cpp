@@ -762,6 +762,22 @@ core::Result<tactical::CombatTable> combat_table(const UnitTables& tables, const
         }
     }
 
+    std::map<std::size_t, std::map<tactical::TypeId, std::uint32_t>> lucky_override;
+    for (std::size_t index = 0; index < tables.units.size(); ++index) {
+        const auto& holder = tables.units[index];
+        if (!type_selection.keeps(holder)) continue;
+        const auto& authored = holder.kind == UnitKind::squadron ? holder.team_abilities : holder.abilities;
+        for (const auto& ability : authored) {
+            if (!same_name(ability.type, "LUCKY_SHOT") || ability.projectile_index == no_index) continue;
+            if (holder.kind != UnitKind::squadron) lucky_override[index].insert_or_assign(assets::object_type_crc(holder.id), ability.projectile_index);
+            else for (const auto& member : holder.members) {
+                if (member.craft_index >= tables.units.size()) continue;
+                const auto* winner = type_selection.find(tables.units[member.craft_index].id);
+                if (winner) lucky_override[static_cast<std::size_t>(winner - tables.units.data())].insert_or_assign(assets::object_type_crc(holder.id), ability.projectile_index);
+            }
+        }
+    }
+
     // space-targeting R-01: Hardpoint_Recharge_Cutoff_For_Opportunity_Fire. A mod without the tag
     // forces nothing.
     std::optional<Fixed> opportunity_cutoff;
@@ -826,6 +842,22 @@ core::Result<tactical::CombatTable> combat_table(const UnitTables& tables, const
             return phase_error;
         if (auto phase_error = append_object_combat_weapon(unit, profile, place, weapon_profile, shot_profile, barrage_projectile))
             return phase_error;
+        if (const auto lucky = lucky_override.find(unit_index); lucky != lucky_override.end()
+            && !unit.abilities.empty() && same_name(unit.abilities.front().type, "LUCKY_SHOT")) {
+            for (auto& weapon : profile.weapons) {
+                const auto* authored = weapon.hardpoint == tactical::object_weapon ? (unit.weapon ? &*unit.weapon : nullptr)
+                    : weapon.hardpoint < unit.hardpoints.size() && unit.hardpoints[weapon.hardpoint].weapon
+                        ? &*unit.hardpoints[weapon.hardpoint].weapon : nullptr;
+                if (!authored) continue;
+                for (const auto& [holder, projectile] : lucky->second) {
+                    auto swapped = *authored;
+                    swapped.projectile_index = projectile;
+                    auto shot = shot_profile(swapped, weapon.hardpoint != tactical::object_weapon);
+                    if (!shot) return shot.error();
+                    weapon.lucky_shots.push_back({holder, std::move(shot).value()});
+                }
+            }
+        }
         if (auto phase_error = append_combat_collision_geometry(unit, profile, place))
             return phase_error;
         if (shot_profile.notes != nullptr && profile.collision) {

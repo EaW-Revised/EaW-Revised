@@ -174,8 +174,11 @@ that also works when the window system cannot report a refresh rate. Existing sa
 are retained, including Off. Files without the field acquire 120 without replacing other settings.
 
 Front-end menus, setup and their demo battle use at most 60 FPS; unfocused or minimized
-windows use at most 30. The lower of these limits, the selected cap and the display refresh
-when vsync is enabled wins. Display refresh falls back to 60 when unavailable. Positive
+windows use at most 30. The lower of these limits and the selected cap wins. With vsync enabled,
+Off, Display refresh rate or a cap within 3% of the refresh rate limits to the refresh rate rounded up
+(119.88 Hz gives 120, never 119, which would repeat a refresh about every 1.1 s); a cap clearly below
+the refresh stays as chosen. Display refresh falls back to 60 when unavailable; with vsync, Off then
+still limits to 60 (an explicit cap is kept), so a vsync loop is never unlimited. Positive
 hand-edited limits below 30 use 30 at runtime. Vsync uses FIFO presentation. Changes take
 effect at runtime and unchanged effective caps do not call the engine setter again.
 The 30 Hz simulation advances from elapsed time independently of presentation pacing.
@@ -248,3 +251,10 @@ join both selections; an action's optional Include_Heroes (Yes by default) set t
 out. Structures and decorations stay excluded. Audio uses normal SFX Play_Sequentially, Is_HUD_VO and Localize policies.
 
 The built-in Revised data layer uses `revised_layer_enabled` (0 or 1, default 1 when absent) and an optional `revised_layer_path` development override in the same settings file (for example `revised_layer_path=<workspace>/eawr-layers/Revised`); it names the folder containing `Data`. Service changes apply on the next start, and the launcher disables the switch while a game runs.
+
+**Fit radar to galaxy** (WGUI-177, owner decision) (legacy EAWR-5967) is a default-off checkbox
+in Options > Tweaks, stored as `gameplay.fit_radar_to_galaxy`. Apply/Accept saves
+it, Cancel discards edits and Defaults switches it off. It expands the galactic
+radar from the loaded planet positions; retail's fixed frame remains the default.
+This is an optional presentation deviation for large mod galaxies, shared by the
+normal and advanced radar and their click transforms.

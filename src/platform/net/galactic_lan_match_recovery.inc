@@ -107,6 +107,7 @@ void quarantine_live_recovery(RecoveryRefusal reason) {
     const std::lock_guard lock(mutex_);
     view_.phase = GalacticLanPhase::ended; view_.reason = GalacticLanReason::local_left;
     view_.message = "Recovery could not publish this peer; the surviving campaign continues.";
+    view_.recovery_ended = true;
 }
 bool recovery_send_control(const net::GalacticRecoveryControl& control, bool all) {
     const auto bytes = net::encode_galactic_recovery_control(control);

@@ -32,8 +32,9 @@ struct GalacticSetupPayload {
     friend bool operator==(const GalacticSetupPayload&, const GalacticSetupPayload&) = default;
 };
 
-// Canonical payload (little-endian): "GCSU", version:u32 = 2, campaign:text, difficulty:text, custom:u8,
-// credits/start tech/max tech:u64, allow heroes:u8, command quota:u32, byte quota:u32, factions (count:u32; player,
+// Canonical payload (little-endian): "GCSU", version:u32 = 3, campaign:text, difficulty:text, custom:u8,
+// credits/start tech/max tech:u64, allow heroes:u8, vote timeout seconds:u32 (0: the campaign's own constant; a lobby
+// always agrees a value, #6156), command quota:u32, byte quota:u32, factions (count:u32; player,
 // faction id, flags:u32, name:text, active:u8, dropout:u8, AI configuration:blob), seats (count:u32; seat, player:u32,
 // kind:u8, lobby slot:u32, active:u8, side:u32), leads (count:u32; side, lead:u32, observer AI:u8), tick-zero claim:32.
 [[nodiscard]] core::Result<std::vector<std::uint8_t>> encode_galactic_setup(const GalacticSetupPayload& payload);

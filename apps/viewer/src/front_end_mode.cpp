@@ -17,6 +17,7 @@
 #include "ui/load_game_view.hpp"
 #include "skirmish_setup_mode.hpp"
 #include "viewer_path.hpp"
+#include "viewer_mounted_mods.hpp"
 #include "ui/dialog_builder.hpp"
 #include "ui/font_provider.hpp"
 #include "ui/kit.hpp"
@@ -658,13 +659,12 @@ bool FrontEndMode::State::build() {
 // the whole screen; the demo battle behind it is the AttractRunner's (sync_attract), and the
 // backdrop turns transparent while it runs.
 void FrontEndMode::State::load_overlay() {
-    auto document = data::load_document(*resources.filesystem, "data/xml/gameconstants.xml");
-    if (!document) {
-        notes.push_back("game constants: " + core::format_diagnostic(document.error()) + "; no menu overlay");
+    if (!resources.game_constants) {
+        notes.push_back("game constants unavailable; no menu overlay");
         return;
     }
     std::string name;
-    for (const data::XmlNode& node : document.value().root.children) {
+    for (const data::XmlNode& node : resources.game_constants->children) {
         if (!same(node.name, "Localized_Menu_Overlay")) continue;
         const auto comma = node.raw_text.find(',');
         if (comma == std::string::npos) continue;
@@ -835,6 +835,19 @@ void FrontEndMode::State::show_screen() {
         context.store = ViewerPath{utf8(OS::get_singleton()->get_user_data_dir())}.native() / "replays";
         context.saves = std::make_shared<viewer::DirectorySavedGameStore>(save_directory());
         context.launcher = [this](const model::SavedGameRequest& request) { return restore_saved(request); };
+        context.review_ready = [] { return mounted_mods_ready(); };
+        context.review_wait_lease = [] { return mods::ContentDigests::screen_wait_lease(); };
+        context.review_progress = [] {
+            const auto progress = mounted_mods_progress();
+            return progress.files_total == 0 ? std::string("reading mod folders")
+                : std::to_string(progress.files_done) + " of " + std::to_string(progress.files_total) + " mod files hashed";
+        };
+        context.review_save = [](const model::SavedGameRequest& request) {
+            const auto mounted = mounted_mod_description().value_or(mods::ModDescription{});
+            return std::async(std::launch::async, [request, mounted] {
+                return viewer::saved_game_mod_prompt(request, mounted);
+            });
+        };
         load_screen = memnew(EawrLoadGameScreen);
         load_id = static_cast<int64_t>(load_screen->get_instance_id());
         if (!load_screen->open(*host, context)) {
@@ -1419,6 +1432,25 @@ std::optional<int> FrontEndMode::State::run_battle_test() {
     };
     using S = model::FrontEndScreen;
     if (!battle_started) {
+        if (options.load_battle_test) {
+            switch (frames) {
+            case 8: press_gadget(S::main_menu, "IDC_LOAD_GAME_MAIN"); break;
+            case 24:
+                if (auto* list = load_screen ? Object::cast_to<ItemList>(load_screen->gadget("IDC_SAVE_GAME_LIST")) : nullptr;
+                    list && list->get_item_count() > 0)
+                    click(list->get_global_position() + list->get_item_rect(0).get_center());
+                else return 2;
+                break;
+            case 36:
+                if (auto* button = load_screen ? load_screen->gadget("IDC_LOAD_GAME_BUTTON") : nullptr) {
+                    click(button->get_global_rect().get_center());
+                    battle_started = true;
+                } else return 2;
+                break;
+            default: break;
+            }
+            return std::nullopt;
+        }
         switch (frames) {
         case 8: press_gadget(S::main_menu, "IDC_MAIN_MENU_SINGLE_PLAYER_GAMES"); break;
         case 16: press_gadget(S::single_player, "IDC_SKIRMISH_GAMES_BUTTON"); break;
@@ -1487,6 +1519,7 @@ FrontEndMode::Options FrontEndMode::from_command_line(const std::filesystem::pat
         if (argument == "--eawr-settings-file" && i + 1 < arguments.size()) options.settings_file = ViewerPath{utf8(arguments[i + 1])}.native();
         if (argument == "--eawr-front-end-test-quit-open") options.quit_with_options_open = true;
         if (argument == "--eawr-front-end-test-battle") options.battle_round_trip = true;
+        if (argument == "--eawr-front-end-test-load-battle") { options.battle_round_trip = true; options.load_battle_test = true; }
         if (argument == "--eawr-front-end-test-start") options.start_battle = true;
         if (argument == "--eawr-front-end-test-campaign" && i + 1 < arguments.size())
             options.campaign_test = utf8(arguments[i + 1]);
@@ -1593,6 +1626,10 @@ void FrontEndMode::return_to_main_menu() {
     // The Escape that closed the in-game menu is not a press on the main menu (which quits).
     state.escape_was_down = true;
     UtilityFunctions::print("EAWR front end returned to the main menu");
+}
+
+void FrontEndMode::show_load_failure(const std::string& reason) {
+    state_->show_notice("TEXT_BUTTON_LOAD_GAME", reason);
 }
 
 bool FrontEndMode::owns_frame() const {

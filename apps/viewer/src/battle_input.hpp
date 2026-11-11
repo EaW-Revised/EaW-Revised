@@ -179,6 +179,11 @@ public:
     // point as a right click on empty space does (MM-11). True when an order was issued.
     void follow_waypoint_lighting(const GodotRenderer& renderer) { world_ui_->follow_waypoint_lighting(renderer); }
     [[nodiscard]] bool selected(sim::EntityId entity) const { return selection_.contains(entity); }
+    [[nodiscard]] std::optional<sim::EntityId> hovered_subject() const {
+        if (!hovered_ || *hovered_ >= units_.size()) return std::nullopt;
+        const auto& unit = units_[*hovered_];
+        return unit.part ? unit.part : unit.entity;
+    }
     [[nodiscard]] std::optional<std::array<std::array<double, 2>, 4>> ground_corners(double height) const;
     bool minimap_move(double x, double y, bool double_click, LiveSessionView& live);
     // OF-01: one local presentation acknowledgement for an admitted destination order.

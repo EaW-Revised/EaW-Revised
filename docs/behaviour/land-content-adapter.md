@@ -12,10 +12,11 @@ or appends its output to content identity.
 | `OverrideAcceleration`, `OverrideDeceleration` | Separate physical rates, multiplied by the same scalar and the square of the logical frame rate. An absent or negative override uses raw maximum speed. | MV-01 shared accessor fallback; LR3-14; LR13-23/25; LSL-09 |
 | `Max_Rate_Of_Turn` | Degrees per frame become turns per second after the speed scalar and logical frame rate, then division by 360. Absent is the type default 2.3; zero never turns. | Shared MV-01 units; LR13-23; LSL-02/03 |
 | `Custom_Soft_Footprint_Radius`, `Land_Model_Name`, `Scale_Factor` | A positive authored custom radius, or otherwise the maximum collision-bound XY half extent, multiplied by the scale's magnitude (absent scale 1.0). Missing model geometry with no positive radius refuses the binding. This supplies WLPA-06/14's soft footprint, not a guessed unit-class radius. | WLPA-06/14; shared AV-05 geometry; LSL-02/04/10 |
+| `Min_Speed_Fraction_For_Turn`, `Close_Enough_Angle_For_Move_Start` | The fraction is carried clamped to 0..1 (absent or negative: 0, never stop to turn); the angle is degrees over 360 as turns, and an absent or non-positive value is the game constant, stock 180 degrees (hard-coded: the constants file is not read yet). Land movement reads both (WLPA-90/91). | WLPA-90/91 |
 | `FormationSpacing` | Absent spacing contributes zero additional spacing. Member hard extents remain in landing slots; absent hard geometry retains a named refusal instead of borrowing the soft radius; the first member's spacing is kept separately from team-type and per-member spacing. Session placement applies the code factor 20 once. | LC-79/80; WLPA-24/27 |
 | `MovementClass`, `MovementClassType/*` | Memberships are loaded from the engine's movement-class table through the VFS winner. Each named admitted passability resolves through the explicit raw-bit input; their union is the class mask. Member aliases differing only in case retain exact lookup names. | WLPA-01..11 |
 | `UnitCollisionClass` | The authored name decodes against the engine-fixed set of eleven class names (absent = None; an unknown name refuses the member). The decoded class is copied onto the member locomotion profile, and its ordering rank still resolves through an explicit independent input and is copied into the live member. It never supplies terrain bits. | WLPA-35, WLPA-73..75; LR3-10 |
-| `Walk_Transition` | Selects the live member's start/stop transition mode; animation completion remains an authoritative external gate. | LR13-17/18 |
+| `Walk_Transition`, `Movement_Animation_Speed`, the `MOVESTART` clip | Selects the live member's start/stop transition mode. The loader reads the member model's first `MOVESTART` clip (frame count, frame rate); the adapter turns it into the profile's start wait in whole logical frames (frame count minus 2 frames at the clip rate times `Max_Speed / Movement_Animation_Speed`, rounded up, one short), so the walk starts when the clip is almost finished (a model with no clip has none to wait for). The stop transition completion remains an authoritative external gate. | LR13-17/18 |
 
 These rules reuse the cited behaviour and research rows; they do not establish a
 new retail timing or raw enum assignment. The engine table path is a schema
@@ -65,8 +66,8 @@ formation's terrain-contact stall remains a named unresolved case.
 Every loaded stock company is attempted individually by the installed test and
 produces either a binding or a printed named refusal. Authored 1v1 and 4v4 starts
 run 300 move ticks with equality on 1/2/4/8 workers and reversed partitions.
-Walk-transition units still require the live animation gate producer; this
-content-loading test does not fabricate clip completion.
+Walk-transition units start through the `MOVESTART` clip clock of the movement (docs/behaviour/land-local-movement.md);
+the stop transition still requires a live gate producer, and this content-loading test does not fabricate clip completion.
 
 ## Static scene roots
 

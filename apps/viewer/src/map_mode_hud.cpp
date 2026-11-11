@@ -1,5 +1,8 @@
 #include "eawr/core/load_profile.hpp"
 #include "eawr/vfs/vfs.hpp"
+#include "eawr/data/xml.hpp"
+#include "eawr/data/tag_trace.hpp"
+#include "eawr/core/text.hpp"
 // The tactical HUD over a map (P2-20a, #83): `--eawr-hud tactical` draws the
 // space HUD shell for `--eawr-hud-faction <empire|rebel|underworld>` (default
 // rebel), laid out by `--eawr-hud-rules <aspect|retail>` (default aspect, D4).
@@ -33,6 +36,8 @@
 
 #include <array>
 #include <chrono>
+#include <charconv>
+#include <cctype>
 #include <cmath>
 #include <limits>
 #include <optional>
@@ -52,6 +57,26 @@ namespace {
 
 [[nodiscard]] double to_double(const sim::math::Fixed value) {
     return static_cast<double>(value.raw()) / static_cast<double>(sim::math::Fixed::scale);
+}
+
+[[nodiscard]] std::array<float, 7> battlecam_weights(const vfs::Vfs& filesystem) {
+    std::array<float, 7> result{1, 1, 1, 1, 1, 1, 1};
+    constexpr std::array<std::string_view, 7> names{"Saliency_Size", "Saliency_Power", "Saliency_X",
+        "Saliency_Y", "Saliency_Health", "Saliency_Targets", "Saliency_Speed"};
+    if (const auto xml = data::load_document(filesystem, "data/xml/gameconstants.xml")) {
+        for (const auto& node : xml.value().root.children) for (std::size_t i = 0; i < names.size(); ++i) {
+            if (!core::iequals(node.name, names[i])) continue;
+            data::tag_trace::used(&node);
+            std::string_view value = node.raw_text;
+            while (!value.empty() && std::isspace(static_cast<unsigned char>(value.front()))) value.remove_prefix(1);
+            while (!value.empty() && std::isspace(static_cast<unsigned char>(value.back()))) value.remove_suffix(1);
+            if (!value.empty() && (value.back() == 'f' || value.back() == 'F')) value.remove_suffix(1);
+            float parsed{};
+            const auto [end, error] = std::from_chars(value.data(), value.data() + value.size(), parsed);
+            if (error == std::errc{} && end == value.data() + value.size() && std::isfinite(parsed)) result[i] = parsed;
+        }
+    }
+    return result;
 }
 
 } // namespace
@@ -263,6 +288,8 @@ bool MapMode::State::open_game_menu() {
             screen_options.save_game = [this](const std::string& name, const bool overwrite) {
                 return save_battle(name, overwrite);
             };
+            screen_options.load_directory = player_save_directory();
+            screen_options.load_game = options.battle_load;
         }
         if (!screen->build(std::move(screen_options))) {
             UtilityFunctions::printerr("EAWR in-game menu: ", String::utf8(screen->failure().c_str()));
@@ -300,6 +327,9 @@ bool MapMode::State::save_battle(const std::string& name, const bool overwrite) 
                                                   controller.yaw_degrees()};
     }
     hints.label = std::filesystem::path(options.map_path).stem().string();
+    const auto scoring = live_session->save_scoring();
+    if (scoring) hints.scoring = scoring.value();
+    else UtilityFunctions::printerr("EAWR battle scoring save: ", String::utf8(core::format_diagnostic(scoring.error()).c_str()));
     const bool begun = live_session->save_game(player_save_directory(), name, overwrite,
                                                  eawr::viewer::encode_skirmish_save_hints(hints));
     UtilityFunctions::print("EAWR battle save requested: ", String::utf8(name.c_str()), "; started ", begun);
@@ -337,6 +367,8 @@ std::optional<std::array<float, 2>> MapMode::State::game_menu_point(const std::s
     const char* gadget = name == "menu_resume" ? "IDC_GAME_OPTIONS_RESUME" : name == "menu_options" ? "IDC_INGAME_OPTIONS"
         : name == "menu_quit" ? "IDC_GAME_OPTIONS_QUIT" : name == "menu_yes" ? "yes" : name == "menu_no" ? "no"
         : name == "menu_back" ? "IDC_OK_IN_GAME" : name == "menu_save" ? "IDC_SAVE_GAME"
+        : name == "menu_load" ? "IDC_LOAD_GAME" : name == "menu_load_first" ? "load_first"
+        : name == "menu_load_button" ? "load_button"
         : name == "menu_save_first" ? "IDC_SAVE_GAME_LIST#0" : name == "menu_save_button" ? "IDC_SAVE_GAME_BUTTON" : nullptr;
     if (gadget == nullptr) return std::nullopt;
     const auto point = game_menu->control_point(gadget);
@@ -395,7 +427,7 @@ bool MapMode::State::build_hud(Node3D& host, const std::optional<std::string>& c
         // BE-06: LAN currently has no replay-permission setting; assume allowed.
         hud->set_replay_writer(live->multiplayer(), [live](std::string& error) { return live->finished_replay_bytes(error); },
             [live](std::string& error) { return live->finished_session_replay_bytes(error); });
-        hud->set_movie_handler([this] { if (space) set_movie_mode(!space->live_camera_movie()); });
+        hud->set_movie_handler([this] { if (space) set_movie_mode(true); });
         hud->set_time_handlers({[live] { live->press_pause(); }, [live] { live->press_fast_forward(); },
                                 [live] { live->resume(); }, [live] { live->quit(); }});
         // The options button (tooltip TEXT_BUTTON_MAIN_MENU) opens the in-game menu, as Escape does.
@@ -563,6 +595,9 @@ void MapMode::State::fill_type_names() {
 
 void MapMode::State::sync_cards() {
     if (!hud || !battle) return;
+    const auto* production_hover = hud->shell_shown() && hud->production()
+        ? hud->production()->hovered_entry() : nullptr;
+    hud->set_production_hover(production_hover);
     if (live_session) {
         const auto research = live_session->team_research_view();
         // Name lookup is shared with production; no unit/world census for the dock.
@@ -624,7 +659,7 @@ void MapMode::State::sync_cards() {
     }
     const bool dock_hover = hud->team_dock_hovered();
     bool ability_hover{};
-    if (auto* abilities = hud->ability_buttons(); abilities && hud->shell_shown() && !dock_hover) {
+    if (auto* abilities = hud->ability_buttons(); abilities && hud->shell_shown() && !dock_hover && !production_hover) {
         if (const auto index = abilities->hovered_button()) {
             const auto& button = abilities->bar().buttons[*index];
             if (!button.units.empty()) {
@@ -639,7 +674,7 @@ void MapMode::State::sync_cards() {
             }
         }
     }
-    if (hud->unit_cards() && !ability_hover && !dock_hover) {
+    if (hud->unit_cards() && !ability_hover && !dock_hover && !production_hover) {
         const auto hovered = hud->shell_shown() ? battle->encyclopedia_unit() : std::nullopt;
         const auto identity = hovered ? std::optional(std::pair{hovered->entity, hovered->type}) : std::nullopt;
         if (identity != encyclopedia_world_hover || encyclopedia_ui_hover) {
@@ -649,7 +684,7 @@ void MapMode::State::sync_cards() {
                 ? std::optional(std::pair{static_cast<std::uint64_t>(hovered->entity), name->second}) : std::nullopt);
         }
     }
-    encyclopedia_ui_hover = ability_hover || dock_hover;
+    encyclopedia_ui_hover = ability_hover || dock_hover || production_hover != nullptr;
 }
 
 void MapMode::State::sync_production() {
@@ -669,9 +704,11 @@ void MapMode::State::sync_production() {
     view.notifications = live.reinforcement_notifications();
     view.notification_seconds = live.reinforcement_notification_tick() / sim::tactical::logical_frames_per_second;
     // Land reinforcement drops are not wired yet: the pane stays inert there.
-    view.reinforcement_allowed = live.reinforcement_allowed() && overview_ui.tactical_shell && !land_population;
+    const bool movie = space && space->live_camera_movie();
+    view.reinforcement_allowed = presentation::ui::reinforcement_available(
+        live.reinforcement_allowed(), overview_ui.tactical_shell, movie, static_cast<bool>(land_population));
     view.tactical_population.clear();
-    if (!view.reinforcement_allowed && battle->placing()) battle->cancel();
+    if ((!view.reinforcement_allowed || movie) && battle->placing()) battle->cancel();
     if (const sim::tactical::EconomyView* economy = live.local_economy()) {
         // WPR-04/41: only registered arrivals count; station capacity and queued
         // purchases do not change the tactical ledger readout.
@@ -737,23 +774,353 @@ void MapMode::State::sync_production() {
     hud->production()->show(view, live.presented_tick() / sim::tactical::logical_frames_per_second);
 }
 
-void MapMode::State::set_movie_mode(const bool on) {
-    if (!space || !hud || !live_session) return;
-    if (on && live_session->phase() != LiveSessionView::Phase::running) return;
+bool MapMode::State::cinematics_allowed() {
+    if (in_game_cinematics) return *in_game_cinematics;
+    if (!filesystem) return false;
+    in_game_cinematics = true;
+    if (const auto xml = data::load_document(*filesystem, "data/xml/gameconstants.xml")) {
+        for (const auto& node : xml.value().root.children) {
+            if (!core::iequals(node.name, "In_Game_Cinematics")) continue;
+            data::tag_trace::used(&node);
+            std::string_view value = node.raw_text;
+            while (!value.empty() && std::isspace(static_cast<unsigned char>(value.front()))) value.remove_prefix(1);
+            while (!value.empty() && std::isspace(static_cast<unsigned char>(value.back()))) value.remove_suffix(1);
+            if (core::iequals(value, "false") || value == "0" || core::iequals(value, "no")) in_game_cinematics = false;
+            break;
+        }
+    }
+    return *in_game_cinematics;
+}
+
+std::vector<BattlecamCandidate> MapMode::State::movie_candidates() {
+    if (!live_session || !space_population) return {};
     const auto& visible = live_session->visible_units();
-    if (!on || visible.empty()) {
-        space->live_camera_movie(false, {});
-        hud->set_movie_mode(false);
-        movie_subject = 0;
+    if (!movie_weights && filesystem) movie_weights = battlecam_weights(*filesystem);
+    const auto tick = static_cast<std::uint64_t>(std::max(0.0, live_session->presented_tick()));
+    const auto snapshot = live_session->snapshot_at(tick);
+    const auto previous_snapshot = tick ? live_session->snapshot_at(tick - 1) : nullptr;
+    const auto* tables = live_session->tables();
+    if (!snapshot || !tables || !movie_weights) return {};
+    std::map<sim::tactical::TypeId, const units::UnitType*> types;
+    for (const auto& type : tables->units) types.emplace(battle::type_id(type.id), &type);
+    std::map<sim::EntityId, const sim::tactical::TacticalInstance*> instances, previous;
+    std::map<sim::EntityId, float> targets;
+    for (const auto& instance : snapshot->instances()) {
+        instances.emplace(instance.entity_id, &instance);
+        const auto add_target = [&](const sim::EntityId id) {
+            if (id) { targets[instance.entity_id] += 1.0F; targets[id] += 1.0F; }
+        };
+        add_target(instance.presentation_attack_target);
+        for (const auto& turret : instance.hardpoint_turrets) add_target(turret.target);
+    }
+    if (previous_snapshot) for (const auto& instance : previous_snapshot->instances()) previous.emplace(instance.entity_id, &instance);
+    std::vector<BattlecamCandidate> candidates;
+    for (const auto& unit : visible) {
+        const auto model = space_population->live_ship_box(unit.ship);
+        const auto info = types.find(unit.type);
+        const auto state = instances.find(unit.entity);
+        if (!model || info == types.end() || state == instances.end() || !info->second->movie_object
+            || !info->second->locomotion || !state->second->durability || state->second->durability->hull.raw() <= 0) continue;
+        if (std::any_of(info->second->category_mask.begin(), info->second->category_mask.end(),
+            [](const auto& category) { return core::iequals(category, "Wall"); })) continue;
+        const float x = (model->high[0] - model->low[0]) * 0.5F;
+        const float y = (model->high[1] - model->low[1]) * 0.5F;
+        const float z = (model->high[2] - model->low[2]) * 0.5F;
+        float distance_squared{};
+        if (const auto old = previous.find(unit.entity); old != previous.end()) for (std::size_t axis = 0; axis < 3; ++axis) {
+            const float displacement = static_cast<float>(to_double(state->second->fixed_transform.rows[axis][3])
+                - to_double(old->second->fixed_transform.rows[axis][3]));
+            distance_squared += displacement * displacement;
+        }
+        const float power = info->second->ai_combat_power ? static_cast<float>(to_double(*info->second->ai_combat_power)) : 0.0F;
+        const auto squadron = live_session->squadron_of().find(unit.entity);
+        const auto selection_id = squadron == live_session->squadron_of().end() ? unit.entity : squadron->second;
+        candidates.push_back({unit.entity, unit.type, state->second->presentation_attack_target,
+            {x*x+y*y+z*z, power, static_cast<float>(unit.position[0]), static_cast<float>(unit.position[1]),
+             static_cast<float>(to_double(state->second->durability->hull)), targets[unit.entity], std::sqrt(distance_squared)},
+            battle && battle->selected(selection_id), 0.0F});
+    }
+    return candidates;
+}
+
+namespace {
+[[nodiscard]] std::string_view shot_kind_name(const BattlecamShotKind kind) noexcept {
+    switch (kind) {
+    case BattlecamShotKind::chase: return "chase";
+    case BattlecamShotKind::circle: return "circle";
+    case BattlecamShotKind::flyby: return "flyby";
+    case BattlecamShotKind::belly: return "belly";
+    case BattlecamShotKind::floating: return "floating";
+    case BattlecamShotKind::frigate: return "frigate";
+    }
+    return "";
+}
+} // namespace
+
+bool MapMode::State::begin_movie_shot(const LiveSessionView::VisibleUnit& subject) {
+    if (!space_population || !live_session || !live_session->tables()) return false;
+    const auto box = space_population->live_ship_box(subject.ship);
+    if (!box) return false;
+    std::array<float, 3> extents{};
+    for (std::size_t i = 0; i < 3; ++i) extents[i] = (box->high[i] - box->low[i]) * 0.5F;
+    if (!(extents[0]*extents[0] + extents[1]*extents[1] + extents[2]*extents[2] > 0.0F)) return false;
+    BattlecamCategory category;
+    movie_tec.reset();
+    movie_hardpoint.reset();
+    movie_frigate_target = 0;
+    std::optional<std::array<float, 3>> frigate_target_extents;
+    sim::EntityId transfer_target{};
+    movie_anchor = {static_cast<float>(subject.position[0]), static_cast<float>(subject.position[1]),
+                    static_cast<float>(subject.position[2])};
+    movie_elapsed = 0.0;
+    for (const auto& type : live_session->tables()->units) {
+        if (battle::type_id(type.id) != subject.type) continue;
+        if (!type.glory_cinematics.empty() && filesystem) {
+            const auto& name = type.glory_cinematics[movie_random.next() % type.glory_cinematics.size()];
+            if (const auto bytes = filesystem->open("Data/Art/Cinematics/" + name))
+                movie_tec = parse_battlecam_tec(bytes.value());
+            if (movie_tec) {
+                for (std::size_t row = 0; row < 3; ++row) for (std::size_t col = 0; col < 3; ++col)
+                    movie_tec_rotation[row][col] = static_cast<float>(to_double(box->model_to_world.rows[row][col]));
+                movie_shot.duration = static_cast<float>(movie_tec->duration) / 30.0F;
+                return true;
+            }
+        }
+        const auto snapshot = live_session->snapshot_at(static_cast<std::uint64_t>(std::max(0.0, live_session->presented_tick())));
+        if (snapshot) {
+            const auto instance = std::find_if(snapshot->instances().begin(), snapshot->instances().end(),
+                [&](const auto& item) { return item.entity_id == subject.entity; });
+            if (instance != snapshot->instances().end()) {
+                const auto& visible = live_session->visible_units();
+                const auto transfer = std::find_if(visible.begin(), visible.end(),
+                    [&](const auto& unit) { return unit.entity == instance->presentation_attack_target; });
+                if (transfer != visible.end() && frigate_target_eligible(static_cast<float>(subject.yaw),
+                    static_cast<float>(transfer->yaw), static_cast<float>(transfer->position[0] - subject.position[0]),
+                    static_cast<float>(transfer->position[1] - subject.position[1]))) {
+                    if (const auto target_box = space_population->live_ship_box(transfer->ship)) {
+                        std::array<float, 3> half{};
+                        for (std::size_t axis = 0; axis < 3; ++axis)
+                            half[axis] = (target_box->high[axis] - target_box->low[axis]) * 0.5F;
+                        frigate_target_extents = half;
+                        transfer_target = transfer->entity;
+                    }
+                }
+                std::vector<MovieHardpoint> hardpoints;
+                for (const auto& weapon : instance->hardpoint_turrets) {
+                    if (!weapon.available || !weapon.target || weapon.hardpoint >= type.hardpoints.size()) continue;
+                    if (instance->durability && weapon.hardpoint < instance->durability->hardpoints.size()
+                        && !instance->durability->hardpoints[weapon.hardpoint].enabled) continue;
+                    const auto& hardpoint = type.hardpoints[weapon.hardpoint];
+                    if (!hardpoint.fire_a.owner_bone_index || !hardpoint.attachment.owner_bone_index) continue;
+                    const auto target = std::find_if(visible.begin(), visible.end(),
+                        [&](const auto& unit) { return unit.entity == weapon.target; });
+                    if (target == visible.end() || !space_population->live_ship_box(target->ship)) continue;
+                    const auto fire = space_population->live_bone_frame(subject.entity, *hardpoint.fire_a.owner_bone_index);
+                    const auto anchor = space_population->live_bone_frame(subject.entity, *hardpoint.attachment.owner_bone_index);
+                    if (!fire || !anchor || !fire->visible || !anchor->visible) continue;
+                    std::array<float, 3> direction{};
+                    for (std::size_t axis = 0; axis < 3; ++axis)
+                        direction[axis] = static_cast<float>(to_double(fire->transform.rows[axis][0]));
+                    if (!hardpoint_camera_offset(direction)) continue;
+                    hardpoints.push_back({*hardpoint.fire_a.owner_bone_index, *hardpoint.attachment.owner_bone_index, weapon.target});
+                }
+                if (!hardpoints.empty()) {
+                    movie_hardpoint = hardpoints[movie_random.next() % hardpoints.size()];
+                    movie_shot.duration = static_cast<float>(120U + movie_random.next() % 61U) / 30.0F;
+                    return true;
+                }
+            }
+        }
+        for (const auto& value : type.category_mask) {
+            category.fighter = category.fighter || core::iequals(value, "Fighter");
+            category.bomber = category.bomber || core::iequals(value, "Bomber");
+            category.corvette = category.corvette || core::iequals(value, "Corvette");
+            category.frigate = category.frigate || core::iequals(value, "Frigate");
+        }
+        break;
+    }
+    movie_shot = make_battlecam_shot(extents, category, movie_random, frigate_target_extents);
+    if (movie_shot.kind == BattlecamShotKind::frigate) movie_frigate_target = transfer_target;
+    return true;
+}
+
+std::optional<AttractCameraPose> MapMode::State::movie_pose(const LiveSessionView::VisibleUnit& subject) const {
+    if (movie_hardpoint && !movie_preview) {
+        const auto fire = space_population->live_bone_frame(subject.entity, movie_hardpoint->fire_bone);
+        const auto anchor = space_population->live_bone_frame(subject.entity, movie_hardpoint->attachment_bone);
+        const auto& visible = live_session->visible_units();
+        const auto target = std::find_if(visible.begin(), visible.end(),
+            [this](const auto& unit) { return unit.entity == movie_hardpoint->target; });
+        if (!fire || !anchor || !fire->visible || !anchor->visible || target == visible.end()) return std::nullopt;
+        std::array<float, 3> forward{};
+        for (std::size_t i = 0; i < 3; ++i) forward[i] = static_cast<float>(to_double(fire->transform.rows[i][0]));
+        const auto offset = hardpoint_camera_offset(forward);
+        if (!offset) return std::nullopt;
+        std::array<float, 3> source{};
+        for (std::size_t i = 0; i < 3; ++i) source[i] = static_cast<float>(to_double(anchor->transform.rows[i][3])) + (*offset)[i];
+        const auto eye = presentation::space::render_from_source({source[0], source[1], source[2]});
+        const auto aim = presentation::space::render_from_source({static_cast<float>(target->position[0]),
+            static_cast<float>(target->position[1]), static_cast<float>(target->position[2])});
+        return AttractCameraPose{{eye.x, eye.y, eye.z}, {aim.x, aim.y, aim.z}};
+    }
+    const auto box = space_population->live_ship_box(subject.ship);
+    if (!box) return std::nullopt;
+    if (!movie_preview && !movie_tec && movie_shot.kind == BattlecamShotKind::frigate) {
+        const auto& visible = live_session->visible_units();
+        const auto target = std::find_if(visible.begin(), visible.end(),
+            [this](const auto& unit) { return unit.entity == movie_frigate_target; });
+        if (target == visible.end()) return std::nullopt;
+        const auto target_box = space_population->live_ship_box(target->ship);
+        if (!target_box) return std::nullopt;
+        const float t = std::clamp(static_cast<float>(movie_elapsed) / movie_shot.duration, 0.0F, 1.0F);
+        const auto point = [](const auto& unit, const auto& frame, const auto& offset) {
+            std::array<float, 3> result{};
+            for (std::size_t row = 0; row < 3; ++row) {
+                result[row] = static_cast<float>(unit.position[row]);
+                for (std::size_t col = 0; col < 3; ++col)
+                    result[row] += static_cast<float>(to_double(frame.model_to_world.rows[row][col])) * offset[col];
+            }
+            return result;
+        };
+        const auto start = point(subject, *box, movie_shot.start);
+        const auto middle = point(subject, *box, movie_shot.middle);
+        const auto end = point(*target, *target_box, movie_shot.end);
+        std::array<float, 3> eye{}, aim{};
+        const float phase = t < 0.5F ? t * 2.0F : (t - 0.5F) * 2.0F;
+        for (std::size_t i = 0; i < 3; ++i) {
+            const float from = t < 0.5F ? start[i] : middle[i];
+            const float to = t < 0.5F ? middle[i] : end[i];
+            eye[i] = from + (to - from) * phase;
+            aim[i] = static_cast<float>(subject.position[i] + (target->position[i] - subject.position[i]) * t);
+        }
+        const auto rendered_eye = presentation::space::render_from_source({eye[0], eye[1], eye[2]});
+        const auto rendered_aim = presentation::space::render_from_source({aim[0], aim[1], aim[2]});
+        return AttractCameraPose{{rendered_eye.x, rendered_eye.y, rendered_eye.z}, {rendered_aim.x, rendered_aim.y, rendered_aim.z}};
+    }
+    std::array<float, 3> offset{};
+    std::array<float, 3> target_offset{};
+    if (movie_preview) {
+        offset = preview_offset(preview_distance, preview_azimuth, preview_elevation);
+    } else if (movie_tec) {
+        offset = tec_position(movie_tec->camera, static_cast<float>(movie_elapsed * 30.0));
+        target_offset = tec_position(movie_tec->target, static_cast<float>(movie_elapsed * 30.0));
+    } else { offset = movie_shot.at(static_cast<float>(movie_elapsed)); target_offset = movie_shot.target; }
+    std::array<float, 3> source{}, target{};
+    for (std::size_t row = 0; row < 3; ++row) {
+        const bool floating = !movie_preview && !movie_tec && movie_shot.kind == BattlecamShotKind::floating;
+        source[row] = floating ? movie_anchor[row] : static_cast<float>(subject.position[row]);
+        target[row] = floating ? movie_anchor[row] : static_cast<float>(subject.position[row]);
+        for (std::size_t col = 0; col < 3; ++col) {
+            const float rotation = movie_tec && !movie_preview ? movie_tec_rotation[row][col]
+                : static_cast<float>(to_double(box->model_to_world.rows[row][col]));
+            source[row] += floating ? (row == col ? offset[col] : 0.0F) : rotation * offset[col];
+            if (!movie_preview) target[row] += rotation * target_offset[col];
+        }
+    }
+    const auto eye = presentation::space::render_from_source({source[0], source[1], source[2]});
+    const auto aim = presentation::space::render_from_source({target[0], target[1], target[2]});
+    return AttractCameraPose{{eye.x, eye.y, eye.z}, {aim.x, aim.y, aim.z}};
+}
+
+std::optional<float> MapMode::State::movie_fov() const {
+    if (movie_preview || !movie_tec) return std::nullopt;
+    const auto horizontal = tec_fov(movie_tec->fov, static_cast<float>(movie_elapsed * 30.0));
+    if (!horizontal) return std::nullopt;
+    const auto vertical = presentation::camera::vertical_fov_degrees(*horizontal);
+    return vertical ? std::optional<float>{vertical.value()} : std::nullopt;
+}
+
+void MapMode::State::enter_unit_preview() {
+    if (!space || !live_session || !space_population || !battle
+        || live_session->phase() != LiveSessionView::Phase::running || !cinematics_allowed()) return;
+    if (movie_preview && space->live_camera_movie()) {
+        preview_azimuth = std::fmod(preview_azimuth - 45.0F + 360.0F, 360.0F);
+        preview_elevation = 30.0F;
+        perf_camera.shot_cut = true; // trace only: the orbit steps 45 degrees at once
+        advance_movie(0.0);
         return;
     }
-    auto subject = std::find_if(visible.begin(), visible.end(), [](const auto& unit) { return unit.own; });
-    if (subject == visible.end()) subject = visible.begin();
+    const auto& visible = live_session->visible_units();
+    const auto hovered = battle->hovered_subject();
+    const auto subject = std::find_if(visible.begin(), visible.end(), [&](const auto& unit) {
+        if (hovered) return unit.entity == *hovered;
+        const auto team = live_session->squadron_of().find(unit.entity);
+        const auto selected = team == live_session->squadron_of().end() ? unit.entity : team->second;
+        return battle->selected(selected);
+    });
+    if (subject == visible.end() || find_preview_subject(visible, live_session->alive_units(),
+        live_session->sensor_visible_units(), subject->entity, live_session->reveal_all()) == visible.end()) return;
+    const auto box = space_population->live_ship_box(subject->ship);
+    if (!box) return;
+    float length_squared{};
+    for (std::size_t i = 0; i < 3; ++i) {
+        const float extent = (box->high[i] - box->low[i]) * 0.5F;
+        length_squared += extent * extent;
+    }
+    preview_radius = std::sqrt(length_squared);
+    if (!(preview_radius > 0.0F)) return;
+    movie_preview = true;
+    movie_tec.reset();
     movie_subject = subject->entity;
+    // Trace only: the C-key preview starts here (a cut for the drawn camera).
+    ++perf_camera.shot_id;
+    perf_camera.shot_cut = true;
+    perf_camera.input.reset();
+    perf_camera.shot_type = "preview";
+    preview_azimuth = 0.0F;
+    preview_elevation = 30.0F;
+    // #6569: the smaller playable-map dimension caps the start and the zoom-out limit (0 = unknown).
+    preview_extent = 0.0F;
+    if (const auto& bounds = live_session->economy().bounds) {
+        const float width = static_cast<float>(to_double((*bounds)[2]) - to_double((*bounds)[0]));
+        const float height = static_cast<float>(to_double((*bounds)[3]) - to_double((*bounds)[1]));
+        if (width > 0.0F && height > 0.0F) preview_extent = std::min(width, height);
+    }
+    preview_distance = preview_start_distance(preview_radius, preview_extent);
     const auto target = presentation::space::render_from_source({static_cast<float>(subject->position[0]),
         static_cast<float>(subject->position[1]), static_cast<float>(subject->position[2])});
     space->live_camera_movie(true, {target.x, target.y, target.z});
-    hud->set_movie_mode(space->live_camera_movie());
+    if (live_fog) live_fog->set_movie_hidden(space->live_camera_movie());
+    if (hud) hud->set_movie_mode(space->live_camera_movie());
+    advance_movie(0.0);
+}
+
+void MapMode::State::set_movie_mode(const bool on, const bool immediate) {
+    if (!on) {
+        const bool stop_bands = immediate || !live_session
+            || live_session->phase() != LiveSessionView::Phase::running || live_session->time().paused();
+        restore_battlecam([&] { if (space) space->live_camera_movie(false, {}); },
+            [&] { if (live_fog) live_fog->set_movie_hidden(false); },
+            [&] { if (hud) hud->set_movie_mode(false, stop_bands); },
+            movie_subject, movie_key_down, movie_tab_down);
+        movie_preview = false;
+        preview_key_down = false;
+        return;
+    }
+    if (!space || !live_session || !space_population || live_session->phase() != LiveSessionView::Phase::running || !cinematics_allowed()) return;
+    const auto& visible = live_session->visible_units();
+    if (visible.empty()) { set_movie_mode(false); return; }
+    movie_preview = false;
+    auto candidates = movie_candidates();
+    if (candidates.empty() || !movie_weights) { set_movie_mode(false); return; }
+    const auto chosen = choose_battlecam_subject(std::move(candidates), *movie_weights, movie_subject,
+        !space->live_camera_movie(), movie_random);
+    const auto subject_it = std::find_if(visible.begin(), visible.end(), [chosen](const auto& unit) { return unit.entity == chosen; });
+    if (subject_it == visible.end()) { set_movie_mode(false); return; }
+    const auto* subject = &*subject_it;
+    movie_subject = subject->entity;
+    if (!begin_movie_shot(*subject)) { set_movie_mode(false); return; }
+    // Trace only: a new battlecam shot starts here (a cut for the drawn camera).
+    ++perf_camera.shot_id;
+    perf_camera.shot_cut = true;
+    perf_camera.input.reset();
+    perf_camera.shot_type = movie_hardpoint ? std::string("hardpoint") : movie_tec ? std::string("tec") : std::string(shot_kind_name(movie_shot.kind));
+    const auto target = presentation::space::render_from_source({static_cast<float>(subject->position[0]),
+        static_cast<float>(subject->position[1]), static_cast<float>(subject->position[2])});
+    space->live_camera_movie(true, {target.x, target.y, target.z});
+    if (live_fog) live_fog->set_movie_hidden(space->live_camera_movie());
+    advance_movie(0.0);
+    if (hud) hud->set_movie_mode(space->live_camera_movie());
     // Movie entry cancels an armed world order without issuing it.
     if (battle) {
         battle->command_click(ui::OrderMode::none, false, *live_session, ui::CommandOrigin::hud_button);
@@ -761,22 +1128,51 @@ void MapMode::State::set_movie_mode(const bool on) {
     }
 }
 
+
+void MapMode::State::advance_movie(const double delta) {
+    if (!space || !space->live_camera_movie()) return;
+    const bool playing = live_session && space_population && live_session->phase() == LiveSessionView::Phase::running && cinematics_allowed();
+    const bool paused = playing && live_session->time().paused();
+    const auto before = battlecam_advance(playing, paused, false, false);
+    if (before == BattlecamAdvance::exit) { set_movie_mode(false, true); return; }
+    const auto& visible = live_session->visible_units();
+    if (movie_preview && preview_subject_lost(visible, live_session->alive_units(),
+        live_session->sensor_visible_units(), movie_subject, live_session->reveal_all())) {
+        set_movie_mode(false); return;
+    }
+    // A zero-time call initializes the shot pose even if the battle is paused.
+    if (before == BattlecamAdvance::hold && delta != 0.0) return;
+    if (!paused) movie_elapsed += std::max(delta, 0.0);
+    if (battlecam_advance(true, paused, !movie_preview && movie_elapsed >= movie_shot.duration, movie_key_down || movie_tab_down)
+        == BattlecamAdvance::next) {
+        set_movie_mode(true);
+        return;
+    }
+    apply_movie_pose();
+}
+
+bool MapMode::State::apply_movie_pose() {
+    if (!space || !live_session || !space_population) return false;
+    const auto& visible = live_session->visible_units();
+    const auto subject = std::find_if(visible.begin(), visible.end(),
+        [this](const auto& unit) { return unit.entity == movie_subject; });
+    if (subject == visible.end()) return false; // BCAM-08: ordinary shots retain the last pose until expiry.
+    const auto pose = movie_pose(*subject);
+    if (!pose) return false;
+    // Trace only: the subject position this pose was built from (the visible-unit list as of the start of this frame, before this
+    // frame's session frame; the drawn camera of this frame is aimed there, not at where the subject is drawn this frame).
+    if (PerfTrace::movers() > 0) perf_camera.input = subject->position;
+    space->live_camera_movie(true, pose->target);
+    space->live_camera_movie_eye(pose->eye);
+    space->live_camera_movie_fov(movie_fov());
+    return true;
+}
+
 void MapMode::State::sync_overview_ui() {
     if (!live_session || !space) return;
     const std::string level = space->live_camera_overview();
     const auto is_level = [](const std::string& value) { return value == "off" || value == "overview" || value == "map"; };
     bool movie = space->live_camera_movie();
-    if (movie) {
-        const auto& visible = live_session->visible_units();
-        const auto subject = std::find_if(visible.begin(), visible.end(),
-            [this](const auto& unit) { return unit.entity == movie_subject; });
-        if (subject == visible.end()) { set_movie_mode(false); movie = false; }
-        else {
-            const auto target = presentation::space::render_from_source({static_cast<float>(subject->position[0]),
-                static_cast<float>(subject->position[1]), static_cast<float>(subject->position[2])});
-            space->live_camera_movie(true, {target.x, target.y, target.z});
-        }
-    }
     if (hud) hud->set_movie_mode(movie);
     const bool on = level == "overview" || level == "map";
     const bool first = overview_level.empty();
@@ -1112,6 +1508,8 @@ void MapMode::State::open_loading_screen(Node3D& host, const assets::Map& map) {
 }
 
 void MapMode::State::load_report(const std::size_t stage, const std::uint64_t done, const std::uint64_t total) {
+    // The battle audio's file reads run beside the load; publish what they have finished (a few ms at most).
+    if (battle_audio) battle_audio->pump_loading();
     load_progress.report(stage, done, total);
     if (GodotRenderer::texture_census_enabled()) {
         if (done == total) TextureCensusJournal::snapshot(("stage" + std::to_string(stage)).c_str());
@@ -1168,13 +1566,38 @@ void MapMode::State::sync_battle_hud() {
             gift_enabled ? live_session->gift_recipients() : no_recipients);
     }
     hud->set_begin(live_session->phase() == LiveSessionView::Phase::ready && (loading == nullptr || !loading->shown()));
-    const auto child_pause_notice = options.shared_pause_notice ? options.shared_pause_notice() : std::string{};
-    hud->set_time_view({time.paused() && (!options.shared_pause_notice || !child_pause_notice.empty()) && (!live_session->multiplayer() || lan_gameplay_enabled(live_session->lan_view())), time.state() == presentation::ui::TimeState::fast_forward,
-                        running && time.pause_enabled(), running && !live_session->multiplayer() && !options.shared_pause_notice && time.fast_forward_enabled(),
+    static const std::string no_child_pause_notice;
+    const auto& child_pause_notice = options.shared_pause_notice ? options.shared_pause_notice() : no_child_pause_notice;
+    // #5355: a multiplayer battle's fast forward (skirmish LAN or a LAN GC battle child) is the agreed shared 2x
+    // (TP-MP06), not the local 4x.
+    const auto agreed_pace = live_session->agreed_pacing();
+    const bool shared_speed = agreed_pace || live_session->multiplayer();
+    hud->set_time_view({time.paused() && (!options.shared_pause_notice || !child_pause_notice.empty()) && (!live_session->multiplayer() || lan_gameplay_enabled(live_session->lan_view())),
+                        shared_speed ? live_session->shared_fast_forward_pressed() : time.state() == presentation::ui::TimeState::fast_forward,
+                        running && time.pause_enabled(),
+                        running && (agreed_pace ? !agreed_pace->paused
+                            : live_session->multiplayer() ? lan_gameplay_enabled(lan) && !lan.clock_paused
+                            : !options.shared_pause_notice && time.fast_forward_enabled()),
                         live_session->multiplayer(), time.speed_step()});
     const auto pause_view = live_session->lan_view();
     const bool shared_pause = live_session->multiplayer() && pause_view.clock_paused && lan_gameplay_enabled(pause_view);
-    hud->set_pause_notice(options.shared_pause_notice ? child_pause_notice : (shared_pause ? "Paused by " + pause_view.pause_name : ""));
+    const auto& save_status = live_session->save_status();
+    if (options.shared_pause_notice) {
+        if (child_pause_notice != shown_child_pause_notice) {
+            shown_child_pause_notice = child_pause_notice;
+            hud->set_pause_notice(child_pause_notice);
+        }
+    } else hud->set_pause_notice(shared_pause ? "Paused by " + pause_view.pause_name : "");
+    if (save_status.failed != shown_save_failures) {
+        shown_save_failures = save_status.failed;
+        hud->set_retreat_countdown("Save failed: " + save_status.last_problem, {255, 100, 100, 255});
+        save_notice_until = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    }
+    if (save_notice_until && std::chrono::steady_clock::now() >= *save_notice_until) {
+        hud->set_retreat_countdown({}, {255, 255, 255, 255});
+        save_notice_until.reset();
+    }
+    if (shared_speed) update_speed_notice(running, lan, agreed_pace);
     if (live_session->multiplayer()) {
         if (!lan_overlay) {
             auto* layer = memnew(CanvasLayer); layer->set_layer(40); perf_host->add_child(layer);
@@ -1269,6 +1692,48 @@ void MapMode::State::sync_battle_hud() {
     }
     hud->set_battle(departure ? lan.victory : end ? std::optional<bool>(end->result == presentation::ui::BattleResult::victory) : std::nullopt,
                     departure || (end && end->ended_frame));
+}
+
+// #5355 (TP-MP06): who changed the shared battle speed, for five presentation seconds, and while the agreed rate is not
+// the nominal 30, what really runs (lockstep follows the slowest seat and never skips a tick, MP-31).
+void MapMode::State::update_speed_notice(const bool running, const LanView& lan,
+    const std::optional<platform::TacticalFeed::AgreedPacing>& agreed) {
+    namespace ui = presentation::ui;
+    if (!speed_notice) {
+        if (!perf_host || !hud || !hud->hud()) return;
+        auto* layer = memnew(CanvasLayer); layer->set_layer(41); perf_host->add_child(layer);
+        auto* label = memnew(EawrUiLabel); label->set_name("SharedSpeedNotice"); label->set_role("L_Text");
+        label->set_theme(hud->hud()->get_theme());
+        label->set_position(Vector2(24, 104)); label->set_size(Vector2(900, 48)); label->set_wrap(true);
+        label->set_mouse_filter(Control::MOUSE_FILTER_IGNORE);
+        layer->add_child(label);
+        speed_notice = label;
+    }
+    const auto now_ms = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count());
+    std::uint32_t requested = ui::nominal_rate;
+    bool advancing = running;
+    // A speed event is formatted once, when its identity is new: the GC child's clock event count (lock-free; the
+    // owner view is read only for a new one), or the skirmish options change tick.
+    if (agreed) {
+        requested = agreed->target_rate;
+        advancing = advancing && !agreed->paused;
+        if (options.shared_speed_notice) {
+            std::string line;
+            if (const auto revision = options.shared_speed_notice(speed_notice_text.revision(), line); revision != speed_notice_text.revision())
+                speed_notice_text.change(revision, std::move(line), now_ms);
+        }
+    } else {
+        requested = ui::speed_step_rates[std::min<std::size_t>(lan.options.tactical_speed, ui::speed_step_rates.size() - 1)];
+        advancing = advancing && lan.phase == LanPhase::running && !lan.clock_paused;
+        if (lan.options_actor && lan.options_change_tick != speed_notice_text.revision())
+            speed_notice_text.change(lan.options_change_tick,
+                lan.options_name + " set the battle speed to " + ui::speed_factor_label(requested), now_ms);
+    }
+    if (!speed_notice_text.refresh(static_cast<std::uint64_t>(live_session->presented_tick()), now_ms, requested, advancing)) return;
+    auto* label = static_cast<EawrUiLabel*>(speed_notice);
+    label->set_text(String::utf8(speed_notice_text.text().c_str()));
+    label->set_visible(!speed_notice_text.text().empty());
 }
 
 } // namespace eawr::presentation::godot_backend

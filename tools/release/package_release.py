@@ -70,13 +70,16 @@ PLAYER_SUMS = "SHA256SUMS"
 REVISED_LAYER_RELPATH = Path("Revised")
 REVISED_LAYER_MANIFEST = ROOT / "tools/release/revised-layer-manifest.json"
 REVISED_LAYER_README = "The Revised voice and hotkey layer is included and enabled by default."
-# The bundled runtime must be byte-identical to the pinned patched build (EAWR fork fad06b579, MSVC lto=full;
+# The bundled runtime must be byte-identical to the pinned patched build (EAWR fork 5b733a90f, MSVC lto=full;
 # third_party/godot/README.md), not only report its version. The maintainer-only remote-run tooling keeps pinning the
 # stock official exe for its probes, so the two pins differ on purpose.
-PINNED_GODOT_SHA256 = "453b4ad56a8f5c64b39c1d75e77468c5227475b2483922dee44ade51cff43442"
+PINNED_GODOT_SHA256 = "96c03783011f197aff146e92c1e33e0000e8975b3a873fbfcc52cd86dff12b7f"
 DEBUG_GUIDE = ROOT / "docs" / "debug-build.md"
 PLAYER_GUIDE = ROOT / "docs" / "player-guide.md"
 IMPORT_TIMEOUT_SECONDS = 180
+# Through a runner (Wine on a Linux host) the first run in a cold prefix is slow: the version probe alone needs up to
+# export_package.GODOT_RUNNER_VERSION_TIMEOUT_SECONDS, and the import does real work after it.
+RUNNER_IMPORT_TIMEOUT_SECONDS = 600
 # What a pre-imported project must contain so starting it never writes beside the project.
 PREIMPORT_FILES = (".godot/extension_list.cfg", ".godot/global_script_class_cache.cfg", ".godot/uid_cache.bin")
 # Nothing the game owns may ride along in the player folder.
@@ -188,14 +191,18 @@ def add_docs(archive: zipfile.ZipFile, top: str, readme: str) -> None:
     archive.write(ROOT / "tools" / "release" / readme, f"{top}/README.md")
 
 
+def import_timeout() -> int:
+    return RUNNER_IMPORT_TIMEOUT_SECONDS if os.environ.get("EAWR_GODOT_RUNNER") else IMPORT_TIMEOUT_SECONDS
+
+
 def godot_import(godot: Path, project: Path) -> Optional[str]:
     """Let the pinned Godot write the project's .godot metadata once, headless, at packaging time.
 
     The exit code proves nothing (the viewer's host node may stop the run itself); preimport_project checks
     the files. Returns the tail of the output for its error message.
     """
-    result = subprocess.run([str(godot), "--headless", "--path", str(project), "--import"], capture_output=True,
-                            text=True, timeout=IMPORT_TIMEOUT_SECONDS, check=False)
+    result = subprocess.run(export_package.godot_command(godot, "--headless", "--path", str(project), "--import"), capture_output=True,
+                            text=True, timeout=import_timeout(), check=False)
     return f"exit {result.returncode}: {(result.stdout + result.stderr)[-400:]}"
 
 
@@ -240,6 +247,20 @@ def stage_revised_layer(folder: Path, source: Optional[Path], allow_missing: boo
     if before != after:
         raise ValueError("Revised layer copy verification failed (file count, sizes or hashes differ)")
     return True
+
+
+def archive_stem(version: str, platform: str) -> str:
+    """Keep archive and top-folder names within the shipped updater's name limit.
+
+    Normal release names stay unchanged. Long kit labels retain a readable
+    prefix plus a digest of the full version; manifest/build identities keep
+    the complete version and commit.
+    """
+    budget = update_manifest.NAME_LENGTH - len(f"eaw-revised--{platform}-player.zip")
+    if len(version) > budget:
+        digest = hashlib.sha256(version.encode("utf-8")).hexdigest()[:12]
+        version = version[:budget - len(digest) - 1].rstrip(".-") + "-" + digest
+    return f"eaw-revised-{version}-{platform}"
 
 
 def build_player(stem: str, spec: dict, out: Path, godot: Path, launcher: Optional[Path],
@@ -384,7 +405,7 @@ def package(build_dir: Path, platform: str, version: str, out: Path, godot: Opti
     verify_identity(expect_identity, identity_binaries(spec, build_dir, "Release", launcher, mods_service))
     verify_kit_label(read_kit_label(), identity_binaries(spec, build_dir, "Release", launcher, mods_service))
     out.mkdir(parents=True, exist_ok=True)
-    stem = f"eaw-revised-{version}-{platform}"
+    stem = archive_stem(version, platform)
 
     tools_zip = out / f"{stem}-tools.zip"
     with zipfile.ZipFile(tools_zip, "w", zipfile.ZIP_DEFLATED) as archive:
@@ -452,7 +473,7 @@ def package_debug(build_dir: Path, version: str, out: Path, godot: Path, launche
     verify_identity(expect_identity, identity_binaries(spec, build_dir, "Debug", launcher, mods_service))
     verify_kit_label(read_kit_label(), identity_binaries(spec, build_dir, "Debug", launcher, mods_service))
     out.mkdir(parents=True, exist_ok=True)
-    return build_player(f"eaw-revised-{version}-windows-x64", spec, out, godot, launcher, importer, build_dir, mods_service, manager_artifact, launcher_pin, with_mods_manager, shader_runtime, revised_layer, allow_missing_revised_layer, public, readme_note)
+    return build_player(archive_stem(version, "windows-x64"), spec, out, godot, launcher, importer, build_dir, mods_service, manager_artifact, launcher_pin, with_mods_manager, shader_runtime, revised_layer, allow_missing_revised_layer, public, readme_note)
 
 
 def write_sums(files: list[Path], out: Path) -> Path:

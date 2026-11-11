@@ -11,6 +11,7 @@
 
 namespace eawr::vfs { class Vfs; }
 namespace eawr::data { class Catalog; }
+namespace eawr::data { struct XmlNode; }
 namespace eawr::data::ui { struct DialogCatalog; }
 namespace eawr::presentation::ui { struct ThemeModel; }
 
@@ -34,6 +35,8 @@ public:
     };
     explicit SkirmishSetupMode(Options options);
     ~SkirmishSetupMode();
+    [[nodiscard]] bool prepare_startup(godot::Node3D& host);
+    void dismiss_startup();
     [[nodiscard]] bool ready(godot::Node3D& host);
     [[nodiscard]] const std::string& failure() const;
     void process();
@@ -65,6 +68,7 @@ public:
     struct UiResources final {
         const vfs::Vfs* filesystem{};
         const data::Catalog* catalog{};
+        const data::XmlNode* game_constants{};
         const data::ui::DialogCatalog* dialogs{};
         const presentation::ui::ThemeModel* theme_model{};
         godot::Ref<godot::Theme> theme;

@@ -145,6 +145,8 @@ enum class OrderKind : std::uint8_t {
     gift = 26, // ADR-020: controller transfer only, replay opcode 32, no unit order.
     battle_control = 27, // ADR-020: trusted departure boundary, replay opcode 33.
     script_invulnerable = 28, // TL-03: Lua Make_Invulnerable, replay opcode 34, no unit order.
+    land_garrison = 29,
+    land_unload = 30,
 };
 
 // The order a unit last accepted: a move or face keeps its point in `destination`, an attack its
@@ -301,6 +303,8 @@ enum class AbilityKind : std::uint8_t {
     blast = 28, // coordinator-reserved, WHE-35/36, FS-34/35
     rocket_attack = 29, // WRA-01: modal weapon selection
     super_laser = 30, // WSPL-01 to WSPL-06
+    deploy_squad = 31, // FL-17: manual hangar launch
+    lucky_shot = 32, // WLK-01..06: holder-wide shot bonus.
 };
 
 // What an ability command asks (AB-10 to AB-13): switch the ability on or off, or set whether it
@@ -463,10 +467,21 @@ struct BeaconState {
     friend constexpr bool operator==(const BeaconState&, const BeaconState&) noexcept = default;
 };
 
+struct LandGarrisonPayload {
+    EntityId host{};
+    std::uint32_t bone{};
+    friend constexpr bool operator==(const LandGarrisonPayload&, const LandGarrisonPayload&) noexcept = default;
+};
+struct LandUnloadPayload {
+    EntityId occupant{}; // zero when all is set
+    bool all{};
+    friend constexpr bool operator==(const LandUnloadPayload&, const LandUnloadPayload&) noexcept = default;
+};
+
 using CommandPayload = std::variant<StopPayload, MovePayload, AttackPayload, DamagePayload, FacePayload,
     AttackMovePayload, GuardPayload, AbilityPayload, BuyPayload, CancelPayload, ReinforcePayload, PadBuildPayload,
     CreditGrantPayload, QuitPayload, PadSellPayload, AreaAbilityPayload, ManualTargetPayload, RevealAllPayload,
-    RepairHardpointPayload, AiReservationDebitPayload, SpecialFirePayload, CampaignCreditReleasePayload, RetreatPayload, RetreatCinematicPayload, BeaconPayload, GiftPayload, BattleControlPayload, ScriptInvulnerablePayload>;
+    RepairHardpointPayload, AiReservationDebitPayload, SpecialFirePayload, CampaignCreditReleasePayload, RetreatPayload, RetreatCinematicPayload, BeaconPayload, GiftPayload, BattleControlPayload, ScriptInvulnerablePayload, LandGarrisonPayload, LandUnloadPayload>;
 
 // Whether a command acts on the issuer's economy (#530) rather than on units.
 [[nodiscard]] constexpr bool economy_command(const CommandPayload& payload) noexcept {
@@ -495,6 +510,8 @@ struct PlayerCommand {
 }
 
 [[nodiscard]] constexpr OrderKind order_kind(const CommandPayload& payload) noexcept {
+    if (std::holds_alternative<LandGarrisonPayload>(payload)) return OrderKind::land_garrison;
+    if (std::holds_alternative<LandUnloadPayload>(payload)) return OrderKind::land_unload;
     if (std::holds_alternative<ScriptInvulnerablePayload>(payload)) return OrderKind::script_invulnerable;
     if (std::holds_alternative<GiftPayload>(payload)) return OrderKind::gift;
     if (std::holds_alternative<BattleControlPayload>(payload)) return OrderKind::battle_control;

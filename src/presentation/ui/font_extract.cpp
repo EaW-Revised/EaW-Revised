@@ -19,6 +19,13 @@
 #include <thread>
 #include <utility>
 
+#ifdef _WIN32
+#include <fcntl.h>
+#include <io.h>
+#include <share.h>
+#include <sys/stat.h>
+#endif
+
 namespace eawr::presentation::ui {
 namespace {
 
@@ -267,10 +274,18 @@ bool publish(const fs::path& target, const std::string_view data) {
     std::random_device random;
     const fs::path temporary = target.parent_path() / ("." + target.filename().string() + "." + std::to_string(random())
                                                        + ".tmp");
-    // "x": the create fails when the name exists, so a planted file or link is never followed.
+    // Exclusive creation refuses an existing file or link.
 #ifdef _WIN32
-    std::FILE* file = nullptr;
-    if (_wfopen_s(&file, temporary.c_str(), L"wbx") != 0) file = nullptr;
+    int descriptor = -1;
+    if (_wsopen_s(&descriptor, temporary.c_str(), _O_CREAT | _O_EXCL | _O_WRONLY | _O_BINARY,
+                  _SH_DENYNO, _S_IREAD | _S_IWRITE) != 0) return false;
+    std::FILE* const file = _wfdopen(descriptor, L"wb");
+    if (file == nullptr) {
+        _close(descriptor);
+        std::error_code ignored;
+        fs::remove(temporary, ignored);
+        return false;
+    }
 #else
     std::FILE* const file = std::fopen(temporary.c_str(), "wbx");
 #endif

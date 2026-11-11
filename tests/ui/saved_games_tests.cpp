@@ -1,3 +1,4 @@
+#include "../support/runtime_path.hpp"
 // The Load Game screen's saved-game list (MNU-39, WGS-155/156/161): the rows the viewer's save-directory
 // adapter builds from checkpoint saves, in the retail order (the in-game dialog's key, reserved slots
 // first, newest first, equal keys in file order) with the retail columns (the name or the localized
@@ -24,6 +25,7 @@
 #include <iterator>
 #include <optional>
 #include <regex>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <system_error>
@@ -450,6 +452,19 @@ void checkpoint_screen_models() {
         && guest.rows[6].find("your assigned seat") == std::string::npos,
         "joiner assignment follows stable peer mapping and sparse saved seat IDs");
     expect(guest.progress == "Transfer: 512 / 1024 bytes", "bounded transfer progress is visible before restore");
+    expect(guest.rows[5].find("Mod faction") != std::string::npos, "without a lookup the saved-seat line keeps the identity");
+    const auto named = eawr::viewer::checkpoint_lobby_model(false, true, roster, 90, bindings, peers, 3,
+        progress, "", "", "", [](const std::string& faction) { return faction == "Mod faction" ? std::string("Mod Display") : faction; });
+    expect(named.rows[5] == "Seat 11 - Mod Display (human) - your assigned seat"
+            && named.rows[5].find("Mod faction") == std::string::npos,
+        "saved-seat lines show the faction display name the screen passes in (#6086)");
+    {   // #6156: a loaded save shows the battle-vote timeout it recorded; a save that recorded none shows no line.
+        const auto none = std::any_of(guest.rows.begin(), guest.rows.end(), [](const auto& row) { return row.find("Battle vote timeout") != std::string::npos; });
+        auto timed = roster; timed.vote_timeout_seconds = 45;
+        const auto shown = eawr::viewer::checkpoint_lobby_model(false, true, timed, 90, bindings, peers, 3, progress, "", "", "");
+        expect(!none && std::find(shown.rows.begin(), shown.rows.end(), "Battle vote timeout: 45 s") != shown.rows.end(),
+            "the saved battle vote timeout is shown in the load summary");
+    }
     progress.agreed = true; progress.restored = true;
     guest = eawr::viewer::checkpoint_lobby_model(false, true, roster, 90, bindings, peers, 3,
         progress, "", "", "");
@@ -588,7 +603,7 @@ std::optional<int> layer_value(const std::string& expression, const int screen_l
 // lobby for as long as it is open, under the message boxes (100), and the lobby must get its own index back on close.
 void load_list_layer_is_above_the_lobby() {
     const auto read = [](const char* name) {
-        std::ifstream input(fs::path(EAWR_VIEWER_SOURCE_DIR) / name);
+        std::ifstream input(eawr::testing::runtime_path("EAWR_TEST_SOURCE_ROOT", "apps/viewer/src", EAWR_VIEWER_SOURCE_DIR) / name);
         expect(input.is_open(), std::string(name) + " is readable");
         return std::string{std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
     };
@@ -624,7 +639,7 @@ void load_list_layer_is_above_the_lobby() {
 }
 
 void checkpoint_apply_uses_background_restore() {
-    std::ifstream input(fs::path(EAWR_VIEWER_SOURCE_DIR) / "lan_lobby_screen_checkpoint.cpp");
+    std::ifstream input(eawr::testing::runtime_path("EAWR_TEST_SOURCE_ROOT", "apps/viewer/src", EAWR_VIEWER_SOURCE_DIR) / "lan_lobby_screen_checkpoint.cpp");
     expect(input.is_open(), "checkpoint lobby source is readable");
     const std::string source{std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
     const auto start = source.find("void EawrLanLobby::apply_checkpoint_selection()");
@@ -634,6 +649,47 @@ void checkpoint_apply_uses_background_restore() {
     const auto apply = source.substr(start, end - start);
     expect(apply.find("select_checkpoint(") == std::string::npos, "Apply must not restore synchronously");
     expect(apply.find("checkpoint_prepare.submit(") != std::string::npos, "Apply submits background restore");
+}
+
+// #6178 F2: the two screen call sites that fit the seat assignment to the room read the room's peers, not just its size, and an
+// unassigned peer is labelled in its combo. The screen needs a running Godot, so these read the source (as the Apply test above).
+void checkpoint_screen_reconciles_by_peer() {
+    std::ifstream input(eawr::testing::runtime_path("EAWR_TEST_SOURCE_ROOT", "apps/viewer/src", EAWR_VIEWER_SOURCE_DIR) / "lan_lobby_screen_checkpoint.cpp");
+    expect(input.is_open(), "checkpoint lobby source is readable");
+    const std::string source{std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
+    std::size_t calls = 0;
+    for (auto at = source.find("viewer::reconcile_checkpoint_bindings("); at != std::string::npos;
+         at = source.find("viewer::reconcile_checkpoint_bindings(", at + 1)) ++calls;
+    expect(calls == 2, "exactly the two screen call sites fit the assignment to the room (found " + std::to_string(calls) + ")");
+    const auto read = source.find("void EawrLanLobby::process_checkpoint_read()");
+    const auto select = source.find("void EawrLanLobby::new_campaign()", read);
+    expect(read != std::string::npos && select != std::string::npos, "the saved-game read source is present");
+    if (read != std::string::npos && select != std::string::npos) {
+        const auto body = source.substr(read, select - read);
+        const auto record = body.find("checkpoint_bound_peers.push_back(seat.peer)");
+        const auto fit = body.find("{}, {}, impl.checkpoint_bound_peers");
+        expect(record != std::string::npos && body.find("reconcile_checkpoint_bindings(") != std::string::npos
+            && fit != std::string::npos,
+            "reading a save fits the first assignment to the room's peers and records them");
+        // The fit reads the recorded peers, so recording them comes first.
+        expect(record != std::string::npos && fit != std::string::npos && record < fit,
+            "the room's peers are recorded before the first assignment is fitted to them");
+    }
+    const auto refresh = source.find("void EawrLanLobby::refresh_checkpoint_staging()");
+    expect(refresh != std::string::npos, "the staging refresh source is present");
+    if (refresh != std::string::npos) {
+        const auto body = source.substr(refresh);
+        const auto call = body.find("reconcile_checkpoint_bindings(");
+        const auto close = body.find(");", call);
+        expect(call != std::string::npos && close != std::string::npos
+            && body.substr(call, close - call).find("impl.checkpoint_bindings, impl.checkpoint_bound_peers, room_peers") != std::string::npos,
+            "a room change keeps each assignment with its PEER: the previous peers and the new ones are passed");
+        const auto record = body.find("impl.checkpoint_bound_peers = std::move(room_peers)", close);
+        expect(record != std::string::npos, "the peers the assignment was fitted to are recorded after the fit");
+        expect(body.find("no saved seat (not in the save)") != std::string::npos
+            && body.find("bindings[i].seat.value == 0") != std::string::npos,
+            "a peer beyond the save's humans is labelled in its combo (F3)");
+    }
 }
 
 void saved_mod_details() {
@@ -662,9 +718,232 @@ void saved_mod_details() {
     expect(eawr::viewer::saved_game_mod_details(std::span<const std::uint8_t>{}, saved) == "Mods: unavailable", "invalid saves do not invent mod details");
 }
 
+void saved_mod_load_review() {
+    namespace mods = eawr::mods;
+    const auto root = fs::temp_directory_path() / "eawr-mod-review-tests";
+    fs::create_directories(root);
+    mods::DescriptionEntry a{mods::DescriptionKeyKind::workshop, "workshop:1", "Alpha", "1", std::array<std::uint8_t, 32>{}};
+    auto b = a; b.key = "workshop:2"; b.name = "Beta";
+    const mods::ModDescription saved{true, {a, b}};
+    cp::Checkpoint checkpoint;
+    checkpoint.sections.push_back({static_cast<std::uint16_t>(cp::SectionId::mod_list), 1, true, *mods::encode_description(saved)});
+    write_file(root / "Mods.eawrsave", cp::write_checkpoint(checkpoint).value());
+    const ui::SavedGameRequest selected{root, "Mods"};
+    auto prompt = eawr::viewer::saved_game_mod_prompt(selected, saved);
+    expect(prompt && prompt.value().empty(), "equal saved mods load without a confirmation");
+    ui::SavedLoadReview review;
+    review.wait(selected);
+    expect(review.waiting() && !review.proceed() && !review.answer(true), "pending metadata never starts a load without a completed check");
+    expect(!review.answer(false) && !review.waiting() && !review.complete("late mismatch") && !review.proceed(),
+        "Cancel during hashing returns immediately and discards a late check without reviving the request");
+    review.wait(selected);
+    expect(review.complete({}) && review.proceed().has_value(), "a fresh load can be admitted after a cancelled wait");
+    review.begin(selected, prompt.value());
+    expect(review.proceed().has_value() && !review.proceed(), "equal description admits exactly one load");
+    auto changed = a; (*changed.checksum)[0] = 3;
+    auto version = a; version.version = "2";
+    for (const auto& mounted : {mods::ModDescription{true, {a}}, mods::ModDescription{true, {b, a}},
+             mods::ModDescription{true, {version, b}},
+             mods::ModDescription{true, {changed, b}}, mods::ModDescription{true, {a, b, {mods::DescriptionKeyKind::mods_folder, "mods:Extra", "Extra", {}, {}}}}}) {
+        prompt = eawr::viewer::saved_game_mod_prompt(selected, mounted);
+        expect(prompt && prompt.value().find("Load with your current mods?") != std::string::npos,
+            "missing, reordered, checksum-changed and extra mods each ask before loading");
+        review.begin(selected, prompt.value());
+        expect(review.needs_confirmation() && !review.proceed(), "mismatch cannot start a restore before an answer");
+        expect(!review.answer(false) && !review.proceed() && !review.answer(true), "No cancels and cannot later admit the cancelled load");
+        review.begin(selected, prompt.value());
+        const auto admitted = review.answer(true);
+        expect(admitted && admitted->name == "Mods" && admitted->directory == root && !review.answer(true),
+            "Yes loads the reviewed request once, independently of later list selection");
+    }
+    auto unknown = a; unknown.checksum.reset();
+    prompt = eawr::viewer::saved_game_mod_prompt(selected, {true, {unknown, b}});
+    expect(prompt && prompt.value().empty(), "unknown checksum stays advisory rather than inventing a difference");
+    checkpoint.sections.front().bytes = {99};
+    write_file(root / "Mods.eawrsave", cp::write_checkpoint(checkpoint).value());
+    expect(!eawr::viewer::saved_game_mod_prompt(selected, saved), "malformed metadata fails rather than offering a bypass");
+    eawr::core::Diagnostic error; error.code = "EAWR-CKP-0103"; error.message = "saved by another build: the content identity differs";
+    const auto refusal = eawr::viewer::saved_game_restore_refusal(error);
+    expect(refusal.find("Check its mods.") != std::string::npos && refusal.find(error.message) != std::string::npos,
+        "restore refusal gives mod guidance and preserves the real diagnostic");
+    for (const auto& message : {"The selected seat is unavailable.", "The campaign did not start.", "The save file could not be read."}) {
+        error.code = "EAWR-SAVE-0104"; error.message = message;
+        expect(eawr::viewer::saved_game_restore_refusal(error).find("Check its mods.") == std::string::npos,
+            "seat, campaign and unreadable-file errors retain their cause without an unrelated mod hint");
+    }
+    error.code = "EAWR-CKP-0103"; error.message = "saved campaign identity differs";
+    expect(eawr::viewer::saved_game_restore_refusal(error).find("Check its mods.") == std::string::npos,
+        "a campaign identity mismatch is reported as its own diagnostic");
+    error.code = "EAWR-CKP-0110"; error.message = "restored state differs";
+    expect(eawr::viewer::saved_game_restore_refusal(error).find("Check its mods.") != std::string::npos,
+        "a checkpoint reconstruction failure receives the restore guidance");
+    error.code = "EAWR-CKP-0103"; error.message = "the campaign content description differs";
+    expect(eawr::viewer::saved_game_restore_refusal(error).find("Check its mods.") == std::string::npos,
+        "only the exact content-identity diagnostic gets content guidance");
+    error.code = "EAWR-SIM-0501"; error.message = "restored owner start failed"; error.logical_path = "Restored Save";
+    const auto start_failure = eawr::viewer::saved_game_restore_refusal(error, eawr::viewer::SavedGameRestoreStage::owner_start);
+    expect(start_failure.find("Check its mods.") != std::string::npos && start_failure.find(error.message) != std::string::npos
+        && start_failure.find(error.code) != std::string::npos && start_failure.find(*error.logical_path) != std::string::npos,
+        "a restored owner start failure retains code, path, cause and restore guidance");
+    for (const auto& code : {"EAWR-SIM-0508", "EAWR-PLATFORM-0600"}) {
+        error.code = code;
+        const auto failure = eawr::viewer::saved_game_restore_refusal(error, eawr::viewer::SavedGameRestoreStage::owner_start);
+        expect(failure.find("Check its mods.") == std::string::npos && failure.find(code) != std::string::npos,
+            "worker and platform startup refusals keep their actual cause without a mod hint");
+    }
+    error.code = "EAWR-SIM-0501"; error.message = "invalid saved auto-summary";
+    expect(eawr::viewer::saved_game_restore_refusal(error, eawr::viewer::SavedGameRestoreStage::reconstruction).find("Check its mods.") != std::string::npos,
+        "saved auto-summary decode failures are reconstruction failures regardless of their original code");
+    fs::remove(root / "Mods.eawrsave"); fs::remove(root);
+}
+
 } // namespace
 
+// #6128: after a save is restored a guest can Accept, though only the host ever sees `agreed`. Waiting for `agreed` on the guest kept
+// Accept off for ever ("Waiting for restore agreement"), so no saved co-op game could start.
+void checkpoint_guest_can_accept_when_its_restore_is_done() {
+    namespace net = eawr::net;
+    namespace sim = eawr::sim;
+    namespace viewer = eawr::viewer;
+    net::SaveTransferView guest_done{}; guest_done.total = 100; guest_done.received = 100; guest_done.restored = true; // agreed stays false
+    net::SaveTransferView host_waiting = guest_done;                                       // the host has not collected every ack yet
+    net::SaveTransferView host_done = guest_done; host_done.agreed = true;
+    expect(!viewer::checkpoint_start_blocked(false, false, false, true, guest_done),
+        "#6128 a guest whose restore is done is not blocked, although it never sees agreed");
+    expect(viewer::checkpoint_start_blocked(true, false, false, true, host_waiting),
+        "#6128 the host stays blocked until every guest's restore acknowledgement arrived");
+    expect(!viewer::checkpoint_start_blocked(true, false, false, true, host_done), "#6128 the host is free once every guest restored");
+    net::SaveTransferView receiving{}; receiving.total = 100; receiving.received = 40;
+    expect(viewer::checkpoint_start_blocked(false, false, false, true, receiving), "#6128 a guest still receiving the save is blocked");
+    expect(viewer::checkpoint_start_blocked(false, true, false, true, guest_done) && viewer::checkpoint_start_blocked(false, false, true, true, guest_done),
+        "#6128 a pending mapping problem or a refusal blocks both seats");
+    expect(!viewer::checkpoint_start_blocked(false, false, false, false, receiving), "#6128 a room with no saved game is never blocked");
+    sim::galactic::MpRoster roster;
+    sim::galactic::Seat seat{}; seat.seat_id = {1}; seat.player = 1; seat.kind = sim::SeatKind::human; seat.active = true;
+    roster.seats.push_back(seat);
+    const std::vector<net::SetupSeat> bindings{{0, {1}, 1}};
+    const std::vector<net::PeerIndex> peers{0};
+    const auto guest = viewer::checkpoint_lobby_model(false, true, roster, 90, bindings, peers, 0, guest_done, "", "", "");
+    expect(guest.can_accept && guest.progress == "Save restored; accept when ready",
+        "#6128 the guest's summary says it can accept and no longer 'Waiting for restore agreement'");
+    const auto host = viewer::checkpoint_lobby_model(true, true, roster, 90, bindings, peers, 0, host_waiting, "", "", "");
+    expect(!host.can_accept && host.progress == "Waiting for every player to restore the save", "#6128 the host still waits for every guest");
+}
+
+// #6121: the host's saved-seat assignment follows the room. A guest who joined after Load Game used to have no entry (its combo
+// showed the first saved seat, Apply always refused), so a saved co-op game with two Empire humans could not start.
+void checkpoint_bindings_follow_the_room() {
+    namespace net = eawr::net;
+    namespace sim = eawr::sim;
+    const auto human = [](std::uint32_t seat, std::uint32_t player, bool active = true) {
+        sim::galactic::Seat row{};
+        row.seat_id = {seat}; row.player = player; row.kind = sim::SeatKind::human; row.active = active;
+        return row;
+    };
+    const auto ai = [](std::uint32_t seat, std::uint32_t player) {
+        sim::galactic::Seat row{};
+        row.seat_id = {seat}; row.player = player; row.kind = sim::SeatKind::ai; row.active = true;
+        return row;
+    };
+    const auto seats_of = [](const std::vector<net::SetupSeat>& bindings) {
+        std::vector<std::uint32_t> seats;
+        for (const auto& binding : bindings) seats.push_back(binding.seat.value);
+        return seats;
+    };
+    const auto distinct = [](const std::vector<net::SetupSeat>& bindings) {
+        std::set<std::uint32_t> seen;
+        for (const auto& binding : bindings) if (!seen.insert(binding.seat.value).second) return false;
+        return true;
+    };
+    // The owner's save: two Empire humans (seats 1 and 2, player 1) and a Rebel AI (seat 3).
+    sim::galactic::MpRoster owner;
+    owner.seats = {human(1, 1), human(2, 1), ai(3, 2)};
+    const auto built = eawr::viewer::reconcile_checkpoint_bindings(owner, {}, 2);
+    expect(seats_of(built) == std::vector<std::uint32_t>{1, 2} && built[0].peer == 0 && built[1].peer == 1
+            && built[0].player == 1 && built[1].player == 1,
+        "#6121 two same-faction humans get seats 1 and 2, not seat 1 twice");
+    // Load Game pressed with the host alone, the guest joins afterwards.
+    const auto alone = eawr::viewer::reconcile_checkpoint_bindings(owner, {}, 1);
+    expect(seats_of(alone) == std::vector<std::uint32_t>{1}, "#6121 the host alone holds the first saved seat");
+    const auto joined = eawr::viewer::reconcile_checkpoint_bindings(owner, alone, 2);
+    expect(seats_of(joined) == std::vector<std::uint32_t>{1, 2} && joined[1].peer == 1 && joined[1].player == 1,
+        "#6121 a guest joining after Load Game gets the other saved seat, the host keeps its own");
+    // Three and four humans on one faction.
+    for (const std::size_t humans : {3U, 4U}) {
+        sim::galactic::MpRoster crowd;
+        for (std::uint32_t seat = 1; seat <= humans; ++seat) crowd.seats.push_back(human(seat, 1));
+        crowd.seats.push_back(ai(static_cast<std::uint32_t>(humans) + 1, 2));
+        std::vector<net::SetupSeat> grown;
+        for (std::size_t room = 1; room <= humans; ++room) {
+            grown = eawr::viewer::reconcile_checkpoint_bindings(crowd, grown, room);
+            expect(grown.size() == room && distinct(grown), "#6121 every human has a distinct saved seat as the room fills, "
+                + std::to_string(humans) + " on one faction");
+        }
+        expect(seats_of(grown).size() == humans && seats_of(grown).front() == 1 && seats_of(grown).back() == humans,
+            "#6121 all " + std::to_string(humans) + " same-faction humans are mapped");
+    }
+    // A guest leaves and rejoins after Load Game (two and three same-faction humans): the leaver's seat goes back to the pool and
+    // the newcomer gets a distinct one, every step of the way.
+    {
+        auto room = eawr::viewer::reconcile_checkpoint_bindings(owner, {}, 2);
+        room = eawr::viewer::reconcile_checkpoint_bindings(owner, room, 1);
+        expect(seats_of(room) == std::vector<std::uint32_t>{1}, "#6121 after the guest leaves the host keeps its seat");
+        room = eawr::viewer::reconcile_checkpoint_bindings(owner, room, 2);
+        expect(seats_of(room) == std::vector<std::uint32_t>{1, 2} && room[1].peer == 1, "#6121 the rejoining guest gets the free saved seat");
+        sim::galactic::MpRoster three;
+        three.seats = {human(1, 1), human(2, 1), human(3, 1), ai(4, 2)};
+        auto crowd = eawr::viewer::reconcile_checkpoint_bindings(three, {}, 3);
+        expect(seats_of(crowd) == std::vector<std::uint32_t>{1, 2, 3}, "#6121 three same-faction humans fill seats 1 2 3");
+        // The middle guest leaves: the last guest moves up one place in the room and keeps a distinct seat.
+        crowd = eawr::viewer::reconcile_checkpoint_bindings(three, crowd, 2);
+        expect(crowd.size() == 2 && distinct(crowd) && crowd[0].seat.value == 1, "#6121 a leaving middle guest leaves distinct seats");
+        // A new guest joins the free place; then everyone leaves but the host and two join again.
+        crowd = eawr::viewer::reconcile_checkpoint_bindings(three, crowd, 3);
+        expect(distinct(crowd) && crowd.size() == 3, "#6121 a guest joining after the leave gets the free seat");
+        crowd = eawr::viewer::reconcile_checkpoint_bindings(three, crowd, 1);
+        crowd = eawr::viewer::reconcile_checkpoint_bindings(three, crowd, 3);
+        expect(distinct(crowd) && crowd.size() == 3 && crowd[0].seat.value == 1,
+            "#6121 two guests leaving and two rejoining still map to three distinct saved seats");
+    }
+    // The host's own choices survive a change of the room: a swap stays a swap, a duplicate is repaired.
+    const std::vector<net::SetupSeat> swapped{{0, {2}, 1}, {1, {1}, 1}};
+    expect(seats_of(eawr::viewer::reconcile_checkpoint_bindings(owner, swapped, 2)) == std::vector<std::uint32_t>{2, 1},
+        "#6121 a host's swapped assignment is kept");
+    const std::vector<net::SetupSeat> doubled{{0, {1}, 1}, {1, {1}, 1}};
+    const auto repaired = eawr::viewer::reconcile_checkpoint_bindings(owner, doubled, 2);
+    expect(seats_of(repaired) == std::vector<std::uint32_t>{1, 2}, "#6121 two peers on one saved seat are repaired to distinct seats");
+    expect(seats_of(eawr::viewer::reconcile_checkpoint_bindings(owner, swapped, 1)) == std::vector<std::uint32_t>{2},
+        "#6121 when a guest leaves, the remaining peers keep their seats");
+    // #6178 F1: a middle guest leaves. The guest behind keeps ITS saved seat; it does not inherit the leaver's.
+    {
+        sim::galactic::MpRoster three;
+        three.seats = {human(1, 1), human(2, 1), human(3, 1), ai(4, 2)};
+        const std::vector<net::PeerIndex> before{0, 5, 9}, after{0, 9};
+        const auto crowd = eawr::viewer::reconcile_checkpoint_bindings(three, {}, {}, before);
+        expect(seats_of(crowd) == std::vector<std::uint32_t>{1, 2, 3}, "#6178 three peers fill seats 1 2 3");
+        const auto left = eawr::viewer::reconcile_checkpoint_bindings(three, crowd, before, after);
+        expect(seats_of(left) == std::vector<std::uint32_t>{1, 3} && left[1].peer == 1,
+            "#6178 when the middle guest leaves, the last guest keeps its own saved seat (3), not the leaver's (2)");
+        const auto again = eawr::viewer::reconcile_checkpoint_bindings(three, left, after, {0, 7, 9});
+        expect(seats_of(again) == std::vector<std::uint32_t>{1, 2, 3}, "#6178 a newcomer takes the freed seat, the others keep theirs");
+        const auto first_leaves = eawr::viewer::reconcile_checkpoint_bindings(three, crowd, before, {5, 9});
+        expect(seats_of(first_leaves) == std::vector<std::uint32_t>{2, 3},
+            "#6178 the function keeps each remaining peer's seat when the room's first place changes hands (the lobby's first seat is the host and never leaves; this pins the rule itself)");
+    }
+    // More peers than saved humans: the extra peer stays unassigned (Apply says so), nobody is given a seat twice.
+    const auto extra = eawr::viewer::reconcile_checkpoint_bindings(owner, built, 3);
+    expect(seats_of(extra) == std::vector<std::uint32_t>{1, 2, 0} && extra[2].peer == 2,
+        "#6121 a peer beyond the saved humans stays unassigned");
+    // Different factions and an inactive human: saves that already worked map as before.
+    sim::galactic::MpRoster mixed;
+    mixed.seats = {human(4, 3), human(9, 5), human(12, 5, false), ai(13, 6)};
+    const auto mixed_built = eawr::viewer::reconcile_checkpoint_bindings(mixed, {}, 2);
+    expect(seats_of(mixed_built) == std::vector<std::uint32_t>{4, 9} && mixed_built[0].player == 3 && mixed_built[1].player == 5,
+        "#6121 different-faction saves map in saved order, inactive humans are not assigned");
+}
+
 int main() {
+    checkpoint_screen_reconciles_by_peer();
     row_order_and_columns();
     unreadable_and_undated();
     list_limit();
@@ -674,12 +953,15 @@ int main() {
     unicode_directory();
     campaign_admission();
     checkpoint_screen_models();
+    checkpoint_bindings_follow_the_room();
+    checkpoint_guest_can_accept_when_its_restore_is_done();
     checkpoint_worker_keeps_frames_responsive();
     checkpoint_restore_orchestration();
     checkpoint_listing_is_bounded_and_abandonable();
     load_list_layer_is_above_the_lobby();
     checkpoint_apply_uses_background_restore();
     saved_mod_details();
+    saved_mod_load_review();
     concurrent_repository_access();
     if (eawr::test::ui::failures() != 0) {
         std::cerr << eawr::test::ui::failures() << " saved game contract(s) failed\n";

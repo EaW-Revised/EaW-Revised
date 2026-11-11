@@ -55,24 +55,33 @@
   Retail capture (2026-11-05, Galactic Warfare, one pair of space categories, one ground category): a second
   category replaced the first, a second click on the active category restored the full list, pressing the
   already-active space tab restored it too, and clicks made while the game was paused changed the offers only after
-  resume (the tab change itself showed while paused). The state rules sit in one place, `ControlStateRules`.
+  resume (the tab change itself showed while paused). **How that capture's pause was made is not recorded.** The filter
+  scripts of the shipped mods track the pause button (a pause click flips their own flag, and a filter pressed while that
+  flag says paused makes them force the pause button off, let their game-time thread apply the filter, and pause again),
+  so a capture paused another way would show exactly what was captured, while one paused with the on-screen button would
+  contradict the dance. We follow the dance (see GFD-24; `galactic_story_filter_flow_contracts` asserts it), so this
+  paragraph and that test agree only if the capture was not paused with the button. The live check is therefore: pause
+  with the on-screen pause button, then click a category, and note whether the offers change while the game stays paused.
+  The state rules sit in one place, `ControlStateRules`.
   **Forced-press limit (debug build):** the mouse handler of the command bar calls the component's click slot and then,
-  as a separate call, `Tutorial_Click_UI`, which raises `STORY_CLICK_GUI`; `Reward_Force_Click_GUI` calls only the click
-  slot, and no path from it to `Tutorial_Click_UI` appears in its cross-references. The slot's own body was not read,
+  as a separate call, raises `STORY_CLICK_GUI`; the `FORCE_CLICK_GUI` reward calls only the click slot, and no path from
+  it to the story click appears in its cross-references (WST-75). The slot's own body was not read,
   so a direct story event raised inside it is not excluded. **Loop safety:** because a forced press raises no click,
   forced presses cannot feed each other; the session still executes at most `max_gui_clicks_per_tick` (8) `GuiClick`
   commands per seat per tick (a safety cap for human bursts and for a rule switched to raise) and reports the rest as a
   diagnostic, and the HUD hands at most the same number of forced presses to a drain. Nothing aborts the match.
   **Deviations (named):** (1) a click reaches only the plots of the seat that made it, where retail's
-  `Tutorial_Click_UI` dispatches without a player and so reaches every sub-plot (a named departure from WST-14, kept for
+  story click dispatches without a player and so reaches every sub-plot (a named departure from WST-14, kept for
   multiplayer); (2) a forced press goes to the plot owner's seat, where retail presses the local bar whoever owns the
   plot, and a request from an AI-owned plot is ignored without a diagnostic. **Gaps:** the press state of the
   authored controls is not saved (a loaded game shows no filter selected while the script state stays filtered), and a
   forced request not yet drained at save time is lost; story progress itself, flags and Lua edits are saved and the
   click listeners are rebuilt on load. A control that a later Lua edit names gets no button, because the controls are
   built once after the session starts. **Unverified:** exclusion across other groups, other domain transitions,
-  button order, selected art apart from hover and response latency. The production filtering the scripts do with
-  these clicks is not part of this change. Evidence: synthetic contracts `galactic_story_engine_contracts` and
+  button order, selected art apart from hover and response latency. The press path itself (human press, forced press, the drain
+  of the requests, the guards) is one Godot-free class, `CommandPresses`, so the contracts below run the same code the HUD
+  runs; the production filtering the scripts do with these clicks (TRIGGER_AI flags, `Check_Story_Flag`, `Story_Event`) is
+  the story bridge of WST-49/55/56. Evidence: synthetic contracts `galactic_story_engine_contracts` and
   `galactic_planet_hud_contracts`.
 
 Audit dated 2026-10-09, against `f58f8f3d6b09f71f74de1c0a4305800f2f8a815c`.

@@ -8,6 +8,7 @@
 #include "eawr/campaign/conflict_policy.hpp"
 #include "eawr/campaign/live_setup.hpp"
 #include "eawr/campaign/live_conflict.hpp"
+#include "eawr/campaign/planet_economy.hpp"
 #include "eawr/campaign/tactical_return.hpp"
 #include "eawr/checkpoint/tactical.hpp"
 #include "eawr/campaign/starting_forces.hpp"
@@ -142,6 +143,27 @@ void installed_reserve_order(const std::shared_ptr<const campaign::StockSpaceEnt
     for (sim::EntityId id = 50; id < 90; ++id) setup.fleets.back().members.push_back({id,type("Rebel_X-Wing_Squadron")});
     setup.player_economy = gc::PlayerEconomySetup{{{1,whole(10000),whole(100000),0,5},{2,whole(10000),whole(100000),0,5},
         {3,{},whole(100000),0,5},{4,{},whole(100000),0,5}}};
+    setup.fiscal.emplace();
+    setup.rules.fiscal_cycle_frames = 300;
+    setup.fiscal->credit_cap_per_planet = whole(100000);
+    auto& market = setup.economy_corruption.emplace();
+    for (const auto& player : setup.players) {
+        setup.fiscal->players.push_back({player.player_id, true, whole(1)});
+        gc::CorruptionEconomyPlayer entry;
+        entry.player = player.player_id;
+        entry.faction = player.player_id;
+        if (entry.player == 1) entry.unlocks.insert(10);
+        market.players.push_back(entry);
+    }
+    for (const auto& planet : setup.planets) {
+        setup.fiscal->planets.push_back({planet.id, {}});
+        gc::CorruptionEconomyPlanet entry;
+        entry.planet = planet.id;
+        market.planets.push_back(entry);
+    }
+    gc::corruption_fixture::MarketItem offer;
+    offer.id = 10; offer.faction = 1; offer.ability_names = {"Test_Cloak", "Test_Salvo"};
+    market.items.push_back(offer);
     auto galaxy = take(gc::GalacticSession::create(setup));
     expect(galaxy.snapshot()->fleets().front().motion.orbit_entry > 0
         && galaxy.snapshot()->fleets().front().motion.orbit_entry < galaxy.snapshot()->fleets().back().motion.orbit_entry,
@@ -154,6 +176,10 @@ void installed_reserve_order(const std::shared_ptr<const campaign::StockSpaceEnt
         record.forces.push_back({member.id,member.type,fleet.owner,fleet.id});
     std::sort(record.forces.begin(),record.forces.end(),[](const auto& a,const auto& b){return a.id < b.id;});
     const auto resolved = take(provider->resolve(record,*galaxy.snapshot(),901));
+    const auto& policy = resolved.conflict.tactical.campaign->market_abilities;
+    expect(policy && policy->items.size() == 1 && policy->items[0].abilities == offer.ability_names
+        && policy->owners.size() == setup.players.size() && policy->owners[0].purchased == std::vector<std::uint32_t>{10}
+        && policy->owners[1].purchased.empty(), "GC battle entry carries ordered market identities and per-owner purchases");
     std::vector<sim::EntityId> expected;
     for (sim::EntityId id = 100; id < 140; ++id) expected.push_back(id);
     for (sim::EntityId id = 50; id < 65; ++id) expected.push_back(id);
@@ -182,6 +208,54 @@ void installed_reserve_order(const std::shared_ptr<const campaign::StockSpaceEnt
         if (workers == 1) reference = hashes;
         else expect(reference == hashes,"stock multiple-fleet reserve order is deterministic on 1/2/4/8 workers");
     }
+}
+
+// A real campaign entry observes the buyer's unlocks. This uses only the public
+// pre-existing campaign/session interfaces so the same test can run on the base.
+void installed_market_entitlement(const std::shared_ptr<const campaign::StockSpaceEntry>& provider,
+    const campaign::CampaignSetupPlan& plan, const data::galactic::GalacticData& authored,
+    const vfs::Vfs& files, const data::Catalog& catalog) {
+    const auto type = [&] {
+        for (const auto& binding : plan.type_bindings())
+            if (binding.original_type == "Interceptor4_Frigate") return binding.id;
+        throw std::runtime_error("market entitlement fixture type missing");
+    }();
+    gc::GalacticSetup setup;
+    setup.seed = plan.galaxy().seed; setup.content_identity = plan.galaxy().content_identity;
+    setup.players = plan.galaxy().players; setup.seats = plan.galaxy().seats; setup.planets = plan.galaxy().planets;
+    setup.planets.front().owner = 2;
+    setup.fleets = {{10, 1, setup.planets.front().id, {{100, type}}},
+        {11, 2, setup.planets.front().id, {{200, type}}}};
+    setup.player_economy = gc::PlayerEconomySetup{{{1,whole(10000),whole(100000),0,5}, {2,whole(10000),whole(100000),0,5},
+        {3,{},whole(100000),0,5}, {4,{},whole(100000),0,5}}};
+    setup.rules.fiscal_cycle_frames = 300;
+    setup.fiscal.emplace(); setup.fiscal->credit_cap_per_planet = whole(100000);
+    for (const auto& player : setup.players) setup.fiscal->players.push_back({player.player_id, true, whole(1)});
+    for (const auto& planet : setup.planets) setup.fiscal->planets.push_back({planet.id, {}});
+    setup.economy_corruption = take(campaign::prepare_corruption_economy(files, catalog, plan, setup));
+    // Stock Full Salvo item is the fourth registered item in the installed fixture.
+    setup.economy_corruption->players[0].unlocks.insert(4);
+    auto galaxy = take(gc::GalacticSession::create(setup));
+    campaign::ConflictRecord record; record.id = 900; record.planet = setup.planets.front().id;
+    record.invader = 1; record.defender = 2; record.seats = {{{1},1},{{2},2}};
+    for (const auto& location : plan.locations()) if (location.planet && location.planet->id == record.planet)
+        record.map_identity = authored.planet(location.original_type)->space_tactical_map;
+    record.forces = {{100, type, 1, 10}, {200, type, 2, 11}};
+    auto resolved = take(provider->resolve(record, *galaxy.snapshot(), 901));
+    auto battle = take(tt::TacticalSession::create(resolved.conflict.tactical, resolved.content));
+    const platform::ThreadWorkerAdapter executor(1);
+    const auto step = take(battle.step(executor));
+    const auto ready = [&](sim::EntityId id) {
+        const auto& units = step.snapshot->instances();
+        const auto unit = std::find_if(units.begin(), units.end(), [id](const auto& row) { return row.entity_id == id; });
+        if (unit == units.end()) return false;
+        const auto ability = std::find_if(unit->abilities.begin(), unit->abilities.end(), [](const auto& row) {
+            return row.kind == tt::AbilityKind::full_salvo;
+        });
+        return ability != unit->abilities.end() && ability->ready;
+    };
+    expect(ready(100), "purchased Full Salvo is available in the campaign battle");
+    expect(!ready(200), "unbought Full Salvo is unavailable for the other campaign owner");
 }
 
 void installed_garrison(const std::shared_ptr<const campaign::StockSpaceEntry>& provider,
@@ -799,6 +873,7 @@ void installed(bool garrison_only, bool population_only, bool commander_only, bo
         return;
     }
     installed_reserve_order(provider, plan, authored);
+    installed_market_entitlement(provider, plan, authored, files, catalog.catalog);
     const auto type_id = [&](std::string_view name) {
         const auto at = std::find_if(plan.type_bindings().begin(), plan.type_bindings().end(), [&](const auto& row) { return row.original_type == name; });
         if (at == plan.type_bindings().end()) throw std::runtime_error("stock fixture missing binding");

@@ -224,15 +224,16 @@ core::Result<void> session_detail::Tick::ion_team() {
             continue;
         }
         // AB-68: on autofire (always for a player the engine plays, AB-40), a ready ion shot locks
-        // onto the squadron's attack target.
-        const bool autofire = team->autofire || !impl_->abilities.human(container->state.owner);
+        // onto the squadron's attack target. AB-70 also admits the default Special_Attack trigger without a flag.
         const auto target = mind->second.target;
-        if (autofire && !(container->nebula && container->nebula->present) && tick >= team->ready_tick && !craft.empty()
+        if (!(container->nebula && container->nebula->present) && tick >= team->ready_tick && !craft.empty()
             && std::none_of(craft.begin(), craft.end(), [](const AbilitySlot* slot) { return slot->active; })
-            && impl_->ion_target_valid(container->state.owner, live_unit(moving, target))) {
+            && impl_->ion_handler_admits(*container, live_unit(moving, target), true)) {
             lock_ion_shot(*container, *team, squadron, minds.at(mind->first), target, no_hardpoint);
         }
     }
+
+    if (auto serviced = lucky_shots(); !serviced) return serviced;
 
     // Orders phase (#452, docs/behaviour/space-orders.md OR-06): every reevaluation interval after
     // its order, a unit approaching another (attack, attack-move or guard on a unit) checks whether
@@ -428,7 +429,8 @@ core::Result<void> session_detail::CombatPhases::launch_shots() {
                 [&](const WeaponProfile& entry) { return entry.hardpoint == event.weapon; });
             // AB-66 (#561): an ion shot flies the weapon's ability shot.
             if (weapon == weapons.end()) continue;
-            const auto& shot = (event.outcome & fired_ability_shot) != 0U ? weapon->ability_shot
+            const auto& shot = (event.outcome & fired_lucky_shot) != 0U ? lucky_shot(*weapon, shooter->lucky_holder_type)
+                : (event.outcome & fired_ability_shot) != 0U ? weapon->ability_shot
                 : (event.outcome & fired_barrage_shot) != 0U ? weapon->barrage_shot
                 : (event.outcome & fired_charged_shot) != 0U && weapon->charged_shot ? weapon->charged_shot : weapon->shot;
             if (!shot) continue;
@@ -466,9 +468,11 @@ core::Result<void> session_detail::CombatPhases::launch_shots() {
                     continue;
                 }
                 projectile.value().profile_key = ProjectileProfileKey{shooter->type_id, event.weapon,
-                    (event.outcome & fired_ability_shot) != 0U ? ProjectileProfileKind::ability
+                    (event.outcome & fired_lucky_shot) != 0U ? ProjectileProfileKind::lucky_shot
+                    : (event.outcome & fired_ability_shot) != 0U ? ProjectileProfileKind::ability
                     : (event.outcome & fired_barrage_shot) != 0U ? ProjectileProfileKind::barrage
-                    : (event.outcome & fired_charged_shot) != 0U ? ProjectileProfileKind::charged_blast : ProjectileProfileKind::ordinary};
+                    : (event.outcome & fired_charged_shot) != 0U ? ProjectileProfileKind::charged_blast : ProjectileProfileKind::ordinary,
+                    (event.outcome & fired_lucky_shot) != 0U ? shooter->lucky_holder_type : TypeId{}};
                 if ((event.outcome & fired_charged_shot) != 0U) {
                     // WAD-36: instance direct damage only; selected-type area budget is unchanged.
                     const auto multiplied = math::multiply(projectile.value().damage, shooter->blast_damage_multiplier);
@@ -937,7 +941,8 @@ core::Result<bool> session_detail::Tick::redirect_projectile_impact(const UnitSt
                 const auto weapon = std::find_if(launch_profile->weapons.begin(), launch_profile->weapons.end(),
                     [&](const WeaponProfile& entry) { return entry.hardpoint == key.weapon; });
                 if (weapon == launch_profile->weapons.end()) continue;
-                const auto& selected = key.kind == ProjectileProfileKind::ability ? weapon->ability_shot
+                const auto& selected = key.kind == ProjectileProfileKind::lucky_shot ? lucky_shot(*weapon, key.holder)
+                    : key.kind == ProjectileProfileKind::ability ? weapon->ability_shot
                     : key.kind == ProjectileProfileKind::barrage ? weapon->barrage_shot
                     : key.kind == ProjectileProfileKind::charged_blast && weapon->charged_shot ? weapon->charged_shot : weapon->shot;
                 if (selected) shot = &*selected;
@@ -1085,14 +1090,50 @@ core::Result<void> session_detail::Tick::commit_projectile_flight(std::size_t& f
         if (!caused) return core::Result<void>::failure(caused.error());
         primary_amount = caused.value();
     }
+    const auto caused = impl_->caused_damage(
+        source != staged.end() ? source->second.cause_damage_mode : math::Fixed::from_raw(math::Fixed::scale), projectile.owner);
+    if (!caused) return core::Result<void>::failure(caused.error());
+    // WLK-03: immunity and ordinary damage modes gate the first positive matching impact.
+    if (source != staged.end() && primary_amount.raw() > 0 && target->second.durability->hull.raw() > 0
+        && !profile.scenario_invulnerable && !target->second.script_invulnerable) {
+        auto holder = source;
+        const auto member = craft_prep_->craft_squadron->find(projectile.shooter);
+        if (member != craft_prep_->craft_squadron->end()) {
+            const auto parent = staged.find(member->second);
+            if (parent != staged.end() && impl_->lucky_slot(parent->second)) holder = parent;
+        }
+        auto* lock = impl_->lucky_slot(holder->second);
+        const auto victim_member = craft_prep_->craft_squadron->find(target->first);
+        const auto victim_team = victim_member == craft_prep_->craft_squadron->end() ? invalid_entity_id : victim_member->second;
+        const auto routed = target->first == projectile.target && projectile.target_hardpoint != no_hardpoint
+            ? projectile.target_hardpoint : hardpoint;
+        if (lock && lock->active && (lock->target == target->first || lock->target == victim_team)
+            && (lock->target_hardpoint == no_hardpoint || lock->target_hardpoint == routed)) {
+            auto after_modes = math::multiply(primary_amount, target->second.take_damage_mode);
+            if (!after_modes) return core::Result<void>::failure(after_modes.error());
+            after_modes = math::multiply(after_modes.value(), caused.value());
+            if (!after_modes) return core::Result<void>::failure(after_modes.error());
+            if (after_modes.value().raw() > 0) {
+                const auto& abilities = *impl_->abilities.find(holder->second.state.type_id);
+                const auto& ability = abilities.abilities[*ability_slot(abilities, AbilityKind::lucky_shot)];
+                auto boosted = math::multiply(primary_amount, ability.modifiers.cause_damage);
+                if (!boosted) return core::Result<void>::failure(boosted.error());
+                primary_amount = boosted.value();
+                lock->active = false;
+                lock->lucky_spent = true;
+                if (lock->target_hardpoint == no_hardpoint && hardpoint == hull_target) {
+                    const auto* victim = targets_->world->value().find(target->first);
+                    if (victim) if (const auto* nearest = detail::nearest_hardpoint(*victim, projectile.position))
+                        hardpoint = nearest->hardpoint;
+                }
+            }
+        }
+    }
     Hit hit{primary_amount, projectile.damage_type, true, projectile.shield_damage,
         projectile.hitpoint_damage, hardpoint, projectile.allow_diminishing_firepower,
         projectile.internal_damage_misc, modifier, projectile.energy_damage};
     hit.take_damage_multiplier = target->second.take_damage_mode;
     hit.target_script_invulnerable = target->second.script_invulnerable;
-    const auto caused = impl_->caused_damage(
-        source != staged.end() ? source->second.cause_damage_mode : math::Fixed::from_raw(math::Fixed::scale), projectile.owner);
-    if (!caused) return core::Result<void>::failure(caused.error());
     hit.cause_damage_multiplier = caused.value();
     // WRB-06..WRB-10: after the combat damage modifier and before shields and hull, a Redirect_Blaster handler
     // of the target may deflect the shot: no direct damage, and a fresh projectile of the target's owner.
@@ -1171,6 +1212,13 @@ core::Result<void> session_detail::CombatPhases::impacts() {
         const auto* profile = target == staged.end() ? nullptr : context_.impl_->combat.find(target->second.state.type_id);
         const auto hit = detail::delayed_damage_hit(blast_due_end->amount, blast_due_end->damage_type,
             blast_due_end->internal_damage_misc, blast_due_end->contacted_mesh, profile);
+        if (target != staged.end() && target->second.durability) {
+            const auto* health = context_.impl_->health_profile(target->second);
+            if (!health || (hit.hardpoint != hull_target && hit.hardpoint >= health->hardpoints.size())
+                || health->hardpoints.size() != target->second.durability->hardpoints.size())
+                return core::Result<void>::failure(detail::diagnostic(diagnostic_codes::invalid_setup,
+                    "delayed damage target disagrees with durability state"));
+        }
         auto redirected = context_.redirect_damage(blast_due_end->recipient, hit, [&](const EntityId id, const Hit share) {
             return deliver_redirected(id, share, blast_due_end->owner, invalid_entity_id);
         });

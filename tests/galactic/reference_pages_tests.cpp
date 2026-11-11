@@ -11,6 +11,7 @@
 #include "../support/check.hpp"
 #include "galactic/reference_catalog.hpp"
 #include "galactic/planet_label_scale.hpp"
+#include "galactic/command_bar_scale.hpp"
 #include "galactic/hud_retained.hpp"
 #include <algorithm>
 #include <chrono>
@@ -152,7 +153,10 @@ void mod_label_scale() {
     std::ofstream(base / "XML/CommandBarComponentFiles.xml")
         << "<CommandBar_Component_Files><File>Components.xml</File></CommandBar_Component_Files>";
     std::ofstream(base / "XML/Components.xml")
-        << "<CommandBarComponents><CommandBarComponent Name='g_planet_name'><Type>TextButton</Type><Scale>1</Scale><Text_Offset>0 0</Text_Offset></CommandBarComponent></CommandBarComponents>";
+        << "<CommandBarComponents><CommandBarComponent Name='g_planet_name'><Type>TextButton</Type><Scale>1</Scale><Text_Offset>0 0</Text_Offset></CommandBarComponent>"
+        << "<CommandBarComponent Name='g_ground_level_pips'><Type>Button</Type><Scale>1.0</Scale></CommandBarComponent>"
+        << "<CommandBarComponent Name='g_planet_fleet'><Type>Button</Type><Scale>1.0</Scale></CommandBarComponent>"
+        << "<CommandBarComponent Name='g_build'><Type>Button</Type><Scale>1.0</Scale></CommandBarComponent></CommandBarComponents>";
     std::ofstream(mod / "XML/Components.xml")
         << "<CommandBarComponents><CommandBarComponent Name='g_planet_name'><Type>TextButton</Type><Scale>0.8</Scale><Text_Offset>0 -15</Text_Offset></CommandBarComponent></CommandBarComponents>";
     auto mounted = eawr::vfs::Vfs::mount(std::array{eawr::vfs::MountSpec{"mod", mod, "data", {}},
@@ -168,6 +172,25 @@ void mod_label_scale() {
     const auto place = [](const auto& component) {
         return page::planet_label_placement(component, 200, 100, 2, 100, 20, 100, 20);
     };
+    require(near(page::command_bar_component_scale(*style, 2), 1.6F),
+        "authored component scale multiplies viewport scale for overview icon geometry");
+    eawr::data::ui::CommandBarComponent face_style;
+    face_style.fields.push_back({eawr::data::ui::Field::blank_texture_name, std::vector<std::string>{"blank.tga"}, 0});
+    face_style.fields.push_back({eawr::data::ui::Field::icon_texture_name, std::vector<std::string>{"icon.tga"}, 0});
+    require(page::command_bar_text_button_face(face_style) == "blank.tga", "text button uses authored blank face");
+    face_style.fields.erase(face_style.fields.begin());
+    require(page::command_bar_text_button_face(face_style) == "icon.tga", "text button falls back to icon face");
+    const eawr::data::ui::ShellBone button_bone{"test_button", {100, -20}};
+    const auto button_anchor = page::bone_button_anchor(button_bone, 200, 40,
+        page::command_bar_component_scale(*style, 1));
+    require(button_anchor.rect == eawr::data::ui::ReferenceRect{20, -36, 160, 32}
+        && button_anchor.origin && button_anchor.origin->x == 100 && button_anchor.origin->y == -20,
+        "bone-only button centres the authored scaled face on its bone");
+    auto mesh_anchor = button_anchor;
+    mesh_anchor.rect = {0, 0, 5, 10}; // Mesh bounds need not centre the button's state art.
+    require(page::button_face_rect(mesh_anchor, 200, 40, page::command_bar_component_scale(*style, 1))
+        == eawr::data::ui::ReferenceRect{20, -36, 160, 32},
+        "mesh-backed button artwork uses its bone and texture, not the mesh rectangle");
     const auto scaled = place(*style);
     require(near(scaled.scale, .8F) && near(scaled.x, 160) && near(scaled.y, 122)
         && near(scaled.bounds.x, 160) && near(scaled.bounds.y, 122)
@@ -177,6 +200,30 @@ void mod_label_scale() {
     const auto set_scale = [&](float value) {
         for (auto& entry : variant.fields) if (entry.field == eawr::data::ui::Field::scale) entry.value = value;
     };
+    set_scale(.5F);
+    require(near(page::command_bar_component_scale(variant, 1.5F), .75F),
+        "half-scale pip and fleet components occupy half the viewport-scaled texture size");
+    set_scale(1);
+    require(near(page::command_bar_component_scale(variant, 1.5F), 1.5F),
+        "unit component scale retains stock overview geometry");
+    // Stock-like XML gives each of these components scale 1. Compare the
+    // resulting dimensions with the pre-change viewport-only calculation.
+    auto stock_files = eawr::vfs::Vfs::mount(std::array{eawr::vfs::MountSpec{"stock", base, "data", {}}});
+    require(static_cast<bool>(stock_files), "stock-like command bar mounts");
+    auto stock_bar = eawr::data::ui::load_command_bar(stock_files.value());
+    require(static_cast<bool>(stock_bar), "stock-like command bar loads");
+    for (const auto& [name, texture_width] : {std::pair{"g_ground_level_pips", 16.0F},
+            std::pair{"g_planet_fleet", 50.0F}, std::pair{"g_build", 32.0F}}) {
+        const auto* component = stock_bar.value().catalog.find(name);
+        require(component != nullptr, "stock-like component exists");
+        const float before = texture_width * 1.5F;
+        const float after = texture_width * page::command_bar_component_scale(*component, 1.5F);
+        require(after == before, "stock pip, fleet and status dimensions match main");
+    }
+    auto default_scale = variant;
+    std::erase_if(default_scale.fields, [](const auto& field) { return field.field == eawr::data::ui::Field::scale; });
+    require(page::command_bar_component_scale(default_scale, 1.5F) == 1.5F,
+        "an omitted component scale keeps the main-branch dimensions");
     set_scale(0);
     const auto zero = place(variant);
     require(near(zero.x, 200) && near(zero.y, 130) && near(zero.bounds.x, 200)

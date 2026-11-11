@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """The XML tag registry (docs/tag-coverage.md): every FoC XML tag has a target in our code, or a known reason it has none.
 
-The universe is every (object class, tag path) of the FoC XML the game loads, taken from the committed tag
-inventory (plan/inventories/xml-tags.json) with data-defined names collapsed to `*`. The registry
+The universe unions the stock inventory with the offline target-profile manifest and typed engine catalog
+obligations, with data-defined names collapsed to `*`. The registry
 (docs/tag-coverage/statuses.json and its shards, schema_version 2) gives each pair exactly one status. This module loads and
 validates it, renders its Markdown view and reports on it; tag_coverage.py joins it with the M2 load trace.
 
@@ -136,7 +136,8 @@ def is_attribute(path: str) -> bool:
 
 
 def load_universe(inventory: dict[str, Any], profile: str = "foc", *,
-                  registry: dict[str, Any] | None = None) -> dict[tuple[str, str], UniverseRow]:
+                  registry: dict[str, Any] | None = None,
+                  coverage: dict[str, Any] | None = None) -> dict[tuple[str, str], UniverseRow]:
     """The (class, tag) pairs of the inventory's profile, keyed by their ASCII-folded spelling: every attribute and
     every element that has no element below it (a container carries no value of its own)."""
     normalised: dict[str, tuple[str, str, int, int, str]] = {}
@@ -178,6 +179,13 @@ def load_universe(inventory: dict[str, Any], profile: str = "foc", *,
         source_profile = row.get("inventory_profile")
         if not isinstance(source_profile, str) or not source_profile or source_profile == profile:
             continue
+        if coverage is not None and source_profile in {p["id"] for p in coverage["profiles"]}:
+            authored = {pair_key(r["class"], r["tag"]) for r in coverage["pairs"]
+                        if any(s["profile"] == source_profile for s in r["sources"])}
+            for object_class in row.get("classes", []):
+                if pair_key(object_class, row.get("tag", "")) not in authored:
+                    raise RegistryError(f"{object_class}/{row.get('tag', '')}: not authored in source profile {source_profile!r}")
+            continue  # Provenance validates a claim; it does not select required coverage.
         if source_profile not in profile_pairs:
             profile_pairs[source_profile] = load_universe(inventory, source_profile)
         authored = profile_pairs[source_profile]
@@ -187,6 +195,16 @@ def load_universe(inventory: dict[str, Any], profile: str = "foc", *,
                 raise RegistryError(f"{object_class}/{row.get('tag', '')}: not authored in inventory profile {source_profile!r}")
             if key not in pairs:
                 pairs[key] = authored[key]
+    if coverage is not None:
+        # The manifest is independent of registry claims: missing mod rows
+        # cannot opt themselves out of the required universe.
+        for source in coverage["pairs"]:
+            key = pair_key(source["class"], source["tag"])
+            if key not in pairs:
+                pairs[key] = UniverseRow(source["class"], source["tag"],
+                                        "attribute" if source["tag"].split("/")[-1].startswith("@") else "element",
+                                        sum(s["occurrences"] for s in source["sources"]),
+                                        object_types=set(source["canonical_types"]))
     return pairs
 
 
@@ -706,9 +724,35 @@ def load_inventory(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def required_universe(inventory: Path, registry: dict[str, Any], root: Path | None) -> dict:
+    # Fixture repositories without coverage inputs retain the small inventory
+    # API. The real repository always requires all three committed inputs.
+    coverage = None
+    coverage_root = (root or ROOT) / "docs/tag-coverage"
+    if inventory.resolve() == DEFAULT_INVENTORY.resolve() or (coverage_root / "coverage-profiles.json").exists():
+        try:
+            from . import coverage_universe
+        except ImportError:
+            import coverage_universe
+        coverage, _ = coverage_universe.load(coverage_root / "coverage-universe.json",
+                                              coverage_root / "coverage-profiles.json",
+                                              coverage_root / "coverage-parser-owners.json",
+                                              coverage_root / "engine-tags.json")
+    universe = load_universe(load_inventory(inventory), registry=registry, coverage=coverage)
+    # These reviewed defaults already had concrete consumers before the union
+    # manifest. Their status, catalog evidence and consumers are still checked
+    # by registry_problems; they are not authored corpus observations.
+    for row in registry["rows"]:
+        if "engine_default" in row:
+            for cls in row["classes"]:
+                universe.setdefault(pair_key(cls, row["tag"]), UniverseRow(cls, row["tag"], "element",
+                                                                          object_types={row["engine_default"]}))
+    return universe
+
+
 def gate_problems(statuses: Path | Sequence[Path], inventory: Path, root: Path | None) -> tuple[list[str], dict[str, Any], dict]:
     registry = load_registry(statuses)
-    universe = load_universe(load_inventory(inventory), registry=registry)
+    universe = required_universe(inventory, registry, root)
     problems = registry_problems(registry, universe, root)
     shards = registry_shards(statuses)
     roots = [statuses] if isinstance(statuses, Path) else statuses
@@ -811,7 +855,7 @@ def check_data_command(args: argparse.Namespace) -> int:
 
 def render_command(args: argparse.Namespace) -> int:
     registry = load_registry(args.statuses)
-    universe = load_universe(load_inventory(args.inventory), registry=registry)
+    universe = required_universe(args.inventory, registry, args.repo)
     problems = registry_problems(registry, universe, None)
     if problems:
         print_problems(problems)

@@ -65,7 +65,7 @@ struct SetupRefusal {
 // Setup transport accepts both domains; admission to a playable match is separate.
 [[nodiscard]] std::optional<SetupRefusal> skirmish_start_refusal(const sim::tactical::TacticalSetup& setup);
 
-// Offer v3: kind:u8, version:u32, seed:u64, delay:u64, final tick count:u64, domain:text,
+// Tactical offer v3, galactic offer v4 (mode-specific tick bound): kind:u8, version:u32, seed:u64, delay:u64, final tick count:u64, domain:text,
 // setup:blob, seat count:u32 and (peer,seat,player):u32 triples, build:text,
 // canonical MPS-6 identity:blob + combined digest:32, recovery flags:u8 and five limits:u64, offer SHA-256:32.
 // Text/blob lengths are LE u32; every integer is LE. Accept is kind + offer

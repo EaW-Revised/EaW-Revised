@@ -8,6 +8,24 @@
   "screen_mouse_units": true,
   "bindings": [
     {
+      "id": "space.unit-preview.c",
+      "action": "unit_preview",
+      "context": "space",
+      "device": "keyboard",
+      "control": "C",
+      "trigger": "held",
+      "scale": 1.0
+    },
+    {
+      "id": "space.battlecam.space",
+      "action": "battlecam",
+      "context": "space",
+      "device": "keyboard",
+      "control": "Space",
+      "trigger": "held",
+      "scale": 1.0
+    },
+    {
       "id": "space.pan-left.left",
       "action": "pan_left",
       "context": "space",

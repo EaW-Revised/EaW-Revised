@@ -163,13 +163,25 @@ void SpacePopulation::pose_units(GodotRenderer& renderer, const std::uint32_t sa
     FrameTimer upload_timer(trace_frames_ ? &idle_upload_ms_ : nullptr);
     for (const auto& row : prepared) if (row.failed) ++idle_sample_failures_;
     renderer.begin_skin_batch(profile);
+    struct BatchGuard {
+        GodotRenderer& renderer;
+        bool active{true};
+        ~BatchGuard() { if (active) static_cast<void>(renderer.end_skin_batch()); }
+        SkinPoseWork finish() { active = false; return renderer.end_skin_batch(); }
+    } batch_guard{renderer};
+    for (const AnimatedInstance& instance : animated_instances_) {
+        if (prepared[instance.idle].pose)
+            renderer.prepare_shared_idle_surface(static_cast<std::uint64_t>(instance.idle) + 1,
+                instance.entity, instance.asset);
+    }
     for (const AnimatedInstance& instance : animated_instances_) {
         if (!prepared[instance.idle].pose) continue;
-        const auto posed = renderer.set_prepared_skin_pose(instance.entity, instance.asset, prepared[instance.idle].palette);
+        const auto posed = renderer.set_prepared_skin_pose(instance.entity, instance.asset,
+            prepared[instance.idle].palette, static_cast<std::uint64_t>(instance.idle) + 1);
         if (!posed) upload_failures_.push_back("entity " + std::to_string(instance.entity) + " idle pose: "
                                                + core::format_diagnostic(posed.error()));
     }
-    idle_skin_work_ = renderer.end_skin_batch();
+    idle_skin_work_ = batch_guard.finish();
     for (const auto& row : prepared) {
         if (render_categories::fighter_experiment() && row.fighter_sample_ms > 0) {
             ++render_categories::fighter_work.idle_samples;
@@ -521,6 +533,22 @@ const animation::Player* SpacePopulation::live_clip(const std::size_t ship, cons
     return ship < bound.size() && bound[ship] ? clips_[*bound[ship]].get() : nullptr;
 }
 
+const animation::Player* SpacePopulation::land_clip(const std::size_t ship, const std::size_t type) const noexcept {
+    if (ship >= land_clips_.size() || type >= land_clips_[ship].size()) return nullptr;
+    const auto& slot = land_clips_[ship][type];
+    return slot ? clips_[*slot].get() : nullptr;
+}
+
+std::optional<animation::ClipPosition> SpacePopulation::land_idle_position(const std::size_t ship,
+    const std::uint64_t tick) const noexcept {
+    if (ship >= land_idle_.size() || !land_idle_[ship]) return {};
+    const auto& idle = *land_idle_[ship];
+    const auto* player = land_clip(ship, animation::clip_types::idle);
+    if (!player || player->frames_per_second() < 1.0F || std::floor(player->frames_per_second()) != player->frames_per_second()) return {};
+    return animation::idle_position(idle.playback, idle.start_frame, player->playable_frames(),
+        static_cast<std::uint32_t>(player->frames_per_second()), tick, 30);
+}
+
 bool SpacePopulation::live_clip_terminal_hidden(const std::size_t ship) const noexcept {
     const auto held = held_clips_.find(ship);
     return held != held_clips_.end() && held->second.hidden;
@@ -545,7 +573,19 @@ void SpacePopulation::prepare_live_clip(const std::size_t index) {
     const bool fighter = render_categories::fighter_experiment() && request.ship < diagnostic_fighters_.size()
         && diagnostic_fighters_[request.ship];
     FrameTimer fighter_sample(fighter ? &row.fighter_sample_ms : nullptr);
-    if (request.blend_from > 0.0F) {
+    if (request.land_type && request.outgoing_land_type && request.land_blend > 0.0F) {
+        const auto* outgoing = land_clip(request.ship, *request.outgoing_land_type);
+        const bool compatible_position = outgoing && request.position.subdivisions == request.outgoing_position.subdivisions;
+        const auto sampled = compatible_position
+            ? row.player->sample_blend(request.position.position, *outgoing, request.outgoing_position.position,
+                request.position.subdivisions, request.land_blend, row.sample)
+            : row.player->sample_position(request.position.position, request.position.subdivisions, row.sample);
+        if (!sampled) {
+            const auto fallback = row.player->sample_position(request.position.position,
+                request.position.subdivisions, row.sample);
+            if (!fallback) { row.failure = core::format_diagnostic(fallback.error()); return; }
+        }
+    } else if (request.blend_from > 0.0F) {
         // Keep the existing bind-blend fallback exactly as authored.
         auto pose = animation::sample_death_frame(*row.player, {request.position, request.blend_from});
         if (!pose) { row.failure = core::format_diagnostic(pose.error()); return; }
@@ -605,7 +645,7 @@ bool SpacePopulation::pose_live_clips(GodotRenderer& renderer, const std::span<c
     for (std::size_t index = 0; index < poses.size(); ++index) {
         const auto& request = poses[index];
         auto& row = prepared[index];
-        row.player = live_clip(request.ship, request.alternate);
+        row.player = request.land_type ? land_clip(request.ship, *request.land_type) : live_clip(request.ship, request.alternate);
         if (!row.player || request.ship >= live_retired_.size() || live_retired_[request.ship]) continue;
         row.terminal = live_death_clone_[request.ship] && !request.alternate && request.blend_from == 0.0F
             && request.position.subdivisions != 0 && request.position.position

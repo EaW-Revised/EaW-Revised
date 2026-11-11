@@ -200,4 +200,40 @@ FontPixels font_pixels(const FontSpec& font, const std::uint32_t screen_height) 
     return result;
 }
 
+ScrollPanelLayout scroll_panel_layout(const Viewport viewport, const ScrollPanelSpec& spec) noexcept {
+    ScrollPanelLayout result;
+    if (viewport.width == 0U || viewport.height == 0U) return result;
+    const double screen_width = viewport.width;
+    const double screen_height = viewport.height;
+    const double margin = std::max(spec.margin, 0.0);
+    const double edge = std::max(spec.screen_margin, 0.0);
+    const double separation = std::max(spec.separation, 0.0);
+    const double header = std::max(spec.header_height, 0.0);
+    const double footer = std::max(spec.footer_height, 0.0);
+    const double body_natural = std::max(spec.body_height, 0.0);
+    const double width = std::max(std::min(spec.width, screen_width - 2.0 * edge), 0.0);
+    // Gaps sit between present parts only: the body is always present.
+    const double gaps = separation * ((header > 0.0 ? 1.0 : 0.0) + (footer > 0.0 ? 1.0 : 0.0));
+    const double fixed = 2.0 * margin + header + footer + gaps;
+    const double room = std::max(screen_height - 2.0 * edge, 0.0);
+    const double body = std::max(std::min(body_natural, room - fixed), 0.0);
+    const double height = fixed + body;
+    const double x = std::max((screen_width - width) / 2.0, 0.0);
+    // Centred; a panel taller than the screen starts at the top so its footer is the part that is cut, never its
+    // header, but that only happens when the fixed parts alone exceed the screen.
+    const double y = std::max((screen_height - height) / 2.0, 0.0);
+    result.panel = PixelRect{x, y, width, height};
+    const double inner_x = x + margin;
+    const double inner_width = std::max(width - 2.0 * margin, 0.0);
+    double cursor = y + margin;
+    result.header = PixelRect{inner_x, cursor, inner_width, header};
+    if (header > 0.0) cursor += header + separation;
+    result.body = PixelRect{inner_x, cursor, inner_width, body};
+    cursor += body;
+    if (footer > 0.0) cursor += separation;
+    result.footer = PixelRect{inner_x, cursor, inner_width, footer};
+    result.body_scrolls = body_natural > body;
+    return result;
+}
+
 } // namespace eawr::presentation::ui

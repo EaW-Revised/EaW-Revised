@@ -2,6 +2,7 @@
 
 #include "eawr/sim/tactical/types.hpp"
 
+#include <array>
 #include <cstdint>
 #include <map>
 #include <optional>
@@ -98,6 +99,7 @@ struct SquadronTable {
     std::vector<SquadronProfile> squadrons; // strictly increasing type_id
     std::vector<SpawnerProfile> spawners;   // strictly increasing type_id
     std::map<std::pair<TypeId, PlayerId>, SpawnerProfile> campaign_spawners; // WGT-58: content-bound owner-tech selections
+    std::map<TypeId, std::array<SpawnerProfile, 7>> tech_spawners; // last entry is an invalid tech
     // FO-11 (#599): gameconstants.xml FormationMinimumSideError and FormationMaximumSideError, the
     // side error a squadron of a group move ignores and the one its lane steer divides by. A
     // maximum of zero (a table without the constants) turns the lane steer off.
@@ -106,7 +108,8 @@ struct SquadronTable {
     [[nodiscard]] const CraftProfile* find_craft(TypeId type_id) const noexcept;
     [[nodiscard]] const SquadronProfile* find_squadron(TypeId type_id) const noexcept;
     [[nodiscard]] const SpawnerProfile* find_spawner(TypeId type_id, PlayerId owner = 0) const noexcept;
-    [[nodiscard]] bool empty() const noexcept { return craft.empty() && squadrons.empty() && spawners.empty() && campaign_spawners.empty(); }
+    [[nodiscard]] const SpawnerProfile* find_spawner_at_tech(TypeId type_id, PlayerId owner, std::uint32_t tech) const noexcept;
+    [[nodiscard]] bool empty() const noexcept { return craft.empty() && squadrons.empty() && spawners.empty() && campaign_spawners.empty() && tech_spawners.empty(); }
     friend bool operator==(const SquadronTable&, const SquadronTable&) = default;
 };
 

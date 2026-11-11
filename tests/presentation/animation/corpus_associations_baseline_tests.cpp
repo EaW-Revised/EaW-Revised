@@ -1,3 +1,4 @@
+#include "../../support/runtime_path.hpp"
 #include "../../support/temp_dir.hpp"
 #include "corpus_associations_test_support.hpp"
 
@@ -307,7 +308,7 @@ void test_frozen_metadata_parsing() {
 // The tracked manifest is metadata only; parse it (its pin is checked by the
 // CLI test, which has a SHA-256 implementation).
 void test_tracked_manifest_parses() {
-    std::ifstream input(EAWR_ASSOCIATION_FROZEN_MANIFEST, std::ios::binary);
+    std::ifstream input(eawr::testing::runtime_path("EAWR_TEST_SOURCE_ROOT", "tests/presentation/animation/corpus_association_frozen.tsv", EAWR_ASSOCIATION_FROZEN_MANIFEST), std::ios::binary);
     const std::string text{std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
     const auto load = audit::load_frozen_metadata(text, std::string("tracked"), "tracked");
     expect(load.metadata.has_value(), "tracked manifest parses: " + load.error);

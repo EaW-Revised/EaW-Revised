@@ -251,6 +251,12 @@ add_test(NAME ui_net_perf_contracts COMMAND ui_net_perf_tests)
 
 eawr_label_tests()
 
+# PF cut #3: instanced hull batching, membership and hysteresis (engine-free).
+add_executable(ui_hull_batching_tests hull_batching_tests.cpp)
+target_link_libraries(ui_hull_batching_tests PRIVATE eawr::ui_model)
+target_compile_features(ui_hull_batching_tests PRIVATE cxx_std_20)
+eawr_target_project_warnings(ui_hull_batching_tests)
+add_test(NAME ui_hull_batching_contracts COMMAND ui_hull_batching_tests)
 add_executable(ui_build_label_tests build_label_tests.cpp)
 target_link_libraries(ui_build_label_tests PRIVATE eawr::ui_model)
 target_compile_features(ui_build_label_tests PRIVATE cxx_std_20)

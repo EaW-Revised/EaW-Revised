@@ -5,10 +5,12 @@
 #include "eawr/core/sha256.hpp"
 #include "eawr/script/authoritative/galactic_bridge.hpp"
 #include "eawr/script/foc/tactical_ai.hpp"
+#include "../script/foc/story_plot_bindings.hpp"
 
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <charconv>
 #include <cstring>
 #include <map>
 #include <set>
@@ -24,6 +26,10 @@ namespace story = sim::galactic::story;
 constexpr std::string_view library_prefix = "data/scripts/library/";
 constexpr std::string_view story_prefix = "data/scripts/story/";
 constexpr std::string_view story_directory = "Data/Scripts/Story/";
+
+// Staged by the bindings below, committed in command order by GalacticStoryLink::commit.
+constexpr std::string_view verb_story_event = "galactic.story_event";            // name, has object ("1"/"0"), planet name
+constexpr std::string_view verb_story_flag_clear = "galactic.story_flag_clear";  // player, planet, name (decimal text)
 
 constexpr std::string_view player_module = "EAWR/Story/Players.lua";
 // WST-90: validate in Lua before crossing the host value boundary. Non-string graphs and functions never need conversion.
@@ -55,7 +61,85 @@ std::string trimmed(std::string_view text) {
     return std::string(text);
 }
 
+std::string upper_text(std::string_view text) {
+    std::string out(text);
+    for (char& character : out) if (character >= 'a' && character <= 'z') character = static_cast<char>(character - ('a' - 'A'));
+    return out;
+}
+
+std::optional<std::uint64_t> number_text(const auth::Value& value) {
+    const auto* text = std::get_if<std::string>(&value.data);
+    if (!text) return std::nullopt;
+    std::uint64_t out{};
+    const auto parsed = std::from_chars(text->data(), text->data() + text->size(), out);
+    if (parsed.ec != std::errc{} || parsed.ptr != text->data() + text->size()) return std::nullopt;
+    return out;
+}
+
 } // namespace
+
+struct GalacticStoryLink::Impl {
+    script::foc::StoryPlotLinkHolder plots; // Get_Story_Plot's names and the plot-edit sink
+    std::unique_ptr<GalacticStorySink> sink;
+};
+
+GalacticStoryLink::GalacticStoryLink() : impl_(std::make_unique<Impl>()) {}
+GalacticStoryLink::~GalacticStoryLink() = default;
+
+void GalacticStoryLink::bind(std::span<const story::SubPlotDef> definitions, std::unique_ptr<GalacticStorySink> sink) {
+    impl_->sink = std::move(sink);
+    auto* target = impl_->sink.get();
+    impl_->plots.link = script::foc::StoryPlotLink::from(definitions,
+        [target](const story::PlotCommand& command) { return target->plot(command); });
+}
+
+core::Result<void> GalacticStoryLink::commit(auth::ServiceReport& report) const {
+    namespace foc = script::foc;
+    auto* sink = impl_->sink.get();
+    core::Result<void> failure = core::Result<void>::success();
+    const auto note = [&](std::string object, std::string message) {
+        core::LoadNote row;
+        row.code = "EAWR-LOAD-1400";
+        row.object = std::move(object);
+        row.action = core::LoadAction::runtime_degraded;
+        row.phase = core::LoadPhase::runtime;
+        row.diagnostic_code = std::string(auth::codes::unsupported_api);
+        row.message = std::move(message);
+        report.load_notes.push_back(std::move(row));
+    };
+    std::erase_if(report.commands, [&](const auth::ScriptCommand& command) {
+        const auto& args = command.arguments;
+        if (command.verb == foc::verb_story_plot) {
+            if (auto why = foc::detail::commit_story_plot(impl_->plots.link.get(), command); !why.empty())
+                note("Get_Story_Plot:" + (args.size() > 1 && std::holds_alternative<std::string>(args[1].data)
+                    ? std::get<std::string>(args[1].data) : std::string{}), "story plot request not applied: " + why);
+            return true;
+        }
+        if (command.verb == verb_story_event) {
+            const auto* name = args.size() == 3 ? std::get_if<std::string>(&args[0].data) : nullptr;
+            const auto* has_object = args.size() == 3 ? std::get_if<std::string>(&args[1].data) : nullptr;
+            const auto* planet = args.size() == 3 ? std::get_if<std::string>(&args[2].data) : nullptr;
+            if (!name || !has_object || !planet) { note("Story_Event", "malformed story event request"); return true; }
+            if (!sink) { note("Story_Event:" + *name, "story event not delivered: no plot engine is hosted"); return true; }
+            story::TextNotice notice;
+            notice.kind = story::Text::ai_notification;
+            notice.text = *name;
+            if (*has_object == "1") notice.planet = *planet;
+            if (auto done = sink->notify(notice); !done && failure) failure = core::Result<void>::failure(done.error());
+            return true;
+        }
+        if (command.verb == verb_story_flag_clear) {
+            const auto player = args.size() == 3 ? number_text(args[0]) : std::nullopt;
+            const auto planet = args.size() == 3 ? number_text(args[1]) : std::nullopt;
+            const auto* name = args.size() == 3 ? std::get_if<std::string>(&args[2].data) : nullptr;
+            if (!player || !planet || !name) { note("Check_Story_Flag", "malformed flag request"); return true; }
+            if (sink) sink->clear_flag(static_cast<story::Player>(*player), *planet, *name);
+            return true;
+        }
+        return false;
+    });
+    return failure;
+}
 
 core::Result<std::shared_ptr<const GalacticStoryScripts>> GalacticStoryScripts::load(
     const vfs::Vfs& files, std::span<const story::SubPlotDef> subplots) {
@@ -122,8 +206,9 @@ std::string GalacticStoryScripts::fingerprint() const {
 
 core::Result<auth::ScriptScheduler> create_galactic_story_scheduler(const GalacticStoryScripts& content, auth::SessionConfig base,
     bool multiplayer, const GalacticStoryPlayers& players, auth::GalacticSnapshotReader reader,
-    auth::GlobalValueReader globals) {
+    auth::GlobalValueReader globals, const std::shared_ptr<GalacticStoryLink>& link_in) {
     using Result = core::Result<auth::ScriptScheduler>;
+    const auto link = link_in ? link_in : std::make_shared<GalacticStoryLink>();
     // Only scripted campaigns change anything: a story scheduler without scripts keeps its previous identity and hash.
     if (content.entries().empty()) return auth::ScriptScheduler::create(std::move(base), {});
     base.script_directories = {"Data/Scripts/Library/", std::string(story_directory)};
@@ -297,12 +382,78 @@ core::Result<auth::ScriptScheduler> create_galactic_story_scheduler(const Galact
             }
             return Prevent::success({});
         }); !added) return Result::failure(added.error());
+    // WST-56: the sub-plot scripts edit their plots (Lock_List/Unlock_List set the reward parameter, then send the event).
+    {
+        std::vector<core::Diagnostic> errors;
+        script::foc::detail::register_story_plot_bindings(scheduler.value(),
+            script::foc::StoryPlotAccess([link] { return link->impl().plots.link.get(); }), errors);
+        if (!errors.empty()) return Result::failure(errors.front());
+    }
+    // WST-37/55: Story_Event(name[, object]) stages a STORY_AI_NOTIFICATION broadcast. The debug build's
+    // The debug build dispatches the notification to the sub-plots at the call (WST-55), so the engine commits it at the call's place in
+    // the script's command order, after the Set_Reward_Parameter calls before it (their values are captured per trigger).
+    {
+        std::map<std::uint64_t, std::string> names;
+        for (const auto& [name, id] : players.planets) names.try_emplace(id, upper_text(name));
+        if (auto added = scheduler.value().register_binding("Story_Event", [names = std::move(names)](
+                auth::BindingContext& context, const auth::ValueList& arguments) {
+            using Sent = core::Result<auth::ValueList>;
+            if (arguments.empty() || arguments.size() > 2 || !std::holds_alternative<std::string>(arguments[0].data))
+                return Sent::failure(problem("Story_Event expects a name and an optional object"));
+            std::string planet;
+            bool has_object = false;
+            if (arguments.size() == 2 && !std::holds_alternative<std::monostate>(arguments[1].data)) {
+                const auto* object = std::get_if<auth::Handle>(&arguments[1].data);
+                if (!object || object->kind != script::foc::handle_game_object)
+                    return Sent::failure(problem("Story_Event: the second argument must be a game object"));
+                has_object = true;
+                if (const auto found = names.find(object->id); found != names.end()) planet = found->second;
+            }
+            context.issue_command(std::string(verb_story_event), {auth::Value::text(std::get<std::string>(arguments[0].data)),
+                auth::Value::text(has_object ? "1" : "0"), auth::Value::text(planet)});
+            return Sent::success({});
+        }); !added) return Result::failure(added.error());
+    }
+    // Check_Story_Flag(player, name[, planet[, reset]]): whether a TRIGGER_AI reward set (player, planet, name); `reset`
+    // clears it. The read sees the flags as of the end of the last story step; the clear is committed in command order
+    // after the service, so a flag consumed by one script is gone for every later service.
+    if (auto added = scheduler.value().register_binding("Check_Story_Flag", [link](
+            auth::BindingContext& context, const auth::ValueList& arguments) {
+        using Checked = core::Result<auth::ValueList>;
+        if (arguments.size() < 2 || arguments.size() > 4 || !std::holds_alternative<std::string>(arguments[1].data))
+            return Checked::failure(problem("Check_Story_Flag expects a player, a flag name, an optional planet and an optional reset"));
+        const auto* player = std::get_if<auth::Handle>(&arguments[0].data);
+        if (!player && !std::holds_alternative<std::monostate>(arguments[0].data))
+            return Checked::failure(problem("Check_Story_Flag: the first argument must be a player"));
+        std::uint64_t planet = 0;
+        if (arguments.size() > 2 && !std::holds_alternative<std::monostate>(arguments[2].data)) {
+            const auto* object = std::get_if<auth::Handle>(&arguments[2].data);
+            if (!object || object->kind != script::foc::handle_game_object)
+                return Checked::failure(problem("Check_Story_Flag: the planet must be a game object or nil"));
+            planet = object->id;
+        }
+        bool reset = false;
+        if (arguments.size() > 3 && !std::holds_alternative<std::monostate>(arguments[3].data)) {
+            const auto* flag = std::get_if<bool>(&arguments[3].data);
+            if (!flag) return Checked::failure(problem("Check_Story_Flag: reset must be a Boolean or nil"));
+            reset = *flag;
+        }
+        // No such player (a faction that is not in this game): nothing can have set a flag for it.
+        if (!player || player->kind != script::foc::handle_player) return Checked::success({auth::Value{false}});
+        const auto& name = std::get<std::string>(arguments[1].data);
+        const auto* sink = link->impl().sink.get();
+        const bool set = sink && sink->flag(static_cast<story::Player>(player->id), planet, name);
+        if (set && reset)
+            context.issue_command(std::string(verb_story_flag_clear), {auth::Value::text(std::to_string(player->id)),
+                auth::Value::text(std::to_string(planet)), auth::Value::text(name)});
+        return Checked::success({auth::Value{set}});
+    }); !added) return Result::failure(added.error());
     // Debug sinks (PGDebug, NEW-L22): the engine writes them to its logs; here they have no effect and write no file.
     for (const std::string_view sink : {"_OuputDebug", "_ScriptMessage", "_CustomScriptMessage", "_MessagePopup", "DumpCallStack"})
         if (auto added = scheduler.value().register_binding(sink, [](auth::BindingContext&, const auth::ValueList&) {
                 return core::Result<auth::ValueList>::success(auth::ValueList{}); }); !added) return Result::failure(added.error());
     std::vector<std::string_view> implemented{"GlobalValue.Get", "GlobalValue.Set", "Find_First_Object", "Find_Object_Type", "Spawn_Unit", "FindPlanet", "Find_Player", "DiscreteDistribution.Create", "GameRandom", "_OuputDebug", "_ScriptMessage",
-        "_CustomScriptMessage", "_MessagePopup", "DumpCallStack"};
+        "_CustomScriptMessage", "_MessagePopup", "DumpCallStack", "Get_Story_Plot", "Story_Event", "Check_Story_Flag"};
     // `Object`, `Target`, `Budget`, `FreeStore` and `PlayerObject` are variables of the scripts (Common_Base_Definitions
     // clears them), and the inventory's "Object.x" names are methods of the wrappers they hold; bound as global tables they
     // would be protected and fault every Base_Definitions. Calls on them fail as an index of nil until the wrappers exist.
